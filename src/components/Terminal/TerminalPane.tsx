@@ -5,22 +5,29 @@ import { WebglAddon } from '@xterm/addon-webgl';
 import '@xterm/xterm/css/xterm.css';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, UnlistenFn } from '@tauri-apps/api/event';
+import { useWorkspaceStore } from '../../store/workspace';
 
 export function TerminalPane({ title, initialCommand }: { title: string; initialCommand?: string }) {
   const terminalRef = useRef<HTMLDivElement>(null);
   const terminalInstance = useRef<Terminal | null>(null);
   const fitAddon = useRef<FitAddon | null>(null);
   const [terminalId] = useState(() => crypto.randomUUID());
+  const currentTheme = useWorkspaceStore((s) => s.theme);
 
   useEffect(() => {
     if (!terminalRef.current) return;
+
+    const rootStyle = getComputedStyle(document.documentElement);
+    const bgColor = rootStyle.getPropertyValue('--bg-app').trim() || '#000000';
+    const fgColor = rootStyle.getPropertyValue('--text-primary').trim() || '#ffffff';
 
     const term = new Terminal({
       cursorBlink: true,
       fontFamily: 'monospace',
       fontSize: 14,
       theme: {
-        background: '#000000',
+        background: bgColor,
+        foreground: fgColor,
       },
     });
 
@@ -86,6 +93,15 @@ export function TerminalPane({ title, initialCommand }: { title: string; initial
       term.dispose();
     };
   }, [title, terminalId]);
+
+  useEffect(() => {
+    if (!terminalInstance.current) return;
+    const rootStyle = getComputedStyle(document.documentElement);
+    terminalInstance.current.options.theme = {
+      background: rootStyle.getPropertyValue('--bg-app').trim() || '#000000',
+      foreground: rootStyle.getPropertyValue('--text-primary').trim() || '#ffffff',
+    };
+  }, [currentTheme]);
 
   return (
     <div className="flex flex-col h-full bg-bg-app">

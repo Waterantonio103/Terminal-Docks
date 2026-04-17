@@ -7,11 +7,16 @@ import { ActivityFeedPane } from '../ActivityFeed/ActivityFeedPane';
 export function WorkspaceGrid() {
   const panes = useWorkspaceStore((s) => s.panes);
 
-  // Simple grid based on pane count
-  const gridCols = panes.length > 1 ? 'grid-cols-2' : 'grid-cols-1';
+  // Grid based on pane count
+  let gridClass = 'grid-cols-1 grid-rows-1';
+  if (panes.length === 2) {
+    gridClass = 'grid-cols-2 grid-rows-1';
+  } else if (panes.length >= 3) {
+    gridClass = 'grid-cols-2 grid-rows-2';
+  }
 
   return (
-    <div className={`flex-1 grid ${gridCols} gap-px bg-bg-surface p-px`}>
+    <div className={`flex-1 grid ${gridClass} gap-px bg-bg-surface p-px`}>
       {panes.map((pane) => (
         <div key={pane.id} className="bg-bg-panel flex flex-col overflow-hidden relative">
           {/* Pane Header */}

@@ -9,8 +9,17 @@ import {
 } from 'lucide-react';
 import { useWorkspaceStore } from '../../store/workspace';
 import { FileTree } from './FileTree';
+import { AgentsTab } from './AgentsTab';
 
 type SidebarTab = 'tasks' | 'swarm' | 'files' | 'agents';
+
+function TasksTab() {
+  return <div className="p-4 text-sm text-text-muted text-center mt-10">Tasks View<br/>(Use Task Board Pane for details)</div>;
+}
+
+function SwarmTab() {
+  return <div className="p-4 text-sm text-text-muted text-center mt-10">Swarm Status: Active<br/>(Use Swarm Pane for activity feed)</div>;
+}
 
 export function Sidebar() {
   const sidebarOpen = useWorkspaceStore((s) => s.sidebarOpen);
@@ -19,7 +28,7 @@ export function Sidebar() {
   if (!sidebarOpen) return null;
 
   return (
-    <div className="w-64 bg-bg-panel border-r border-border-panel flex flex-col h-full text-text-muted">
+    <div className="w-64 bg-bg-panel border-r border-border-panel flex flex-col h-full text-text-muted shrink-0">
       <div className="p-4 flex items-center space-x-2 font-bold text-text-primary shrink-0">
         <TerminalSquare size={24} className="text-accent-primary" />
         <span>Terminal Docks</span>
@@ -47,11 +56,9 @@ export function Sidebar() {
 
       <div className="flex-1 overflow-hidden flex flex-col">
         {activeTab === 'files' && <FileTree />}
-        {activeTab !== 'files' && (
-          <div className="p-4 text-center text-sm text-text-muted">
-            {activeTab} coming soon...
-          </div>
-        )}
+        {activeTab === 'tasks' && <TasksTab />}
+        {activeTab === 'swarm' && <SwarmTab />}
+        {activeTab === 'agents' && <AgentsTab />}
       </div>
 
       <div className="p-4 border-t border-border-panel hover:bg-bg-surface cursor-pointer flex items-center space-x-3 shrink-0">

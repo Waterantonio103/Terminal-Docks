@@ -34,8 +34,8 @@ pub fn run() {
             // Initialize db
             db::init_db(app.handle()).expect("Failed to init db");
 
-            // Scaffold: Initialize swarm here in the future
-            // swarm::init_swarm_watcher(app.handle()).expect("Failed to init swarm");
+            // Initialize swarm
+            swarm::init_swarm_watcher(app.handle()).expect("Failed to init swarm");
             Ok(())
         })
         .run(tauri::generate_context!())
