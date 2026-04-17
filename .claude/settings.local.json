@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:www.bridgemind.ai)",
+      "Bash(git -C /c/VSCODE/terminal-docks log --oneline -15)"
+    ]
+  }
+}

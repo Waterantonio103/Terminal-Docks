@@ -1,0 +1,85 @@
+@import "tailwindcss";
+
+@theme {
+  --color-bg-app: var(--bg-app);
+  --color-bg-panel: var(--bg-panel);
+  --color-bg-surface: var(--bg-surface);
+  --color-bg-surface-hover: var(--bg-surface-hover);
+  --color-border-panel: var(--border-panel);
+  --color-border-divider: var(--border-divider);
+  --color-text-primary: var(--text-primary);
+  --color-text-secondary: var(--text-secondary);
+  --color-text-muted: var(--text-muted);
+  --color-accent-primary: var(--accent-primary);
+  --color-accent-hover: var(--accent-hover);
+  --color-accent-text: var(--accent-text);
+}
+
+:root {
+  /* Default Dark Theme (matches existing) */
+  --bg-app: #030712; /* gray-950 */
+  --bg-panel: #111827; /* gray-900 */
+  --bg-surface: #1f2937; /* gray-800 */
+  --bg-surface-hover: #374151; /* gray-700 */
+  --border-panel: #1f2937; /* gray-800 */
+  --border-divider: #374151; /* gray-700 */
+  --text-primary: #f3f4f6; /* gray-100 */
+  --text-secondary: #d1d5db; /* gray-300 */
+  --text-muted: #9ca3af; /* gray-400 */
+  --accent-primary: #2563eb; /* blue-600 */
+  --accent-hover: #1d4ed8; /* blue-700 */
+  --accent-text: #ffffff;
+}
+
+.theme-light {
+  --bg-app: #f9fafb; /* gray-50 */
+  --bg-panel: #ffffff; /* white */
+  --bg-surface: #f3f4f6; /* gray-100 */
+  --bg-surface-hover: #e5e7eb; /* gray-200 */
+  --border-panel: #e5e7eb; /* gray-200 */
+  --border-divider: #d1d5db; /* gray-300 */
+  --text-primary: #111827; /* gray-900 */
+  --text-secondary: #374151; /* gray-700 */
+  --text-muted: #6b7280; /* gray-500 */
+  --accent-primary: #2563eb; /* blue-600 */
+  --accent-hover: #1d4ed8; /* blue-700 */
+  --accent-text: #ffffff;
+}
+
+.theme-dracula {
+  --bg-app: #282a36;
+  --bg-panel: #21222c;
+  --bg-surface: #44475a;
+  --bg-surface-hover: #6272a4;
+  --border-panel: #191a21;
+  --border-divider: #44475a;
+  --text-primary: #f8f8f2;
+  --text-secondary: #e2e2dc;
+  --text-muted: #6272a4;
+  --accent-primary: #bd93f9;
+  --accent-hover: #ff79c6;
+  --accent-text: #f8f8f2;
+}
+
+.theme-solarized {
+  --bg-app: #002b36;
+  --bg-panel: #073642;
+  --bg-surface: #586e75;
+  --bg-surface-hover: #657b83;
+  --border-panel: #002b36;
+  --border-divider: #586e75;
+  --text-primary: #fdf6e3;
+  --text-secondary: #eee8d5;
+  --text-muted: #93a1a1;
+  --accent-primary: #b58900;
+  --accent-hover: #cb4b16;
+  --accent-text: #fdf6e3;
+}
+
+/* Base styles */
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  background-color: var(--bg-app);
+  color: var(--text-primary);
+}

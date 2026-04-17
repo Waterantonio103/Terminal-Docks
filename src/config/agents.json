@@ -1,0 +1,14 @@
+{
+  "agents": [
+    {
+      "id": "gemini",
+      "name": "Gemini Engineer",
+      "promptTemplate": "Please implement the following task: {{task.title}}"
+    },
+    {
+      "id": "reviewer",
+      "name": "Code Reviewer",
+      "promptTemplate": "Review the code for the task: {{task.title}}"
+    }
+  ]
+}
