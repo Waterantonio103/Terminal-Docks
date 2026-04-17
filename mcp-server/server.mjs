@@ -11,6 +11,20 @@ const projects = [];
 const tasks = [];
 const agents = [];
 
+const clients = new Set();
+
+function broadcast(from, content, type = 'message') {
+  const msg = {
+    id: Date.now(),
+    from,
+    content,
+    type,
+    timestamp: Date.now()
+  };
+  const data = `data: ${JSON.stringify(msg)}\n\n`;
+  clients.forEach(res => res.write(data));
+}
+
 const server = new McpServer({ name: 'terminal-docks-bridge', version: '1.0.0' });
 
 // Project Tools
@@ -19,6 +33,7 @@ server.tool(
   'List all projects for the authenticated builder. Use this first to discover project IDs.',
   {},
   async () => {
+    broadcast('Bridge', 'Listing projects');
     return {
       content: [{ type: 'text', text: JSON.stringify(projects.map(p => ({
         id: p.id,
@@ -39,6 +54,7 @@ server.tool(
   async ({ name, description }) => {
     const project = { id: randomUUID(), name, description: description || '' };
     projects.push(project);
+    broadcast('Bridge', `Created project: ${name}`);
     return { content: [{ type: 'text', text: JSON.stringify(project) }] };
   }
 );
@@ -51,6 +67,7 @@ server.tool(
     projectId: z.string().uuid().describe('The project to list tasks from')
   },
   async ({ projectId }) => {
+    broadcast('Bridge', `Listing tasks for project ${projectId}`);
     const filteredTasks = tasks.filter(t => t.projectId === projectId);
     return {
       content: [{ type: 'text', text: JSON.stringify(filteredTasks.map(t => ({
@@ -72,6 +89,7 @@ server.tool(
   async ({ taskId }) => {
     const task = tasks.find(t => t.id === taskId);
     if (!task) return { isError: true, content: [{ type: 'text', text: `Task ${taskId} not found` }] };
+    broadcast('Bridge', `Retrieved task ${taskId}`);
     return { content: [{ type: 'text', text: JSON.stringify(task) }] };
   }
 );
@@ -96,6 +114,7 @@ server.tool(
       updatedAt: Date.now()
     };
     tasks.push(task);
+    broadcast('Bridge', `Created task in project ${projectId}`);
     return { content: [{ type: 'text', text: JSON.stringify(task) }] };
   }
 );
@@ -122,6 +141,7 @@ server.tool(
     if (status !== undefined) task.status = status;
     task.updatedAt = Date.now();
 
+    broadcast('Bridge', `Updated task ${taskId} (status: ${task.status})`);
     return { content: [{ type: 'text', text: JSON.stringify(task) }] };
   }
 );
@@ -134,6 +154,7 @@ server.tool(
     projectId: z.string().uuid().describe('The project to list agents for')
   },
   async ({ projectId }) => {
+    broadcast('Bridge', `Listing agents for project ${projectId}`);
     const filteredAgents = agents.filter(a => a.projectId === projectId);
     return {
       content: [{ type: 'text', text: JSON.stringify(filteredAgents.map(a => ({
@@ -154,6 +175,7 @@ server.tool(
   async ({ agentId }) => {
     const agent = agents.find(a => a.id === agentId);
     if (!agent) return { isError: true, content: [{ type: 'text', text: `Agent ${agentId} not found` }] };
+    broadcast('Bridge', `Retrieved agent ${agentId}`);
     return { content: [{ type: 'text', text: JSON.stringify(agent) }] };
   }
 );
@@ -176,6 +198,7 @@ server.tool(
       updatedAt: Date.now()
     };
     agents.push(agent);
+    broadcast('Bridge', `Created agent: ${name}`);
     return { content: [{ type: 'text', text: JSON.stringify(agent) }] };
   }
 );
@@ -200,6 +223,7 @@ server.tool(
     if (systemPrompt !== undefined) agent.systemPrompt = systemPrompt;
     agent.updatedAt = Date.now();
 
+    broadcast('Bridge', `Updated agent ${agentId}`);
     return { content: [{ type: 'text', text: JSON.stringify(agent) }] };
   }
 );
@@ -214,6 +238,7 @@ server.tool(
     const index = agents.findIndex(a => a.id === agentId);
     if (index === -1) return { isError: true, content: [{ type: 'text', text: `Agent ${agentId} not found` }] };
     agents.splice(index, 1);
+    broadcast('Bridge', `Deleted agent ${agentId}`);
     return { content: [{ type: 'text', text: `Agent ${agentId} deleted` }] };
   }
 );
@@ -227,6 +252,20 @@ const app = express();
 app.use(express.json());
 
 app.get('/health', (_req, res) => res.json({ ok: true, port: PORT }));
+
+app.get('/events', (req, res) => {
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders();
+
+  clients.add(res);
+  broadcast('Bridge', 'Client connected to activity feed', 'status');
+
+  req.on('close', () => {
+    clients.delete(res);
+  });
+});
 
 app.all('/mcp', (req, res) => transport.handleRequest(req, res, req.body));
 

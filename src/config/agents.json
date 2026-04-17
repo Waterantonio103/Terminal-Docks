@@ -1,14 +1,32 @@
 {
   "agents": [
     {
-      "id": "gemini",
-      "name": "Gemini Engineer",
-      "promptTemplate": "Please implement the following task: {{task.title}}"
+      "id": "coordinator",
+      "name": "Coordinator",
+      "role": "Staff Engineer / Tech Lead",
+      "description": "Decomposes goals into parallel tasks, manages dependencies, and assigns ownership.",
+      "promptTemplate": "You are the Coordinator. Your goal is to decompose the following high-level objective into a set of technical tasks for other agents (Scout, Builder, Reviewer). Objective: {{task.title}}"
+    },
+    {
+      "id": "scout",
+      "name": "Scout",
+      "role": "Intelligence Specialist",
+      "description": "Maps the codebase and identifies patterns or risks to eliminate discovery time.",
+      "promptTemplate": "You are the Scout. Your goal is to analyze the codebase and provide context for the following task: {{task.title}}"
+    },
+    {
+      "id": "builder",
+      "name": "Builder",
+      "role": "Senior Software Engineer",
+      "description": "Executes coding tasks within assigned files, following existing conventions.",
+      "promptTemplate": "You are the Builder. Your goal is to implement the following task: {{task.title}}. You have exclusive ownership of the assigned files."
     },
     {
       "id": "reviewer",
-      "name": "Code Reviewer",
-      "promptTemplate": "Review the code for the task: {{task.title}}"
+      "name": "Reviewer",
+      "role": "Principal Engineer",
+      "description": "Quality gate providing actionable feedback and blocking substandard code.",
+      "promptTemplate": "You are the Reviewer. Your goal is to review the implementation of the task: {{task.title}}"
     }
   ]
 }

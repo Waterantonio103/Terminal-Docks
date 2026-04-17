@@ -2,7 +2,14 @@
   "permissions": {
     "allow": [
       "WebFetch(domain:www.bridgemind.ai)",
-      "Bash(git -C /c/VSCODE/terminal-docks log --oneline -15)"
+      "Bash(git -C /c/VSCODE/terminal-docks log --oneline -15)",
+      "Bash(npx tsc *)",
+      "Bash(npm run *)",
+      "Bash(cargo check *)",
+      "Bash(xargs grep *)",
+      "Bash(npm install *)",
+      "Bash(node -e \"const s = require\\('fs'\\).readFileSync\\('src/store/workspace.ts','utf8'\\); console.log\\('tabs:', s.includes\\('WorkspaceTab'\\)\\); console.log\\('themes count:', \\(s.match\\(/\\\\| '/g\\)||[]\\).length\\); console.log\\('selectActivePanes:', s.includes\\('selectActivePanes'\\)\\);\")",
+      "Bash(node -e \"const s = require\\('fs'\\).readFileSync\\('src/App.css','utf8'\\); const themes = s.match\\(/\\\\.theme-[\\\\w-]+/g\\)||[]; console.log\\('CSS themes:', themes.length, themes.join\\(', '\\)\\)\")"
     ]
   }
 }

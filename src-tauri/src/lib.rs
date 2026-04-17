@@ -1,8 +1,7 @@
 pub mod db;
 pub mod pty;
-pub mod swarm;
+pub mod mcp;
 
-// Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 #[tauri::command]
 fn greet(name: &str) -> String {
     format!("Hello, {}! You've been greeted from Rust!", name)
@@ -15,6 +14,8 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_opener::init())
+        .manage(pty::PtyState::new())
+        .manage(mcp::McpState::new())
         .invoke_handler(tauri::generate_handler![
             greet,
             pty::spawn_pty,
@@ -25,19 +26,21 @@ pub fn run() {
             db::add_task,
             db::update_task_status,
             db::delete_task,
-            swarm::get_swarm_status
+            db::lock_file,
+            db::unlock_file,
+            db::get_file_locks,
+            mcp::get_mcp_url,
         ])
         .setup(|app| {
-            use tauri::Manager;
-            app.manage(pty::PtyState::new());
-
-            // Initialize db
             db::init_db(app.handle()).expect("Failed to init db");
-
-            // Initialize swarm
-            swarm::init_swarm_watcher(app.handle()).expect("Failed to init swarm");
+            mcp::init_mcp_server(app.handle()).expect("Failed to init MCP server");
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app_handle, event| {
+            if let tauri::RunEvent::Exit = event {
+                mcp::kill_mcp_server(app_handle);
+            }
+        });
 }

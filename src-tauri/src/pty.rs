@@ -35,7 +35,12 @@ pub fn spawn_pty(
     id: String,
     rows: u16,
     cols: u16,
-) -> Result<(), String> {
+) -> Result<bool, String> {
+    let mut ptys = state.ptys.lock().unwrap();
+    if ptys.contains_key(&id) {
+        return Ok(false);
+    }
+
     let pty_system = NativePtySystem::default();
     let pty_size = PtySize {
         rows,
@@ -70,8 +75,8 @@ pub fn spawn_pty(
 
     let instance = PtyInstance { master, writer };
 
-    let mut ptys = state.ptys.lock().unwrap();
     ptys.insert(id.clone(), instance);
+    drop(ptys); // Release lock before spawning thread
 
     // Read thread
     thread::spawn(move || {
@@ -94,7 +99,7 @@ pub fn spawn_pty(
         }
     });
 
-    Ok(())
+    Ok(true)
 }
 
 #[tauri::command]

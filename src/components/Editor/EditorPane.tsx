@@ -2,8 +2,11 @@ import { useState, useEffect } from 'react';
 import CodeMirror from '@uiw/react-codemirror';
 import { javascript } from '@codemirror/lang-javascript';
 import { readTextFile, writeTextFile } from '@tauri-apps/plugin-fs';
+import { Pane } from '../../store/workspace';
 
-export function EditorPane({ title, filePath }: { title: string; filePath?: string }) {
+export function EditorPane({ pane }: { pane: Pane }) {
+  const { title, data } = pane;
+  const filePath = data?.filePath;
   const [content, setContent] = useState('// Welcome to the Editor\nconsole.log("Hello, world!");');
   const [isDirty, setIsDirty] = useState(false);
 
@@ -38,10 +41,18 @@ export function EditorPane({ title, filePath }: { title: string; filePath?: stri
 
   return (
     <div className="flex flex-col h-full bg-bg-panel" onKeyDown={handleKeyDown}>
-      <div className="text-text-muted bg-bg-panel px-3 py-1 text-xs border-b border-border-panel shrink-0 flex justify-between items-center">
-        <span>{filePath ? filePath : title} {isDirty ? '*' : ''}</span>
+      <div className="flex items-center justify-between px-3 py-1.5 text-xs border-b border-border-panel shrink-0 bg-bg-titlebar">
+        <span className="text-text-muted truncate max-w-[70%]">
+          {filePath ? filePath.split(/[\\/]/).pop() : title}
+          {isDirty && <span className="ml-1 text-accent-primary">●</span>}
+        </span>
         {filePath && (
-          <button onClick={handleSave} className="text-accent-primary hover:text-accent-hover">Save (Ctrl+S)</button>
+          <button
+            onClick={handleSave}
+            className="text-text-muted hover:text-accent-primary text-xs transition-colors shrink-0"
+          >
+            Save
+          </button>
         )}
       </div>
       <div className="flex-1 overflow-auto h-full">

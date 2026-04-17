@@ -1,4 +1,4 @@
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::sync::Mutex;
@@ -15,6 +15,15 @@ pub struct Task {
     pub description: Option<String>,
     pub status: String,
     pub created_at: String,
+    pub parent_id: Option<i64>,
+    pub agent_id: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct FileLock {
+    pub file_path: String,
+    pub agent_id: String,
+    pub locked_at: String,
 }
 
 pub fn init_db(app: &AppHandle) -> Result<(), String> {
@@ -34,7 +43,20 @@ pub fn init_db(app: &AppHandle) -> Result<(), String> {
             title TEXT NOT NULL,
             description TEXT,
             status TEXT NOT NULL DEFAULT 'todo',
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            parent_id INTEGER,
+            agent_id TEXT,
+            FOREIGN KEY(parent_id) REFERENCES tasks(id)
+        )",
+        (),
+    )
+    .map_err(|e| e.to_string())?;
+
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS file_locks (
+            file_path TEXT PRIMARY KEY,
+            agent_id TEXT NOT NULL,
+            locked_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )",
         (),
     )
@@ -55,7 +77,7 @@ pub fn get_tasks(state: State<'_, DbState>) -> Result<Vec<Task>, String> {
         .map_err(|_| "Failed to lock database".to_string())?;
     let conn = db_lock.as_ref().ok_or("Database not initialized")?;
 
-    let mut stmt = conn.prepare("SELECT id, title, description, status, datetime(created_at, 'localtime') FROM tasks ORDER BY id DESC").map_err(|e| e.to_string())?;
+    let mut stmt = conn.prepare("SELECT id, title, description, status, datetime(created_at, 'localtime'), parent_id, agent_id FROM tasks ORDER BY id DESC").map_err(|e| e.to_string())?;
     let task_iter = stmt
         .query_map([], |row| {
             Ok(Task {
@@ -64,6 +86,8 @@ pub fn get_tasks(state: State<'_, DbState>) -> Result<Vec<Task>, String> {
                 description: row.get(2)?,
                 status: row.get(3)?,
                 created_at: row.get(4)?,
+                parent_id: row.get(5)?,
+                agent_id: row.get(6)?,
             })
         })
         .map_err(|e| e.to_string())?;
@@ -80,6 +104,8 @@ pub fn get_tasks(state: State<'_, DbState>) -> Result<Vec<Task>, String> {
 pub fn add_task(
     title: String,
     description: Option<String>,
+    parent_id: Option<i64>,
+    agent_id: Option<String>,
     state: State<'_, DbState>,
 ) -> Result<Task, String> {
     let db_lock = state
@@ -89,14 +115,14 @@ pub fn add_task(
     let conn = db_lock.as_ref().ok_or("Database not initialized")?;
 
     conn.execute(
-        "INSERT INTO tasks (title, description, status) VALUES (?1, ?2, 'todo')",
-        (&title, &description),
+        "INSERT INTO tasks (title, description, status, parent_id, agent_id) VALUES (?1, ?2, 'todo', ?3, ?4)",
+        (&title, &description, &parent_id, &agent_id),
     )
     .map_err(|e| e.to_string())?;
 
     let id = conn.last_insert_rowid();
 
-    let mut stmt = conn.prepare("SELECT id, title, description, status, datetime(created_at, 'localtime') FROM tasks WHERE id = ?1").map_err(|e| e.to_string())?;
+    let mut stmt = conn.prepare("SELECT id, title, description, status, datetime(created_at, 'localtime'), parent_id, agent_id FROM tasks WHERE id = ?1").map_err(|e| e.to_string())?;
     let task = stmt
         .query_row([id], |row| {
             Ok(Task {
@@ -105,6 +131,8 @@ pub fn add_task(
                 description: row.get(2)?,
                 status: row.get(3)?,
                 created_at: row.get(4)?,
+                parent_id: row.get(5)?,
+                agent_id: row.get(6)?,
             })
         })
         .map_err(|e| e.to_string())?;
@@ -116,6 +144,7 @@ pub fn add_task(
 pub fn update_task_status(
     id: i64,
     status: String,
+    agent_id: Option<String>,
     state: State<'_, DbState>,
 ) -> Result<(), String> {
     let db_lock = state
@@ -124,10 +153,95 @@ pub fn update_task_status(
         .map_err(|_| "Failed to lock database".to_string())?;
     let conn = db_lock.as_ref().ok_or("Database not initialized")?;
 
-    conn.execute("UPDATE tasks SET status = ?1 WHERE id = ?2", (&status, &id))
-        .map_err(|e| e.to_string())?;
+    if let Some(agent) = agent_id {
+        conn.execute("UPDATE tasks SET status = ?1, agent_id = ?2 WHERE id = ?3", (&status, &agent, &id))
+            .map_err(|e| e.to_string())?;
+    } else {
+        conn.execute("UPDATE tasks SET status = ?1 WHERE id = ?2", (&status, &id))
+            .map_err(|e| e.to_string())?;
+    }
 
     Ok(())
+}
+
+#[tauri::command]
+pub fn lock_file(
+    file_path: String,
+    agent_id: String,
+    state: State<'_, DbState>,
+) -> Result<(), String> {
+    let db_lock = state
+        .db
+        .lock()
+        .map_err(|_| "Failed to lock database".to_string())?;
+    let conn = db_lock.as_ref().ok_or("Database not initialized")?;
+
+    // Check if locked by someone else
+    let mut stmt = conn.prepare("SELECT agent_id FROM file_locks WHERE file_path = ?1").map_err(|e| e.to_string())?;
+    let current_lock_agent: Option<String> = stmt.query_row([&file_path], |row| row.get(0)).optional().map_err(|e| e.to_string())?;
+
+    if let Some(current_agent) = current_lock_agent {
+        if current_agent != agent_id {
+            return Err(format!("File already locked by agent: {}", current_agent));
+        }
+        return Ok(()); // Already locked by this agent
+    }
+
+    conn.execute(
+        "INSERT INTO file_locks (file_path, agent_id) VALUES (?1, ?2)",
+        (&file_path, &agent_id),
+    )
+    .map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
+#[tauri::command]
+pub fn unlock_file(
+    file_path: String,
+    agent_id: String,
+    state: State<'_, DbState>,
+) -> Result<(), String> {
+    let db_lock = state
+        .db
+        .lock()
+        .map_err(|_| "Failed to lock database".to_string())?;
+    let conn = db_lock.as_ref().ok_or("Database not initialized")?;
+
+    conn.execute(
+        "DELETE FROM file_locks WHERE file_path = ?1 AND agent_id = ?2",
+        (&file_path, &agent_id),
+    )
+    .map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
+#[tauri::command]
+pub fn get_file_locks(state: State<'_, DbState>) -> Result<Vec<FileLock>, String> {
+    let db_lock = state
+        .db
+        .lock()
+        .map_err(|_| "Failed to lock database".to_string())?;
+    let conn = db_lock.as_ref().ok_or("Database not initialized")?;
+
+    let mut stmt = conn.prepare("SELECT file_path, agent_id, datetime(locked_at, 'localtime') FROM file_locks").map_err(|e| e.to_string())?;
+    let lock_iter = stmt
+        .query_map([], |row| {
+            Ok(FileLock {
+                file_path: row.get(0)?,
+                agent_id: row.get(1)?,
+                locked_at: row.get(2)?,
+            })
+        })
+        .map_err(|e| e.to_string())?;
+
+    let mut locks = Vec::new();
+    for lock in lock_iter {
+        locks.push(lock.map_err(|e| e.to_string())?);
+    }
+
+    Ok(locks)
 }
 
 #[tauri::command]
