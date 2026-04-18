@@ -4145,6 +4145,7 @@ dependencies = [
  "tauri-plugin-opener",
  "tauri-plugin-shell",
  "ureq",
+ "uuid",
 ]
 
 [[package]]

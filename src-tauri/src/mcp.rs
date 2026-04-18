@@ -194,11 +194,15 @@ pub struct McpMessage {
 
 pub struct McpState {
     pub process: Arc<Mutex<Option<Child>>>,
+    pub auth_token: Arc<Mutex<String>>,
 }
 
 impl McpState {
     pub fn new() -> Self {
-        Self { process: Arc::new(Mutex::new(None)) }
+        Self { 
+            process: Arc::new(Mutex::new(None)),
+            auth_token: Arc::new(Mutex::new(String::new())),
+        }
     }
 }
 
@@ -256,10 +260,15 @@ pub fn init_mcp_server(app: &AppHandle) -> Result<(), String> {
             return;
         }
 
-        register_with_ai_clis(&app_handle, &format!("{}/mcp", base));
+        let token = {
+            let state = app_handle.state::<McpState>();
+            let t = state.auth_token.lock().unwrap().clone();
+            t
+        };
+        register_with_ai_clis(&app_handle, &format!("{}/mcp?token={}", base, token));
 
         // Subscribe to SSE activity feed
-        let response = match ureq::get(&format!("{}/events", base)).call() {
+        let response = match ureq::get(&format!("{}/events?token={}", base, token)).call() {
             Ok(r) => r,
             Err(e) => {
                 eprintln!("Failed to connect to MCP events: {}", e);
@@ -289,6 +298,7 @@ pub fn kill_mcp_server(app: &AppHandle) {
 }
 
 #[tauri::command]
-pub fn get_mcp_url() -> String {
-    format!("http://localhost:{}/mcp", PORT)
+pub fn get_mcp_url(state: tauri::State<'_, McpState>) -> String {
+    let token = state.auth_token.lock().unwrap().clone();
+    format!("http://localhost:{}/mcp?token={}", PORT, token)
 }
