@@ -274,14 +274,11 @@ export function WorkspaceGrid() {
         
         const clampedW = Math.min(GRID_COLUMNS - startGrid.x, newW);
         
-        setGhostPos({ ...startGrid, w: clampedW, h: newH });
+        setGhostPos(prev => {
+          if (prev && prev.x === startGrid.x && prev.y === startGrid.y && prev.w === clampedW && prev.h === newH) return prev;
+          return { ...startGrid, w: clampedW, h: newH };
+        });
       }
-    }
-
-    function onMouseUp() {
-      // Use the final ghostPos which is already computed in state
-      // We need to capture the current ghostPos correctly.
-      // Since useEffect might have a stale ghostPos, we'll use a functional state update or just rely on the fact that this is re-run.
     }
 
     const handleMouseUp = (e: MouseEvent) => {

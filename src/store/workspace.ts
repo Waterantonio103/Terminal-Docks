@@ -126,6 +126,22 @@ function withActivePanes(
   };
 }
 
+export interface ResultEntry {
+  id: number;
+  agentId: string;
+  content: string;
+  type: 'markdown' | 'url';
+  timestamp: number;
+}
+
+export interface McpMessage {
+  id: number;
+  from: string;
+  content: string;
+  type: string;
+  timestamp: number;
+}
+
 interface WorkspaceState {
   tabs: WorkspaceTab[];
   activeTabId: string;
@@ -133,6 +149,8 @@ interface WorkspaceState {
   workspaceDir: string | null;
   theme: ThemeType;
   savedLayouts: SavedLayout[];
+  messages: McpMessage[];
+  results: ResultEntry[];
   toggleSidebar: () => void;
   addPane: (type: PaneType, title: string, data?: any) => void;
   addPaneAt: (type: PaneType, title: string, index: number, data?: any) => void;
@@ -153,6 +171,8 @@ interface WorkspaceState {
   removeTab: (id: string) => void;
   switchTab: (id: string) => void;
   renameTab: (id: string, name: string) => void;
+  addMessage: (msg: McpMessage) => void;
+  addResult: (result: ResultEntry) => void;
 }
 
 const _initTabId = generateId();
@@ -174,6 +194,11 @@ export const useWorkspaceStore = create<WorkspaceState>()(
       workspaceDir: null,
       theme: 'dark',
       savedLayouts: [],
+      messages: [],
+      results: [],
+
+      addMessage: (msg) => set((s) => ({ messages: [...s.messages, msg].slice(-500) })),
+      addResult: (result) => set((s) => ({ results: [...s.results, result].slice(-200) })),
 
       toggleSidebar: () => set((s) => ({ sidebarOpen: !s.sidebarOpen })),
 

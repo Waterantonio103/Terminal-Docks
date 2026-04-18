@@ -1,24 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
-import { listen } from '@tauri-apps/api/event';
-import { Pane, MissionAgent } from '../../store/workspace';
+import { Pane, MissionAgent, useWorkspaceStore } from '../../store/workspace';
 import agentsConfig from '../../config/agents.json';
 import { Monitor, FileText, ChevronRight } from 'lucide-react';
-
-interface ResultEntry {
-  id: number;
-  agentId: string;
-  content: string;
-  type: 'markdown' | 'url';
-  timestamp: number;
-}
-
-interface McpMessage {
-  id: number;
-  from: string;
-  content: string;
-  type: string;
-  timestamp: number;
-}
+import ReactMarkdown from 'react-markdown';
 
 function AgentBadge({ agent }: { agent: MissionAgent }) {
   const role = agentsConfig.agents.find(a => a.id === agent.roleId);
@@ -38,27 +22,20 @@ export function MissionControlPane({ pane }: { pane: Pane }) {
   const taskDescription: string = pane.data?.taskDescription ?? '';
   const agents: MissionAgent[]  = pane.data?.agents ?? [];
 
+  const results = useWorkspaceStore(s => s.results);
+
   const [tab, setTab]               = useState<'preview' | 'output'>('preview');
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
-  const [results, setResults]       = useState<ResultEntry[]>([]);
   const outputRef                   = useRef<HTMLDivElement>(null);
 
-  // Listen for published results from agents
+  // Update preview URL when a new URL result comes in
   useEffect(() => {
-    const unlisten = listen<McpMessage>('mcp-message', (event) => {
-      const msg = event.payload;
-      if (!msg.type.startsWith('result:')) return;
-      const type = msg.type === 'result:url' ? 'url' : 'markdown';
-      if (type === 'url') {
-        setPreviewUrl(msg.content.trim());
-        setTab('preview');
-      }
-      setResults(prev => [...prev, {
-        id: msg.id, agentId: msg.from, content: msg.content, type, timestamp: msg.timestamp,
-      }]);
-    });
-    return () => { unlisten.then(f => f()); };
-  }, []);
+    const latestUrl = results.filter(r => r.type === 'url').pop();
+    if (latestUrl) {
+      setPreviewUrl(latestUrl.content.trim());
+      setTab('preview');
+    }
+  }, [results]);
 
   // Auto-scroll output
   useEffect(() => {
@@ -150,9 +127,9 @@ export function MissionControlPane({ pane }: { pane: Pane }) {
                     {new Date(e.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
                   </span>
                 </div>
-                <pre className="px-3 py-2 text-text-secondary whitespace-pre-wrap break-words leading-relaxed text-[11px]">
-                  {e.content}
-                </pre>
+                <div className="px-3 py-2 text-text-secondary whitespace-pre-wrap break-words leading-relaxed text-[11px] prose prose-invert max-w-none prose-sm prose-pre:bg-bg-panel prose-pre:border prose-pre:border-border-panel">
+                  <ReactMarkdown>{e.content}</ReactMarkdown>
+                </div>
               </div>
             ))
           )}
