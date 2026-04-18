@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::sync::Mutex;
 use std::thread;
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, State, Manager};
 
 pub struct PtyInstance {
     pub master: Box<dyn MasterPty + Send>,
@@ -36,6 +36,7 @@ pub fn spawn_pty(
     id: String,
     rows: u16,
     cols: u16,
+    cwd: Option<String>,
 ) -> Result<bool, String> {
     let mut ptys = state.ptys.lock().unwrap();
     if ptys.contains_key(&id) {
@@ -54,13 +55,18 @@ pub fn spawn_pty(
         .openpty(pty_size)
         .map_err(|e| format!("Failed to open pty: {}", e))?;
 
-    let cmd = if cfg!(target_os = "windows") {
-        let shell = std::env::var("COMSPEC").unwrap_or_else(|_| "powershell.exe".to_string());
-        CommandBuilder::new(shell)
+    let shell = if cfg!(target_os = "windows") {
+        std::env::var("COMSPEC").unwrap_or_else(|_| "powershell.exe".to_string())
     } else {
-        let shell = std::env::var("SHELL").unwrap_or_else(|_| "sh".to_string());
-        CommandBuilder::new(shell)
+        std::env::var("SHELL").unwrap_or_else(|_| "sh".to_string())
     };
+
+    let mut cmd = CommandBuilder::new(shell);
+    if let Some(path) = cwd {
+        if !path.is_empty() {
+            cmd.cwd(path);
+        }
+    }
 
     let child = pair
         .slave
@@ -108,7 +114,20 @@ pub fn spawn_pty(
 pub fn write_to_pty(state: State<'_, PtyState>, id: String, data: String) -> Result<(), String> {
     let mut ptys = state.ptys.lock().unwrap();
     if let Some(instance) = ptys.get_mut(&id) {
-        let _ = instance.writer.write_all(data.as_bytes());
+        let bytes = data.as_bytes();
+        // Use a chunked approach for large inputs to avoid overwhelming the PTY buffer
+        // especially on Windows/ConPTY which can be sensitive to large rapid writes.
+        if bytes.len() > 512 {
+            for chunk in bytes.chunks(512) {
+                let _ = instance.writer.write_all(chunk);
+                let _ = instance.writer.flush();
+                // Tiny sleep to allow the PTY driver to process the chunk
+                thread::sleep(std::time::Duration::from_millis(5));
+            }
+        } else {
+            let _ = instance.writer.write_all(bytes);
+            let _ = instance.writer.flush();
+        }
     }
     Ok(())
 }
@@ -139,4 +158,12 @@ pub fn destroy_pty(state: State<'_, PtyState>, id: String) -> Result<(), String>
         let _ = instance.child.kill();
     }
     Ok(())
+}
+
+pub fn kill_all_ptys(app: &AppHandle) {
+    let state = app.state::<PtyState>();
+    let mut ptys = state.ptys.lock().unwrap();
+    for (_, mut instance) in ptys.drain() {
+        let _ = instance.child.kill();
+    }
 }

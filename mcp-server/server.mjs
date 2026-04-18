@@ -554,29 +554,4 @@ app.listen(PORT, () => {
   writeFileSync('.mcp/server.json', JSON.stringify({ url: `http://localhost:${PORT}/mcp`, port: PORT }, null, 2));
   console.log(`MCP server listening on port ${PORT}`);
 });
-ion ID');
-    return;
-  }
-  await sessions[sessionId].transport.handleRequest(req, res);
-});
 
-// DELETE handler for session termination
-app.delete('/mcp', async (req, res) => {
-  const sessionId = req.headers['mcp-session-id'];
-  if (!sessionId || !sessions[sessionId] || !sessions[sessionId].transport) {
-    res.status(400).send('Invalid or missing session ID');
-    return;
-  }
-  try {
-    await sessions[sessionId].transport.handleRequest(req, res);
-  } catch (err) {
-    console.error('Error terminating session:', err);
-    if (!res.headersSent) res.status(500).send('Error processing session termination');
-  }
-});
-
-app.listen(PORT, () => {
-  mkdirSync('.mcp', { recursive: true });
-  writeFileSync('.mcp/server.json', JSON.stringify({ url: `http://localhost:${PORT}/mcp`, port: PORT }, null, 2));
-  console.log(`MCP server listening on port ${PORT}`);
-});

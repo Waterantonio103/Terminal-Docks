@@ -14,6 +14,8 @@ export interface MissionAgent {
   terminalId: string;
   title: string;
   roleId: string;
+  status?: 'idle' | 'waiting' | 'running' | 'completed';
+  triggered?: boolean;
 }
 
 export type ThemeType =
@@ -204,6 +206,17 @@ export const useWorkspaceStore = create<WorkspaceState>()(
 
       addPane: (type, title, data) => set((state) => {
         const panes = selectActivePanes(state);
+        
+        // Singleton logic for specific pane types
+        if (type === 'missioncontrol') {
+          const existing = panes.find(p => p.type === 'missioncontrol');
+          if (existing) {
+            return withActivePanes(state, ps => 
+              ps.map(p => p.id === existing.id ? { ...p, data: { ...p.data, ...data } } : p)
+            );
+          }
+        }
+
         if (data?.filePath && panes.find(p => p.data?.filePath === data.filePath)) return state;
         const newData = data ? { ...data } : {};
         if (type === 'terminal' && !newData.terminalId) newData.terminalId = generateId();

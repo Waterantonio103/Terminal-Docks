@@ -10,7 +10,7 @@ const ROLES = [
   ...agentsConfig.agents.map(a => ({ id: a.id, label: `${a.name} (${a.role})` })),
 ];
 
-const ROLE_PRIORITY = ['coordinator', 'scout', 'builder', 'reviewer'];
+const ROLE_PRIORITY = ['scout', 'coordinator', 'builder', 'reviewer'];
 
 const CONNECT_PROMPT =
   `Call terminal-docks_get_collaboration_protocol() now. ` +
@@ -44,6 +44,7 @@ export function LauncherPane() {
   const [status, setStatus]   = useState<string | null>(null);
   const [busy, setBusy]       = useState(false);
   const [isConfirming, setIsConfirming] = useState(false);
+  const [isSequential, setIsSequential] = useState(true);
 
   // Reset confirmation if task or roles change
   useEffect(() => {
@@ -121,19 +122,32 @@ export function LauncherPane() {
         setIsConfirming(true);
         setStatus('Prompts staged. Verify in terminals and click Confirm to execute.');
       } else {
-        // Step 2: Actually send (carriage return) sequentially
-        for (const r of targets) {
-          await writeToTerminal(r.pane, '\r');
-          // Small delay to ensure order and prevent bridge congestion
-          await new Promise(resolve => setTimeout(resolve, 200));
-        }
-        const agents: MissionAgent[] = targets.map(r => ({
+        // Step 2: Actually send (carriage return)
+        const agents: MissionAgent[] = targets.map((r, idx) => ({
           terminalId: r.pane.data?.terminalId ?? `term-${r.pane.id}`,
           title: r.pane.title,
           roleId: r.roleId,
+          status: isSequential ? (idx === 0 ? 'running' : 'waiting') : 'running',
+          triggered: false,
         }));
-        addPane('missioncontrol', 'Mission Control', { taskDescription: task.trim(), agents });
-        setStatus(`Launched ${targets.length} agent(s). Mission Control opened.`);
+
+        if (isSequential) {
+          // Only trigger the first one
+          await writeToTerminal(targets[0].pane, '\r');
+          agents[0].triggered = true;
+        } else {
+          // Trigger all
+          for (const r of targets) {
+            await writeToTerminal(r.pane, '\r');
+          }
+        }
+        
+        addPane('missioncontrol', 'Mission Control', { 
+          taskDescription: task.trim(), 
+          agents,
+          isSequential 
+        });
+        setStatus(`Launched ${isSequential ? 'Scout' : targets.length + ' agent(s)'}. Mission Control opened.`);
         setIsConfirming(false);
       }
     } catch (e) {
@@ -142,6 +156,7 @@ export function LauncherPane() {
       setBusy(false);
     }
   }
+
 
   return (
     <div className="flex flex-col h-full bg-bg-panel overflow-hidden">
@@ -231,9 +246,24 @@ export function LauncherPane() {
             {status}
           </p>
         )}
+
+        {/* Sequential Launch Toggle */}
+        <div className="flex items-center gap-2 pt-1">
+          <input
+            type="checkbox"
+            id="sequential-toggle"
+            checked={isSequential}
+            onChange={e => setIsSequential(e.target.checked)}
+            className="w-3.5 h-3.5 rounded border-border-panel bg-bg-surface text-accent-primary focus:ring-0 focus:ring-offset-0 cursor-pointer"
+          />
+          <label htmlFor="sequential-toggle" className="text-xs text-text-secondary cursor-pointer select-none">
+            Sequential Mode <span className="text-[10px] text-text-muted opacity-70">(Agents wait for signals)</span>
+          </label>
+        </div>
       </div>
 
       {/* Action buttons */}
+
       <div className="shrink-0 border-t border-border-panel px-4 py-3 flex gap-2">
         <button
           onClick={handleConnect}

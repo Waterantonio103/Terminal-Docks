@@ -163,10 +163,13 @@ export function TerminalPane({ pane }: { pane: Pane }) {
         }
       });
 
+      const workspaceDir = useWorkspaceStore.getState().workspaceDir;
+
       await invoke<boolean>('spawn_pty', {
         id: terminalId,
         rows: term.rows || 24,
         cols: term.cols || 80,
+        cwd: workspaceDir,
       });
     };
 

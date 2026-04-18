@@ -41,6 +41,7 @@ pub fn run() {
         .expect("error while building tauri application")
         .run(|app_handle, event| {
             if let tauri::RunEvent::Exit = event {
+                pty::kill_all_ptys(app_handle);
                 mcp::kill_mcp_server(app_handle);
             }
         });
