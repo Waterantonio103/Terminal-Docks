@@ -9,7 +9,30 @@
       "Bash(xargs grep *)",
       "Bash(npm install *)",
       "Bash(node -e \"const s = require\\('fs'\\).readFileSync\\('src/store/workspace.ts','utf8'\\); console.log\\('tabs:', s.includes\\('WorkspaceTab'\\)\\); console.log\\('themes count:', \\(s.match\\(/\\\\| '/g\\)||[]\\).length\\); console.log\\('selectActivePanes:', s.includes\\('selectActivePanes'\\)\\);\")",
-      "Bash(node -e \"const s = require\\('fs'\\).readFileSync\\('src/App.css','utf8'\\); const themes = s.match\\(/\\\\.theme-[\\\\w-]+/g\\)||[]; console.log\\('CSS themes:', themes.length, themes.join\\(', '\\)\\)\")"
+      "Bash(node -e \"const s = require\\('fs'\\).readFileSync\\('src/App.css','utf8'\\); const themes = s.match\\(/\\\\.theme-[\\\\w-]+/g\\)||[]; console.log\\('CSS themes:', themes.length, themes.join\\(', '\\)\\)\")",
+      "Bash(claude mcp *)",
+      "Bash(curl -s http://localhost:3741/health)",
+      "Bash(netstat -ano)",
+      "Bash(tasklist)",
+      "Bash(node server.mjs)",
+      "Bash(taskkill /PID 17016 /F)",
+      "Bash(powershell -Command \"Stop-Process -Id 17016 -Force\")",
+      "Bash(powershell -Command \"Stop-Process -Id 9612 -Force\")",
+      "Bash(awk '{print $5}')",
+      "Bash(xargs -I{} powershell -Command \"Stop-Process -Id {} -Force\")",
+      "Bash(read pid *)",
+      "Bash(powershell -Command 'Stop-Process -Id __TRACKED_VAR__ -Force')",
+      "Bash(curl -s http://localhost:3741/sessions)",
+      "Bash(curl -s -X POST http://localhost:3741/mcp -H 'Content-Type: application/json' -d '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"clientInfo\":{\"name\":\"test\",\"version\":\"1\"}}}')",
+      "Bash(node -e \"const d=require\\('fs'\\).readFileSync\\('/dev/stdin','utf8'\\); const j=JSON.parse\\(d\\); console.log\\('prompts cap:', JSON.stringify\\(j.result?.capabilities?.prompts\\)\\); console.log\\('resources cap:', JSON.stringify\\(j.result?.capabilities?.resources\\)\\);\")",
+      "Bash(powershell -Command \"Invoke-RestMethod -Uri 'http://localhost:3741/mcp' -Method POST -ContentType 'application/json' -Body '{\\\\\"jsonrpc\\\\\":\\\\\"2.0\\\\\",\\\\\"id\\\\\":1,\\\\\"method\\\\\":\\\\\"initialize\\\\\",\\\\\"params\\\\\":{\\\\\"protocolVersion\\\\\":\\\\\"2024-11-05\\\\\",\\\\\"capabilities\\\\\":{},\\\\\"clientInfo\\\\\":{\\\\\"name\\\\\":\\\\\"test\\\\\",\\\\\"version\\\\\":\\\\\"1\\\\\"}}}' | ConvertTo-Json -Depth 5\")",
+      "Bash(powershell *)",
+      "Bash(node --check server.mjs)",
+      "Bash(where python *)",
+      "Bash(where python3 *)",
+      "WebSearch",
+      "WebFetch(domain:geminicli.com)",
+      "WebFetch(domain:opencode.ai)"
     ]
   }
 }

@@ -6,6 +6,7 @@ import { SearchAddon } from '@xterm/addon-search';
 import '@xterm/xterm/css/xterm.css';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, UnlistenFn } from '@tauri-apps/api/event';
+import { writeText, readText } from '@tauri-apps/plugin-clipboard-manager';
 import { useWorkspaceStore, Pane } from '../../store/workspace';
 import { ChevronDown, ChevronUp, X } from 'lucide-react';
 
@@ -49,6 +50,7 @@ export function TerminalPane({ pane }: { pane: Pane }) {
 
   useEffect(() => {
     if (!terminalRef.current) return;
+    const terminalElement = terminalRef.current;
 
     const rootStyle  = getComputedStyle(document.documentElement);
     const bgColor    = rootStyle.getPropertyValue('--bg-app').trim()        || '#0c0c14';
@@ -58,9 +60,10 @@ export function TerminalPane({ pane }: { pane: Pane }) {
     const term = new Terminal({
       cursorBlink: true,
       cursorStyle: 'bar',
+      cursorWidth: 2,
       fontFamily: '"Cascadia Code", "Fira Code", "JetBrains Mono", Menlo, Monaco, Consolas, monospace',
       fontSize: 13,
-      lineHeight: 1.5,
+      lineHeight: 1.2,
       letterSpacing: 0,
       theme: {
         background: bgColor,
@@ -79,22 +82,38 @@ export function TerminalPane({ pane }: { pane: Pane }) {
       },
       scrollback: 5000,
       allowTransparency: false,
+      screenReaderMode: false,
     });
 
     const fit    = new FitAddon();
     const search = new SearchAddon();
     term.loadAddon(fit);
     term.loadAddon(search);
-    term.open(terminalRef.current);
+    term.open(terminalElement);
     fitAddon.current   = fit;
     searchAddon.current = search;
+
+    // Handle paste events ourselves to prevent duplication
+    // Use capture phase to run before xterm.js's internal handler
+    const pasteHandler = (e: ClipboardEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+
+      // Handle paste manually
+      const text = e.clipboardData?.getData('text');
+      if (text) {
+        invoke('write_to_pty', { id: terminalId, data: text });
+      }
+    };
+    terminalElement.addEventListener('paste', pasteHandler, true);
 
     try {
       const webgl = new WebglAddon();
       term.loadAddon(webgl);
     } catch { /* WebGL not available */ }
 
-    fit.fit();
+    // Use a small timeout to ensure the container is stable before fitting
+    setTimeout(() => fit.fit(), 50);
     terminalInstance.current = term;
 
     // Scroll tracking
@@ -103,19 +122,36 @@ export function TerminalPane({ pane }: { pane: Pane }) {
       setIsScrolledUp(buf.viewportY < buf.baseY);
     });
 
-    // Intercept Ctrl/Cmd+F to open inline search
+    // Intercept Ctrl/Cmd+F to open inline search, and Ctrl+C/V for clipboard
     term.attachCustomKeyEventHandler((event) => {
       if (event.type !== 'keydown') return true;
       const mod = event.ctrlKey || event.metaKey;
+      
       if (mod && event.key === 'f') {
         setShowSearch(true);
         return false;
       }
+      
       if (event.key === 'Escape' && showSearchRef.current) {
         setShowSearch(false);
         setSearchQuery('');
         return false;
       }
+
+      // Ctrl+C: copy if selection exists
+      if (mod && event.key === 'c' && term.hasSelection()) {
+        const sel = term.getSelection();
+        if (sel) writeText(sel).catch(() => {});
+        return false;
+      }
+
+      // Ctrl+V: block xterm.js processing so native paste event fires
+      if (mod && event.key === 'v') {
+        return false;
+      }
+
+
+
       return true;
     });
 
@@ -147,17 +183,25 @@ export function TerminalPane({ pane }: { pane: Pane }) {
       invoke('write_to_pty', { id: terminalId, data });
     });
 
+    // Debounced resize to prevent layout thrashing and PTY issues
+    let resizeTimeout: ReturnType<typeof setTimeout>;
     const resizeObserver = new ResizeObserver(() => {
-      fit.fit();
-      if (term.rows && term.cols) {
-        invoke('resize_pty', { id: terminalId, rows: term.rows, cols: term.cols });
-      }
+      clearTimeout(resizeTimeout);
+      resizeTimeout = setTimeout(() => {
+        if (!terminalInstance.current) return;
+        fit.fit();
+        if (term.rows && term.cols) {
+          invoke('resize_pty', { id: terminalId, rows: term.rows, cols: term.cols });
+        }
+      }, 100);
     });
 
-    resizeObserver.observe(terminalRef.current);
+    resizeObserver.observe(terminalElement);
 
     return () => {
+      clearTimeout(resizeTimeout);
       resizeObserver.disconnect();
+      terminalElement.removeEventListener('paste', pasteHandler, true);
       if (unlisten) unlisten();
       term.dispose();
     };
@@ -200,11 +244,11 @@ export function TerminalPane({ pane }: { pane: Pane }) {
     switch (action) {
       case 'copy': {
         const sel = term.getSelection();
-        if (sel) navigator.clipboard.writeText(sel).catch(() => {});
+        if (sel) writeText(sel).catch(() => {});
         break;
       }
       case 'paste': {
-        const text = await navigator.clipboard.readText().catch(() => '');
+        const text = await readText().catch(() => '');
         if (text) invoke('write_to_pty', { id: terminalId, data: text });
         break;
       }
@@ -267,7 +311,10 @@ export function TerminalPane({ pane }: { pane: Pane }) {
         </div>
       )}
 
-      <div className="flex-1 p-2 overflow-hidden relative">
+      <div 
+        className="flex-1 p-2 overflow-hidden relative cursor-text"
+        onClick={() => terminalInstance.current?.focus()}
+      >
         <div ref={terminalRef} className="h-full w-full" />
 
         {/* Scroll-to-bottom indicator */}

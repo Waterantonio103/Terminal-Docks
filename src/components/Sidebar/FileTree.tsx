@@ -2,10 +2,7 @@ import { useState, useEffect } from 'react';
 import { useWorkspaceStore } from '../../store/workspace';
 import { open } from '@tauri-apps/plugin-dialog';
 import { readDir, DirEntry } from '@tauri-apps/plugin-fs';
-import { Folder, File, ChevronRight, ChevronDown } from 'lucide-react';
-import { useDraggable } from '@dnd-kit/core';
-
-import { Lock } from 'lucide-react';
+import { Folder, File as FileIcon, ChevronRight, ChevronDown, Lock } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
 
 interface FileLock {
@@ -20,22 +17,7 @@ function TreeNode({ file, parentPath, locks }: { file: DirEntry, parentPath: str
   const addPane = useWorkspaceStore(s => s.addPane);
 
   const fullPath = parentPath + (parentPath.endsWith('/') || parentPath.endsWith('\\') ? '' : '/') + file.name;
-  const lock = locks.find(l => l.file_path === fullPath || l.file_path.endsWith(file.name)); // Simplified matching for now
-
-  const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({
-    id: `file-${fullPath}`,
-    data: { 
-      type: 'editor', 
-      isNew: true, 
-      title: file.name,
-      data: { filePath: fullPath }
-    },
-    disabled: file.isDirectory
-  });
-
-  const style = transform ? {
-    transform: `translate3d(${transform.x}px, ${transform.y}px, 0)`,
-  } : undefined;
+  const lock = locks.find(l => l.file_path === fullPath || l.file_path.endsWith(file.name));
 
   const handleClick = async () => {
     if (file.isDirectory) {
@@ -57,14 +39,26 @@ function TreeNode({ file, parentPath, locks }: { file: DirEntry, parentPath: str
     }
   };
 
+  const onDragStart = (e: React.MouseEvent) => {
+    if (file.isDirectory) return;
+    
+    const dragEvent = new CustomEvent('file-drag-start', {
+      detail: {
+        type: 'editor',
+        title: file.name,
+        data: { filePath: fullPath },
+        clientX: e.clientX,
+        clientY: e.clientY
+      }
+    });
+    window.dispatchEvent(dragEvent);
+  };
+
   return (
     <div className="pl-2">
       <div
-        ref={setNodeRef}
-        style={style}
-        {...listeners}
-        {...attributes}
-        className={`flex items-center gap-1 py-0.5 hover:bg-bg-surface cursor-pointer rounded px-1 text-xs transition-colors group ${isDragging ? 'opacity-50' : ''}`}
+        onMouseDown={onDragStart}
+        className="flex items-center gap-1 py-0.5 hover:bg-bg-surface cursor-pointer rounded px-1 text-xs transition-colors group select-none"
         onClick={handleClick}
       >
         {file.isDirectory ? (
@@ -75,7 +69,7 @@ function TreeNode({ file, parentPath, locks }: { file: DirEntry, parentPath: str
         ) : (
           <>
             <span className="w-3 shrink-0" />
-            <File size={13} className="text-text-muted shrink-0 opacity-60" />
+            <FileIcon size={13} className="text-text-muted shrink-0 opacity-60" />
           </>
         )}
         <span className="truncate text-text-secondary flex-1" title={file.name}>{file.name}</span>

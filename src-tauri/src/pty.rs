@@ -53,8 +53,10 @@ pub fn spawn_pty(
         .openpty(pty_size)
         .map_err(|e| format!("Failed to open pty: {}", e))?;
 
-    let cmd = if cfg!(target_os = "windows") {
-        CommandBuilder::new("cmd.exe")
+    let mut cmd = if cfg!(target_os = "windows") {
+        let mut c = CommandBuilder::new("cmd.exe");
+        c.args(&["/K", "chcp 65001"]);
+        c
     } else {
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "sh".to_string());
         CommandBuilder::new(shell)

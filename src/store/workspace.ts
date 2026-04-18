@@ -8,7 +8,13 @@ export function arrayMove<T>(array: T[], fromIndex: number, toIndex: number): T[
   return newArray;
 }
 
-export type PaneType = 'terminal' | 'editor' | 'taskboard' | 'activityfeed';
+export type PaneType = 'terminal' | 'editor' | 'taskboard' | 'activityfeed' | 'launcher' | 'missioncontrol';
+
+export interface MissionAgent {
+  terminalId: string;
+  title: string;
+  roleId: string;
+}
 
 export type ThemeType =
   // Original themes
@@ -20,16 +26,64 @@ export type ThemeType =
   // Spec light themes
   | 'paper' | 'chalk' | 'solar' | 'arctic' | 'ivory';
 
+export interface GridPos {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
 export interface Pane {
   id: string;
   type: PaneType;
   title: string;
+  gridPos: GridPos;
   data?: {
     terminalId?: string;
     filePath?: string;
     initialCommand?: string;
     [key: string]: any;
   };
+}
+
+export function resolveCollisions(panes: Pane[], anchorId?: string): Pane[] {
+  // If there's an anchor, it gets priority and stays fixed
+  const anchor = anchorId ? panes.find(p => p.id === anchorId) : null;
+  const others = anchorId ? panes.filter(p => p.id !== anchorId) : panes;
+
+  // Sort others by Y then X
+  const sortedOthers = [...others].sort((a, b) => {
+    if (a.gridPos.y !== b.gridPos.y) return a.gridPos.y - b.gridPos.y;
+    return a.gridPos.x - b.gridPos.x;
+  });
+
+  const resolved: Pane[] = [];
+  if (anchor) resolved.push(anchor);
+
+  for (const pane of sortedOthers) {
+    let currentPos = { ...pane.gridPos };
+    let hasCollision = true;
+
+    while (hasCollision) {
+      hasCollision = false;
+      for (const other of resolved) {
+        // Check overlap
+        const overlapX = currentPos.x < other.gridPos.x + other.gridPos.w && currentPos.x + currentPos.w > other.gridPos.x;
+        const overlapY = currentPos.y < other.gridPos.y + other.gridPos.h && currentPos.y + currentPos.h > other.gridPos.y;
+
+        if (overlapX && overlapY) {
+          currentPos.y = other.gridPos.y + other.gridPos.h;
+          hasCollision = true;
+          // After moving Y, we need to re-check all resolved panes
+          break;
+        }
+      }
+    }
+    resolved.push({ ...pane, gridPos: currentPos });
+  }
+
+  // Final sort to keep consistency in the array if needed, though id-based mapping is usually used
+  return resolved;
 }
 
 export interface WorkspaceTab {
@@ -84,6 +138,11 @@ interface WorkspaceState {
   addPaneAt: (type: PaneType, title: string, index: number, data?: any) => void;
   removePane: (id: string) => void;
   movePane: (activeId: string, overId: string) => void;
+  updatePaneData: (id: string, data: Partial<NonNullable<Pane['data']>>) => void;
+  renamePane: (id: string, title: string) => void;
+  resizePane: (id: string, w: number, h: number) => void;
+  updatePaneLayout: (id: string, gridPos: Partial<GridPos>) => void;
+  createMissionTab: (taskDescription: string, agents: MissionAgent[]) => void;
   clearPanes: () => void;
   setWorkspaceDir: (dir: string | null) => void;
   setTheme: (theme: ThemeType) => void;
@@ -106,8 +165,8 @@ export const useWorkspaceStore = create<WorkspaceState>()(
         name: 'Workspace 1',
         color: TAB_COLORS[0],
         panes: [
-          { id: generateId(), type: 'terminal', title: 'Terminal 1', data: { terminalId: generateId() } },
-          { id: generateId(), type: 'editor', title: 'Welcome' },
+          { id: generateId(), type: 'terminal', title: 'Terminal 1', gridPos: { x: 0, y: 0, w: 12, h: 10 }, data: { terminalId: generateId() } },
+          { id: generateId(), type: 'editor', title: 'Welcome', gridPos: { x: 12, y: 0, w: 12, h: 10 } },
         ],
       }],
       activeTabId: _initTabId,
@@ -123,18 +182,40 @@ export const useWorkspaceStore = create<WorkspaceState>()(
         if (data?.filePath && panes.find(p => p.data?.filePath === data.filePath)) return state;
         const newData = data ? { ...data } : {};
         if (type === 'terminal' && !newData.terminalId) newData.terminalId = generateId();
-        const newPane: Pane = { id: generateId(), type, title, data: newData };
-        return withActivePanes(state, ps => [...ps, newPane]);
+        
+        // Find next Y position
+        const maxY = panes.reduce((max, p) => Math.max(max, p.gridPos.y + p.gridPos.h), 0);
+
+        const newPane: Pane = { 
+          id: generateId(), 
+          type, 
+          title, 
+          gridPos: { x: 0, y: maxY, w: 12, h: 8 },
+          data: newData 
+        };
+        
+        return withActivePanes(state, ps => resolveCollisions([...ps, newPane]));
       }),
 
       addPaneAt: (type, title, index, data) => set((state) => {
         const newData = data ? { ...data } : {};
         if (type === 'terminal' && !newData.terminalId) newData.terminalId = generateId();
-        const newPane: Pane = { id: generateId(), type, title, data: newData };
+
+        const panes = selectActivePanes(state);
+        const maxY = panes.reduce((max, p) => Math.max(max, p.gridPos.y + p.gridPos.h), 0);
+
+        const newPane: Pane = { 
+          id: generateId(), 
+          type, 
+          title, 
+          gridPos: { x: 0, y: maxY, w: 12, h: 8 },
+          data: newData 
+        };
+        
         return withActivePanes(state, ps => {
           const arr = [...ps];
           arr.splice(index, 0, newPane);
-          return arr;
+          return resolveCollisions(arr);
         });
       }),
 
@@ -156,6 +237,53 @@ export const useWorkspaceStore = create<WorkspaceState>()(
         })
       ),
 
+      updatePaneData: (id, data) => set((state) =>
+        withActivePanes(state, panes =>
+          panes.map(p => p.id === id ? { ...p, data: { ...p.data, ...data } } : p)
+        )
+      ),
+
+      renamePane: (id, title) => set((state) =>
+        withActivePanes(state, panes =>
+          panes.map(p => p.id === id ? { ...p, title } : p)
+        )
+      ),
+
+      resizePane: (id, w, h) => set((state) =>
+        withActivePanes(state, panes => {
+          const updated = panes.map(p => p.id === id ? { ...p, gridPos: { ...p.gridPos, w, h } } : p);
+          return resolveCollisions(updated, id);
+        })
+      ),
+
+      updatePaneLayout: (id, gridPos) => set((state) =>
+        withActivePanes(state, panes => {
+          const updated = panes.map(p => p.id === id ? { ...p, gridPos: { ...p.gridPos, ...gridPos } } : p);
+          return resolveCollisions(updated, id);
+        })
+      ),
+
+      createMissionTab: (taskDescription, agents) => set((state) => {
+        const color = TAB_COLORS[state.tabs.length % TAB_COLORS.length];
+        const tabId = generateId();
+        const shortTask = taskDescription.length > 24
+          ? taskDescription.slice(0, 24) + '…'
+          : taskDescription;
+        const newTab: WorkspaceTab = {
+          id: tabId,
+          name: `Mission: ${shortTask}`,
+          color,
+          panes: [{
+            id: generateId(),
+            type: 'missioncontrol',
+            title: 'Mission Control',
+            gridPos: { x: 0, y: 0, w: 24, h: 20 },
+            data: { taskDescription, agents },
+          }],
+        };
+        return { tabs: [...state.tabs, newTab], activeTabId: tabId };
+      }),
+
       clearPanes: () => set((state) => withActivePanes(state, () => [])),
 
       setWorkspaceDir: (dir) => set({ workspaceDir: dir }),
@@ -167,7 +295,7 @@ export const useWorkspaceStore = create<WorkspaceState>()(
           id: generateId(),
           name,
           createdAt: Date.now(),
-          panes: panes.map(({ type, title, data }) => ({ type, title, data: data ? { ...data } : {} })),
+          panes: panes.map(({ type, title, data, gridPos }) => ({ type, title, data: data ? { ...data } : {}, gridPos })),
         };
         return { savedLayouts: [...state.savedLayouts, layout] };
       }),
@@ -175,12 +303,18 @@ export const useWorkspaceStore = create<WorkspaceState>()(
       loadLayout: (id) => set((state) => {
         const layout = state.savedLayouts.find(l => l.id === id);
         if (!layout) return state;
-        const newPanes: Pane[] = layout.panes.map(p => {
+        const newPanes: Pane[] = (layout.panes as any[]).map(p => {
           const newData = p.data ? { ...p.data } : {};
           if (p.type === 'terminal') newData.terminalId = generateId();
-          return { id: generateId(), type: p.type, title: p.title, data: newData };
+          return { 
+            id: generateId(), 
+            type: p.type, 
+            title: p.title, 
+            gridPos: p.gridPos || { x: 0, y: 0, w: 12, h: 8 },
+            data: newData 
+          };
         });
-        return withActivePanes(state, () => newPanes);
+        return withActivePanes(state, () => resolveCollisions(newPanes));
       }),
 
       deleteLayout: (id) => set((state) => ({
@@ -196,7 +330,7 @@ export const useWorkspaceStore = create<WorkspaceState>()(
           name: `Workspace ${tabNum}`,
           color,
           panes: [
-            { id: generateId(), type: 'terminal', title: 'Terminal 1', data: { terminalId: generateId() } },
+            { id: generateId(), type: 'terminal', title: 'Terminal 1', gridPos: { x: 0, y: 0, w: 12, h: 10 }, data: { terminalId: generateId() } },
           ],
         };
         return { tabs: [...state.tabs, newTab], activeTabId: newTabId };
@@ -229,33 +363,18 @@ export const useWorkspaceStore = create<WorkspaceState>()(
     }),
     {
       name: 'workspace-storage',
-      version: 2,
+      version: 3,
       migrate: (persistedState: any, version: number) => {
-        if (version <= 1) {
-          const oldPanes: Pane[] = (persistedState as any).panes || [];
-          const seenIds = new Set<string>();
-          const fixedPanes = oldPanes.map((pane: Pane) => {
-            if (pane.type === 'terminal' && pane.data) {
-              if (!pane.data.terminalId || seenIds.has(pane.data.terminalId)) {
-                pane.data.terminalId = generateId();
-              }
-              seenIds.add(pane.data.terminalId);
-            }
-            if (!pane.id || seenIds.has(pane.id)) pane.id = generateId();
-            seenIds.add(pane.id);
-            return pane;
-          });
-          const defaultTabId = generateId();
-          return {
-            ...persistedState,
-            tabs: [{
-              id: defaultTabId,
-              name: 'Workspace 1',
-              color: TAB_COLORS[0],
-              panes: fixedPanes,
-            }],
-            activeTabId: defaultTabId,
-          };
+        if (version <= 2) {
+          const tabs = (persistedState as any).tabs || [];
+          const updatedTabs = tabs.map((tab: any) => ({
+            ...tab,
+            panes: (tab.panes || []).map((pane: any, idx: number) => ({
+              ...pane,
+              gridPos: pane.gridPos || { x: (idx % 2) * 12, y: Math.floor(idx / 2) * 10, w: 12, h: 10 }
+            }))
+          }));
+          return { ...persistedState, tabs: updatedTabs };
         }
         return persistedState;
       },

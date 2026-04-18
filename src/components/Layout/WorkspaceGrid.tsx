@@ -1,132 +1,397 @@
-import { TerminalSquare, FileCode2, KanbanSquare, Activity, X } from 'lucide-react';
-import { useWorkspaceStore, PaneType, Pane, selectActivePanes } from '../../store/workspace';
+import { TerminalSquare, FileCode2, KanbanSquare, Activity, Rocket, Monitor, X } from 'lucide-react';
+import { useWorkspaceStore, PaneType, Pane, selectActivePanes, GridPos, resolveCollisions } from '../../store/workspace';
+import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { TerminalPane } from '../Terminal/TerminalPane';
 import { EditorPane } from '../Editor/EditorPane';
 import { TaskBoardPane } from '../TaskBoard/TaskBoardPane';
 import { ActivityFeedPane } from '../ActivityFeed/ActivityFeedPane';
-import {
-  SortableContext,
-  rectSortingStrategy,
-  useSortable,
-} from '@dnd-kit/sortable';
-import { CSS } from '@dnd-kit/utilities';
+import { LauncherPane } from '../Launcher/LauncherPane';
+import { MissionControlPane } from '../MissionControl/MissionControlPane';
 
 const PANE_ICONS: Record<PaneType, React.ReactNode> = {
-  terminal:     <TerminalSquare size={13} />,
-  editor:       <FileCode2 size={13} />,
-  taskboard:    <KanbanSquare size={13} />,
-  activityfeed: <Activity size={13} />,
+  terminal:       <TerminalSquare size={13} />,
+  editor:         <FileCode2 size={13} />,
+  taskboard:      <KanbanSquare size={13} />,
+  activityfeed:   <Activity size={13} />,
+  launcher:       <Rocket size={13} />,
+  missioncontrol: <Monitor size={13} />,
 };
 
-interface SortablePaneProps {
+const CELL_HEIGHT = 30;
+const GRID_COLUMNS = 24;
+
+interface DashboardPanelProps {
   pane: Pane;
-  isDragging?: boolean;
+  onDragStart: (id: string, e: React.MouseEvent) => void;
+  onResizeStart: (id: string, e: React.MouseEvent) => void;
+  isDragging: boolean;
+  isResizing: boolean;
 }
 
-function SortablePane({ pane, isDragging }: SortablePaneProps) {
-  const {
-    attributes,
-    listeners,
-    setNodeRef,
-    transform,
-    transition,
-    isOver,
-  } = useSortable({ id: pane.id });
+function DashboardPanel({ pane, onDragStart, onResizeStart, isDragging, isResizing }: DashboardPanelProps) {
+  const { x, y, w, h } = pane.gridPos;
+  const renamePane = useWorkspaceStore(s => s.renamePane);
+  const removePane = useWorkspaceStore(s => s.removePane);
 
-  const style = {
-    transform: CSS.Transform.toString(transform),
-    transition,
-    opacity: isDragging ? 0.3 : 1,
-    zIndex: isDragging ? 0 : 1,
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState('');
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  const left = (x / GRID_COLUMNS) * 100;
+  const width = (w / GRID_COLUMNS) * 100;
+  const top = y * CELL_HEIGHT;
+  const height = h * CELL_HEIGHT;
+
+  const style: React.CSSProperties = {
+    position: 'absolute',
+    left: `${left}%`,
+    top: `${top}px`,
+    width: `${width}%`,
+    height: `${height}px`,
+    transition: isDragging || isResizing ? 'none' : 'all 0.2s cubic-bezier(0.2, 0, 0, 1)',
+    zIndex: isDragging || isResizing ? 50 : 10,
+    opacity: isDragging ? 0.8 : 1,
   };
 
+  function startEdit() {
+    setDraft(pane.title);
+    setEditing(true);
+    setTimeout(() => inputRef.current?.select(), 20);
+  }
+
+  function commitEdit() {
+    const t = draft.trim();
+    if (t) renamePane(pane.id, t);
+    setEditing(false);
+  }
+
   return (
-    <div
-      ref={setNodeRef}
-      style={style}
-      className={`bg-bg-panel flex flex-col overflow-hidden relative group transition-shadow ${
-        isOver && !isDragging ? 'ring-2 ring-accent-primary ring-inset z-20 shadow-lg shadow-accent-primary/20' : ''
-      }`}
-    >
-      {/* Pane Tab Bar */}
-      <div className="flex items-center bg-bg-titlebar border-b border-border-panel shrink-0 h-8 px-1 gap-0.5">
+    <div style={style} className="p-1 group">
+      <div className={`w-full h-full bg-bg-panel border rounded shadow-sm flex flex-col overflow-hidden transition-colors
+        ${isDragging || isResizing ? 'border-accent-primary ring-2 ring-accent-primary/20 shadow-xl' : 'border-border-panel hover:border-accent-primary/50'}
+      `}>
+        {/* Header - Drag Handle */}
         <div 
-          {...attributes} 
-          {...listeners}
-          className="flex items-center gap-1.5 px-3 py-1 rounded-t text-xs bg-bg-panel border border-border-panel border-b-transparent -mb-px relative z-10 text-text-secondary cursor-grab active:cursor-grabbing hover:bg-bg-surface transition-colors"
+          className="flex items-center bg-bg-titlebar border-b border-border-panel shrink-0 h-8 px-2 gap-2 cursor-grab active:cursor-grabbing select-none"
+          onMouseDown={(e) => onDragStart(pane.id, e)}
         >
           <span className="text-text-muted">{PANE_ICONS[pane.type]}</span>
-          <span className="max-w-[120px] truncate font-medium">{pane.title}</span>
+          {editing ? (
+            <input
+              ref={inputRef}
+              value={draft}
+              onChange={e => setDraft(e.target.value)}
+              onBlur={commitEdit}
+              onKeyDown={e => {
+                if (e.key === 'Enter') commitEdit();
+                if (e.key === 'Escape') setEditing(false);
+                e.stopPropagation();
+              }}
+              className="bg-bg-surface border border-accent-primary rounded px-1 text-xs text-text-primary outline-none w-[100px]"
+            />
+          ) : (
+            <span
+              className="text-xs font-medium text-text-secondary truncate flex-1"
+              onDoubleClick={(e) => { e.stopPropagation(); startEdit(); }}
+            >
+              {pane.title}
+            </span>
+          )}
+          <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+            <button
+              onClick={() => removePane(pane.id)}
+              className="w-5 h-5 flex items-center justify-center rounded text-text-muted hover:text-red-400 hover:bg-bg-surface"
+            >
+              <X size={12} />
+            </button>
+          </div>
         </div>
-        <div className="flex-1" />
-        <button
-          onClick={() => useWorkspaceStore.getState().removePane(pane.id)}
-          className="w-6 h-6 flex items-center justify-center rounded text-text-muted hover:text-red-400 hover:bg-bg-surface transition-colors mr-1"
-          title="Close pane"
-        >
-          <X size={12} />
-        </button>
-      </div>
 
-      {/* Pane Content */}
-      <div className="flex-1 overflow-hidden pointer-events-auto">
-        {pane.type === 'terminal'     && <TerminalPane pane={pane} />}
-        {pane.type === 'editor'       && <EditorPane pane={pane} />}
-        {pane.type === 'taskboard'    && <TaskBoardPane />}
-        {pane.type === 'activityfeed' && <ActivityFeedPane />}
-      </div>
-      
-      {/* Drop indicator highlighting */}
-      {isOver && !isDragging && (
-        <div className="absolute inset-0 bg-accent-primary/15 pointer-events-none border-2 border-dashed border-accent-primary z-50 backdrop-blur-[2px] flex items-center justify-center">
-           <div className="bg-accent-primary text-accent-text px-3 py-1.5 rounded-full text-[10px] font-bold uppercase tracking-widest shadow-lg shadow-accent-primary/40 animate-bounce">
-              Drop Here
-           </div>
+        {/* Body */}
+        <div className="flex-1 overflow-hidden relative">
+          {pane.type === 'terminal'       && <TerminalPane pane={pane} />}
+          {pane.type === 'editor'         && <EditorPane pane={pane} />}
+          {pane.type === 'taskboard'      && <TaskBoardPane />}
+          {pane.type === 'activityfeed'   && <ActivityFeedPane />}
+          {pane.type === 'launcher'       && <LauncherPane />}
+          {pane.type === 'missioncontrol' && <MissionControlPane pane={pane} />}
         </div>
-      )}
+
+        {/* Resize Handle */}
+        <div 
+          className="absolute bottom-1 right-1 w-3 h-3 cursor-nwse-resize opacity-0 group-hover:opacity-100 transition-opacity z-20"
+          onMouseDown={(e) => onResizeStart(pane.id, e)}
+        >
+          <div className="absolute bottom-0.5 right-0.5 w-1.5 h-1.5 border-r-2 border-b-2 border-text-muted/50 rounded-br-sm" />
+        </div>
+      </div>
     </div>
   );
 }
 
-interface WorkspaceGridProps {
-  activeId: string | null;
-}
-
-export function WorkspaceGrid({ activeId }: WorkspaceGridProps) {
+export function WorkspaceGrid() {
   const panes = useWorkspaceStore(selectActivePanes);
+  const updatePaneLayout = useWorkspaceStore(s => s.updatePaneLayout);
+  const updatePaneData = useWorkspaceStore(s => s.updatePaneData);
+  const addPaneAt = useWorkspaceStore(s => s.addPaneAt);
+  
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [containerWidth, setContainerWidth] = useState(0);
+  
+  const [draggingId, setDraggingId] = useState<string | null>(null);
+  const [resizingId, setResizingId] = useState<string | null>(null);
+  const [ghostPos, setGhostPos] = useState<GridPos | null>(null);
+  
+  const dragInfo = useRef<{ startX: number; startY: number; startGrid: GridPos; offsetX: number; offsetY: number } | null>(null);
 
-  const getGridClass = (count: number) => {
-    if (count <= 1) return 'grid-cols-1 grid-rows-1';
-    if (count === 2) return 'grid-cols-2 grid-rows-1';
-    if (count === 3) return 'grid-cols-3 grid-rows-1';
-    if (count === 4) return 'grid-cols-2 grid-rows-2';
-    if (count <= 6) return 'grid-cols-3 grid-rows-2';
-    return 'grid-cols-4 grid-rows-2';
-  };
-
-  const gridClass = getGridClass(panes.length);
-
-  if (panes.length === 0) {
-    return (
-      <div className="flex-1 flex flex-col items-center justify-center bg-bg-app text-text-muted gap-4 border-2 border-dashed border-border-panel m-6 rounded-2xl">
-        <div className="p-4 bg-bg-surface rounded-full opacity-40">
-           <TerminalSquare size={48} />
-        </div>
-        <div className="text-center">
-          <p className="text-base font-medium text-text-primary opacity-60">Workspace Empty</p>
-          <p className="text-sm opacity-40">Drag an option from the top bar to create a new pane.</p>
-        </div>
-      </div>
+  // Compute live preview of collisions
+  const displayPanes = useMemo(() => {
+    if (!ghostPos || (!draggingId && !resizingId)) return panes;
+    
+    const activeId = draggingId || resizingId;
+    const previewPanes = panes.map(p => 
+      p.id === activeId ? { ...p, gridPos: ghostPos } : p
     );
-  }
+    
+    return resolveCollisions(previewPanes, activeId!);
+  }, [panes, ghostPos, draggingId, resizingId]);
+
+  useEffect(() => {
+    if (!containerRef.current) return;
+    const observer = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        setContainerWidth(entry.contentRect.width);
+      }
+    });
+    observer.observe(containerRef.current);
+    setContainerWidth(containerRef.current.offsetWidth);
+    return () => observer.disconnect();
+  }, []);
+
+  const onDragStart = useCallback((id: string, e: React.MouseEvent) => {
+    const pane = panes.find(p => p.id === id);
+    if (!pane || !containerRef.current) return;
+
+    const rect = containerRef.current.getBoundingClientRect();
+    const cellW = containerWidth / GRID_COLUMNS;
+    
+    dragInfo.current = {
+      startX: e.clientX,
+      startY: e.clientY,
+      startGrid: { ...pane.gridPos },
+      offsetX: e.clientX - rect.left - (pane.gridPos.x * cellW),
+      offsetY: e.clientY - rect.top - (pane.gridPos.y * CELL_HEIGHT),
+    };
+    
+    setDraggingId(id);
+    setGhostPos(pane.gridPos);
+  }, [panes, containerWidth]);
+
+  const onResizeStart = useCallback((id: string, e: React.MouseEvent) => {
+    const pane = panes.find(p => p.id === id);
+    if (!pane) return;
+
+    dragInfo.current = {
+      startX: e.clientX,
+      startY: e.clientY,
+      startGrid: { ...pane.gridPos },
+      offsetX: 0,
+      offsetY: 0,
+    };
+    
+    setResizingId(id);
+    setGhostPos(pane.gridPos);
+    e.stopPropagation();
+  }, [panes]);
+
+  // Handle drop of new panes from top bar or files from sidebar
+  useEffect(() => {
+    const grid = containerRef.current;
+    if (!grid) return;
+
+    const handleDrop = (e: any) => {
+      const { type, title, data, clientX, clientY } = e.detail;
+      const rect = grid.getBoundingClientRect();
+      const cellW = containerWidth / GRID_COLUMNS;
+      
+      const mouseX = clientX - rect.left;
+      const mouseY = clientY - rect.top;
+      
+      // Calculate drop position
+      const x = Math.max(0, Math.min(GRID_COLUMNS - 12, Math.round(mouseX / cellW - 6)));
+      const y = Math.max(0, Math.round(mouseY / CELL_HEIGHT - 4));
+
+      // Check if dropped over an existing pane
+      const overPane = panes.find(p => {
+        const px = p.gridPos.x;
+        const py = p.gridPos.y;
+        const pw = p.gridPos.w;
+        const ph = p.gridPos.h;
+        const gridMouseX = mouseX / cellW;
+        const gridMouseY = mouseY / CELL_HEIGHT;
+        return gridMouseX >= px && gridMouseX <= px + pw && gridMouseY >= py && gridMouseY <= py + ph;
+      });
+
+      if (type === 'editor' && data?.filePath && overPane?.type === 'editor') {
+        updatePaneData(overPane.id, { filePath: data.filePath });
+      } else {
+        // Add new pane at dropped position
+        const newTitle = title || (type.charAt(0).toUpperCase() + type.slice(1));
+        addPaneAt(type, newTitle, panes.length, { ...data, gridPos: { x, y, w: 12, h: 8 } });
+      }
+    };
+
+    grid.addEventListener('pane-drop', handleDrop);
+    return () => grid.removeEventListener('pane-drop', handleDrop);
+  }, [panes, containerWidth, updatePaneData, addPaneAt]);
+
+  useEffect(() => {
+    if (!draggingId && !resizingId) return;
+
+    function onMouseMove(e: MouseEvent) {
+      if (!dragInfo.current || !containerRef.current) return;
+      const { startX, startY, startGrid, offsetX, offsetY } = dragInfo.current;
+      const rect = containerRef.current.getBoundingClientRect();
+      const cellW = containerWidth / GRID_COLUMNS;
+
+      if (draggingId) {
+        const mouseX = e.clientX - rect.left;
+        const mouseY = e.clientY - rect.top;
+        
+        const newX = Math.round((mouseX - offsetX) / cellW);
+        const newY = Math.round((mouseY - offsetY) / CELL_HEIGHT);
+        
+        const clampedX = Math.max(0, Math.min(GRID_COLUMNS - startGrid.w, newX));
+        const clampedY = Math.max(0, newY);
+        
+        setGhostPos({ ...startGrid, x: clampedX, y: clampedY });
+      } else if (resizingId) {
+        const dx = e.clientX - startX;
+        const dy = e.clientY - startY;
+        
+        const newW = Math.max(2, Math.round((startGrid.w * cellW + dx) / cellW));
+        const newH = Math.max(2, Math.round((startGrid.h * CELL_HEIGHT + dy) / CELL_HEIGHT));
+        
+        const clampedW = Math.min(GRID_COLUMNS - startGrid.x, newW);
+        
+        setGhostPos({ ...startGrid, w: clampedW, h: newH });
+      }
+    }
+
+    function onMouseUp() {
+      // Use the final ghostPos which is already computed in state
+      // We need to capture the current ghostPos correctly.
+      // Since useEffect might have a stale ghostPos, we'll use a functional state update or just rely on the fact that this is re-run.
+    }
+
+    const handleMouseUp = (e: MouseEvent) => {
+      // Capture the current ghostPos from the dragInfo and current mouse position for a clean commit
+      if (dragInfo.current && containerRef.current && (draggingId || resizingId)) {
+        const { startX, startY, startGrid, offsetX, offsetY } = dragInfo.current;
+        const rect = containerRef.current.getBoundingClientRect();
+        const cellW = containerWidth / GRID_COLUMNS;
+        const id = (draggingId || resizingId)!;
+
+        let finalGridPos: GridPos;
+
+        if (draggingId) {
+          const mouseX = e.clientX - rect.left;
+          const mouseY = e.clientY - rect.top;
+          const newX = Math.round((mouseX - offsetX) / cellW);
+          const newY = Math.round((mouseY - offsetY) / CELL_HEIGHT);
+          finalGridPos = { 
+            ...startGrid, 
+            x: Math.max(0, Math.min(GRID_COLUMNS - startGrid.w, newX)),
+            y: Math.max(0, newY)
+          };
+        } else {
+          const dx = e.clientX - startX;
+          const dy = e.clientY - startY;
+          const newW = Math.max(2, Math.round((startGrid.w * cellW + dx) / cellW));
+          const newH = Math.max(2, Math.round((startGrid.h * CELL_HEIGHT + dy) / CELL_HEIGHT));
+          finalGridPos = { 
+            ...startGrid, 
+            w: Math.min(GRID_COLUMNS - startGrid.x, newW),
+            h: newH
+          };
+        }
+        
+        updatePaneLayout(id, finalGridPos);
+      }
+      
+      setDraggingId(null);
+      setResizingId(null);
+      setGhostPos(null);
+      dragInfo.current = null;
+    };
+
+    window.addEventListener('mousemove', onMouseMove);
+    window.addEventListener('mouseup', handleMouseUp);
+    return () => {
+      window.removeEventListener('mousemove', onMouseMove);
+      window.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, [draggingId, resizingId, containerWidth, updatePaneLayout]);
+
+  const totalHeight = displayPanes.reduce((max, p) => Math.max(max, p.gridPos.y + p.gridPos.h), 0) * CELL_HEIGHT + 400;
 
   return (
-    <div className={`flex-1 grid ${gridClass} gap-px bg-border-panel`}>
-      <SortableContext items={panes.map((p) => p.id)} strategy={rectSortingStrategy}>
-        {panes.map((pane) => (
-          <SortablePane key={pane.id} pane={pane} isDragging={activeId === pane.id} />
+    <div 
+      id="workspace-grid"
+      className="flex-1 bg-bg-app overflow-y-auto relative p-2 select-none" 
+      ref={containerRef}
+    >
+      <div 
+        className="relative w-full" 
+        style={{ height: `${totalHeight}px` }}
+      >
+        {/* Grid lines (only in "edit" mode - simulating with dragging/resizing state) */}
+        {(draggingId || resizingId) && (
+          <div className="absolute inset-0 pointer-events-none opacity-10">
+            {Array.from({ length: GRID_COLUMNS + 1 }).map((_, i) => (
+              <div 
+                key={i} 
+                className="absolute top-0 bottom-0 border-l border-dashed border-text-muted" 
+                style={{ left: `${(i / GRID_COLUMNS) * 100}%` }} 
+              />
+            ))}
+            {Array.from({ length: Math.ceil(totalHeight / CELL_HEIGHT) }).map((_, i) => (
+              <div 
+                key={i} 
+                className="absolute left-0 right-0 border-t border-dashed border-text-muted" 
+                style={{ top: `${i * CELL_HEIGHT}px` }} 
+              />
+            ))}
+          </div>
+        )}
+
+        {/* Ghost / Placeholder */}
+        {ghostPos && (
+          <div 
+            className="absolute p-1 z-0"
+            style={{
+              left: `${(ghostPos.x / GRID_COLUMNS) * 100}%`,
+              top: `${ghostPos.y * CELL_HEIGHT}px`,
+              width: `${(ghostPos.w / GRID_COLUMNS) * 100}%`,
+              height: `${ghostPos.h * CELL_HEIGHT}px`,
+            }}
+          >
+            <div className="w-full h-full border-2 border-dashed border-accent-primary/40 rounded bg-accent-primary/5" />
+          </div>
+        )}
+
+        {/* Panels */}
+        {displayPanes.map(pane => (
+          <DashboardPanel 
+            key={pane.id} 
+            pane={pane} 
+            onDragStart={onDragStart}
+            onResizeStart={onResizeStart}
+            isDragging={draggingId === pane.id}
+            isResizing={resizingId === pane.id}
+          />
         ))}
-      </SortableContext>
+      </div>
     </div>
   );
 }

@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import {
   Layout, Save, Trash2, Play,
-  TerminalSquare, FileCode2, Kanban, Activity,
+  TerminalSquare, FileCode2, Kanban, Activity, Rocket, Monitor,
   LayoutDashboard,
 } from 'lucide-react';
 import { useWorkspaceStore, ThemeType, PaneType, selectActivePanes } from '../../store/workspace';
@@ -48,6 +48,8 @@ const PANE_ICONS: Record<PaneType, React.ReactNode> = {
   editor:       <FileCode2 size={11} />,
   taskboard:    <Kanban size={11} />,
   activityfeed: <Activity size={11} />,
+  launcher:       <Rocket size={11} />,
+  missioncontrol: <Monitor size={11} />,
 };
 
 const PANE_COLORS: Record<PaneType, string> = {
@@ -55,6 +57,8 @@ const PANE_COLORS: Record<PaneType, string> = {
   editor:       'text-blue-400',
   taskboard:    'text-yellow-400',
   activityfeed: 'text-purple-400',
+  launcher:       'text-accent-primary',
+  missioncontrol: 'text-cyan-400',
 };
 
 const TEMPLATES = [
