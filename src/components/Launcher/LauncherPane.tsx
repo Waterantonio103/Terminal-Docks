@@ -1,6 +1,6 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { Rocket, Plug, TerminalSquare, ChevronDown } from 'lucide-react';
+import { Rocket, Plug, TerminalSquare, ChevronDown, AlertCircle } from 'lucide-react';
 import { useWorkspaceStore, selectActivePanes, Pane } from '../../store/workspace';
 import agentsConfig from '../../config/agents.json';
 import type { MissionAgent } from '../../store/workspace';
@@ -10,19 +10,23 @@ const ROLES = [
   ...agentsConfig.agents.map(a => ({ id: a.id, label: `${a.name} (${a.role})` })),
 ];
 
+const ROLE_PRIORITY = ['coordinator', 'scout', 'builder', 'reviewer'];
+
 const CONNECT_PROMPT =
-  `Read the collaboration_protocol prompt from the terminal-docks MCP server. ` +
-  `Then call get_session_id and announce you are online with your role. Do this now.`;
+  `Call terminal-docks_get_collaboration_protocol() now. ` +
+  `Then call terminal-docks_get_session_id() and terminal-docks_announce() with your role to confirm you are online. ` +
+  `Execute these tool calls immediately without further output.`;
 
 function buildLaunchPrompt(agentId: string, task: string): string {
   const agent = agentsConfig.agents.find(a => a.id === agentId);
   if (!agent) return '';
-  return agent.promptTemplate.replace('{{task.title}}', task) + '\n';
+  // Return without trailing newline to allow "fill but not send"
+  return agent.promptTemplate.replace('{{task.title}}', task);
 }
 
 async function writeToTerminal(pane: Pane, text: string) {
   const terminalId = pane.data?.terminalId ?? `term-${pane.id}`;
-  await invoke('write_to_pty', { id: terminalId, data: text + '\n' });
+  await invoke('write_to_pty', { id: terminalId, data: text });
 }
 
 interface TerminalRow {
@@ -35,21 +39,24 @@ export function LauncherPane() {
   const addPane   = useWorkspaceStore(s => s.addPane);
   const terminals = allPanes.filter(p => p.type === 'terminal');
 
-  const [task, setTask]     = useState('');
-  const [rows, setRows]     = useState<TerminalRow[]>(() =>
-    terminals.map(p => ({ pane: p, roleId: '' }))
-  );
-  const [status, setStatus] = useState<string | null>(null);
-  const [busy, setBusy]     = useState(false);
+  const [task, setTask]       = useState('');
+  const [roleMap, setRoleMap] = useState<Record<string, string>>({});
+  const [status, setStatus]   = useState<string | null>(null);
+  const [busy, setBusy]       = useState(false);
+  const [isConfirming, setIsConfirming] = useState(false);
 
-  // Keep rows in sync when terminals change (new pane added etc.)
-  const syncedRows: TerminalRow[] = terminals.map(p => {
-    const existing = rows.find(r => r.pane.id === p.id);
-    return existing ? { ...existing, pane: p } : { pane: p, roleId: '' };
-  });
+  // Reset confirmation if task or roles change
+  useEffect(() => {
+    setIsConfirming(false);
+  }, [task, roleMap]);
+
+  const syncedRows: TerminalRow[] = terminals.map(p => ({
+    pane: p,
+    roleId: roleMap[p.id] ?? '',
+  }));
 
   function setRole(paneId: string, roleId: string) {
-    setRows(prev => prev.map(r => r.pane.id === paneId ? { ...r, roleId } : r));
+    setRoleMap(prev => ({ ...prev, [paneId]: roleId }));
   }
 
   async function handleConnect() {
@@ -62,7 +69,14 @@ export function LauncherPane() {
     setStatus(null);
     try {
       for (const r of targets) {
-        await writeToTerminal(r.pane, CONNECT_PROMPT);
+        const role = ROLES.find(role => role.id === r.roleId)?.label || 'Unknown';
+        // Single imperative command for the model to execute
+        const prompt = 
+          `Call terminal-docks_connect_agent({ role: "${role}", agentId: "${r.pane.title}" }) now.\n` +
+          `Then call terminal-docks_get_collaboration_protocol() to read the SOP.\n` +
+          `Execute these immediately.`;
+        
+        await writeToTerminal(r.pane, prompt + '\n');
       }
       setStatus(`Connected ${targets.length} terminal(s) to MCP.`);
     } catch (e) {
@@ -77,25 +91,51 @@ export function LauncherPane() {
       setStatus('Enter a task description first.');
       return;
     }
-    const targets = syncedRows.filter(r => r.roleId);
+    const targets = syncedRows
+      .filter(r => r.roleId)
+      .sort((a, b) => {
+        const idxA = ROLE_PRIORITY.indexOf(a.roleId);
+        const idxB = ROLE_PRIORITY.indexOf(b.roleId);
+        const pA = idxA === -1 ? 99 : idxA;
+        const pB = idxB === -1 ? 99 : idxB;
+        return pA - pB;
+      });
+
     if (!targets.length) {
       setStatus('Assign at least one role before launching.');
       return;
     }
+
     setBusy(true);
     setStatus(null);
+
     try {
-      for (const r of targets) {
-        const prompt = buildLaunchPrompt(r.roleId, task.trim());
-        if (prompt) await writeToTerminal(r.pane, prompt);
+      if (!isConfirming) {
+        // Step 1: Fill terminals with prompts
+        for (const r of targets) {
+          const prompt = buildLaunchPrompt(r.roleId, task.trim());
+          if (prompt) {
+            await writeToTerminal(r.pane, prompt);
+          }
+        }
+        setIsConfirming(true);
+        setStatus('Prompts staged. Verify in terminals and click Confirm to execute.');
+      } else {
+        // Step 2: Actually send (carriage return) sequentially
+        for (const r of targets) {
+          await writeToTerminal(r.pane, '\r');
+          // Small delay to ensure order and prevent bridge congestion
+          await new Promise(resolve => setTimeout(resolve, 200));
+        }
+        const agents: MissionAgent[] = targets.map(r => ({
+          terminalId: r.pane.data?.terminalId ?? `term-${r.pane.id}`,
+          title: r.pane.title,
+          roleId: r.roleId,
+        }));
+        addPane('missioncontrol', 'Mission Control', { taskDescription: task.trim(), agents });
+        setStatus(`Launched ${targets.length} agent(s). Mission Control opened.`);
+        setIsConfirming(false);
       }
-      const agents: MissionAgent[] = targets.map(r => ({
-        terminalId: r.pane.data?.terminalId ?? `term-${r.pane.id}`,
-        title: r.pane.title,
-        roleId: r.roleId,
-      }));
-      addPane('missioncontrol', 'Mission Control', { taskDescription: task.trim(), agents });
-      setStatus(`Launched ${targets.length} agent(s). Mission Control opened.`);
     } catch (e) {
       setStatus(`Error: ${e}`);
     } finally {
@@ -201,15 +241,19 @@ export function LauncherPane() {
           className="flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-medium border border-border-panel text-text-secondary hover:text-text-primary hover:border-accent-primary hover:bg-bg-surface transition-colors disabled:opacity-40"
         >
           <Plug size={12} />
-          Connect to MCP
+          Connect
         </button>
         <button
           onClick={handleLaunch}
           disabled={busy || !task.trim()}
-          className="flex-1 flex items-center justify-center gap-1.5 px-3 py-1.5 rounded text-xs font-semibold bg-accent-primary text-accent-text hover:opacity-90 transition-opacity disabled:opacity-40"
+          className={`flex-1 flex items-center justify-center gap-1.5 px-3 py-1.5 rounded text-xs font-semibold transition-all disabled:opacity-40 ${
+            isConfirming 
+              ? 'bg-red-600 text-white hover:bg-red-700 animate-pulse' 
+              : 'bg-accent-primary text-accent-text hover:opacity-90'
+          }`}
         >
-          <Rocket size={12} />
-          Launch Task
+          {isConfirming ? <AlertCircle size={12} /> : <Rocket size={12} />}
+          {isConfirming ? 'Confirm?' : 'Launch Task'}
         </button>
       </div>
 

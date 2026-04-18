@@ -195,6 +195,85 @@ function createMcpServer(getSessionId) {
     return { content: [{ type: 'text', text }] };
   });
 
+  server.registerTool('connect_agent', {
+    title: 'Connect Agent',
+    description: 'Initializes the agent session and announces presence to the team in one step.',
+    inputSchema: {
+      role: z.string().describe('Your assigned role (e.g. Coordinator, Scout, Builder, Reviewer)'),
+      agentId: z.string().describe('A friendly name for your agent instance')
+    }
+  }, async ({ role, agentId }) => {
+    const sid = getSessionId() ?? 'unknown';
+    const message = `Role: ${role}. Agent "${agentId}" is online and ready. (Session: ${sid})`;
+    
+    // Perform the announcement
+    const targets = Object.keys(sessions).filter(id => id !== sid);
+    const ts = Date.now();
+    for (const targetSid of targets) {
+      if (!messageQueues[targetSid]) messageQueues[targetSid] = [];
+      messageQueues[targetSid].push({ from: agentId, text: `[BROADCAST] ${message}`, timestamp: ts });
+    }
+    
+    broadcast('Bridge', `Agent "${agentId}" (${role}) connected via session ${sid}`);
+    
+    return {
+      content: [{
+        type: 'text',
+        text: `Successfully connected to terminal-docks bridge.\nSession ID: ${sid}\nStatus: Online`
+      }]
+    };
+  });
+
+  server.registerTool('get_collaboration_protocol', {
+    title: 'Get Collaboration Protocol',
+    description: 'Returns the standard operating procedure for multi-agent collaboration. All agents should call this first.',
+    inputSchema: {}
+  }, async () => {
+    return {
+      content: [{
+        type: 'text',
+        text: `# Team Collaboration Protocol
+
+You are part of a multi-agent team (Claude, Gemini, OpenCode, or other CLIs) working on a shared codebase via the terminal-docks MCP bridge. Follow this protocol to avoid conflicts and collaborate effectively.
+
+## On Session Start
+1. Call \`get_file_locks()\` — see what files teammates currently own.
+2. Call \`receive_messages()\` — read any updates sent while you were offline.
+3. Call \`read_resource("roster://agents")\` — understand your team's roles.
+4. Call \`announce({ message: "Online as <role>. Starting: <task>", agentId: "<your-id>" })\`.
+
+## Before Editing Any File
+1. Call \`lock_file({ filePath: "<path>", agentId: "<your-id>" })\`.
+   - On conflict: another agent owns the file. Wait, coordinate via \`send_message\`, or pick a different task.
+2. Make your changes using your CLI's native file tools.
+3. Call \`unlock_file({ filePath: "<path>", agentId: "<your-id>" })\`.
+4. Call \`announce({ message: "Done with <path>: <summary of changes>", agentId: "<your-id>" })\`.
+
+## Inter-Agent Communication
+- \`list_sessions()\` — discover active session IDs.
+- \`send_message({ targetSessionId, message })\` — direct message to one session.
+- \`announce({ message, agentId })\` — broadcast to all sessions at once.
+- \`receive_messages()\` — check your inbox (also shows lock-conflict auto-notifications).
+
+## Role Awareness
+- Read \`roster://agents\` resource to see defined roles: Coordinator, Scout, Builder, Reviewer.
+- Respect role boundaries. Builders implement; Reviewers review; Scouts map; Coordinators decompose.
+
+## Publishing Results
+When your work produces something the user should see, call \`publish_result\`:
+- Completed summaries, decisions, instructions → \`type: "markdown"\`
+- A running web server the user can preview → \`type: "url", content: "http://localhost:5173"\`
+The Mission Control panel displays published results in real time.
+
+## General Rules
+- Never edit a file without a lock.
+- Always unlock promptly — don't hold locks while idle.
+- Broadcast progress at meaningful milestones so teammates can plan around your work.
+- If blocked on a lock, send a direct message to the owner rather than polling.`
+      }]
+    };
+  });
+
   server.registerTool('get_session_id', {
     title: 'Get Session ID',
     description: 'Returns the session ID of this Claude instance. Share it with another instance so they can relay messages to you.',

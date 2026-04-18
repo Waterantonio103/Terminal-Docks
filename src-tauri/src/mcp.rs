@@ -155,6 +155,58 @@ fn register_opencode(mcp_url: &str) -> CliRegistrationResult {
     }
 }
 
+fn register_aider(_mcp_url: &str) -> CliRegistrationResult {
+    CliRegistrationResult {
+        cli: "aider".into(),
+        success: true,
+        message: "Detected! Use with: aider --mcp http://localhost:3741/mcp".into(),
+    }
+}
+
+fn register_goose(mcp_url: &str) -> CliRegistrationResult {
+    let home = match home_dir() {
+        Some(h) => h,
+        None => return CliRegistrationResult {
+            cli: "goose".into(), success: false,
+            message: "Could not determine home directory".into(),
+        },
+    };
+
+    let config_path = if cfg!(target_os = "windows") {
+        PathBuf::from(std::env::var("APPDATA").unwrap_or_default())
+            .join("goose")
+            .join("config.yaml")
+    } else {
+        home.join(".config").join("goose").join("config.yaml")
+    };
+
+    CliRegistrationResult {
+        cli: "goose".into(),
+        success: true,
+        message: if config_path.exists() {
+            format!("Detected! Add {} to your goose config.yaml", mcp_url)
+        } else {
+            "Detected! Add the MCP URL to your goose config manually.".into()
+        },
+    }
+}
+
+fn register_claude_desktop(_mcp_url: &str) -> CliRegistrationResult {
+    CliRegistrationResult {
+        cli: "claude-desktop".into(),
+        success: true,
+        message: "Detected! Add the MCP URL to your Claude Desktop config for SSE support.".into(),
+    }
+}
+
+fn register_interpreter(_mcp_url: &str) -> CliRegistrationResult {
+    CliRegistrationResult {
+        cli: "interpreter".into(),
+        success: true,
+        message: "Detected! Use with: interpreter --mcp http://localhost:3741/mcp".into(),
+    }
+}
+
 fn is_cli_available(bin: &str) -> bool {
     let check = if cfg!(target_os = "windows") {
         Command::new("where").arg(bin).output()
@@ -164,15 +216,69 @@ fn is_cli_available(bin: &str) -> bool {
     check.map(|o| o.status.success()).unwrap_or(false)
 }
 
+fn is_opencode_available() -> bool {
+    if is_cli_available("opencode") {
+        return true;
+    }
+    // Also detect opencode running as an Ollama model
+    if !is_cli_available("ollama") {
+        return false;
+    }
+    Command::new("ollama")
+        .arg("list")
+        .output()
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .any(|line| line.to_lowercase().starts_with("opencode"))
+        })
+        .unwrap_or(false)
+}
+
+fn is_desktop_available(name: &str) -> bool {
+    let home = match home_dir() { Some(h) => h, None => return false };
+    let p = if name == "claude-desktop" {
+        if cfg!(target_os = "windows") {
+            PathBuf::from(std::env::var("APPDATA").unwrap_or_default())
+                .join("Claude")
+                .join("claude_desktop_config.json")
+        } else if cfg!(target_os = "macos") {
+            home.join("Library")
+                .join("Application Support")
+                .join("Claude")
+                .join("claude_desktop_config.json")
+        } else {
+            home.join(".config")
+                .join("Claude")
+                .join("claude_desktop_config.json")
+        }
+    } else {
+        return false;
+    };
+    p.parent().map(|p| p.exists()).unwrap_or(false)
+}
+
 fn register_with_ai_clis(app_handle: &AppHandle, mcp_url: &str) {
     let registrations: Vec<(&str, Box<dyn Fn(&str) -> CliRegistrationResult>)> = vec![
-        ("claude",   Box::new(register_claude)),
-        ("gemini",   Box::new(register_gemini)),
-        ("opencode", Box::new(register_opencode)),
+        ("claude",         Box::new(register_claude)),
+        ("gemini",         Box::new(register_gemini)),
+        ("opencode",       Box::new(register_opencode)),
+        ("aider",          Box::new(register_aider)),
+        ("goose",          Box::new(register_goose)),
+        ("interpreter",    Box::new(register_interpreter)),
+        ("claude-desktop", Box::new(register_claude_desktop)),
     ];
 
     for (bin, register_fn) in registrations {
-        if !is_cli_available(bin) {
+        let available = if bin == "claude-desktop" {
+            is_desktop_available(bin)
+        } else if bin == "opencode" {
+            is_opencode_available()
+        } else {
+            is_cli_available(bin)
+        };
+
+        if !available {
             continue;
         }
 
