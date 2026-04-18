@@ -8,6 +8,7 @@ use tauri::{AppHandle, Emitter, State};
 pub struct PtyInstance {
     pub master: Box<dyn MasterPty + Send>,
     pub writer: Box<dyn Write + Send>,
+    pub child: Box<dyn portable_pty::Child + Send>,
 }
 
 pub struct PtyState {
@@ -53,16 +54,15 @@ pub fn spawn_pty(
         .openpty(pty_size)
         .map_err(|e| format!("Failed to open pty: {}", e))?;
 
-    let mut cmd = if cfg!(target_os = "windows") {
-        let mut c = CommandBuilder::new("cmd.exe");
-        c.args(&["/K", "chcp 65001"]);
-        c
+    let cmd = if cfg!(target_os = "windows") {
+        let shell = std::env::var("COMSPEC").unwrap_or_else(|_| "powershell.exe".to_string());
+        CommandBuilder::new(shell)
     } else {
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "sh".to_string());
         CommandBuilder::new(shell)
     };
 
-    let _child = pair
+    let child = pair
         .slave
         .spawn_command(cmd)
         .map_err(|e| format!("Failed to spawn command: {}", e))?;
@@ -75,7 +75,7 @@ pub fn spawn_pty(
         .try_clone_reader()
         .map_err(|e| format!("Failed to clone reader: {}", e))?;
 
-    let instance = PtyInstance { master, writer };
+    let instance = PtyInstance { master, writer, child };
 
     ptys.insert(id.clone(), instance);
     drop(ptys); // Release lock before spawning thread
@@ -135,6 +135,8 @@ pub fn resize_pty(
 #[tauri::command]
 pub fn destroy_pty(state: State<'_, PtyState>, id: String) -> Result<(), String> {
     let mut ptys = state.ptys.lock().unwrap();
-    ptys.remove(&id);
+    if let Some(mut instance) = ptys.remove(&id) {
+        let _ = instance.child.kill();
+    }
     Ok(())
 }

@@ -76,38 +76,35 @@ function createMcpServer(getSessionId) {
   server.registerTool('list_tasks', {
     title: 'List Tasks',
     description: 'List all tasks in a project',
-    inputSchema: { projectId: z.string().uuid() }
-  }, async ({ projectId }) => {
-    bc(`Listing tasks for project ${projectId}`);
-    const filteredTasks = tasks.filter(t => t.projectId === projectId);
-    return { content: [{ type: 'text', text: JSON.stringify(filteredTasks.map(t => ({ id: t.id, status: t.status, instructionsSummary: t.instructions?.substring(0, 100), knowledge: t.taskKnowledge }))) }] };
+    inputSchema: { projectId: z.string().uuid().optional() } // projectId unused for now
+  }, async () => {
+    bc(`Listing tasks`);
+    const stmt = db.prepare('SELECT * FROM tasks');
+    const filteredTasks = stmt.all();
+    return { content: [{ type: 'text', text: JSON.stringify(filteredTasks) }] };
   });
 
   server.registerTool('create_task', {
     title: 'Create Task',
     description: 'Create a new task in a project',
-    inputSchema: { projectId: z.string().uuid(), instructions: z.string().min(1).max(5000), taskKnowledge: z.string().max(50000).optional(), status: z.enum(['todo', 'in-progress', 'in-review', 'complete', 'cancelled']).optional() }
-  }, async ({ projectId, instructions, taskKnowledge, status }) => {
-    const task = { id: randomUUID(), projectId, instructions, taskKnowledge: taskKnowledge || '', status: status || 'todo', createdAt: Date.now(), updatedAt: Date.now() };
-    tasks.push(task);
-    bc(`Created task in project ${projectId}`);
-    return { content: [{ type: 'text', text: JSON.stringify(task) }] };
+    inputSchema: { title: z.string(), description: z.string().optional(), agentId: z.string().optional() }
+  }, async ({ title, description, agentId }) => {
+    const stmt = db.prepare('INSERT INTO tasks (title, description, agent_id) VALUES (?, ?, ?)');
+    const info = stmt.run(title, description, agentId);
+    bc(`Created task ${info.lastInsertRowid}`);
+    return { content: [{ type: 'text', text: `Task created with id ${info.lastInsertRowid}` }] };
   });
 
   server.registerTool('update_task', {
     title: 'Update Task',
-    description: "Update a task's status, instructions, or knowledge",
-    inputSchema: { taskId: z.string().uuid(), instructions: z.string().min(1).max(5000).optional(), taskKnowledge: z.string().max(50000).optional(), status: z.enum(['todo', 'in-progress', 'in-review', 'complete', 'cancelled']).optional() }
-  }, async ({ taskId, instructions, taskKnowledge, status }) => {
-    const task = tasks.find(t => t.id === taskId);
-    if (!task) return { isError: true, content: [{ type: 'text', text: `Task ${taskId} not found` }] };
-    if (!instructions && !taskKnowledge && !status) return { isError: true, content: [{ type: 'text', text: 'At least one of instructions, taskKnowledge, or status must be provided.' }] };
-    if (instructions !== undefined) task.instructions = instructions;
-    if (taskKnowledge !== undefined) task.taskKnowledge = taskKnowledge;
-    if (status !== undefined) task.status = status;
-    task.updatedAt = Date.now();
-    bc(`Updated task ${taskId} (status: ${task.status})`);
-    return { content: [{ type: 'text', text: JSON.stringify(task) }] };
+    description: "Update a task's status",
+    inputSchema: { taskId: z.number(), status: z.string() }
+  }, async ({ taskId, status }) => {
+    const stmt = db.prepare('UPDATE tasks SET status = ? WHERE id = ?');
+    const info = stmt.run(status, taskId);
+    if (info.changes === 0) return { isError: true, content: [{ type: 'text', text: `Task ${taskId} not found` }] };
+    bc(`Updated task ${taskId} (status: ${status})`);
+    return { content: [{ type: 'text', text: `Task ${taskId} updated` }] };
   });
 
   // Agent tools (simplified)
@@ -434,9 +431,28 @@ The Mission Control panel displays published results in real time.
 const app = express();
 app.use(express.json());
 
+const authToken = process.env.MCP_AUTH_TOKEN;
+
+// Auth middleware
+app.use((req, res, next) => {
+  if (req.path === '/health') return next();
+  const token = req.query.token || req.headers.authorization?.replace('Bearer ', '');
+  if (authToken && token !== authToken) {
+    return res.status(401).send('Unauthorized');
+  }
+  next();
+});
+
 app.get('/health', (_req, res) => res.json({ ok: true, port: PORT }));
 
-app.get('/locks', (_req, res) => res.json(fileLocks));
+app.get('/locks', (_req, res) => {
+  const locks = db.prepare('SELECT * FROM file_locks').all();
+  const locksObj = {};
+  locks.forEach(l => {
+    locksObj[l.file_path] = { agentId: l.agent_id, lockedAt: l.locked_at };
+  });
+  res.json(locksObj);
+});
 app.get('/sessions', (_req, res) => res.json(Object.keys(sessions)));
 
 app.get('/events', (req, res) => {
@@ -478,6 +494,7 @@ app.post('/mcp', async (req, res) => {
         if (sid && sessions[sid]) {
           console.log(`Transport closed for session ${sid}`);
           delete sessions[sid];
+          broadcast('Bridge', 'session_update', 'session_update');
         }
       };
 
@@ -493,6 +510,7 @@ app.post('/mcp', async (req, res) => {
         sessions[sidFromCallback].mcpServer = mcpServer;
         sessions[sidFromCallback].transport = transport;
         console.log(`Registered session ${sidFromCallback}`);
+        broadcast('Bridge', 'session_update', 'session_update');
       }
 
       return;
@@ -511,6 +529,32 @@ app.get('/mcp', async (req, res) => {
   const sessionId = req.headers['mcp-session-id'];
   if (!sessionId || !sessions[sessionId] || !sessions[sessionId].transport) {
     res.status(400).send('Invalid or missing session ID');
+    return;
+  }
+  await sessions[sessionId].transport.handleRequest(req, res);
+});
+
+// DELETE handler for session termination
+app.delete('/mcp', async (req, res) => {
+  const sessionId = req.headers['mcp-session-id'];
+  if (!sessionId || !sessions[sessionId] || !sessions[sessionId].transport) {
+    res.status(400).send('Invalid or missing session ID');
+    return;
+  }
+  try {
+    await sessions[sessionId].transport.handleRequest(req, res);
+  } catch (err) {
+    console.error('Error terminating session:', err);
+    if (!res.headersSent) res.status(500).send('Error processing session termination');
+  }
+});
+
+app.listen(PORT, () => {
+  mkdirSync('.mcp', { recursive: true });
+  writeFileSync('.mcp/server.json', JSON.stringify({ url: `http://localhost:${PORT}/mcp`, port: PORT }, null, 2));
+  console.log(`MCP server listening on port ${PORT}`);
+});
+ion ID');
     return;
   }
   await sessions[sessionId].transport.handleRequest(req, res);

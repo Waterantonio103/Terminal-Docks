@@ -2,14 +2,7 @@ import { useEffect, useState, useRef } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
 import { Activity, Wifi, Users, Lock } from 'lucide-react';
-
-interface McpMessage {
-  id: number;
-  from: string;
-  content: string;
-  type: string;
-  timestamp: number;
-}
+import { useWorkspaceStore, McpMessage } from '../../store/workspace';
 
 interface FileLock {
   agentId: string;
@@ -28,7 +21,7 @@ function shortId(id: string) {
   return id.slice(0, 8);
 }
 
-function AgentPanel({ baseUrl }: { baseUrl: string }) {
+function AgentPanel({ baseUrl, token }: { baseUrl: string, token: string }) {
   const [sessions, setSessions] = useState<string[]>([]);
   const [locks, setLocks]       = useState<Record<string, FileLock>>({});
 
@@ -36,11 +29,12 @@ function AgentPanel({ baseUrl }: { baseUrl: string }) {
     if (!baseUrl) return;
     let cancelled = false;
 
-    async function poll() {
+    async function fetchData() {
       try {
+        const query = token ? `?token=${token}` : '';
         const [sRes, lRes] = await Promise.all([
-          fetch(`${baseUrl}/sessions`),
-          fetch(`${baseUrl}/locks`),
+          fetch(`${baseUrl}/sessions${query}`),
+          fetch(`${baseUrl}/locks${query}`),
         ]);
         if (!cancelled) {
           setSessions(await sRes.json());
@@ -49,9 +43,19 @@ function AgentPanel({ baseUrl }: { baseUrl: string }) {
       } catch { /* server not ready yet */ }
     }
 
-    poll();
-    const id = setInterval(poll, 3000);
-    return () => { cancelled = true; clearInterval(id); };
+    fetchData();
+
+    const unlisten = listen<McpMessage>('mcp-message', (event) => {
+      const t = event.payload.type;
+      if (t === 'lock_update' || t === 'session_update') {
+        fetchData();
+      }
+    });
+
+    return () => {
+      cancelled = true;
+      unlisten.then((f) => f());
+    };
   }, [baseUrl]);
 
   const lockEntries = Object.entries(locks);
@@ -114,22 +118,17 @@ function AgentPanel({ baseUrl }: { baseUrl: string }) {
 }
 
 export function ActivityFeedPane() {
-  const [messages, setMessages] = useState<McpMessage[]>([]);
+  const messages = useWorkspaceStore((s) => s.messages);
   const [mcpUrl,   setMcpUrl]   = useState<string>('');
   const scrollRef = useRef<HTMLDivElement>(null);
 
-  // Derive base URL (strip /mcp suffix)
-  const baseUrl = mcpUrl.replace(/\/mcp$/, '');
+  // Derive base URL and append token to fetch requests
+  const urlObj = mcpUrl ? new URL(mcpUrl) : null;
+  const baseUrl = urlObj ? `${urlObj.protocol}//${urlObj.host}` : '';
+  const token = urlObj?.searchParams.get('token') || '';
 
   useEffect(() => {
     invoke<string>('get_mcp_url').then(setMcpUrl).catch(() => {});
-  }, []);
-
-  useEffect(() => {
-    const unlisten = listen<McpMessage>('mcp-message', (event) => {
-      setMessages((prev) => [...prev, event.payload].slice(-200));
-    });
-    return () => { unlisten.then((f) => f()); };
   }, []);
 
   useEffect(() => {
@@ -154,7 +153,7 @@ export function ActivityFeedPane() {
       </div>
 
       {/* Agent status panel */}
-      {baseUrl && <AgentPanel baseUrl={baseUrl} />}
+      {baseUrl && <AgentPanel baseUrl={baseUrl} token={token} />}
 
       {/* Activity log */}
       <div ref={scrollRef} className="flex-1 overflow-y-auto px-3 py-2 font-mono text-xs">

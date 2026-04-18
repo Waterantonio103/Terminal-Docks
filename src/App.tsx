@@ -1,7 +1,8 @@
 import { Sidebar } from './components/Sidebar/Sidebar';
 import { WorkspaceGrid } from './components/Layout/WorkspaceGrid';
 import { QuickOpen } from './components/QuickOpen/QuickOpen';
-import { useWorkspaceStore, PaneType } from './store/workspace';
+import { useWorkspaceStore, PaneType, McpMessage } from './store/workspace';
+import { listen } from '@tauri-apps/api/event';
 import { PanelLeft, TerminalSquare, FileCode2, KanbanSquare, Activity, Palette, Plus, Rocket, Monitor } from 'lucide-react';
 import { useState, useEffect, useRef } from 'react';
 import './App.css';
@@ -84,8 +85,31 @@ function App() {
   const removeTab    = useWorkspaceStore((s) => s.removeTab);
   const switchTab    = useWorkspaceStore((s) => s.switchTab);
   const renameTab    = useWorkspaceStore((s) => s.renameTab);
+  const addMessage   = useWorkspaceStore((s) => s.addMessage);
+  const addResult    = useWorkspaceStore((s) => s.addResult);
 
   const [draggingNew, setDraggingNew] = useState<{ type: PaneType; x: number; y: number; label?: string; data?: any } | null>(null);
+
+  // Global MCP Message Listener
+  useEffect(() => {
+    const unlisten = listen<McpMessage>('mcp-message', (event) => {
+      const msg = event.payload;
+      if (msg.type.startsWith('result:')) {
+        const type = msg.type === 'result:url' ? 'url' : 'markdown';
+        addResult({
+          id: msg.id,
+          agentId: msg.from,
+          content: msg.content,
+          type,
+          timestamp: msg.timestamp,
+        });
+      } else {
+        addMessage(msg);
+      }
+    });
+    return () => { unlisten.then(f => f()); };
+  }, [addMessage, addResult]);
+
   const [showQuickOpen, setShowQuickOpen] = useState(false);
   const [editingTabId, setEditingTabId] = useState<string | null>(null);
   const [editingTabName, setEditingTabName] = useState('');

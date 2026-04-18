@@ -113,8 +113,16 @@ export function FileTree() {
 
   useEffect(() => {
     fetchLocks();
-    const interval = setInterval(fetchLocks, 5000);
-    return () => clearInterval(interval);
+    
+    // Listen for MCP events instead of polling
+    import('@tauri-apps/api/event').then(({ listen }) => {
+      const unlisten = listen('mcp-message', (event: any) => {
+        if (event.payload?.type === 'lock_update') {
+          fetchLocks();
+        }
+      });
+      return () => unlisten.then(f => f());
+    });
   }, []);
 
   useEffect(() => {

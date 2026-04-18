@@ -28,7 +28,6 @@ export function TerminalPane({ pane }: { pane: Pane }) {
   useEffect(() => { showSearchRef.current = showSearch; }, [showSearch]);
 
   const terminalId     = pane.data?.terminalId || `term-${pane.id}`;
-  const initialCommand = pane.data?.initialCommand;
   const currentTheme   = useWorkspaceStore((s) => s.theme);
 
   // Close context menu on any click elsewhere
@@ -164,17 +163,11 @@ export function TerminalPane({ pane }: { pane: Pane }) {
         }
       });
 
-      const isNew = await invoke<boolean>('spawn_pty', {
+      await invoke<boolean>('spawn_pty', {
         id: terminalId,
         rows: term.rows || 24,
         cols: term.cols || 80,
       });
-
-      if (isNew && initialCommand) {
-        setTimeout(() => {
-          invoke('write_to_pty', { id: terminalId, data: initialCommand + '\r' });
-        }, 500);
-      }
     };
 
     initPty();
