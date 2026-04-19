@@ -218,8 +218,8 @@ export function WorkspaceGrid() {
       const mouseY = clientY - rect.top;
       
       // Calculate drop position
-      const x = Math.max(0, Math.min(GRID_COLUMNS - 12, Math.round(mouseX / cellW - 6)));
-      const y = Math.max(0, Math.round(mouseY / CELL_HEIGHT - 4));
+      const x = Math.max(0, Math.min(GRID_COLUMNS - 8, Math.round(mouseX / cellW - 4)));
+      const y = Math.max(0, Math.round(mouseY / CELL_HEIGHT - 6));
 
       // Check if dropped over an existing pane
       const overPane = panes.find(p => {
@@ -237,7 +237,7 @@ export function WorkspaceGrid() {
       } else {
         // Add new pane at dropped position
         const newTitle = title || (type.charAt(0).toUpperCase() + type.slice(1));
-        addPaneAt(type, newTitle, panes.length, { ...data, gridPos: { x, y, w: 12, h: 8 } });
+        addPaneAt(type, newTitle, panes.length, { ...data, gridPos: { x, y, w: 8, h: 12 } });
       }
     };
 

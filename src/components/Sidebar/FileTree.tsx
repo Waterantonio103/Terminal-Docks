@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { useWorkspaceStore } from '../../store/workspace';
 import { open } from '@tauri-apps/plugin-dialog';
 import { readDir, DirEntry } from '@tauri-apps/plugin-fs';
@@ -11,13 +11,25 @@ interface FileLock {
   locked_at: string;
 }
 
-function TreeNode({ file, parentPath, locks }: { file: DirEntry, parentPath: string, locks: FileLock[] }) {
+function TreeNode({ file, parentPath, locks, refreshSignal }: { file: DirEntry, parentPath: string, locks: FileLock[], refreshSignal: number }) {
   const [isOpen, setIsOpen] = useState(false);
   const [children, setChildren] = useState<DirEntry[]>([]);
   const addPane = useWorkspaceStore(s => s.addPane);
 
   const fullPath = parentPath + (parentPath.endsWith('/') || parentPath.endsWith('\\') ? '' : '/') + file.name;
   const lock = locks.find(l => l.file_path === fullPath || l.file_path.endsWith(file.name));
+
+  useEffect(() => {
+    if (isOpen && file.isDirectory && refreshSignal > 0) {
+      readDir(fullPath).then(files => {
+        files.sort((a, b) => {
+          if (a.isDirectory === b.isDirectory) return a.name.localeCompare(b.name);
+          return a.isDirectory ? -1 : 1;
+        });
+        setChildren(files);
+      }).catch(console.error);
+    }
+  }, [refreshSignal]);
 
   const handleClick = async () => {
     if (file.isDirectory) {
@@ -80,7 +92,7 @@ function TreeNode({ file, parentPath, locks }: { file: DirEntry, parentPath: str
         )}
       </div>
       {isOpen && file.isDirectory && children.map(child => (
-        <TreeNode key={child.name} file={child} parentPath={fullPath} locks={locks} />
+        <TreeNode key={child.name} file={child} parentPath={fullPath} locks={locks} refreshSignal={refreshSignal} />
       ))}
     </div>
   );
@@ -91,6 +103,8 @@ export function FileTree() {
   const setWorkspaceDir = useWorkspaceStore(s => s.setWorkspaceDir);
   const [files, setFiles] = useState<DirEntry[]>([]);
   const [locks, setLocks] = useState<FileLock[]>([]);
+  const [refreshSignal, setRefreshSignal] = useState(0);
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const handleOpenFolder = async () => {
     const selected = await open({
@@ -125,17 +139,44 @@ export function FileTree() {
     });
   }, []);
 
+  const refreshRoot = useCallback((dir: string) => {
+    readDir(dir).then(f => {
+      f.sort((a, b) => {
+        if (a.isDirectory === b.isDirectory) return a.name.localeCompare(b.name);
+        return a.isDirectory ? -1 : 1;
+      });
+      setFiles(f);
+    }).catch(console.error);
+  }, []);
+
   useEffect(() => {
-    if (workspaceDir) {
-      readDir(workspaceDir).then(f => {
-        f.sort((a, b) => {
-          if (a.isDirectory === b.isDirectory) return a.name.localeCompare(b.name);
-          return a.isDirectory ? -1 : 1;
-        });
-        setFiles(f);
-      }).catch(console.error);
-    }
-  }, [workspaceDir]);
+    if (!workspaceDir) return;
+
+    refreshRoot(workspaceDir);
+    invoke('watch_directory', { path: workspaceDir }).catch(console.error);
+
+    let unlisten: (() => void) | undefined;
+    import('@tauri-apps/api/event').then(({ listen }) => {
+      listen('fs-change', () => {
+        if (debounceRef.current) clearTimeout(debounceRef.current);
+        debounceRef.current = setTimeout(() => {
+          refreshRoot(workspaceDir);
+          setRefreshSignal(s => s + 1);
+        }, 150);
+      }).then(fn => { unlisten = fn; });
+    });
+
+    const pollInterval = setInterval(() => {
+      refreshRoot(workspaceDir);
+      setRefreshSignal(s => s + 1);
+    }, 5000);
+
+    return () => {
+      if (debounceRef.current) clearTimeout(debounceRef.current);
+      clearInterval(pollInterval);
+      unlisten?.();
+    };
+  }, [workspaceDir, refreshRoot]);
 
   if (!workspaceDir) {
     return (
@@ -162,7 +203,7 @@ export function FileTree() {
       </div>
       <div className="pb-4">
         {files.map(file => (
-          <TreeNode key={file.name} file={file} parentPath={workspaceDir} locks={locks} />
+          <TreeNode key={file.name} file={file} parentPath={workspaceDir} locks={locks} refreshSignal={refreshSignal} />
         ))}
       </div>
     </div>

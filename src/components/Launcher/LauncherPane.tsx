@@ -1,27 +1,109 @@
 import { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { Rocket, Plug, TerminalSquare, ChevronDown, AlertCircle } from 'lucide-react';
+import { Rocket, Plug, TerminalSquare, ChevronDown, AlertCircle, Hammer, Wrench } from 'lucide-react';
 import { useWorkspaceStore, selectActivePanes, Pane } from '../../store/workspace';
 import agentsConfig from '../../config/agents.json';
 import type { MissionAgent } from '../../store/workspace';
+
+type AgentDef = typeof agentsConfig.agents[0];
+type LaunchMode = 'build' | 'edit';
 
 const ROLES = [
   { id: '',            label: '— no role —' },
   ...agentsConfig.agents.map(a => ({ id: a.id, label: `${a.name} (${a.role})` })),
 ];
 
-const ROLE_PRIORITY = ['scout', 'coordinator', 'builder', 'reviewer'];
+// Phase 3: stage groups — roles inside one group run in parallel once the
+// previous group finishes. Builder/Tester/Security fan out from Coordinator.
+const STAGES: string[][] = [
+  ['scout'],
+  ['coordinator'],
+  ['builder', 'tester', 'security'],
+  ['reviewer'],
+];
+const ROLE_PRIORITY = STAGES.flat();
 
-const CONNECT_PROMPT =
-  `Call terminal-docks_get_collaboration_protocol() now. ` +
-  `Then call terminal-docks_get_session_id() and terminal-docks_announce() with your role to confirm you are online. ` +
-  `Execute these tool calls immediately without further output.`;
+const CLI_OPTIONS = ['claude', 'gemini', 'opencode'];
 
-function buildLaunchPrompt(agentId: string, task: string): string {
+// Edit-mode instruction overrides — what each role does when working on existing code
+const EDIT_INSTRUCTIONS: Record<string, string> = {
+  scout:
+    'Explore the workspace directory to understand the existing codebase. Use shell commands (ls, find, cat, grep) to read existing files — do NOT modify anything. Map out: file structure, naming conventions, tech stack, and which files are directly relevant to the objective. Record findings via `update_workspace_context` so downstream roles can read them without scrolling session history.',
+  coordinator:
+    'Based on the analysis, create a precise change plan. For each change specify: the exact file path, what currently exists (quote relevant lines if helpful), and exactly what it should become. Be specific enough that a Builder can implement without asking questions. Assign exclusive file ownership to each Builder to prevent edit conflicts. Fan out parallel work by handing off to Tester and Security alongside Builder.',
+  builder:
+    'Apply the targeted changes from the plan. Before touching any file call `lock_file` — if it returns "queued", keep working on other unlocked files until you receive a [LOCK GRANTED] message. Read each file first, then make MINIMAL targeted edits — change only what is specified. Preserve existing formatting, naming, and style. Do not rewrite files from scratch unless the plan explicitly says to.',
+  tester:
+    'Write tests for the planned changes in parallel with the Builder. Target the acceptance criteria from the plan, not the Builder\'s in-progress code. Always `lock_file` before editing any test file. Do not modify source files owned by the Builder.',
+  security:
+    'Audit the planned changes for security issues in parallel with the Builder: auth/authz, input validation, secret handling, injection surfaces, dependency CVEs. Record findings via `update_workspace_context` so the Builder can address them live. Only edit files for clear, low-risk fixes and always `lock_file` first.',
+  reviewer:
+    'Review the combined output of Builder, Tester, and Security. Verify: (1) the objective was achieved, (2) no existing behaviour was broken, (3) changes follow the project\'s existing conventions, (4) tests cover the acceptance criteria, (5) security findings are addressed. Apply minor fixes yourself. Give a clear pass or fail verdict with specifics; on fail, target the specific specialist responsible via handoff_task.',
+};
+
+interface LaunchContext {
+  workspaceDir: string | null;
+  pipeline: string[];
+  instanceNum: number;
+  totalInstances: number;
+  predecessorRole: AgentDef | null;
+  successorRole: AgentDef | null;
+  task: string;
+  mode: LaunchMode;
+}
+
+function buildLaunchPrompt(agentId: string, ctx: LaunchContext, instructionOverride?: string): string {
   const agent = agentsConfig.agents.find(a => a.id === agentId);
   if (!agent) return '';
-  // Return without trailing newline to allow "fill but not send"
-  return agent.promptTemplate.replace('{{task.title}}', task);
+
+  const lines: string[] = [];
+  const isSolo = ctx.pipeline.length === 1 && ctx.totalInstances === 1;
+
+  lines.push('Call the `get_collaboration_protocol` MCP tool and follow the protocol it returns.');
+
+  if (ctx.workspaceDir) {
+    if (ctx.mode === 'edit') {
+      lines.push(`Existing project: ${ctx.workspaceDir}.`);
+      lines.push('This is an EXISTING codebase. Read files before making any changes. Make targeted, minimal edits — do not rewrite from scratch unless the plan explicitly says to.');
+    } else {
+      lines.push(`Working directory: ${ctx.workspaceDir}.`);
+      lines.push('Write ALL output files into this directory using your native file tools. Do not describe code — create actual files on disk.');
+    }
+  }
+
+  if (isSolo) {
+    lines.push(`You are the ${agent.name} (${agent.role}), working solo on this task.`);
+  } else {
+    const pos = ctx.pipeline.indexOf(agentId) + 1;
+    if (ctx.totalInstances > 1) {
+      lines.push(`You are ${agent.name} ${ctx.instanceNum} of ${ctx.totalInstances} (${agent.role}) — step ${pos} of ${ctx.pipeline.length} in the pipeline.`);
+      lines.push(`You and the other ${agent.name}s work in parallel on this step.`);
+    } else {
+      lines.push(`You are the ${agent.name} (${agent.role}) — step ${pos} of ${ctx.pipeline.length} in the pipeline.`);
+    }
+  }
+
+  if (ctx.predecessorRole) {
+    lines.push(`Your predecessor, the ${ctx.predecessorRole.name}, has finished and sent you a structured handoff. Call the \`receive_messages\` MCP tool to read their payload before proceeding.`);
+  } else {
+    lines.push('No predecessor — start work immediately from the objective below.');
+  }
+
+  lines.push(`Objective: ${ctx.task}.`);
+
+  // Instruction priority: user override from AgentsTab > mode-specific default > agent default
+  const modeDefault = ctx.mode === 'edit' ? EDIT_INSTRUCTIONS[agentId] : undefined;
+  lines.push(instructionOverride ?? modeDefault ?? agent.coreInstructions);
+
+  lines.push('When your work is complete:');
+  let step = 1;
+  if (!isSolo && ctx.successorRole) {
+    lines.push(`${step++}. Call the \`handoff_task\` MCP tool with fromRole="${agent.id}", targetRole="${ctx.successorRole.id}", a short title, and a structured JSON payload summarizing your output for the next stage. This advances the pipeline — do not announce literal phrases.`);
+  }
+  lines.push(`${step}. Call the \`publish_result\` MCP tool with \`content\` = "${agent.name} Summary: <your summary>" and \`type\` = "markdown" so the user sees your work in Mission Control.`);
+
+  // Join with a space — never newlines, as \n in PTY input is treated as Enter on Windows
+  return lines.join(' ');
 }
 
 async function writeToTerminal(pane: Pane, text: string) {
@@ -29,35 +111,48 @@ async function writeToTerminal(pane: Pane, text: string) {
   await invoke('write_to_pty', { id: terminalId, data: text });
 }
 
+
 interface TerminalRow {
   pane: Pane;
   roleId: string;
+  cli: string;
 }
 
 export function LauncherPane() {
-  const allPanes  = useWorkspaceStore(selectActivePanes);
-  const addPane   = useWorkspaceStore(s => s.addPane);
+  const allPanes          = useWorkspaceStore(selectActivePanes);
+  const addPane           = useWorkspaceStore(s => s.addPane);
+  const agentInstructions = useWorkspaceStore(s => s.agentInstructions);
   const terminals = allPanes.filter(p => p.type === 'terminal');
 
+  const [mode, setMode]       = useState<LaunchMode>('build');
   const [task, setTask]       = useState('');
   const [roleMap, setRoleMap] = useState<Record<string, string>>({});
+  const [cliMap, setCliMap]   = useState<Record<string, string>>({});
   const [status, setStatus]   = useState<string | null>(null);
   const [busy, setBusy]       = useState(false);
   const [isConfirming, setIsConfirming] = useState(false);
-  const [isSequential, setIsSequential] = useState(true);
+  const [mcpUrl, setMcpUrl]   = useState('http://localhost:3741/mcp');
 
-  // Reset confirmation if task or roles change
+  useEffect(() => {
+    invoke<string>('get_mcp_url').then(url => setMcpUrl(url)).catch(() => {});
+  }, []);
+
   useEffect(() => {
     setIsConfirming(false);
-  }, [task, roleMap]);
+  }, [task, roleMap, cliMap, mode]);
 
   const syncedRows: TerminalRow[] = terminals.map(p => ({
     pane: p,
     roleId: roleMap[p.id] ?? '',
+    cli: cliMap[p.id] ?? 'claude',
   }));
 
   function setRole(paneId: string, roleId: string) {
     setRoleMap(prev => ({ ...prev, [paneId]: roleId }));
+  }
+
+  function setCli(paneId: string, cli: string) {
+    setCliMap(prev => ({ ...prev, [paneId]: cli }));
   }
 
   async function handleConnect() {
@@ -69,16 +164,41 @@ export function LauncherPane() {
     setBusy(true);
     setStatus(null);
     try {
-      for (const r of targets) {
+      await Promise.all(targets.map(async r => {
         const role = ROLES.find(role => role.id === r.roleId)?.label || 'Unknown';
-        // Single imperative command for the model to execute
-        const prompt = 
-          `Call terminal-docks_connect_agent({ role: "${role}", agentId: "${r.pane.title}" }) now.\n` +
-          `Then call terminal-docks_get_collaboration_protocol() to read the SOP.\n` +
-          `Execute these immediately.`;
-        
-        await writeToTerminal(r.pane, prompt + '\n');
-      }
+        const terminalId = r.pane.data?.terminalId ?? `term-${r.pane.id}`;
+
+        // Claude Code returns cleanly to its input prompt on Ctrl+C, so we can
+        // interrupt whatever it is doing and immediately send the new prompt.
+        // Other CLIs (OpenCode, Gemini, …) may EXIT on Ctrl+C — for those we
+        // do NOT interrupt; we just send the prompt and let the CLI handle it.
+        if (r.cli === 'claude') {
+          await invoke('write_to_pty', { id: terminalId, data: '\x03' });
+          await new Promise(res => setTimeout(res, 200));
+        }
+
+        // CLI-specific hints. Claude Code can self-register via shell escape
+        // (`!cmd`) if the MCP server was not loaded at session startup.
+        const cliHint = r.cli === 'claude'
+          ? `If the terminal-docks MCP tools are not yet available run this shell command first: !claude mcp add --transport http terminal-docks ${mcpUrl} --scope user `
+          : r.cli === 'gemini'
+          ? `The MCP server uses streamable-HTTP transport at ${mcpUrl}. `
+          : '';
+
+        const connectTool = r.cli === 'gemini' ? 'mcp_terminal-docks_connect_agent' : 'connect_agent';
+        const protocolTool = r.cli === 'gemini' ? 'mcp_terminal-docks_get_collaboration_protocol' : 'get_collaboration_protocol';
+        const roleParam = r.cli === 'gemini' ? r.roleId : role;
+
+        const prompt =
+          `The terminal-docks MCP server is at ${mcpUrl} (streamable-http). ` +
+          cliHint +
+          `CRITICAL: Execute the following sequentially, waiting for each to complete before starting the next. DO NOT call tools in parallel.\n` +
+          `1. Call the ${connectTool} MCP tool with role="${roleParam}" and agentId="${r.pane.title}" to register.\n` +
+          `2. Call the ${protocolTool} tool to load the team SOP.\n` +
+          `Do this now without asking for confirmation.`;
+
+        await writeToTerminal(r.pane, prompt + '\r');
+      }));
       setStatus(`Connected ${targets.length} terminal(s) to MCP.`);
     } catch (e) {
       setStatus(`Error: ${e}`);
@@ -92,14 +212,13 @@ export function LauncherPane() {
       setStatus('Enter a task description first.');
       return;
     }
+
     const targets = syncedRows
       .filter(r => r.roleId)
       .sort((a, b) => {
         const idxA = ROLE_PRIORITY.indexOf(a.roleId);
         const idxB = ROLE_PRIORITY.indexOf(b.roleId);
-        const pA = idxA === -1 ? 99 : idxA;
-        const pB = idxB === -1 ? 99 : idxB;
-        return pA - pB;
+        return (idxA === -1 ? 99 : idxA) - (idxB === -1 ? 99 : idxB);
       });
 
     if (!targets.length) {
@@ -107,47 +226,88 @@ export function LauncherPane() {
       return;
     }
 
+    // Derive pipeline (flat, for display) and stageGroups (string[][], drives
+    // orchestration) from the roles that are actually assigned. Each STAGES
+    // entry becomes one group after filtering to assigned roles; empty groups
+    // are dropped.
+    const usedRoleIds = [...new Set(targets.map(r => r.roleId))];
+    const stageGroups: string[][] = STAGES
+      .map(group => group.filter(r => usedRoleIds.includes(r)))
+      .filter(group => group.length > 0);
+    const pipeline = stageGroups.flat();
+    const firstGroup = stageGroups[0] ?? [];
+
+    const workspaceDir = useWorkspaceStore.getState().workspaceDir;
+
     setBusy(true);
     setStatus(null);
 
     try {
       if (!isConfirming) {
-        // Step 1: Fill terminals with prompts
+        // Stage 1: Fill terminals with context-aware prompts (no execution yet)
         for (const r of targets) {
-          const prompt = buildLaunchPrompt(r.roleId, task.trim());
+          const sameRole = targets.filter(t => t.roleId === r.roleId);
+          // Predecessor / successor are resolved against stageGroups so parallel
+          // peers (builder, tester, security) see the Coordinator as predecessor
+          // and Reviewer as successor, not each other.
+          const groupIdx = stageGroups.findIndex(g => g.includes(r.roleId));
+          const prevGroup = groupIdx > 0 ? stageGroups[groupIdx - 1] : null;
+          const nextGroup = groupIdx >= 0 && groupIdx < stageGroups.length - 1 ? stageGroups[groupIdx + 1] : null;
+          const predecessorRole = prevGroup
+            ? agentsConfig.agents.find(a => a.id === prevGroup[prevGroup.length - 1]) ?? null
+            : null;
+          const successorRole = nextGroup
+            ? agentsConfig.agents.find(a => a.id === nextGroup[0]) ?? null
+            : null;
+
+          const ctx: LaunchContext = {
+            workspaceDir,
+            pipeline,
+            instanceNum: sameRole.indexOf(r) + 1,
+            totalInstances: sameRole.length,
+            predecessorRole,
+            successorRole,
+            task: task.trim(),
+            mode,
+          };
+
+          const prompt = buildLaunchPrompt(r.roleId, ctx, agentInstructions[r.roleId]);
           if (prompt) {
+            // Write prompt text into the input buffer without submitting.
+            // The CLI is already running (started via Connect). Stage 2 sends \r.
             await writeToTerminal(r.pane, prompt);
           }
         }
         setIsConfirming(true);
         setStatus('Prompts staged. Verify in terminals and click Confirm to execute.');
       } else {
-        // Step 2: Actually send (carriage return)
-        const agents: MissionAgent[] = targets.map((r, idx) => ({
+        // Stage 2: Execute — every agent in the first group fires immediately,
+        // the rest wait. Parallel within a group, sequential between groups.
+        const agents: MissionAgent[] = targets.map(r => ({
           terminalId: r.pane.data?.terminalId ?? `term-${r.pane.id}`,
           title: r.pane.title,
           roleId: r.roleId,
-          status: isSequential ? (idx === 0 ? 'running' : 'waiting') : 'running',
-          triggered: false,
+          status: firstGroup.includes(r.roleId) ? 'running' : 'waiting',
+          triggered: firstGroup.includes(r.roleId),
+          startedAt: firstGroup.includes(r.roleId) ? Date.now() : undefined,
         }));
 
-        if (isSequential) {
-          // Only trigger the first one
-          await writeToTerminal(targets[0].pane, '\r');
-          agents[0].triggered = true;
-        } else {
-          // Trigger all
-          for (const r of targets) {
-            await writeToTerminal(r.pane, '\r');
-          }
-        }
-        
-        addPane('missioncontrol', 'Mission Control', { 
-          taskDescription: task.trim(), 
+        await Promise.all(targets.filter(r => firstGroup.includes(r.roleId)).map(r =>
+          writeToTerminal(r.pane, '\r')
+        ));
+
+        addPane('missioncontrol', 'Mission Control', {
+          taskDescription: task.trim(),
           agents,
-          isSequential 
+          pipeline,
+          stageGroups,
         });
-        setStatus(`Launched ${isSequential ? 'Scout' : targets.length + ' agent(s)'}. Mission Control opened.`);
+
+        const firstCount = targets.filter(r => firstGroup.includes(r.roleId)).length;
+        const firstLabel = firstGroup.length === 1
+          ? agentsConfig.agents.find(a => a.id === firstGroup[0])?.name ?? firstGroup[0]
+          : firstGroup.map(id => agentsConfig.agents.find(a => a.id === id)?.name ?? id).join(' + ');
+        setStatus(`Launched ${firstCount > 1 ? `${firstCount}x ` : ''}${firstLabel}. Mission Control opened.`);
         setIsConfirming(false);
       }
     } catch (e) {
@@ -157,6 +317,12 @@ export function LauncherPane() {
     }
   }
 
+  // Derive pipeline preview for the UI hint — grouped by parallel stage.
+  const assignedTargets = syncedRows.filter(r => r.roleId);
+  const previewUsed = new Set(assignedTargets.map(r => r.roleId));
+  const previewGroups: string[][] = STAGES
+    .map(g => g.filter(r => previewUsed.has(r)))
+    .filter(g => g.length > 0);
 
   return (
     <div className="flex flex-col h-full bg-bg-panel overflow-hidden">
@@ -165,19 +331,55 @@ export function LauncherPane() {
       <div className="flex items-center gap-2 px-4 py-2.5 border-b border-border-panel shrink-0">
         <Rocket size={14} className="text-accent-primary" />
         <span className="text-xs font-semibold text-text-secondary uppercase tracking-wider">Task Launcher</span>
+        <div className="ml-auto flex items-center bg-bg-surface border border-border-panel rounded-md p-0.5">
+          <button
+            onClick={() => setMode('build')}
+            className={`flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-semibold transition-colors ${
+              mode === 'build'
+                ? 'bg-accent-primary text-accent-text'
+                : 'text-text-muted hover:text-text-secondary'
+            }`}
+            title="Build mode: create new files and projects from scratch"
+          >
+            <Hammer size={9} />
+            Build
+          </button>
+          <button
+            onClick={() => setMode('edit')}
+            className={`flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-semibold transition-colors ${
+              mode === 'edit'
+                ? 'bg-accent-primary text-accent-text'
+                : 'text-text-muted hover:text-text-secondary'
+            }`}
+            title="Edit mode: read and modify an existing codebase"
+          >
+            <Wrench size={9} />
+            Edit
+          </button>
+        </div>
       </div>
 
       <div className="flex-1 overflow-y-auto px-4 py-3 space-y-4">
 
+        {/* Mode hint */}
+        {mode === 'edit' && (
+          <div className="text-[10px] text-text-muted bg-bg-surface border border-border-panel rounded-md px-2.5 py-2 leading-relaxed">
+            Agents will <span className="text-accent-primary font-semibold">read the existing codebase first</span> and make targeted edits. Set the workspace directory to your project root.
+          </div>
+        )}
+
         {/* Task input */}
         <div className="space-y-1.5">
           <label className="text-[11px] font-semibold text-text-muted uppercase tracking-wider">
-            Task / Goal
+            {mode === 'edit' ? 'Change / Fix' : 'Task / Goal'}
           </label>
           <textarea
             value={task}
             onChange={e => setTask(e.target.value)}
-            placeholder="Describe the task or goal for this agent team…"
+            placeholder={mode === 'edit'
+              ? 'Describe what to change, fix, or refactor…'
+              : 'Describe the task or goal for this agent team…'
+            }
             rows={3}
             className="w-full bg-bg-surface border border-border-panel rounded-md px-3 py-2 text-xs text-text-primary placeholder:text-text-muted resize-none focus:outline-none focus:border-accent-primary transition-colors"
           />
@@ -198,10 +400,24 @@ export function LauncherPane() {
             <div className="space-y-1.5">
               {syncedRows.map(r => (
                 <div key={r.pane.id} className="flex items-center gap-2">
-                  <div className="flex items-center gap-1.5 w-28 shrink-0">
+                  <div className="flex items-center gap-1.5 w-24 shrink-0">
                     <TerminalSquare size={11} className="text-text-muted shrink-0" />
                     <span className="text-xs text-text-secondary truncate">{r.pane.title}</span>
                   </div>
+                  {/* CLI selector */}
+                  <div className="relative w-24 shrink-0">
+                    <select
+                      value={r.cli}
+                      onChange={e => setCli(r.pane.id, e.target.value)}
+                      className="w-full appearance-none bg-bg-surface border border-border-panel rounded px-2 py-1 text-xs text-text-primary focus:outline-none focus:border-accent-primary transition-colors cursor-pointer pr-5"
+                    >
+                      {CLI_OPTIONS.map(c => (
+                        <option key={c} value={c}>{c}</option>
+                      ))}
+                    </select>
+                    <ChevronDown size={10} className="absolute right-1.5 top-1/2 -translate-y-1/2 text-text-muted pointer-events-none" />
+                  </div>
+                  {/* Role selector */}
                   <div className="relative flex-1">
                     <select
                       value={r.roleId}
@@ -219,6 +435,36 @@ export function LauncherPane() {
             </div>
           )}
         </div>
+
+        {/* Pipeline preview — one chip per stage group; parallel peers share. */}
+        {previewGroups.length > 0 && (
+          <div className="space-y-1.5">
+            <label className="text-[11px] font-semibold text-text-muted uppercase tracking-wider">
+              Pipeline
+            </label>
+            <div className="flex items-center flex-wrap gap-1 px-2.5 py-2 bg-bg-surface border border-border-panel rounded-md">
+              {previewGroups.map((group, idx) => {
+                const groupCount = assignedTargets.filter(r => group.includes(r.roleId)).length;
+                const label = group
+                  .map(id => agentsConfig.agents.find(a => a.id === id)?.name ?? id)
+                  .join(' + ');
+                return (
+                  <span key={group.join('+')} className="flex items-center gap-1">
+                    <span className="text-[10px] font-medium text-accent-primary bg-accent-primary/10 border border-accent-primary/20 rounded px-1.5 py-0.5">
+                      {groupCount > group.length ? `${groupCount}× ` : ''}{label}
+                    </span>
+                    {idx < previewGroups.length - 1 && (
+                      <span className="text-[10px] text-text-muted opacity-40">→</span>
+                    )}
+                  </span>
+                );
+              })}
+            </div>
+            <p className="text-[10px] text-text-muted opacity-50 leading-relaxed">
+              Groups run sequentially. Multiple roles in the same group run in parallel.
+            </p>
+          </div>
+        )}
 
         {/* Role descriptions */}
         {syncedRows.some(r => r.roleId) && (
@@ -247,23 +493,9 @@ export function LauncherPane() {
           </p>
         )}
 
-        {/* Sequential Launch Toggle */}
-        <div className="flex items-center gap-2 pt-1">
-          <input
-            type="checkbox"
-            id="sequential-toggle"
-            checked={isSequential}
-            onChange={e => setIsSequential(e.target.checked)}
-            className="w-3.5 h-3.5 rounded border-border-panel bg-bg-surface text-accent-primary focus:ring-0 focus:ring-offset-0 cursor-pointer"
-          />
-          <label htmlFor="sequential-toggle" className="text-xs text-text-secondary cursor-pointer select-none">
-            Sequential Mode <span className="text-[10px] text-text-muted opacity-70">(Agents wait for signals)</span>
-          </label>
-        </div>
       </div>
 
       {/* Action buttons */}
-
       <div className="shrink-0 border-t border-border-panel px-4 py-3 flex gap-2">
         <button
           onClick={handleConnect}
@@ -277,8 +509,8 @@ export function LauncherPane() {
           onClick={handleLaunch}
           disabled={busy || !task.trim()}
           className={`flex-1 flex items-center justify-center gap-1.5 px-3 py-1.5 rounded text-xs font-semibold transition-all disabled:opacity-40 ${
-            isConfirming 
-              ? 'bg-red-600 text-white hover:bg-red-700 animate-pulse' 
+            isConfirming
+              ? 'bg-red-600 text-white hover:bg-red-700 animate-pulse'
               : 'bg-accent-primary text-accent-text hover:opacity-90'
           }`}
         >

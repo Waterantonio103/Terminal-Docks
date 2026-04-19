@@ -32,7 +32,14 @@
       "Bash(where python3 *)",
       "WebSearch",
       "WebFetch(domain:geminicli.com)",
-      "WebFetch(domain:opencode.ai)"
+      "WebFetch(domain:opencode.ai)",
+      "Skill(gsd:discuss-phase)",
+      "Bash(cargo build *)",
+      "Bash(find C:\\\\\\\\VSCODE\\\\\\\\terminal-docks\\\\\\\\src-tauri\\\\\\\\src -name \"swarm.rs\" -o -name \"workflow_log.rs\")",
+      "Bash(find C:\\\\\\\\VSCODE\\\\\\\\terminal-docks\\\\\\\\src-tauri\\\\\\\\src -type f -name \"*.rs\")",
+      "Bash(xargs ls *)",
+      "Bash(node --check mcp-server/server.mjs)",
+      "Bash(node *)"
     ]
   }
 }

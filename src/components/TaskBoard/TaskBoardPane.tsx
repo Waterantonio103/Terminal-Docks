@@ -97,7 +97,17 @@ export function TaskBoardPane() {
   const handleRunTask = (task: Task) => {
     const agentId = task.agent_id || 'coordinator';
     const agent = agentConfig.agents.find(a => a.id === agentId) || agentConfig.agents[0];
-    const prompt = agent.promptTemplate.replace('{{task.title}}', task.title);
+    const workspaceDir = useWorkspaceStore.getState().workspaceDir;
+    const wdLine = workspaceDir ? `Working directory: ${workspaceDir}\nWrite ALL output files here using your native file tools.\n\n` : '';
+    
+    // Map agent to CLI binary
+    let cli = 'claude';
+    if (agent.id === 'builder') cli = 'opencode';
+    else if (agent.id === 'scout') cli = 'gemini';
+
+    const protocolTool = cli === 'gemini' ? 'mcp_terminal-docks_get_collaboration_protocol' : 'get_collaboration_protocol';
+    const prompt = `${cli}\nCRITICAL: You MUST call the \`${protocolTool}\` MCP tool FIRST and wait for its response before doing anything else. Do NOT execute other tools in parallel with it.\n\nYou are the ${agent.name} (${agent.role}), working solo.\n\n${wdLine}Objective: ${task.title}\n\n${agent.coreInstructions}`;
+    
     useWorkspaceStore.getState().addPane('terminal', `[${agent.name}] ${task.title}`, {
       initialCommand: prompt
     });

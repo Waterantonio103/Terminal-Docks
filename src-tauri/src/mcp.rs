@@ -335,9 +335,15 @@ pub fn init_mcp_server(app: &AppHandle) -> Result<(), String> {
         return Err(format!("MCP server directory not found at {:?}", server_dir));
     }
 
+    let db_path = {
+        let state = app.state::<crate::db::DbState>();
+        state.db_path.clone()
+    };
+
     let child = Command::new("node")
         .arg("server.mjs")
         .current_dir(&server_dir)
+        .env("MCP_DB_PATH", &db_path)
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
         .spawn()

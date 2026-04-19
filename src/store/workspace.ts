@@ -16,6 +16,8 @@ export interface MissionAgent {
   roleId: string;
   status?: 'idle' | 'waiting' | 'running' | 'completed';
   triggered?: boolean;
+  startedAt?: number;
+  completedAt?: number;
 }
 
 export type ThemeType =
@@ -144,6 +146,19 @@ export interface McpMessage {
   timestamp: number;
 }
 
+export interface DbTask {
+  id: number;
+  title: string;
+  description: string | null;
+  status: string;
+  created_at: string;
+  parent_id: number | null;
+  agent_id: string | null;
+  from_role: string | null;
+  target_role: string | null;
+  payload: string | null;
+}
+
 interface WorkspaceState {
   tabs: WorkspaceTab[];
   activeTabId: string;
@@ -153,6 +168,8 @@ interface WorkspaceState {
   savedLayouts: SavedLayout[];
   messages: McpMessage[];
   results: ResultEntry[];
+  tasks: DbTask[];
+  agentInstructions: Record<string, string>;
   toggleSidebar: () => void;
   addPane: (type: PaneType, title: string, data?: any) => void;
   addPaneAt: (type: PaneType, title: string, index: number, data?: any) => void;
@@ -175,6 +192,8 @@ interface WorkspaceState {
   renameTab: (id: string, name: string) => void;
   addMessage: (msg: McpMessage) => void;
   addResult: (result: ResultEntry) => void;
+  setTasks: (tasks: DbTask[]) => void;
+  setAgentInstruction: (id: string, value: string) => void;
 }
 
 const _initTabId = generateId();
@@ -187,8 +206,8 @@ export const useWorkspaceStore = create<WorkspaceState>()(
         name: 'Workspace 1',
         color: TAB_COLORS[0],
         panes: [
-          { id: generateId(), type: 'terminal', title: 'Terminal 1', gridPos: { x: 0, y: 0, w: 12, h: 10 }, data: { terminalId: generateId() } },
-          { id: generateId(), type: 'editor', title: 'Welcome', gridPos: { x: 12, y: 0, w: 12, h: 10 } },
+          { id: generateId(), type: 'terminal', title: 'Terminal 1', gridPos: { x: 0, y: 0, w: 12, h: 18 }, data: { terminalId: generateId() } },
+          { id: generateId(), type: 'editor', title: 'Welcome', gridPos: { x: 12, y: 0, w: 12, h: 18 } },
         ],
       }],
       activeTabId: _initTabId,
@@ -198,9 +217,13 @@ export const useWorkspaceStore = create<WorkspaceState>()(
       savedLayouts: [],
       messages: [],
       results: [],
+      tasks: [],
+      agentInstructions: {},
 
       addMessage: (msg) => set((s) => ({ messages: [...s.messages, msg].slice(-500) })),
       addResult: (result) => set((s) => ({ results: [...s.results, result].slice(-200) })),
+      setTasks: (tasks) => set({ tasks }),
+      setAgentInstruction: (id, value) => set((s) => ({ agentInstructions: { ...s.agentInstructions, [id]: value } })),
 
       toggleSidebar: () => set((s) => ({ sidebarOpen: !s.sidebarOpen })),
 
@@ -211,9 +234,14 @@ export const useWorkspaceStore = create<WorkspaceState>()(
         if (type === 'missioncontrol') {
           const existing = panes.find(p => p.type === 'missioncontrol');
           if (existing) {
-            return withActivePanes(state, ps => 
-              ps.map(p => p.id === existing.id ? { ...p, data: { ...p.data, ...data } } : p)
-            );
+            return {
+              ...withActivePanes(state, ps => 
+                ps.map(p => p.id === existing.id ? { ...p, data: { ...p.data, ...data } } : p)
+              ),
+              messages: [],
+              results: [],
+              tasks: [],
+            };
           }
         }
 
@@ -224,15 +252,25 @@ export const useWorkspaceStore = create<WorkspaceState>()(
         // Find next Y position
         const maxY = panes.reduce((max, p) => Math.max(max, p.gridPos.y + p.gridPos.h), 0);
 
+        const gridPos = newData.gridPos || { x: 0, y: maxY, w: 8, h: 12 };
+        delete newData.gridPos;
+
         const newPane: Pane = { 
           id: generateId(), 
           type, 
           title, 
-          gridPos: { x: 0, y: maxY, w: 12, h: 8 },
+          gridPos,
           data: newData 
         };
         
-        return withActivePanes(state, ps => resolveCollisions([...ps, newPane]));
+        const nextState = withActivePanes(state, ps => resolveCollisions([...ps, newPane]));
+        
+        // If we just added a new mission control pane (not just updated an existing one)
+        if (type === 'missioncontrol') {
+          return { ...nextState, messages: [], results: [], tasks: [] };
+        }
+        
+        return nextState;
       }),
 
       addPaneAt: (type, title, index, data) => set((state) => {
@@ -242,19 +280,28 @@ export const useWorkspaceStore = create<WorkspaceState>()(
         const panes = selectActivePanes(state);
         const maxY = panes.reduce((max, p) => Math.max(max, p.gridPos.y + p.gridPos.h), 0);
 
+        const gridPos = newData.gridPos || { x: 0, y: maxY, w: 8, h: 12 };
+        delete newData.gridPos;
+
         const newPane: Pane = { 
           id: generateId(), 
           type, 
           title, 
-          gridPos: { x: 0, y: maxY, w: 12, h: 8 },
+          gridPos,
           data: newData 
         };
         
-        return withActivePanes(state, ps => {
+        const nextState = withActivePanes(state, ps => {
           const arr = [...ps];
           arr.splice(index, 0, newPane);
           return resolveCollisions(arr);
         });
+
+        if (type === 'missioncontrol') {
+          return { ...nextState, messages: [], results: [], tasks: [] };
+        }
+
+        return nextState;
       }),
 
       removePane: (id) => set((state) => {
@@ -348,7 +395,7 @@ export const useWorkspaceStore = create<WorkspaceState>()(
             id: generateId(), 
             type: p.type, 
             title: p.title, 
-            gridPos: p.gridPos || { x: 0, y: 0, w: 12, h: 8 },
+            gridPos: p.gridPos || { x: 0, y: 0, w: 8, h: 12 },
             data: newData 
           };
         });
@@ -368,7 +415,7 @@ export const useWorkspaceStore = create<WorkspaceState>()(
           name: `Workspace ${tabNum}`,
           color,
           panes: [
-            { id: generateId(), type: 'terminal', title: 'Terminal 1', gridPos: { x: 0, y: 0, w: 12, h: 10 }, data: { terminalId: generateId() } },
+            { id: generateId(), type: 'terminal', title: 'Terminal 1', gridPos: { x: 0, y: 0, w: 12, h: 18 }, data: { terminalId: generateId() } },
           ],
         };
         return { tabs: [...state.tabs, newTab], activeTabId: newTabId };
@@ -423,6 +470,8 @@ export const useWorkspaceStore = create<WorkspaceState>()(
         workspaceDir: state.workspaceDir,
         theme: state.theme,
         savedLayouts: state.savedLayouts,
+        results: state.results.slice(-100),
+        agentInstructions: state.agentInstructions,
       }),
     }
   )

@@ -3,10 +3,12 @@ import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebglAddon } from '@xterm/addon-webgl';
 import { SearchAddon } from '@xterm/addon-search';
+import { WebLinksAddon } from '@xterm/addon-web-links';
 import '@xterm/xterm/css/xterm.css';
 import { invoke } from '@tauri-apps/api/core';
-import { listen, UnlistenFn } from '@tauri-apps/api/event';
+import { listen, UnlistenFn, emit } from '@tauri-apps/api/event';
 import { writeText, readText } from '@tauri-apps/plugin-clipboard-manager';
+import { openUrl } from '@tauri-apps/plugin-opener';
 import { useWorkspaceStore, Pane } from '../../store/workspace';
 import { ChevronDown, ChevronUp, X } from 'lucide-react';
 
@@ -86,8 +88,16 @@ export function TerminalPane({ pane }: { pane: Pane }) {
 
     const fit    = new FitAddon();
     const search = new SearchAddon();
+    const links  = new WebLinksAddon((event, uri) => {
+      // Only open if Ctrl (or Cmd on Mac) is held
+      if (event.ctrlKey || event.metaKey) {
+        openUrl(uri);
+      }
+    });
+
     term.loadAddon(fit);
     term.loadAddon(search);
+    term.loadAddon(links);
     term.open(terminalElement);
     fitAddon.current   = fit;
     searchAddon.current = search;
@@ -171,6 +181,16 @@ export function TerminalPane({ pane }: { pane: Pane }) {
         cols: term.cols || 80,
         cwd: workspaceDir,
       });
+
+      const initialCommand = pane.data?.initialCommand;
+      if (initialCommand) {
+        // Small delay to ensure the shell is ready to receive input
+        setTimeout(() => {
+          invoke('write_to_pty', { id: terminalId, data: initialCommand + '\r' });
+        }, 1000);
+      }
+
+      emit('pty-spawned', { id: terminalId });
     };
 
     initPty();

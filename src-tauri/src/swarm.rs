@@ -1,49 +1,18 @@
-use tauri::{AppHandle, Emitter};
-use notify::{Watcher, RecursiveMode, Config};
-use std::path::PathBuf;
-use std::sync::mpsc::channel;
-use std::thread;
+use tauri::AppHandle;
+use tauri::Emitter;
+use notify::{Config, Event, RecommendedWatcher, RecursiveMode, Watcher};
+use std::sync::Mutex;
+use std::path::Path;
 
-#[derive(Clone, serde::Serialize)]
-struct SwarmActivity {
-    event: String,
-    path: String,
+pub struct WatcherState(pub Mutex<Option<RecommendedWatcher>>);
+
+impl WatcherState {
+    pub fn new() -> Self {
+        WatcherState(Mutex::new(None))
+    }
 }
 
-pub fn init_swarm_watcher(app: &AppHandle) -> Result<(), String> {
-    let app_handle = app.clone();
-    
-    thread::spawn(move || {
-        let (tx, rx) = channel();
-        let mut watcher = match notify::RecommendedWatcher::new(tx, Config::default()) {
-            Ok(w) => w,
-            Err(_) => return,
-        };
-        
-        let mut current_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        current_dir.push(".swarm");
-        current_dir.push("mailbox");
-        let _ = std::fs::create_dir_all(&current_dir);
-        
-        if watcher.watch(&current_dir, RecursiveMode::Recursive).is_err() {
-            return;
-        }
-        
-        for res in rx {
-            if let Ok(event) = res {
-                for path in event.paths {
-                    if let Some(file_name) = path.file_name() {
-                        let msg = SwarmActivity {
-                            event: format!("{:?}", event.kind),
-                            path: file_name.to_string_lossy().to_string(),
-                        };
-                        let _ = app_handle.emit("swarm-activity", msg);
-                    }
-                }
-            }
-        }
-    });
-
+pub fn init_swarm_watcher(_app: &AppHandle) -> Result<(), String> {
     Ok(())
 }
 
@@ -52,3 +21,49 @@ pub fn get_swarm_status() -> Result<String, String> {
     Ok("Active".to_string())
 }
 
+#[tauri::command]
+pub fn watch_directory(
+    app: AppHandle,
+    state: tauri::State<WatcherState>,
+    path: String,
+) -> Result<(), String> {
+    let app_clone = app.clone();
+
+    let mut watcher = RecommendedWatcher::new(
+        move |res: notify::Result<Event>| {
+            if let Ok(event) = res {
+                match event.kind {
+                    notify::EventKind::Any
+                    | notify::EventKind::Create(_)
+                    | notify::EventKind::Remove(_)
+                    | notify::EventKind::Modify(_) => {
+                        let changed_dir = event
+                            .paths
+                            .first()
+                            .and_then(|p| {
+                                if p.is_dir() {
+                                    Some(p.to_string_lossy().to_string())
+                                } else {
+                                    p.parent().map(|d| d.to_string_lossy().to_string())
+                                }
+                            })
+                            .unwrap_or_default();
+                        let _ = app_clone.emit("fs-change", changed_dir);
+                    }
+                    _ => {}
+                }
+            }
+        },
+        Config::default(),
+    )
+    .map_err(|e| e.to_string())?;
+
+    watcher
+        .watch(Path::new(&path), RecursiveMode::Recursive)
+        .map_err(|e| e.to_string())?;
+
+    let mut guard = state.0.lock().unwrap();
+    *guard = Some(watcher);
+
+    Ok(())
+}
