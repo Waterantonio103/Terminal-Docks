@@ -62,6 +62,11 @@ pub fn spawn_pty(
     };
 
     let mut cmd = CommandBuilder::new(shell);
+    cmd.env("TERM", "xterm-256color");
+    if !cfg!(target_os = "windows") {
+        cmd.args(["-l", "-i"]);
+    }
+
     if let Some(path) = cwd {
         if !path.is_empty() {
             cmd.cwd(path);

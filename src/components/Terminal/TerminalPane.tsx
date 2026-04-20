@@ -121,8 +121,8 @@ export function TerminalPane({ pane }: { pane: Pane }) {
       term.loadAddon(webgl);
     } catch { /* WebGL not available */ }
 
-    // Use a small timeout to ensure the container is stable before fitting
-    setTimeout(() => fit.fit(), 50);
+    // Use a timeout longer than the panel's 200ms CSS transition so dimensions are stable
+    setTimeout(() => fit.fit(), 260);
     terminalInstance.current = term;
 
     // Scroll tracking
@@ -199,17 +199,21 @@ export function TerminalPane({ pane }: { pane: Pane }) {
       invoke('write_to_pty', { id: terminalId, data });
     });
 
-    // Debounced resize to prevent layout thrashing and PTY issues
+    // Debounced resize to prevent layout thrashing and PTY issues.
+    // Debounce is 250ms — longer than the panel's 200ms CSS transition — so fit.fit()
+    // only runs after the container has reached its final stable dimensions.
     let resizeTimeout: ReturnType<typeof setTimeout>;
     const resizeObserver = new ResizeObserver(() => {
       clearTimeout(resizeTimeout);
       resizeTimeout = setTimeout(() => {
         if (!terminalInstance.current) return;
+        // Guard against zero-dimension containers (e.g. during CSS transitions or hidden states)
+        if (terminalElement.offsetWidth === 0 || terminalElement.offsetHeight === 0) return;
         fit.fit();
         if (term.rows && term.cols) {
           invoke('resize_pty', { id: terminalId, rows: term.rows, cols: term.cols });
         }
-      }, 100);
+      }, 250);
     });
 
     resizeObserver.observe(terminalElement);

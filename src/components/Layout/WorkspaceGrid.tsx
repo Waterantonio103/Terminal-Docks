@@ -26,9 +26,10 @@ interface DashboardPanelProps {
   onResizeStart: (id: string, e: React.MouseEvent) => void;
   isDragging: boolean;
   isResizing: boolean;
+  anyActive: boolean;
 }
 
-function DashboardPanel({ pane, onDragStart, onResizeStart, isDragging, isResizing }: DashboardPanelProps) {
+function DashboardPanel({ pane, onDragStart, onResizeStart, isDragging, isResizing, anyActive }: DashboardPanelProps) {
   const { x, y, w, h } = pane.gridPos;
   const renamePane = useWorkspaceStore(s => s.renamePane);
   const removePane = useWorkspaceStore(s => s.removePane);
@@ -36,6 +37,7 @@ function DashboardPanel({ pane, onDragStart, onResizeStart, isDragging, isResizi
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState('');
   const inputRef = useRef<HTMLInputElement>(null);
+  const bodyRef = useRef<HTMLDivElement>(null);
 
   const left = (x / GRID_COLUMNS) * 100;
   const width = (w / GRID_COLUMNS) * 100;
@@ -48,7 +50,7 @@ function DashboardPanel({ pane, onDragStart, onResizeStart, isDragging, isResizi
     top: `${top}px`,
     width: `${width}%`,
     height: `${height}px`,
-    transition: isDragging || isResizing ? 'none' : 'all 0.2s cubic-bezier(0.2, 0, 0, 1)',
+    transition: anyActive ? 'none' : 'all 0.2s cubic-bezier(0.2, 0, 0, 1)',
     zIndex: isDragging || isResizing ? 50 : 10,
     opacity: isDragging ? 0.8 : 1,
   };
@@ -63,6 +65,13 @@ function DashboardPanel({ pane, onDragStart, onResizeStart, isDragging, isResizi
     const t = draft.trim();
     if (t) renamePane(pane.id, t);
     setEditing(false);
+    // Restore focus to the terminal after rename — xterm requires explicit focus
+    if (pane.type === 'terminal') {
+      setTimeout(() => {
+        const textarea = bodyRef.current?.querySelector<HTMLTextAreaElement>('.xterm-helper-textarea');
+        textarea?.focus();
+      }, 50);
+    }
   }
 
   return (
@@ -82,16 +91,18 @@ function DashboardPanel({ pane, onDragStart, onResizeStart, isDragging, isResizi
               value={draft}
               onChange={e => setDraft(e.target.value)}
               onBlur={commitEdit}
+              onMouseDown={e => e.stopPropagation()}
               onKeyDown={e => {
-                if (e.key === 'Enter') commitEdit();
+                if (e.key === 'Enter') { e.preventDefault(); commitEdit(); }
                 if (e.key === 'Escape') setEditing(false);
                 e.stopPropagation();
               }}
-              className="bg-bg-surface border border-accent-primary rounded px-1 text-xs text-text-primary outline-none w-[100px]"
+              className="bg-bg-surface border border-accent-primary rounded px-1 text-xs text-text-primary outline-none w-[100px] h-5"
             />
           ) : (
             <span
               className="text-xs font-medium text-text-secondary truncate flex-1"
+              onMouseDown={(e) => e.stopPropagation()}
               onDoubleClick={(e) => { e.stopPropagation(); startEdit(); }}
             >
               {pane.title}
@@ -108,7 +119,7 @@ function DashboardPanel({ pane, onDragStart, onResizeStart, isDragging, isResizi
         </div>
 
         {/* Body */}
-        <div className="flex-1 overflow-hidden relative">
+        <div ref={bodyRef} className="flex-1 overflow-hidden relative">
           {pane.type === 'terminal'       && <TerminalPane pane={pane} />}
           {pane.type === 'editor'         && <EditorPane pane={pane} />}
           {pane.type === 'taskboard'      && <TaskBoardPane />}
@@ -173,16 +184,17 @@ export function WorkspaceGrid() {
     if (!pane || !containerRef.current) return;
 
     const rect = containerRef.current.getBoundingClientRect();
+    const scrollTop = containerRef.current.scrollTop;
     const cellW = containerWidth / GRID_COLUMNS;
-    
+
     dragInfo.current = {
       startX: e.clientX,
       startY: e.clientY,
       startGrid: { ...pane.gridPos },
       offsetX: e.clientX - rect.left - (pane.gridPos.x * cellW),
-      offsetY: e.clientY - rect.top - (pane.gridPos.y * CELL_HEIGHT),
+      offsetY: e.clientY - rect.top + scrollTop - (pane.gridPos.y * CELL_HEIGHT),
     };
-    
+
     setDraggingId(id);
     setGhostPos(pane.gridPos);
   }, [panes, containerWidth]);
@@ -252,28 +264,29 @@ export function WorkspaceGrid() {
       if (!dragInfo.current || !containerRef.current) return;
       const { startX, startY, startGrid, offsetX, offsetY } = dragInfo.current;
       const rect = containerRef.current.getBoundingClientRect();
+      const scrollTop = containerRef.current.scrollTop;
       const cellW = containerWidth / GRID_COLUMNS;
 
       if (draggingId) {
         const mouseX = e.clientX - rect.left;
-        const mouseY = e.clientY - rect.top;
-        
+        const mouseY = e.clientY - rect.top + scrollTop;
+
         const newX = Math.round((mouseX - offsetX) / cellW);
         const newY = Math.round((mouseY - offsetY) / CELL_HEIGHT);
-        
+
         const clampedX = Math.max(0, Math.min(GRID_COLUMNS - startGrid.w, newX));
         const clampedY = Math.max(0, newY);
-        
+
         setGhostPos({ ...startGrid, x: clampedX, y: clampedY });
       } else if (resizingId) {
         const dx = e.clientX - startX;
         const dy = e.clientY - startY;
-        
+
         const newW = Math.max(2, Math.round((startGrid.w * cellW + dx) / cellW));
         const newH = Math.max(2, Math.round((startGrid.h * CELL_HEIGHT + dy) / CELL_HEIGHT));
-        
+
         const clampedW = Math.min(GRID_COLUMNS - startGrid.x, newW);
-        
+
         setGhostPos(prev => {
           if (prev && prev.x === startGrid.x && prev.y === startGrid.y && prev.w === clampedW && prev.h === newH) return prev;
           return { ...startGrid, w: clampedW, h: newH };
@@ -286,6 +299,7 @@ export function WorkspaceGrid() {
       if (dragInfo.current && containerRef.current && (draggingId || resizingId)) {
         const { startX, startY, startGrid, offsetX, offsetY } = dragInfo.current;
         const rect = containerRef.current.getBoundingClientRect();
+        const scrollTop = containerRef.current.scrollTop;
         const cellW = containerWidth / GRID_COLUMNS;
         const id = (draggingId || resizingId)!;
 
@@ -293,11 +307,11 @@ export function WorkspaceGrid() {
 
         if (draggingId) {
           const mouseX = e.clientX - rect.left;
-          const mouseY = e.clientY - rect.top;
+          const mouseY = e.clientY - rect.top + scrollTop;
           const newX = Math.round((mouseX - offsetX) / cellW);
           const newY = Math.round((mouseY - offsetY) / CELL_HEIGHT);
-          finalGridPos = { 
-            ...startGrid, 
+          finalGridPos = {
+            ...startGrid,
             x: Math.max(0, Math.min(GRID_COLUMNS - startGrid.w, newX)),
             y: Math.max(0, newY)
           };
@@ -306,13 +320,13 @@ export function WorkspaceGrid() {
           const dy = e.clientY - startY;
           const newW = Math.max(2, Math.round((startGrid.w * cellW + dx) / cellW));
           const newH = Math.max(2, Math.round((startGrid.h * CELL_HEIGHT + dy) / CELL_HEIGHT));
-          finalGridPos = { 
-            ...startGrid, 
+          finalGridPos = {
+            ...startGrid,
             w: Math.min(GRID_COLUMNS - startGrid.x, newW),
             h: newH
           };
         }
-        
+
         updatePaneLayout(id, finalGridPos);
       }
       
@@ -379,13 +393,14 @@ export function WorkspaceGrid() {
 
         {/* Panels */}
         {displayPanes.map(pane => (
-          <DashboardPanel 
-            key={pane.id} 
-            pane={pane} 
+          <DashboardPanel
+            key={pane.id}
+            pane={pane}
             onDragStart={onDragStart}
             onResizeStart={onResizeStart}
             isDragging={draggingId === pane.id}
             isResizing={resizingId === pane.id}
+            anyActive={!!(draggingId || resizingId)}
           />
         ))}
       </div>
