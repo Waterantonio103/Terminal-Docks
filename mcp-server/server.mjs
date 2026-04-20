@@ -1,6 +1,7 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import express from 'express';
+import cors from 'cors';
 import { z } from 'zod';
 import { writeFileSync, mkdirSync, readFileSync } from 'fs';
 import { randomUUID } from 'crypto';
@@ -462,7 +463,9 @@ function createMcpServer(getSessionId) {
 
     if (!existing) {
       fileLocks[filePath] = { agentId, sessionId: sid, lockedAt: Date.now() };
+      try { db.prepare('INSERT INTO file_locks (file_path, agent_id) VALUES (?, ?)').run(filePath, agentId); } catch {}
       bc(`Lock acquired: ${filePath} by ${agentId}`);
+      broadcast('Bridge', 'lock_update', 'lock_update');
       return { content: [{ type: 'text', text: `Lock acquired: ${filePath}` }] };
     }
 
@@ -503,6 +506,7 @@ function createMcpServer(getSessionId) {
       return { isError: true, content: [{ type: 'text', text: `Cannot unlock: owned by "${existing.agentId}".` }] };
     }
     delete fileLocks[filePath];
+    try { db.prepare('DELETE FROM file_locks WHERE file_path = ?').run(filePath); } catch {}
     bc(`Lock released: ${filePath} by ${agentId}`);
 
     // Auto-grant to the next live waiter. Skip waiters whose session has gone away.
@@ -523,6 +527,8 @@ function createMcpServer(getSessionId) {
       break;
     }
     if (queue.length === 0) delete fileWaitQueues[filePath];
+
+    broadcast('Bridge', 'lock_update', 'lock_update');
 
     const tail = granted ? ` Auto-granted to "${granted.agentId}".` : '';
     return { content: [{ type: 'text', text: `Lock released: ${filePath}.${tail}` }] };
@@ -759,6 +765,7 @@ The Mission Control panel displays published results in real time.
 
 // ── Express app ───────────────────────────────────────────────────────────────
 const app = express();
+app.use(cors());
 app.use(express.json());
 
 const authToken = process.env.MCP_AUTH_TOKEN;
@@ -774,14 +781,7 @@ app.use((req, res, next) => {
 
 app.get('/health', (_req, res) => res.json({ ok: true, port: PORT }));
 
-app.get('/locks', (_req, res) => {
-  const locks = db.prepare('SELECT * FROM file_locks').all();
-  const locksObj = {};
-  locks.forEach(l => {
-    locksObj[l.file_path] = { agentId: l.agent_id, lockedAt: l.locked_at };
-  });
-  res.json(locksObj);
-});
+app.get('/locks', (_req, res) => res.json(fileLocks));
 
 app.get('/sessions', (_req, res) => res.json(Object.keys(sessions)));
 
@@ -875,3 +875,4 @@ app.listen(PORT, () => {
   writeFileSync('.mcp/server.json', JSON.stringify({ url: `http://localhost:${PORT}/mcp`, port: PORT }, null, 2));
   console.log(`MCP server listening on port ${PORT} — db: ${dbPath}`);
 });
+

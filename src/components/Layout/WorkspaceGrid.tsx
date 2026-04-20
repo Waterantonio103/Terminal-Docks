@@ -102,7 +102,6 @@ function DashboardPanel({ pane, onDragStart, onResizeStart, isDragging, isResizi
           ) : (
             <span
               className="text-xs font-medium text-text-secondary truncate flex-1"
-              onMouseDown={(e) => e.stopPropagation()}
               onDoubleClick={(e) => { e.stopPropagation(); startEdit(); }}
             >
               {pane.title}
@@ -110,6 +109,7 @@ function DashboardPanel({ pane, onDragStart, onResizeStart, isDragging, isResizi
           )}
           <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
             <button
+              onMouseDown={(e) => e.stopPropagation()}
               onClick={() => removePane(pane.id)}
               className="w-5 h-5 flex items-center justify-center rounded text-text-muted hover:text-red-400 hover:bg-bg-surface"
             >

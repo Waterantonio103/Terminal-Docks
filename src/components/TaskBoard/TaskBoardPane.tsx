@@ -38,6 +38,19 @@ export function TaskBoardPane() {
 
   useEffect(() => {
     fetchTasks();
+
+    let unlisten: (() => void) | undefined;
+    import('@tauri-apps/api/event').then(({ listen }) => {
+      listen('mcp-message', (event: any) => {
+        if (event.payload?.type === 'task_update') {
+          fetchTasks();
+        }
+      }).then(fn => { unlisten = fn; });
+    });
+
+    return () => {
+      if (unlisten) unlisten();
+    };
   }, []);
 
   const handleAddTask = async (e: React.FormEvent) => {
