@@ -2,7 +2,7 @@ import { useState } from 'react';
 import {
   Layout, Save, Trash2, Play,
   TerminalSquare, FileCode2, Kanban, Activity, Rocket, Monitor,
-  LayoutDashboard,
+  LayoutDashboard, Network,
 } from 'lucide-react';
 import { useWorkspaceStore, ThemeType, PaneType, selectActivePanes } from '../../store/workspace';
 
@@ -50,6 +50,7 @@ const PANE_ICONS: Record<PaneType, React.ReactNode> = {
   activityfeed: <Activity size={11} />,
   launcher:       <Rocket size={11} />,
   missioncontrol: <Monitor size={11} />,
+  nodetree:       <Network size={11} />,
 };
 
 const PANE_COLORS: Record<PaneType, string> = {
@@ -59,6 +60,7 @@ const PANE_COLORS: Record<PaneType, string> = {
   activityfeed: 'text-purple-400',
   launcher:       'text-accent-primary',
   missioncontrol: 'text-cyan-400',
+  nodetree:       'text-indigo-400',
 };
 
 const TEMPLATES = [

@@ -95,6 +95,8 @@ function buildLaunchPrompt(agentId: string, ctx: LaunchContext, instructionOverr
   const modeDefault = ctx.mode === 'edit' ? EDIT_INSTRUCTIONS[agentId] : undefined;
   lines.push(instructionOverride ?? modeDefault ?? agent.coreInstructions);
 
+  lines.push('CRITICAL: If you receive a raw JSON message starting with {"signal":"NEW_TASK"...}, you MUST parse it and immediately call the `get_task_details` tool using the provided missionId and nodeId, and then call `receive_messages` with that nodeId to process your inbox.');
+
   lines.push('When your work is complete:');
   let step = 1;
   if (!isSolo && ctx.successorRole) {
@@ -283,24 +285,73 @@ export function LauncherPane() {
       } else {
         // Stage 2: Execute — every agent in the first group fires immediately,
         // the rest wait. Parallel within a group, sequential between groups.
-        const agents: MissionAgent[] = targets.map(r => ({
+        const missionId = crypto.randomUUID();
+        
+        const nodes = targets.map((r, index) => ({
+          id: `node-${missionId}-${index}`,
+          roleId: r.roleId,
+          status: 'idle',
+        }));
+
+        const agents: MissionAgent[] = targets.map((r, index) => ({
           terminalId: r.pane.data?.terminalId ?? `term-${r.pane.id}`,
           title: r.pane.title,
           roleId: r.roleId,
-          status: firstGroup.includes(r.roleId) ? 'running' : 'waiting',
-          triggered: firstGroup.includes(r.roleId),
-          startedAt: firstGroup.includes(r.roleId) ? Date.now() : undefined,
+          status: 'idle',
+          nodeId: `node-${missionId}-${index}`,
         }));
 
-        await Promise.all(targets.filter(r => firstGroup.includes(r.roleId)).map(r =>
-          writeToTerminal(r.pane, '\r')
-        ));
+        // Build edges based on stageGroups
+        const edges = [];
+        for (let i = 0; i < stageGroups.length - 1; i++) {
+          const currentGroupRoles = stageGroups[i];
+          const nextGroupRoles = stageGroups[i + 1];
 
+          // Find nodes in current group
+          const currentNodes = nodes.filter(n => currentGroupRoles.includes(n.roleId));
+          const nextNodes = nodes.filter(n => nextGroupRoles.includes(n.roleId));
+
+          for (const cNode of currentNodes) {
+            for (const nNode of nextNodes) {
+              edges.push({
+                fromNodeId: cNode.id,
+                toNodeId: nNode.id,
+                condition: 'always'
+              });
+            }
+          }
+        }
+        
+        // Add review-to-specialist retry edges if Reviewer exists
+        const reviewerNode = nodes.find(n => n.roleId === 'reviewer');
+        if (reviewerNode) {
+            const retryTargets = nodes.filter(n => ['builder', 'tester', 'security'].includes(n.roleId));
+            for (const target of retryTargets) {
+               edges.push({
+                   fromNodeId: reviewerNode.id,
+                   toNodeId: target.id,
+                   condition: 'on_failure' // Optional semantic condition
+               });
+            }
+        }
+
+        const graph = {
+          id: missionId,
+          nodes,
+          edges,
+        };
+
+        // Notify Rust backend
+        await invoke('start_mission_graph', { missionId, graph });
+
+        // Update UI
         addPane('missioncontrol', 'Mission Control', {
           taskDescription: task.trim(),
           agents,
+          missionId,
           pipeline,
           stageGroups,
+          graph,
         });
 
         const firstCount = targets.filter(r => firstGroup.includes(r.roleId)).length;

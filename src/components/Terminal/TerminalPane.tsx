@@ -14,7 +14,7 @@ import { ChevronDown, ChevronUp, X } from 'lucide-react';
 
 interface ContextMenuState { x: number; y: number }
 
-export function TerminalPane({ pane }: { pane: Pane }) {
+export function TerminalPane({ pane, dragEndSeq }: { pane: Pane; dragEndSeq?: number }) {
   const terminalRef      = useRef<HTMLDivElement>(null);
   const terminalInstance = useRef<Terminal | null>(null);
   const fitAddon         = useRef<FitAddon | null>(null);
@@ -118,6 +118,11 @@ export function TerminalPane({ pane }: { pane: Pane }) {
 
     try {
       const webgl = new WebglAddon();
+      // On macOS (WKWebView), compositing layer changes during drag can silently
+      // kill the WebGL context. Detect this and fall back to the canvas renderer.
+      webgl.onContextLoss(() => {
+        webgl.dispose();
+      });
       term.loadAddon(webgl);
     } catch { /* WebGL not available */ }
 
@@ -237,6 +242,21 @@ export function TerminalPane({ pane }: { pane: Pane }) {
       cursor:     rootStyle.getPropertyValue('--accent-primary').trim() || '#7059f5',
     };
   }, [currentTheme]);
+
+  // After a drag/resize operation ends, force xterm to repaint.
+  // On macOS (WKWebView), moving an overflow:hidden container to a new absolute
+  // position can leave the canvas with a stale compositor frame — the terminal
+  // is functional but visually blank. refresh() forces WebKit to repaint the rows.
+  useEffect(() => {
+    if (!dragEndSeq || !terminalInstance.current) return;
+    const term = terminalInstance.current;
+    // Wait for the 200ms CSS position transition to finish before refreshing.
+    const id = setTimeout(() => {
+      fitAddon.current?.fit();
+      term.refresh(0, term.rows - 1);
+    }, 220);
+    return () => clearTimeout(id);
+  }, [dragEndSeq]);
 
   const handleSearch = (query: string, forward = true) => {
     if (!searchAddon.current || !query) return;

@@ -6,20 +6,6 @@ import ReactMarkdown from 'react-markdown';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 
-type HandoffEvent = {
-  taskId?: number;
-  fromRole: string;
-  targetRole: string;
-  title?: string;
-  description?: string | null;
-  payload?: string | null;
-};
-
-// Phase 2/3 special handoff edges.
-const DONE_ROLE = 'done';
-const RETRY_TARGETS = new Set(['builder', 'tester', 'security']);
-const isRetryEdge = (h: HandoffEvent) => h.fromRole === 'reviewer' && RETRY_TARGETS.has(h.targetRole);
-
 function AgentBadge({ agent }: { agent: MissionAgent }) {
   const role = agentsConfig.agents.find(a => a.id === agent.roleId);
   
@@ -58,7 +44,6 @@ export function MissionControlPane({ pane }: { pane: Pane }) {
   const stageGroups: string[][] = pane.data?.stageGroups ?? pipeline.map(r => [r]);
 
   const results = useWorkspaceStore(s => s.results);
-  const messages = useWorkspaceStore(s => s.messages);
   const allTasks = useWorkspaceStore(s => s.tasks);
   const updatePaneData = useWorkspaceStore(s => s.updatePaneData);
 
@@ -66,9 +51,6 @@ export function MissionControlPane({ pane }: { pane: Pane }) {
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [exportStatus, setExportStatus] = useState<{ path: string } | { error: string } | null>(null);
   const outputRef                   = useRef<HTMLDivElement>(null);
-  // Retry edges need exactly-once handling or we'd re-fire builders on every
-  // messages-array update. Normal stage handoffs are idempotent so they don't.
-  const processedRetryIds = useRef<Set<number>>(new Set());
 
   // Watch for PTY spawn events to reset individual agent status
   useEffect(() => {
@@ -84,108 +66,55 @@ export function MissionControlPane({ pane }: { pane: Pane }) {
     return () => { unlisten.then(f => f()); };
   }, [agents, pane.id, updatePaneData]);
 
-  // Orchestrator: advance the pipeline on handoff_task events.
-  // A handoff message carries { fromRole, targetRole, ... } as JSON. Phase 2
-  // adds two special edges on top of the linear stage advance:
-  //   • reviewer → done:    marks all running agents completed (workflow end).
-  //   • reviewer → builder: retry loop — reset reviewer to waiting and re-fire
-  //     every builder terminal with the failure payload waiting in their inbox.
+  // Phase 2 Orchestrator: Listen for events from the Rust backend engine
   useEffect(() => {
-    if (messages.length === 0 && agents.every(a => a.status !== 'running')) return;
+    const unlistenTrigger = listen<{ missionId: string, nodeId: string, roleId: string, payload?: string }>('workflow-node-triggered', (event) => {
+      const { missionId, nodeId, roleId } = event.payload;
+      if (pane.data?.missionId && pane.data.missionId !== missionId) return;
 
-    const updatedAgents: MissionAgent[] = agents.map(a => ({ ...a }));
-    let changed = false;
-
-    const handoffs: Array<HandoffEvent & { msgId: number }> = [];
-    for (const msg of messages) {
-      if (msg.type !== 'handoff') continue;
-      try {
-        const parsed = JSON.parse(msg.content) as HandoffEvent;
-        if (parsed.fromRole && parsed.targetRole) handoffs.push({ ...parsed, msgId: msg.id });
-      } catch { /* malformed handoff payload — ignore */ }
-    }
-
-    for (const handoff of handoffs) {
-      // Retry loop — must run exactly once per handoff or we'd re-fire the
-      // retried specialist on every message-array update. Retry now targets
-      // a specific role (builder | tester | security), not just Builder.
-      if (isRetryEdge(handoff)) {
-        if (processedRetryIds.current.has(handoff.msgId)) continue;
-        processedRetryIds.current.add(handoff.msgId);
-
-        const retryRole = handoff.targetRole;
-        for (const agent of updatedAgents) {
-          if (agent.roleId === 'reviewer' && (agent.status === 'running' || agent.status === 'completed')) {
-            agent.status = 'waiting';
-            agent.triggered = false;
-            agent.completedAt = undefined;
-            agent.startedAt = undefined;
-            changed = true;
-          }
-          if (agent.roleId === retryRole) {
-            invoke('write_to_pty', { id: agent.terminalId, data: '\r' }).catch(console.error);
-            agent.status = 'running';
-            agent.triggered = true;
-            agent.startedAt = Date.now();
-            agent.completedAt = undefined;
-            changed = true;
-          }
-        }
-        continue;
-      }
-
-      // Terminal handoff — workflow is done, close out any still-running agents.
-      if (handoff.targetRole === DONE_ROLE) {
-        for (const agent of updatedAgents) {
-          if (agent.status === 'running') {
-            agent.status = 'completed';
-            agent.completedAt = Date.now();
-            changed = true;
-          }
-        }
-        continue;
-      }
-
-      if (!pipeline.includes(handoff.fromRole) || !pipeline.includes(handoff.targetRole)) continue;
-
-      // Normal stage advance: mark every running agent in fromRole completed.
-      // Parallel peers (e.g. tester finishing while builder is still running)
-      // each mark their own role done; the group-level predecessor check below
-      // waits until the whole group is finished before firing the next stage.
-      for (const agent of updatedAgents) {
-        if (agent.roleId === handoff.fromRole && agent.status === 'running') {
-          agent.status = 'completed';
-          agent.completedAt = Date.now();
-          changed = true;
+      const updatedAgents = [...agents];
+      const agentIdx = updatedAgents.findIndex(a => a.nodeId === nodeId || (!a.nodeId && a.roleId === roleId));
+      
+      if (agentIdx !== -1) {
+        const agent = updatedAgents[agentIdx];
+        if (!agent.triggered) {
+          const signalPayload = JSON.stringify({
+            signal: "NEW_TASK",
+            missionId,
+            nodeId,
+            roleId
+          });
+          invoke('write_to_pty', { id: agent.terminalId, data: `${signalPayload}\r` }).catch(console.error);
+          agent.status = 'running';
+          agent.triggered = true;
+          agent.startedAt = Date.now();
+          agent.completedAt = undefined;
+          updatePaneData(pane.id, { agents: updatedAgents });
         }
       }
-    }
+    });
 
-    // Advance any stage group whose predecessor group is fully completed.
-    // Idempotent — recovers if a handoff event was missed while the UI mounted.
-    for (let i = 1; i < stageGroups.length; i++) {
-      const prevGroup = stageGroups[i - 1];
-      const prevAgents = updatedAgents.filter(a => prevGroup.includes(a.roleId));
-      const prevAllDone = prevAgents.length > 0 && prevAgents.every(a => a.status === 'completed');
-      if (!prevAllDone) continue;
-
-      const currentGroup = stageGroups[i];
-      for (const next of updatedAgents) {
-        if (!currentGroup.includes(next.roleId)) continue;
-        if ((next.status === 'waiting' || next.status === 'idle') && !next.triggered) {
-          invoke('write_to_pty', { id: next.terminalId, data: '\r' }).catch(console.error);
-          next.status = 'running';
-          next.triggered = true;
-          next.startedAt = Date.now();
-          changed = true;
+    const unlistenUpdate = listen<{ id: string, status: string }>('workflow-node-update', (event) => {
+      const { id: nodeId, status } = event.payload;
+      
+      const updatedAgents = [...agents];
+      const agentIdx = updatedAgents.findIndex(a => a.nodeId === nodeId);
+      
+      if (agentIdx !== -1) {
+        const agent = updatedAgents[agentIdx];
+        agent.status = status as MissionAgent['status'];
+        if (status === 'completed') {
+           agent.completedAt = Date.now();
         }
+        updatePaneData(pane.id, { agents: updatedAgents });
       }
-    }
+    });
 
-    if (changed) {
-      updatePaneData(pane.id, { agents: updatedAgents });
-    }
-  }, [messages, pipeline, agents, pane.id, updatePaneData]);
+    return () => {
+      unlistenTrigger.then(f => f());
+      unlistenUpdate.then(f => f());
+    };
+  }, [agents, pane.id, updatePaneData, pane.data?.missionId]);
 
   // Update preview URL when a new URL result comes in
   useEffect(() => {

@@ -2,6 +2,8 @@ pub mod db;
 pub mod pty;
 pub mod mcp;
 pub mod swarm;
+pub mod workflow;
+pub mod workflow_engine;
 pub mod workflow_log;
 
 #[tauri::command]
@@ -20,6 +22,7 @@ pub fn run() {
         .manage(pty::PtyState::new())
         .manage(mcp::McpState::new())
         .manage(swarm::WatcherState::new())
+        .manage(workflow_engine::WorkflowState::new())
         .invoke_handler(tauri::generate_handler![
             greet,
             pty::spawn_pty,
@@ -40,6 +43,7 @@ pub fn run() {
             swarm::get_swarm_status,
             swarm::watch_directory,
             workflow_log::export_workflow_log,
+            workflow_engine::start_mission_graph,
         ])
         .setup(|app| {
             db::init_db(app.handle()).expect("Failed to init db");

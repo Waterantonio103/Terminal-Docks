@@ -1,5 +1,5 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
+import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
 import express from 'express';
 import cors from 'cors';
 import { z } from 'zod';
@@ -34,6 +34,8 @@ db.exec(`
     from_role TEXT,
     target_role TEXT,
     payload TEXT,
+    mission_id TEXT,
+    node_id TEXT,
     FOREIGN KEY(parent_id) REFERENCES tasks(id)
   );
   CREATE TABLE IF NOT EXISTS file_locks (
@@ -46,7 +48,11 @@ db.exec(`
     session_id TEXT NOT NULL,
     event_type TEXT NOT NULL,
     content TEXT,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    mission_id TEXT,
+    node_id TEXT,
+    recipient_node_id TEXT,
+    is_read BOOLEAN DEFAULT 0
   );
   CREATE TABLE IF NOT EXISTS workspace_context (
     key TEXT PRIMARY KEY,
@@ -58,8 +64,13 @@ db.exec(`
 
 // Migrate existing DBs created before Phase 1 (handoff columns).
 // SQLite lacks IF NOT EXISTS on ADD COLUMN, so we swallow duplicate-column errors.
-for (const col of ['from_role TEXT', 'target_role TEXT', 'payload TEXT']) {
+for (const col of ['from_role TEXT', 'target_role TEXT', 'payload TEXT', 'mission_id TEXT', 'node_id TEXT']) {
   try { db.exec(`ALTER TABLE tasks ADD COLUMN ${col}`); }
+  catch (e) { if (!String(e).includes('duplicate column')) throw e; }
+}
+
+for (const col of ['mission_id TEXT', 'node_id TEXT', 'recipient_node_id TEXT', 'is_read BOOLEAN DEFAULT 0']) {
+  try { db.exec(`ALTER TABLE session_log ADD COLUMN ${col}`); }
   catch (e) { if (!String(e).includes('duplicate column')) throw e; }
 }
 
@@ -260,13 +271,30 @@ function createMcpServer(getSessionId) {
     return { content: [{ type: 'text', text }] };
   });
 
+  server.registerTool('get_task_details', {
+    title: 'Get Task Details',
+    description: 'Get details about a task or your node objective. Use this when you receive a NEW_TASK signal via your terminal.',
+    inputSchema: {
+      missionId: z.string().describe('The active mission ID'),
+      nodeId: z.string().describe('Your specific node ID in the graph')
+    }
+  }, async ({ missionId, nodeId }) => {
+    // If the node was triggered by a handoff, its task is recorded with mission_id and node_id
+    const tasks = db.prepare('SELECT * FROM tasks WHERE mission_id = ? AND node_id = ? ORDER BY id DESC LIMIT 1').all(missionId, nodeId);
+    if (tasks.length === 0) {
+      // Fallback: no explicit task row yet (e.g. start of mission), but the agent is part of a mission.
+      return { content: [{ type: 'text', text: `Node ${nodeId} in mission ${missionId} is active. Use receive_messages to check your inbox.` }] };
+    }
+    return { content: [{ type: 'text', text: JSON.stringify(tasks[0], null, 2) }] };
+  });
+
   // ── Handoff / supervisor routing ───────────────────────────────────────────
   // Phase 1: Replaces string-signal broadcasts ("INTELLIGENCE REPORT" etc.) with
   // explicit, payload-driven stage transitions. Mission Control listens for the
   // emitted 'handoff' event and advances the pipeline deterministically.
   server.registerTool('handoff_task', {
     title: 'Handoff Task',
-    description: 'Hand off structured work to the next role in the pipeline. Creates a task row with a JSON payload and emits a handoff event that advances Mission Control. Use this when your stage is complete instead of announcing a literal phrase.',
+    description: 'Hand off structured work to the next role or node in the pipeline. Creates a task row with a JSON payload and emits a handoff event that advances Mission Control. Use this when your stage is complete instead of announcing a literal phrase.',
     inputSchema: {
       fromRole: z.string().min(1).describe('Your role id (e.g. "scout", "coordinator", "builder")'),
       targetRole: z.string().min(1).describe('Role id that should run next (e.g. "coordinator", "builder", "reviewer")'),
@@ -274,17 +302,19 @@ function createMcpServer(getSessionId) {
       description: z.string().optional().describe('Longer notes for the receiving role'),
       payload: z.any().optional().describe('Structured data for the next role (any JSON value)'),
       parentTaskId: z.number().int().optional().describe('Parent task id if this is a subtask of an existing task'),
+      missionId: z.string().optional().describe('The ID of the active mission graph'),
+      fromNodeId: z.string().optional().describe('Your specific node ID in the graph'),
+      targetNodeId: z.string().optional().describe('The target node ID in the graph'),
     }
-  }, async ({ fromRole: rawFrom, targetRole: rawTarget, title, description, payload, parentTaskId }) => {
+  }, async ({ fromRole: rawFrom, targetRole: rawTarget, title, description, payload, parentTaskId, missionId, fromNodeId, targetNodeId }) => {
     const sid = getSessionId() ?? 'unknown';
 
     const fromRole = rawFrom.trim().toLowerCase();
     const targetRole = rawTarget.trim().toLowerCase();
 
-    // Phase 2: enforce graph edges. Reject transitions that are not allowed
-    // by WORKFLOW_GRAPH so agents cannot jump stages or hand off backwards
-    // except along sanctioned edges (e.g. reviewer → builder for retry).
-    if (!isValidTransition(fromRole, targetRole)) {
+    // If we're operating in Graph Mode (Phase 3), we don't strictly enforce WORKFLOW_GRAPH here,
+    // because the Rust WorkflowEngine manages the dynamic graph. But if we're in legacy mode, we enforce it.
+    if (!missionId && !isValidTransition(fromRole, targetRole)) {
       const allowed = WORKFLOW_GRAPH[fromRole]?.next ?? [];
       const msg = WORKFLOW_GRAPH[fromRole]
         ? `Invalid transition: ${fromRole} → ${targetRole}. Allowed next roles: ${allowed.join(', ') || '(none; this is a terminal role)'}.`
@@ -300,19 +330,19 @@ function createMcpServer(getSessionId) {
     let taskId = null;
     if (targetRole !== 'done') {
       const info = db.prepare(
-        'INSERT INTO tasks (title, description, agent_id, parent_id, status, from_role, target_role, payload) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
-      ).run(title, description ?? null, targetRole, parentTaskId ?? null, 'todo', fromRole, targetRole, payloadStr);
+        'INSERT INTO tasks (title, description, agent_id, parent_id, status, from_role, target_role, payload, mission_id, node_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+      ).run(title, description ?? null, targetRole, parentTaskId ?? null, 'todo', fromRole, targetRole, payloadStr, missionId ?? null, targetNodeId ?? null);
       taskId = info.lastInsertRowid;
     }
 
-    logSession(sid, 'handoff_task', JSON.stringify({ taskId, fromRole, targetRole, title }));
+    logSession(sid, 'handoff_task', JSON.stringify({ taskId, fromRole, targetRole, title, missionId, fromNodeId, targetNodeId }));
 
     // Broadcast the handoff to the UI orchestrator and peers. The JSON content
     // lets MissionControlPane advance the pipeline without string scraping.
-    const eventBody = { taskId, fromRole, targetRole, title, description: description ?? null, payload: payloadStr };
+    const eventBody = { taskId, fromRole, targetRole, title, description: description ?? null, payload: payloadStr, missionId, fromNodeId, targetNodeId };
     broadcast(fromRole, JSON.stringify(eventBody), 'handoff');
     if (taskId !== null) {
-      broadcast('Bridge', JSON.stringify({ id: taskId, title, agentId: targetRole, parentTaskId: parentTaskId ?? null, status: 'todo' }), 'task_update');
+      broadcast('Bridge', JSON.stringify({ id: taskId, title, agentId: targetRole, parentTaskId: parentTaskId ?? null, status: 'todo', missionId, targetNodeId }), 'task_update');
     }
     bc(`Handoff: ${fromRole} → ${targetRole}${taskId ? ` (task ${taskId}: "${title}")` : ' (workflow complete)'}`);
 
@@ -664,29 +694,63 @@ The Mission Control panel displays published results in real time.
 
   server.registerTool('send_message', {
     title: 'Send Message',
-    description: 'Send a message to another agent session.',
-    inputSchema: { targetSessionId: z.string().uuid(), message: z.string() }
-  }, async ({ targetSessionId, message }) => {
-    if (!sessions[targetSessionId]) {
-      return { isError: true, content: [{ type: 'text', text: `Session ${targetSessionId} not found. Use list_sessions to see active sessions.` }] };
+    description: 'Send a message to another agent session or node.',
+    inputSchema: { 
+      targetSessionId: z.string().uuid().optional(), 
+      targetNodeId: z.string().optional(),
+      message: z.string() 
     }
-    if (!messageQueues[targetSessionId]) messageQueues[targetSessionId] = [];
+  }, async ({ targetSessionId, targetNodeId, message }) => {
+    if (!targetSessionId && !targetNodeId) {
+      return { isError: true, content: [{ type: 'text', text: 'Must provide either targetSessionId or targetNodeId' }] };
+    }
     const from = getSessionId() ?? 'unknown';
-    messageQueues[targetSessionId].push({ from, text: message, timestamp: Date.now() });
-    bc(`Message queued: ${from} → ${targetSessionId}`);
-    return { content: [{ type: 'text', text: `Message delivered to session ${targetSessionId}.` }] };
+
+    if (targetNodeId) {
+      db.prepare("INSERT INTO session_log (session_id, event_type, content, recipient_node_id) VALUES (?, 'message', ?, ?)").run(from, message, targetNodeId);
+      bc(`Message queued: ${from} → node ${targetNodeId}`);
+      return { content: [{ type: 'text', text: `Message delivered to node ${targetNodeId}.` }] };
+    }
+
+    if (targetSessionId) {
+      if (!sessions[targetSessionId]) {
+        return { isError: true, content: [{ type: 'text', text: `Session ${targetSessionId} not found. Use list_sessions to see active sessions.` }] };
+      }
+      if (!messageQueues[targetSessionId]) messageQueues[targetSessionId] = [];
+      messageQueues[targetSessionId].push({ from, text: message, timestamp: Date.now() });
+      bc(`Message queued: ${from} → session ${targetSessionId}`);
+      return { content: [{ type: 'text', text: `Message delivered to session ${targetSessionId}.` }] };
+    }
   });
 
   server.registerTool('receive_messages', {
     title: 'Receive Messages',
-    description: 'Read all pending messages sent to your session. Clears the queue after reading.',
-    inputSchema: {}
-  }, async () => {
+    description: 'Read all pending messages sent to your session or node. Marks them as read.',
+    inputSchema: {
+      nodeId: z.string().optional().describe('Your specific node ID in the graph, if applicable.')
+    }
+  }, async ({ nodeId }) => {
     const sid = getSessionId();
     const msgs = messageQueues[sid] ?? [];
     messageQueues[sid] = [];
-    if (msgs.length === 0) return { content: [{ type: 'text', text: 'No messages.' }] };
-    const text = msgs.map(m => `[${new Date(m.timestamp).toISOString()}] from ${m.from}:\n${m.text}`).join('\n\n');
+    
+    let dbMsgs = [];
+    if (nodeId) {
+      dbMsgs = db.prepare("SELECT * FROM session_log WHERE recipient_node_id = ? AND event_type = 'message' AND is_read = 0").all(nodeId);
+      if (dbMsgs.length > 0) {
+        const ids = dbMsgs.map(m => m.id);
+        db.prepare(`UPDATE session_log SET is_read = 1 WHERE id IN (${ids.join(',')})`).run();
+      }
+    }
+
+    if (msgs.length === 0 && dbMsgs.length === 0) return { content: [{ type: 'text', text: 'No messages.' }] };
+    
+    let text = msgs.map(m => `[${new Date(m.timestamp).toISOString()}] from ${m.from}:\n${m.text}`).join('\n\n');
+    if (dbMsgs.length > 0) {
+      if (text) text += '\n\n';
+      text += dbMsgs.map(m => `[${new Date(m.created_at).toISOString()}] from ${m.session_id}:\n${m.content}`).join('\n\n');
+    }
+    
     return { content: [{ type: 'text', text }] };
   });
 
@@ -796,74 +860,59 @@ app.get('/events', (req, res) => {
 });
 
 // ── MCP transport ─────────────────────────────────────────────────────────────
-app.post('/mcp', async (req, res) => {
+app.get('/mcp', async (req, res) => {
   try {
-    const sessionId = req.headers['mcp-session-id'];
-    if (sessionId && sessions[sessionId]) {
-      await sessions[sessionId].transport.handleRequest(req, res, req.body);
-      return;
-    }
+    const transport = new SSEServerTransport('/mcp/message', res);
+    const sid = transport.sessionId;
+    
+    sessions[sid] = sessions[sid] || {};
+    sessions[sid].transport = transport;
 
-    if (!sessionId && isInitializeRequest(req.body)) {
-      let sidFromCallback;
-      const transport = new StreamableHTTPServerTransport({
-        sessionIdGenerator: () => randomUUID(),
-        onsessioninitialized: sid => {
-          sidFromCallback = sid;
-          sessions[sid] = sessions[sid] || {};
-          sessions[sid].transport = transport;
-          console.log(`Session initialized: ${sid}`);
-        }
-      });
+    const mcpServer = createMcpServer(() => sid);
+    sessions[sid].mcpServer = mcpServer;
 
-      transport.onclose = () => {
-        const sid = sidFromCallback || transport.sessionId;
-        if (sid && sessions[sid]) {
-          console.log(`Transport closed for session ${sid}`);
-          logSession(sid, 'disconnect', null);
-          delete sessions[sid];
-          broadcast('Bridge', 'session_update', 'session_update');
-        }
-      };
+    transport.onclose = () => {
+      console.log(`Transport closed for session ${sid}`);
+      logSession(sid, 'disconnect', null);
+      delete sessions[sid];
+      broadcast('Bridge', 'session_update', 'session_update');
+    };
 
-      const mcpServer = createMcpServer(() => sidFromCallback);
-      await mcpServer.connect(transport);
-      await transport.handleRequest(req, res, req.body);
+    // mcpServer.connect calls transport.start() automatically, which sends the SSE headers.
+    await mcpServer.connect(transport);
 
-      if (sidFromCallback) {
-        sessions[sidFromCallback] = sessions[sidFromCallback] || {};
-        sessions[sidFromCallback].mcpServer = mcpServer;
-        sessions[sidFromCallback].transport = transport;
-        console.log(`Registered session ${sidFromCallback}`);
-        broadcast('Bridge', 'session_update', 'session_update');
-      }
-      return;
-    }
-
-    res.status(400).json({ jsonrpc: '2.0', error: { code: -32000, message: 'Bad Request: No valid session ID provided' }, id: null });
+    console.log(`Registered session ${sid}`);
+    broadcast('Bridge', 'session_update', 'session_update');
   } catch (error) {
-    console.error('Error handling MCP POST:', error);
-    if (!res.headersSent) res.status(500).json({ jsonrpc: '2.0', error: { code: -32603, message: 'Internal server error' }, id: null });
+    console.error('Error starting SSE transport:', error);
+    if (!res.headersSent) res.status(500).json({ error: 'Internal server error' });
   }
 });
 
-app.get('/mcp', async (req, res) => {
-  const sessionId = req.headers['mcp-session-id'];
-  if (!sessionId || !sessions[sessionId] || !sessions[sessionId].transport) {
-    res.status(400).send('Invalid or missing session ID');
-    return;
+app.post('/mcp/message', async (req, res) => {
+  try {
+    const sessionId = req.query.sessionId;
+    if (!sessionId || !sessions[sessionId] || !sessions[sessionId].transport) {
+      return res.status(400).send('Invalid or missing session ID');
+    }
+    await sessions[sessionId].transport.handlePostMessage(req, res, req.body);
+  } catch (error) {
+    console.error('Error handling message POST:', error);
+    if (!res.headersSent) res.status(500).send('Internal server error');
   }
-  await sessions[sessionId].transport.handleRequest(req, res);
+});
+
+app.post('/mcp', async (req, res) => {
+  res.status(400).json({ error: 'Please use GET /mcp for SSE connections (SSEServerTransport).' });
 });
 
 app.delete('/mcp', async (req, res) => {
-  const sessionId = req.headers['mcp-session-id'];
+  const sessionId = req.query.sessionId;
   if (!sessionId || !sessions[sessionId] || !sessions[sessionId].transport) {
-    res.status(400).send('Invalid or missing session ID');
-    return;
+    return res.status(400).send('Invalid or missing session ID');
   }
   try {
-    await sessions[sessionId].transport.handleRequest(req, res);
+    await sessions[sessionId].transport.close();
   } catch (err) {
     console.error('Error terminating session:', err);
     if (!res.headersSent) res.status(500).send('Error processing session termination');

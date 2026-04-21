@@ -1,4 +1,4 @@
-import { TerminalSquare, FileCode2, KanbanSquare, Activity, Rocket, Monitor, X } from 'lucide-react';
+import { TerminalSquare, FileCode2, KanbanSquare, Activity, Rocket, Monitor, X, Network } from 'lucide-react';
 import { useWorkspaceStore, PaneType, Pane, selectActivePanes, GridPos, resolveCollisions } from '../../store/workspace';
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { TerminalPane } from '../Terminal/TerminalPane';
@@ -15,6 +15,7 @@ const PANE_ICONS: Record<PaneType, React.ReactNode> = {
   activityfeed:   <Activity size={13} />,
   launcher:       <Rocket size={13} />,
   missioncontrol: <Monitor size={13} />,
+  nodetree:       <Network size={13} />,
 };
 
 const CELL_HEIGHT = 30;
@@ -27,9 +28,12 @@ interface DashboardPanelProps {
   isDragging: boolean;
   isResizing: boolean;
   anyActive: boolean;
+  // Increments each time a drag/resize operation completes — terminal panes
+  // use this to force a repaint after the panel finishes moving.
+  dragEndSeq: number;
 }
 
-function DashboardPanel({ pane, onDragStart, onResizeStart, isDragging, isResizing, anyActive }: DashboardPanelProps) {
+function DashboardPanel({ pane, onDragStart, onResizeStart, isDragging, isResizing, anyActive, dragEndSeq }: DashboardPanelProps) {
   const { x, y, w, h } = pane.gridPos;
   const renamePane = useWorkspaceStore(s => s.renamePane);
   const removePane = useWorkspaceStore(s => s.removePane);
@@ -50,9 +54,11 @@ function DashboardPanel({ pane, onDragStart, onResizeStart, isDragging, isResizi
     top: `${top}px`,
     width: `${width}%`,
     height: `${height}px`,
-    transition: anyActive ? 'none' : 'all 0.2s cubic-bezier(0.2, 0, 0, 1)',
+    // Only transition layout properties — using 'all' or 'opacity' on a container
+    // that holds a WebGL canvas forces WKWebView (macOS) to create/destroy GPU
+    // compositing layers, which silently kills the WebGL context in xterm.js.
+    transition: anyActive ? 'none' : 'left 0.2s cubic-bezier(0.2, 0, 0, 1), top 0.2s cubic-bezier(0.2, 0, 0, 1), width 0.2s cubic-bezier(0.2, 0, 0, 1), height 0.2s cubic-bezier(0.2, 0, 0, 1)',
     zIndex: isDragging || isResizing ? 50 : 10,
-    opacity: isDragging ? 0.8 : 1,
   };
 
   function startEdit() {
@@ -120,7 +126,7 @@ function DashboardPanel({ pane, onDragStart, onResizeStart, isDragging, isResizi
 
         {/* Body */}
         <div ref={bodyRef} className="flex-1 overflow-hidden relative">
-          {pane.type === 'terminal'       && <TerminalPane pane={pane} />}
+          {pane.type === 'terminal'       && <TerminalPane pane={pane} dragEndSeq={dragEndSeq} />}
           {pane.type === 'editor'         && <EditorPane pane={pane} />}
           {pane.type === 'taskboard'      && <TaskBoardPane />}
           {pane.type === 'activityfeed'   && <ActivityFeedPane />}
@@ -152,6 +158,7 @@ export function WorkspaceGrid() {
   const [draggingId, setDraggingId] = useState<string | null>(null);
   const [resizingId, setResizingId] = useState<string | null>(null);
   const [ghostPos, setGhostPos] = useState<GridPos | null>(null);
+  const [dragEndSeq, setDragEndSeq] = useState(0);
   
   const dragInfo = useRef<{ startX: number; startY: number; startGrid: GridPos; offsetX: number; offsetY: number } | null>(null);
 
@@ -334,6 +341,7 @@ export function WorkspaceGrid() {
       setResizingId(null);
       setGhostPos(null);
       dragInfo.current = null;
+      setDragEndSeq(n => n + 1);
     };
 
     window.addEventListener('mousemove', onMouseMove);
@@ -401,6 +409,7 @@ export function WorkspaceGrid() {
             isDragging={draggingId === pane.id}
             isResizing={resizingId === pane.id}
             anyActive={!!(draggingId || resizingId)}
+            dragEndSeq={dragEndSeq}
           />
         ))}
       </div>

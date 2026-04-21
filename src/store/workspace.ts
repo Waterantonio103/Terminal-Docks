@@ -8,7 +8,26 @@ export function arrayMove<T>(array: T[], fromIndex: number, toIndex: number): T[
   return newArray;
 }
 
-export type PaneType = 'terminal' | 'editor' | 'taskboard' | 'activityfeed' | 'launcher' | 'missioncontrol';
+export type PaneType = 'terminal' | 'editor' | 'taskboard' | 'activityfeed' | 'launcher' | 'missioncontrol' | 'nodetree';
+
+export interface WorkflowNode {
+  id: string;
+  roleId: string;
+  status: 'idle' | 'waiting' | 'running' | 'completed' | 'failed';
+  config?: any;
+}
+
+export interface WorkflowEdge {
+  fromNodeId: string;
+  toNodeId: string;
+  condition?: 'always' | 'on_success' | 'on_failure';
+}
+
+export interface WorkflowGraph {
+  id: string;
+  nodes: WorkflowNode[];
+  edges: WorkflowEdge[];
+}
 
 export interface MissionAgent {
   terminalId: string;
@@ -18,6 +37,7 @@ export interface MissionAgent {
   triggered?: boolean;
   startedAt?: number;
   completedAt?: number;
+  nodeId?: string;
 }
 
 export type ThemeType =
@@ -159,10 +179,13 @@ export interface DbTask {
   payload: string | null;
 }
 
+export type SidebarTabType = 'files' | 'tasks' | 'swarm' | 'agents' | 'nodetree' | 'settings';
+
 interface WorkspaceState {
   tabs: WorkspaceTab[];
   activeTabId: string;
   sidebarOpen: boolean;
+  activeSidebarTab: SidebarTabType;
   workspaceDir: string | null;
   theme: ThemeType;
   savedLayouts: SavedLayout[];
@@ -170,7 +193,10 @@ interface WorkspaceState {
   results: ResultEntry[];
   tasks: DbTask[];
   agentInstructions: Record<string, string>;
+  globalGraph: WorkflowGraph;
   toggleSidebar: () => void;
+  setActiveSidebarTab: (tab: SidebarTabType) => void;
+  setGlobalGraph: (graph: WorkflowGraph) => void;
   addPane: (type: PaneType, title: string, data?: any) => void;
   addPaneAt: (type: PaneType, title: string, index: number, data?: any) => void;
   removePane: (id: string) => void;
@@ -212,6 +238,7 @@ export const useWorkspaceStore = create<WorkspaceState>()(
       }],
       activeTabId: _initTabId,
       sidebarOpen: true,
+      activeSidebarTab: 'files',
       workspaceDir: null,
       theme: 'dark',
       savedLayouts: [],
@@ -219,6 +246,10 @@ export const useWorkspaceStore = create<WorkspaceState>()(
       results: [],
       tasks: [],
       agentInstructions: {},
+      globalGraph: { id: 'global-editor', nodes: [], edges: [] },
+
+      setActiveSidebarTab: (tab) => set({ activeSidebarTab: tab }),
+      setGlobalGraph: (graph) => set({ globalGraph: graph }),
 
       addMessage: (msg) => set((s) => ({ messages: [...s.messages, msg].slice(-500) })),
       addResult: (result) => set((s) => ({ results: [...s.results, result].slice(-200) })),

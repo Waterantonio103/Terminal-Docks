@@ -1,4 +1,3 @@
-import { useState } from 'react';
 import {
   TerminalSquare,
   ListTodo,
@@ -7,42 +6,70 @@ import {
   Bot,
   Settings,
   ChevronRight,
+  Network,
 } from 'lucide-react';
 import { useWorkspaceStore } from '../../store/workspace';
 import { FileTree } from './FileTree';
 import { AgentsTab } from './AgentsTab';
 import { SettingsTab } from './SettingsTab';
 
-type SidebarTab = 'files' | 'tasks' | 'swarm' | 'agents' | 'settings';
+type SidebarTab = 'files' | 'tasks' | 'swarm' | 'agents' | 'nodetree' | 'settings';
 
 const TABS: { id: SidebarTab; icon: React.ReactNode; label: string }[] = [
   { id: 'files',   icon: <Files size={18} />,         label: 'Explorer'  },
   { id: 'tasks',   icon: <ListTodo size={18} />,       label: 'Tasks'     },
   { id: 'swarm',   icon: <Activity size={18} />,       label: 'MCP'       },
   { id: 'agents',  icon: <Bot size={18} />,            label: 'Agents'    },
+  { id: 'nodetree', icon: <Network size={18} />,       label: 'Node Tree' },
 ];
 
 function TasksTab() {
+  const addPane = useWorkspaceStore(s => s.addPane);
   return (
     <div className="flex flex-col items-center justify-center h-full text-center gap-2 px-4">
       <ListTodo size={28} className="text-text-muted opacity-40" />
       <p className="text-xs text-text-muted">Open the Task Board pane for full kanban view.</p>
+      <button 
+        onClick={() => addPane('taskboard', 'Tasks')}
+        className="mt-2 px-3 py-1 bg-accent-primary text-accent-text text-[10px] font-bold rounded hover:bg-accent-primary/80 transition-colors"
+      >
+        Open Task Board
+      </button>
     </div>
   );
 }
 
 function SwarmTab() {
+  const addPane = useWorkspaceStore(s => s.addPane);
   return (
     <div className="flex flex-col items-center justify-center h-full text-center gap-2 px-4">
       <Activity size={28} className="text-text-muted opacity-40" />
-      <p className="text-xs text-text-muted">MCP server is active. Open MCP pane to view the activity feed.</p>
+      <p className="text-xs text-text-muted">MCP server is active. View real-time agent coordination.</p>
+      <button 
+        onClick={() => addPane('activityfeed', 'Swarm')}
+        className="mt-2 px-3 py-1 bg-accent-primary text-accent-text text-[10px] font-bold rounded hover:bg-accent-primary/80 transition-colors"
+      >
+        Open Activity Feed
+      </button>
+    </div>
+  );
+}
+
+function NodeTreeTab() {
+  return (
+    <div className="flex flex-col items-center justify-center h-full text-center gap-2 px-4">
+      <Network size={28} className="text-text-muted opacity-40" />
+      <p className="text-[11px] text-text-muted leading-relaxed">
+        Designer mode is active. Build complex multi-agent workflows using the visual node graph.
+      </p>
     </div>
   );
 }
 
 export function Sidebar() {
   const sidebarOpen = useWorkspaceStore((s) => s.sidebarOpen);
-  const [activeTab, setActiveTab] = useState<SidebarTab>('files');
+  const activeTab = useWorkspaceStore((s) => s.activeSidebarTab);
+  const setActiveTab = useWorkspaceStore((s) => s.setActiveSidebarTab);
 
   if (!sidebarOpen) return null;
 
@@ -106,6 +133,7 @@ export function Sidebar() {
           {activeTab === 'tasks'    && <TasksTab />}
           {activeTab === 'swarm'    && <SwarmTab />}
           {activeTab === 'agents'   && <AgentsTab />}
+          {activeTab === 'nodetree' && <NodeTreeTab />}
           {activeTab === 'settings' && <SettingsTab />}
         </div>
       </div>

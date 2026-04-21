@@ -392,6 +392,15 @@ pub fn init_mcp_server(app: &AppHandle) -> Result<(), String> {
         for line in reader.lines().flatten() {
             if let Some(data) = line.strip_prefix("data: ") {
                 if let Ok(msg) = serde_json::from_str::<McpMessage>(data) {
+                    if msg.msg_type == "handoff" {
+                        if let Ok(event) = serde_json::from_str::<crate::workflow_engine::HandoffEvent>(&msg.content) {
+                            if let Ok(value) = serde_json::from_str::<serde_json::Value>(&msg.content) {
+                                if let Some(mission_id) = value.get("missionId").and_then(|v| v.as_str()) {
+                                    crate::workflow_engine::handle_handoff(&app_handle, mission_id, event);
+                                }
+                            }
+                        }
+                    }
                     let _ = app_handle.emit("mcp-message", msg);
                 }
             }

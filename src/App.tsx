@@ -1,12 +1,13 @@
 import { Sidebar } from './components/Sidebar/Sidebar';
 import { WorkspaceGrid } from './components/Layout/WorkspaceGrid';
 import { QuickOpen } from './components/QuickOpen/QuickOpen';
+import { NodeTreePane } from './components/NodeTree/NodeTreePane';
 import { useWorkspaceStore, PaneType, McpMessage, DbTask } from './store/workspace';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { homeDir } from '@tauri-apps/api/path';
 import { Window } from '@tauri-apps/api/window';
-import { PanelLeft, TerminalSquare, FileCode2, KanbanSquare, Activity, Palette, Plus, Rocket, Monitor, Minus, Square, X } from 'lucide-react';
+import { PanelLeft, TerminalSquare, FileCode2, KanbanSquare, Activity, Palette, Plus, Rocket, Monitor, Minus, Square, X, Network } from 'lucide-react';
 import { useState, useEffect, useRef } from 'react';
 import './App.css';
 
@@ -20,6 +21,7 @@ const PANE_ICONS: Record<PaneType, React.ReactNode> = {
   activityfeed: <Activity size={13} />,
   launcher:       <Rocket size={13} />,
   missioncontrol: <Monitor size={13} />,
+  nodetree:       <Network size={13} />,
 };
 
 const ALL_THEMES = [
@@ -83,6 +85,8 @@ function DraggableOption({ type, label, icon, onClick, onDragStart }: DraggableO
 
 function App() {
   const toggleSidebar = useWorkspaceStore((s) => s.toggleSidebar);
+  const sidebarOpen   = useWorkspaceStore((s) => s.sidebarOpen);
+  const activeSidebarTab = useWorkspaceStore((s) => s.activeSidebarTab);
   const addPane         = useWorkspaceStore((s) => s.addPane);
   const theme        = useWorkspaceStore((s) => s.theme);
   const setTheme     = useWorkspaceStore((s) => s.setTheme);
@@ -97,6 +101,8 @@ function App() {
   const setTasks        = useWorkspaceStore((s) => s.setTasks);
   const workspaceDir    = useWorkspaceStore((s) => s.workspaceDir);
   const setWorkspaceDir = useWorkspaceStore((s) => s.setWorkspaceDir);
+  const globalGraph     = useWorkspaceStore((s) => s.globalGraph);
+  const setGlobalGraph  = useWorkspaceStore((s) => s.setGlobalGraph);
 
   // Default terminal working directory to home folder on first launch
   useEffect(() => {
@@ -150,24 +156,7 @@ function App() {
       setDraggingNew(prev => prev ? { ...prev, x: e.clientX, y: e.clientY } : null);
     }
 
-    function onMouseUp(e: MouseEvent) {
-      if (!draggingNew) return;
-      const grid = document.getElementById('workspace-grid');
-      if (grid) {
-        const rect = grid.getBoundingClientRect();
-        if (e.clientX >= rect.left && e.clientX <= rect.right && e.clientY >= rect.top && e.clientY <= rect.bottom) {
-          const dropEvent = new CustomEvent('pane-drop', {
-            detail: {
-              type: draggingNew.type,
-              title: draggingNew.label,
-              data: draggingNew.data,
-              clientX: e.clientX,
-              clientY: e.clientY,
-            }
-          });
-          grid.dispatchEvent(dropEvent);
-        }
-      }
+    function onMouseUp() {
       setDraggingNew(null);
     }
 
@@ -179,103 +168,49 @@ function App() {
     };
   }, [draggingNew]);
 
-  // Handle file-drag-start from FileTree
-  useEffect(() => {
-    const handler = (e: any) => {
-      const { type, title, data, clientX, clientY } = e.detail;
-      setDraggingNew({ type, label: title, data, x: clientX, y: clientY });
-    };
-    window.addEventListener('file-drag-start', handler);
-    return () => window.removeEventListener('file-drag-start', handler);
-  }, []);
-
-  const onNewPaneDragStart = (type: PaneType, e: React.MouseEvent) => {
-    setDraggingNew({ type, x: e.clientX, y: e.clientY });
-  };
-
-  useEffect(() => {
-    if (typeof document === 'undefined') return;
-    const root = document.documentElement;
-    Array.from(root.classList).forEach((cls) => {
-      if (cls.startsWith('theme-')) root.classList.remove(cls);
+  function onNewPaneDragStart(type: PaneType, e: React.MouseEvent) {
+    setDraggingNew({
+      type,
+      x: e.clientX,
+      y: e.clientY,
+      label: PANE_ICONS[type] ? type : undefined
     });
-    if (theme && theme !== 'dark') {
-      root.classList.add(`theme-${theme}`);
-    }
-  }, [theme]);
-
-  useEffect(() => {
-    const handler = (e: KeyboardEvent) => {
-      const mod = e.ctrlKey || e.metaKey;
-      if (!mod) return;
-
-      if (e.key === 't') {
-        e.preventDefault();
-        addTab();
-      } else if (e.key === 'w') {
-        e.preventDefault();
-        removeTab(activeTabId);
-      } else if (e.key === 'p') {
-        e.preventDefault();
-        setShowQuickOpen(true);
-      } else if (e.key === 'd') {
-        e.preventDefault();
-        addPane('terminal', 'Terminal');
-      } else if (/^[1-9]$/.test(e.key)) {
-        const idx = parseInt(e.key) - 1;
-        if (idx < tabs.length) {
-          e.preventDefault();
-          switchTab(tabs[idx].id);
-        }
-      }
-    };
-    document.addEventListener('keydown', handler);
-    return () => document.removeEventListener('keydown', handler);
-  }, [tabs, activeTabId, addTab, removeTab, switchTab, addPane]);
-
-  useEffect(() => {
-    if (editingTabId) setTimeout(() => tabInputRef.current?.focus(), 30);
-  }, [editingTabId]);
-
-  const themeClass = theme !== 'dark' ? `theme-${theme}` : '';
+  }
 
   return (
-    <div className={`flex flex-col h-screen w-screen bg-bg-app text-text-primary overflow-hidden ${themeClass}`}>
-      {/* Title Bar */}
-      <header
-        className="h-9 border-b border-border-panel flex items-center px-3 bg-bg-titlebar shrink-0 select-none gap-3 relative"
-        data-tauri-drag-region
-      >
-        <div className="flex items-center gap-2 shrink-0 relative z-10" data-tauri-drag-region>
-          <button
-            onClick={toggleSidebar}
-            data-tauri-no-drag
-            className="text-text-muted hover:text-text-primary transition-colors p-1 rounded hover:bg-bg-surface"
-            title="Toggle Sidebar"
-          >
-            <PanelLeft size={16} />
-          </button>
-          <div className="flex items-center gap-1.5 text-text-secondary" data-tauri-drag-region>
-            <TerminalSquare size={15} className="text-accent-primary" />
-            <span className="text-xs font-semibold tracking-wide text-text-primary">BridgeSpace</span>
-          </div>
+    <div className={`flex flex-col h-screen overflow-hidden theme-${theme} bg-bg-app text-text-primary font-sans select-none`}>
+      
+      {/* Top Header / Tab Bar */}
+      <div className="flex items-center h-10 bg-bg-titlebar border-b border-border-panel shrink-0 select-none relative z-50">
+        <div 
+          className="flex items-center gap-2 px-3 border-r border-border-panel h-full cursor-pointer hover:bg-bg-surface transition-colors"
+          onClick={toggleSidebar}
+        >
+          <PanelLeft size={16} className={sidebarOpen ? "text-accent-primary" : "text-text-muted"} />
         </div>
 
         <div className="flex-1 flex justify-center items-center gap-1 h-full relative z-10" data-tauri-drag-region>
-          <div 
-            className="flex items-center gap-1 bg-bg-surface border border-border-panel rounded-lg px-1 py-0.5"
-            data-tauri-no-drag
-          >
-            <DraggableOption type="terminal"     label="Terminal" icon={<TerminalSquare size={13} />} onClick={() => addPane('terminal', 'Terminal')} onDragStart={onNewPaneDragStart} />
-            <div className="w-px h-4 bg-border-divider" />
-            <DraggableOption type="editor"       label="Editor"   icon={<FileCode2 size={13} />}      onClick={() => addPane('editor', 'Editor')}   onDragStart={onNewPaneDragStart} />
-            <div className="w-px h-4 bg-border-divider" />
-            <DraggableOption type="taskboard"    label="Tasks"    icon={<KanbanSquare size={13} />}   onClick={() => addPane('taskboard', 'Tasks')} onDragStart={onNewPaneDragStart} />
-            <div className="w-px h-4 bg-border-divider" />
-            <DraggableOption type="activityfeed" label="Swarm"    icon={<Activity size={13} />}       onClick={() => addPane('activityfeed', 'Swarm')} onDragStart={onNewPaneDragStart} />
-            <div className="w-px h-4 bg-border-divider" />
-            <DraggableOption type="launcher"     label="Launch"   icon={<Rocket size={13} />}          onClick={() => addPane('launcher', 'Launcher')} onDragStart={onNewPaneDragStart} />
-          </div>
+          {activeSidebarTab !== 'nodetree' ? (
+            <div 
+              className="flex items-center gap-1 bg-bg-surface border border-border-panel rounded-lg px-1 py-0.5"
+              data-tauri-no-drag
+            >
+              <DraggableOption type="terminal"     label="Terminal" icon={<TerminalSquare size={13} />} onClick={() => addPane('terminal', 'Terminal')} onDragStart={onNewPaneDragStart} />
+              <div className="w-px h-4 bg-border-divider" />
+              <DraggableOption type="editor"       label="Editor"   icon={<FileCode2 size={13} />}      onClick={() => addPane('editor', 'Editor')}   onDragStart={onNewPaneDragStart} />
+              <div className="w-px h-4 bg-border-divider" />
+              <DraggableOption type="taskboard"    label="Tasks"    icon={<KanbanSquare size={13} />}   onClick={() => addPane('taskboard', 'Tasks')} onDragStart={onNewPaneDragStart} />
+              <div className="w-px h-4 bg-border-divider" />
+              <DraggableOption type="activityfeed" label="Swarm"    icon={<Activity size={13} />}       onClick={() => addPane('activityfeed', 'Swarm')} onDragStart={onNewPaneDragStart} />
+              <div className="w-px h-4 bg-border-divider" />
+              <DraggableOption type="launcher"     label="Launch"   icon={<Rocket size={13} />}          onClick={() => addPane('launcher', 'Launcher')} onDragStart={onNewPaneDragStart} />
+            </div>
+          ) : (
+            <div className="flex items-center gap-2 text-xs font-bold text-accent-primary uppercase tracking-widest">
+               <Network size={14} />
+               <span>Workflow Designer</span>
+            </div>
+          )}
         </div>
 
         <div className="flex items-center gap-3 shrink-0 relative z-10" data-tauri-drag-region>
@@ -284,140 +219,117 @@ function App() {
             <select
               value={theme}
               onChange={(e) => setTheme(e.target.value as any)}
-              className="bg-transparent border-none text-xs text-text-muted focus:outline-none cursor-pointer hover:text-text-primary transition-colors max-w-[120px]"
+              className="bg-transparent border-none text-[10px] focus:outline-none cursor-pointer hover:text-text-secondary transition-colors"
             >
-              <optgroup label="── Dark ──">
-                {ALL_THEMES.slice(0, 25).map(t => (
-                  <option key={t.value} value={t.value}>{t.label}</option>
-                ))}
-              </optgroup>
-              <optgroup label="── Light ──">
-                {ALL_THEMES.slice(25).map(t => (
-                  <option key={t.value} value={t.value}>{t.label}</option>
-                ))}
-              </optgroup>
+              {ALL_THEMES.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
             </select>
           </div>
-          <span className="text-xs text-text-muted font-mono opacity-50" data-tauri-drag-region>v0.1.0</span>
-          
-          {/* Window Controls */}
-          <div className="flex items-center border-l border-border-divider pl-3 h-9" data-tauri-no-drag>
-            <button 
-              onClick={() => appWindow?.minimize()}
-              className="w-9 h-9 flex items-center justify-center text-text-muted hover:text-text-primary hover:bg-bg-surface transition-colors"
-              title="Minimize"
-            >
-              <Minus size={14} />
-            </button>
-            <button 
-              onClick={() => appWindow?.toggleMaximize()}
-              className="w-9 h-9 flex items-center justify-center text-text-muted hover:text-text-primary hover:bg-bg-surface transition-colors"
-              title="Maximize"
-            >
-              <Square size={12} />
-            </button>
-            <button 
-              onClick={() => appWindow?.close()}
-              className="w-9 h-9 flex items-center justify-center text-text-muted hover:text-white hover:bg-red-500 transition-colors"
-              title="Close"
-            >
-              <X size={14} />
-            </button>
+
+          <div className="flex items-center bg-bg-surface border border-border-panel rounded-md h-6 px-1 mr-2" data-tauri-no-drag>
+            <button onClick={() => appWindow?.minimize()} className="w-6 h-full flex items-center justify-center text-text-muted hover:text-text-primary hover:bg-bg-panel rounded transition-colors"><Minus size={12} /></button>
+            <button onClick={() => appWindow?.toggleMaximize()} className="w-6 h-full flex items-center justify-center text-text-muted hover:text-text-primary hover:bg-bg-panel rounded transition-colors"><Square size={10} /></button>
+            <button onClick={() => appWindow?.close()} className="w-6 h-full flex items-center justify-center text-text-muted hover:text-red-400 hover:bg-red-400/10 rounded transition-colors"><X size={12} /></button>
           </div>
         </div>
-      </header>
-
-      {/* Workspace Tab Bar */}
-      <div 
-        className="flex items-center h-8 bg-bg-titlebar border-b border-border-panel px-2 gap-0.5 overflow-x-auto shrink-0 select-none relative"
-        data-tauri-drag-region
-      >
-        {tabs.map((tab, i) => (
-          <div
-            key={tab.id}
-            onClick={() => switchTab(tab.id)}
-            onDoubleClick={() => {
-              setEditingTabId(tab.id);
-              setEditingTabName(tab.name);
-            }}
-            data-tauri-no-drag
-            className={`flex items-center gap-1.5 px-3 h-6 rounded-md text-xs relative transition-colors shrink-0 max-w-[180px] group cursor-pointer z-10
-              ${tab.id === activeTabId
-                ? 'bg-bg-panel text-text-primary'
-                : 'text-text-muted hover:text-text-secondary hover:bg-bg-surface'}`}
-            title={`${tab.name} (Ctrl+${i + 1})`}
-          >
-            <span className="w-2 h-2 rounded-full shrink-0" style={{ background: tab.color }} />
-            {editingTabId === tab.id ? (
-              <input
-                ref={tabInputRef}
-                value={editingTabName}
-                onChange={(e) => setEditingTabName(e.target.value)}
-                onBlur={() => {
-                  if (editingTabName.trim()) renameTab(tab.id, editingTabName.trim());
-                  setEditingTabId(null);
-                }}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') {
-                    if (editingTabName.trim()) renameTab(tab.id, editingTabName.trim());
-                    setEditingTabId(null);
-                  } else if (e.key === 'Escape') {
-                    setEditingTabId(null);
-                  }
-                  e.stopPropagation();
-                }}
-                onClick={(e) => e.stopPropagation()}
-                className="bg-transparent border-none outline-none text-xs w-[100px] text-text-primary"
-              />
-            ) : (
-              <span className="truncate max-w-[100px]">{tab.name}</span>
-            )}
-            {tabs.length > 1 && (
-              <button
-                onClick={(e) => { e.stopPropagation(); removeTab(tab.id); }}
-                className="ml-0.5 opacity-0 group-hover:opacity-60 hover:!opacity-100 text-text-muted hover:text-red-400 transition-all leading-none text-base shrink-0"
-                title="Close tab (Ctrl+W)"
-              >
-                ×
-              </button>
-            )}
-          </div>
-        ))}
-        <button
-          onClick={addTab}
-          data-tauri-no-drag
-          className="flex items-center justify-center w-6 h-6 rounded text-text-muted hover:text-text-primary hover:bg-bg-surface transition-colors shrink-0 ml-1 relative z-10"
-          title="New tab (Ctrl+T)"
-        >
-          <Plus size={12} />
-        </button>
       </div>
 
-      {/* Main Content */}
-      <main className="flex-1 flex overflow-hidden">
+      {/* Main Content Area */}
+      <div className="flex-1 flex overflow-hidden relative">
         <Sidebar />
-        <WorkspaceGrid />
-      </main>
+        
+        <main className="flex-1 flex flex-col min-w-0 bg-bg-app relative">
+          
+          {/* View Switcher: Node Tree takes over entire main area */}
+          {activeSidebarTab === 'nodetree' ? (
+             <div className="flex-1 overflow-hidden relative">
+               <NodeTreePane graph={globalGraph} onGraphChange={setGlobalGraph} />
+             </div>
+          ) : (
+            <>
+              {/* Workspace Tab Bar */}
+              <div
+                className="flex items-center h-8 bg-bg-titlebar border-b border-border-panel px-2 gap-0.5 overflow-x-auto shrink-0 select-none relative"
+                data-tauri-drag-region
+              >
+                {tabs.map((tab) => (
+                  <div
+                    key={tab.id}
+                    onClick={() => switchTab(tab.id)}
+                    onDoubleClick={() => {
+                      setEditingTabId(tab.id);
+                      setEditingTabName(tab.name);
+                    }}
+                    className={`
+                      group flex items-center h-6 px-3 gap-2 rounded-t-md text-[11px] font-medium transition-all cursor-pointer min-w-[80px] max-w-[160px] border-x border-t relative
+                      ${activeTabId === tab.id 
+                        ? 'bg-bg-panel text-text-primary border-border-panel z-10 -mb-[1px]' 
+                        : 'bg-transparent text-text-muted border-transparent hover:bg-bg-surface/50'}
+                    `}
+                  >
+                    <div className="w-1.5 h-1.5 rounded-full shrink-0" style={{ backgroundColor: tab.color }} />
+                    
+                    {editingTabId === tab.id ? (
+                      <input
+                        ref={tabInputRef}
+                        value={editingTabName}
+                        onChange={(e) => setEditingTabName(e.target.value)}
+                        onBlur={() => {
+                          if (editingTabName.trim()) renameTab(tab.id, editingTabName.trim());
+                          setEditingTabId(null);
+                        }}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') {
+                            if (editingTabName.trim()) renameTab(tab.id, editingTabName.trim());
+                            setEditingTabId(null);
+                          }
+                          if (e.key === 'Escape') setEditingTabId(null);
+                        }}
+                        className="bg-transparent border-none outline-none text-xs w-[100px] text-text-primary"
+                      />
+                    ) : (
+                      <span className="truncate max-w-[100px]">{tab.name}</span>
+                    )}
+                    {tabs.length > 1 && (
+                      <button
+                        onClick={(e) => { e.stopPropagation(); removeTab(tab.id); }}
+                        className="ml-0.5 opacity-0 group-hover:opacity-60 hover:!opacity-100 text-text-muted hover:text-red-400 transition-all leading-none text-base shrink-0"
+                        title="Close tab (Ctrl+W)"
+                      >
+                        <X size={10} />
+                      </button>
+                    )}
+                  </div>
+                ))}
 
-      {/* Custom Drag Overlay */}
+                <button 
+                  onClick={addTab}
+                  className="w-6 h-6 flex items-center justify-center text-text-muted hover:text-text-primary hover:bg-bg-surface rounded transition-colors ml-1"
+                  title="New Tab (Ctrl+T)"
+                >
+                  <Plus size={14} />
+                </button>
+              </div>
+
+              <div className="flex-1 relative overflow-hidden">
+                <WorkspaceGrid />
+              </div>
+            </>
+          )}
+
+          {/* Quick Open Overlay */}
+          {showQuickOpen && <QuickOpen onClose={() => setShowQuickOpen(false)} />}
+        </main>
+      </div>
+
+      {/* Drag Overlay */}
       {draggingNew && (
         <div 
-          className="fixed pointer-events-none z-[9999] opacity-90 transition-transform duration-75 scale-110"
-          style={{ 
-            left: `${draggingNew.x}px`, 
-            top: `${draggingNew.y}px`,
-            transform: 'translate(-50%, -50%)'
-          }}
+          className="fixed pointer-events-none z-[9999] bg-accent-primary/20 border-2 border-accent-primary rounded-lg px-3 py-1.5 flex items-center gap-2 text-accent-primary font-bold shadow-2xl backdrop-blur-sm"
+          style={{ left: draggingNew.x + 10, top: draggingNew.y + 10 }}
         >
-          <div className="bg-bg-panel border border-accent-primary rounded-lg px-4 py-2 shadow-2xl flex items-center gap-2 text-sm text-text-primary ring-2 ring-accent-primary/50 animate-pulse-subtle">
-            {PANE_ICONS[draggingNew.type]}
-            <span>{draggingNew.label ? draggingNew.label : `New ${draggingNew.type}`}</span>
-          </div>
+          {PANE_ICONS[draggingNew.type]}
+          <span className="text-xs uppercase tracking-wider">{draggingNew.type}</span>
         </div>
-      )}
-
-      {showQuickOpen && (
-        <QuickOpen onClose={() => setShowQuickOpen(false)} />
       )}
     </div>
   );
