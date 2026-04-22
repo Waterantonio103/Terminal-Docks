@@ -1,25 +1,48 @@
-import { useState, useEffect } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { Rocket, Plug, TerminalSquare, AlertCircle, Hammer, Wrench, Cpu } from 'lucide-react';
-import { useWorkspaceStore, selectActivePanes, Pane } from '../../store/workspace';
+import { AlertCircle, Cpu, GitBranch, Hammer, Plug, Rocket, TerminalSquare, Wand2, Wrench } from 'lucide-react';
+import {
+  Pane,
+  selectActivePanes,
+  type CompiledMission,
+  type MissionAgent,
+  type WorkflowAuthoringMode,
+  type WorkflowEdgeCondition,
+  type WorkflowGraph,
+  useWorkspaceStore,
+} from '../../store/workspace';
 import agentsConfig from '../../config/agents';
-import type { CompiledMission, MissionAgent } from '../../store/workspace';
-import { buildLaunchPrompt, STAGES, type LaunchContext, type LaunchMode, type LaunchOutgoingTarget } from '../../lib/buildPrompt';
+import {
+  buildLaunchPrompt,
+  type LaunchContext,
+  type LaunchMode,
+  type LaunchOutgoingTarget,
+} from '../../lib/buildPrompt';
+import { compileMission } from '../../lib/graphCompiler';
 import { generateId } from '../../lib/graphUtils';
+import { buildPresetFlowGraph, getWorkflowPreset, listWorkflowPresets } from '../../lib/workflowPresets';
 import { detectCliForPane, detectRoleForPane, type AgentCli } from '../../lib/cliDetection';
 
-const ROLES = [
-  { id: '',            label: '— no role —' },
-  ...agentsConfig.agents.map(a => ({ id: a.id, label: `${a.name} (${a.role})` })),
-];
+const PRESETS = listWorkflowPresets();
 
-const ROLE_PRIORITY = STAGES.flat();
+type GraphFlowNode = {
+  id: string;
+  type: 'task' | 'agent' | 'barrier' | 'frame' | 'reroute';
+  position: { x: number; y: number };
+  data: Record<string, unknown>;
+};
+
+type GraphFlowEdge = {
+  id: string;
+  source: string;
+  target: string;
+  data: { condition: WorkflowEdgeCondition };
+};
 
 async function writeToTerminal(pane: Pane, text: string) {
   const terminalId = pane.data?.terminalId ?? `term-${pane.id}`;
   await invoke('write_to_pty', { id: terminalId, data: text });
 }
-
 
 interface TerminalRow {
   pane: Pane;
@@ -31,7 +54,7 @@ interface PendingLaunchState {
   missionId: string;
   mission: CompiledMission;
   agents: MissionAgent[];
-  firstGroupTerminalIds: string[];
+  startTerminalIds: string[];
 }
 
 function getAllowedOutgoingTargets(mission: CompiledMission, nodeId: string): LaunchOutgoingTarget[] {
@@ -52,18 +75,174 @@ function getAllowedOutgoingTargets(mission: CompiledMission, nodeId: string): La
     });
 }
 
+function buildRoleBindingPools(rows: TerminalRow[]) {
+  const byRole = new Map<string, TerminalRow[]>();
+  for (const row of rows) {
+    if (!row.roleId) continue;
+    const current = byRole.get(row.roleId) ?? [];
+    current.push(row);
+    byRole.set(row.roleId, current);
+  }
+  const cursor = new Map<string, number>();
+
+  return {
+    hasRole(roleId: string) {
+      return (byRole.get(roleId)?.length ?? 0) > 0;
+    },
+    take(roleId: string): TerminalRow | null {
+      const pool = byRole.get(roleId) ?? [];
+      if (pool.length === 0) return null;
+      const idx = cursor.get(roleId) ?? 0;
+      cursor.set(roleId, idx + 1);
+      return pool[Math.min(idx, pool.length - 1)] ?? null;
+    },
+  };
+}
+
+function workflowGraphToFlowGraph(options: {
+  graph: WorkflowGraph;
+  workspaceDir: string | null;
+  terminalRows: TerminalRow[];
+  agentInstructions: Record<string, string>;
+}): { nodes: GraphFlowNode[]; edges: GraphFlowEdge[] } {
+  const { graph, workspaceDir, terminalRows, agentInstructions } = options;
+  const pools = buildRoleBindingPools(terminalRows);
+
+  const nodes: GraphFlowNode[] = graph.nodes.map((node, index) => {
+    const roleId = node.roleId;
+    const position = node.config?.position ?? { x: 120 + index * 260, y: 140 };
+
+    if (roleId === 'task') {
+      return {
+        id: node.id,
+        type: 'task',
+        position,
+        data: {
+          roleId: 'task',
+          prompt: node.config?.prompt ?? '',
+          mode: node.config?.mode ?? 'build',
+          workspaceDir: node.config?.workspaceDir ?? workspaceDir ?? '',
+        },
+      };
+    }
+
+    if (roleId === 'barrier' || roleId === 'frame' || roleId === 'reroute') {
+      return {
+        id: node.id,
+        type: roleId,
+        position,
+        data: {
+          roleId,
+          label: node.config?.label ?? roleId,
+        },
+      };
+    }
+
+    const picked = pools.take(roleId);
+    const terminalId = node.config?.terminalId ?? picked?.pane.data?.terminalId ?? '';
+    const terminalTitle = node.config?.terminalTitle ?? picked?.pane.title ?? '';
+    const paneId = node.config?.paneId ?? picked?.pane.id;
+
+    return {
+      id: node.id,
+      type: 'agent',
+      position,
+      data: {
+        roleId,
+        instructionOverride: node.config?.instructionOverride ?? agentInstructions[roleId] ?? '',
+        terminalId,
+        terminalTitle,
+        paneId,
+        autoLinked: Boolean(node.config?.autoLinked ?? picked),
+      },
+    };
+  });
+
+  const edges: GraphFlowEdge[] = graph.edges.map((edge, index) => ({
+    id: `edge:${edge.fromNodeId}:${edge.condition ?? 'always'}:${edge.toNodeId}:${index}`,
+    source: edge.fromNodeId,
+    target: edge.toNodeId,
+    data: {
+      condition: edge.condition ?? 'always',
+    },
+  }));
+
+  return { nodes, edges };
+}
+
+function buildAdaptiveSeedFlowGraph(options: {
+  missionId: string;
+  objective: string;
+  mode: LaunchMode;
+  workspaceDir: string | null;
+  terminalRows: TerminalRow[];
+  agentInstructions: Record<string, string>;
+}) {
+  const { missionId, objective, mode, workspaceDir, terminalRows, agentInstructions } = options;
+  const coordinator = terminalRows.find(row => row.roleId === 'coordinator') ?? terminalRows[0];
+  if (!coordinator) {
+    throw new Error('Adaptive mode requires at least one terminal. Name one terminal with role "coordinator" for best results.');
+  }
+
+  const taskNodeId = `task-${missionId}`;
+  const supervisorNodeId = `supervisor-${missionId}`;
+
+  const nodes: GraphFlowNode[] = [
+    {
+      id: taskNodeId,
+      type: 'task',
+      position: { x: 120, y: 120 },
+      data: {
+        roleId: 'task',
+        prompt: objective,
+        mode,
+        workspaceDir: workspaceDir ?? '',
+      },
+    },
+    {
+      id: supervisorNodeId,
+      type: 'agent',
+      position: { x: 460, y: 140 },
+      data: {
+        roleId: 'coordinator',
+        instructionOverride: agentInstructions.coordinator ?? '',
+        terminalId: coordinator.pane.data?.terminalId ?? `term-${coordinator.pane.id}`,
+        terminalTitle: coordinator.pane.title,
+        paneId: coordinator.pane.id,
+        autoLinked: true,
+      },
+    },
+  ];
+
+  const edges: GraphFlowEdge[] = [
+    {
+      id: `edge:${taskNodeId}:always:${supervisorNodeId}`,
+      source: taskNodeId,
+      target: supervisorNodeId,
+      data: { condition: 'always' },
+    },
+  ];
+
+  return { nodes, edges };
+}
+
 export function LauncherPane() {
-  const allPanes          = useWorkspaceStore(selectActivePanes);
-  const addPane           = useWorkspaceStore(s => s.addPane);
+  const allPanes = useWorkspaceStore(selectActivePanes);
+  const addPane = useWorkspaceStore(s => s.addPane);
+  const workspaceDir = useWorkspaceStore(s => s.workspaceDir);
+  const globalGraph = useWorkspaceStore(s => s.globalGraph);
   const agentInstructions = useWorkspaceStore(s => s.agentInstructions);
+
   const terminals = allPanes.filter(p => p.type === 'terminal');
 
-  const [mode, setMode]       = useState<LaunchMode>('build');
-  const [task, setTask]       = useState('');
-  const [status, setStatus]   = useState<string | null>(null);
-  const [busy, setBusy]       = useState(false);
+  const [mode, setMode] = useState<LaunchMode>('build');
+  const [authoringMode, setAuthoringMode] = useState<WorkflowAuthoringMode>('preset');
+  const [presetId, setPresetId] = useState<string>(PRESETS[0]?.id ?? '');
+  const [task, setTask] = useState('');
+  const [status, setStatus] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
   const [isConfirming, setIsConfirming] = useState(false);
-  const [mcpUrl, setMcpUrl]   = useState('http://localhost:3741/mcp');
+  const [mcpUrl, setMcpUrl] = useState('http://localhost:3741/mcp');
   const [pendingLaunch, setPendingLaunch] = useState<PendingLaunchState | null>(null);
 
   useEffect(() => {
@@ -73,258 +252,274 @@ export function LauncherPane() {
   useEffect(() => {
     setIsConfirming(false);
     setPendingLaunch(null);
-  }, [task, mode, allPanes]);
+  }, [task, mode, authoringMode, presetId, allPanes]);
 
-  const syncedRows: TerminalRow[] = terminals.map(p => ({
-    pane: p,
-    roleId: detectRoleForPane(p as any) ?? '',
-    cli: detectCliForPane(p as any),
-  }));
+  const syncedRows: TerminalRow[] = useMemo(
+    () =>
+      terminals.map(p => ({
+        pane: p,
+        roleId: detectRoleForPane(p as any) ?? '',
+        cli: detectCliForPane(p as any),
+      })),
+    [terminals]
+  );
 
   async function handleConnect() {
     const targets = syncedRows.filter(r => r.roleId);
     if (!targets.length) {
-      setStatus('No detectable role found. Name a terminal with a role keyword (scout/coordinator/builder/tester/security/reviewer).');
+      setStatus('No detectable role found. Name terminals with role keywords (scout/coordinator/builder/tester/security/reviewer).');
       return;
     }
+
     setBusy(true);
     setStatus(null);
+
     try {
-      await Promise.all(targets.map(async r => {
-        const cli = r.cli ?? 'claude';
-        const role = ROLES.find(role => role.id === r.roleId)?.label || 'Unknown';
-        const terminalId = r.pane.data?.terminalId ?? `term-${r.pane.id}`;
+      await Promise.all(
+        targets.map(async row => {
+          const cli = row.cli ?? 'claude';
+          const role = row.roleId;
+          const terminalId = row.pane.data?.terminalId ?? `term-${row.pane.id}`;
 
-        // Claude Code returns cleanly to its input prompt on Ctrl+C, so we can
-        // interrupt whatever it is doing and immediately send the new prompt.
-        // Other CLIs (OpenCode, Gemini, …) may EXIT on Ctrl+C — for those we
-        // do NOT interrupt; we just send the prompt and let the CLI handle it.
-        if (cli === 'claude') {
-          await invoke('write_to_pty', { id: terminalId, data: '\x03' });
-          await new Promise(res => setTimeout(res, 200));
-        }
+          if (cli === 'claude') {
+            await invoke('write_to_pty', { id: terminalId, data: '\x03' });
+            await new Promise(resolve => setTimeout(resolve, 200));
+          }
 
-        // CLI-specific hints. Claude Code can self-register via shell escape
-        // (`!cmd`) if the MCP server was not loaded at session startup.
-        const cliHint = cli === 'claude'
-          ? `If the terminal-docks MCP tools are not yet available run this shell command first: !claude mcp add --transport http terminal-docks ${mcpUrl} --scope user `
-          : cli === 'gemini'
-          ? `The MCP server uses streamable-HTTP transport at ${mcpUrl}. `
-          : '';
+          const cliHint =
+            cli === 'claude'
+              ? `If terminal-docks MCP tools are not yet available run: !claude mcp add --transport http terminal-docks ${mcpUrl} --scope user `
+              : cli === 'gemini'
+                ? `The MCP server uses streamable-HTTP transport at ${mcpUrl}. `
+                : '';
 
-        const connectTool = cli === 'gemini' ? 'mcp_terminal-docks_connect_agent' : 'connect_agent';
-        const protocolTool = cli === 'gemini' ? 'mcp_terminal-docks_get_collaboration_protocol' : 'get_collaboration_protocol';
-        const roleParam = cli === 'gemini' ? r.roleId : role;
+          const roleParam = cli === 'gemini' ? role : `${role}`;
+          const profile = agentsConfig.agents.find(agent => agent.id === role);
+          const capabilityJson = JSON.stringify(profile?.capabilities ?? []);
+          const profileId = profile?.profileId ?? `${role}_profile`;
+          const escapedWorkingDir = workspaceDir ? workspaceDir.replace(/\\/g, '\\\\') : '';
+          const prompt =
+            `The terminal-docks MCP server is at ${mcpUrl} (streamable-http). ` +
+            cliHint +
+            `Graph runtime is control-plane driven: wait for NEW_TASK payloads and use mission/node-scoped tools. ` +
+            `Session bootstrap: call connect_agent with role="${roleParam}", agentId="${row.pane.title}", terminalId="${terminalId}", cli="${cli}", profileId="${profileId}", capabilities=${capabilityJson}${workspaceDir ? `, workingDir="${escapedWorkingDir}"` : ''}. ` +
+            `Then keep worker metadata current with register_worker_capabilities when your availability changes.`;
 
-        const prompt =
-          `The terminal-docks MCP server is at ${mcpUrl} (streamable-http). ` +
-          cliHint +
-          `CRITICAL: Execute the following sequentially, waiting for each to complete before starting the next. DO NOT call tools in parallel.\n` +
-          `1. Call the ${connectTool} MCP tool with role="${roleParam}", agentId="${r.pane.title}", terminalId="${terminalId}", and cli="${cli}" to register.\n` +
-          `2. Call the ${protocolTool} tool to load the team SOP.\n` +
-          `Do this now without asking for confirmation.`;
+          await writeToTerminal(row.pane, `${prompt}\r`);
+        })
+      );
 
-        await writeToTerminal(r.pane, prompt + '\r');
-      }));
-      setStatus(`Connected ${targets.length} auto-detected terminal(s) to MCP.`);
-    } catch (e) {
-      setStatus(`Error: ${e}`);
+      setStatus(`Sent MCP bootstrap context to ${targets.length} terminal(s).`);
+    } catch (error) {
+      setStatus(`Error: ${error}`);
     } finally {
       setBusy(false);
     }
   }
 
-  async function handleLaunch() {
+  function compileLaunchMission(missionId: string): CompiledMission {
     if (!task.trim()) {
-      setStatus('Enter a task description first.');
-      return;
+      throw new Error('Enter a task description first.');
     }
 
-    const targets = syncedRows
-      .filter(r => r.roleId)
-      .sort((a, b) => {
-        const idxA = ROLE_PRIORITY.indexOf(a.roleId);
-        const idxB = ROLE_PRIORITY.indexOf(b.roleId);
-        return (idxA === -1 ? 99 : idxA) - (idxB === -1 ? 99 : idxB);
+    const objective = task.trim();
+    const terminalClis = Object.fromEntries(
+      syncedRows
+        .map(row => [row.pane.data?.terminalId ?? `term-${row.pane.id}`, row.cli ?? 'claude'])
+        .filter(entry => Boolean(entry[0]))
+    );
+
+    if (authoringMode === 'preset') {
+      const preset = getWorkflowPreset(presetId);
+      if (!preset) {
+        throw new Error(`Unknown preset "${presetId}".`);
+      }
+
+      const pools = buildRoleBindingPools(syncedRows);
+      for (const node of preset.nodes) {
+        if (!pools.hasRole(node.roleId)) {
+          throw new Error(`Preset requires a terminal with role "${node.roleId}".`);
+        }
+      }
+
+      const bindingByRole: Record<string, { terminalId: string; terminalTitle: string; paneId?: string; cli?: AgentCli | null }> = {};
+      for (const node of preset.nodes) {
+        const picked = pools.take(node.roleId);
+        if (!picked) continue;
+        bindingByRole[node.roleId] = {
+          terminalId: picked.pane.data?.terminalId ?? `term-${picked.pane.id}`,
+          terminalTitle: picked.pane.title,
+          paneId: picked.pane.id,
+          cli: picked.cli,
+        };
+      }
+
+      const flow = buildPresetFlowGraph({
+        preset,
+        missionId,
+        prompt: objective,
+        mode,
+        workspaceDir,
+        bindingsByRole: bindingByRole,
+        instructionOverrides: agentInstructions,
       });
 
-    if (!targets.length) {
-      setStatus('No detectable role found. Name a terminal with a role keyword (scout/coordinator/builder/tester/security/reviewer).');
-      return;
+      return compileMission({
+        missionId,
+        graphId: `preset:${preset.id}`,
+        nodes: flow.nodes,
+        edges: flow.edges,
+        workspaceDirFallback: workspaceDir,
+        terminalClis,
+        authoringMode: 'preset',
+        presetId: preset.id,
+        runVersion: 1,
+      });
     }
 
-    // Derive pipeline (flat, for display) and stageGroups (string[][], drives
-    // orchestration) from the roles that are actually assigned. Each STAGES
-    // entry becomes one group after filtering to assigned roles; empty groups
-    // are dropped.
-    const usedRoleIds = [...new Set(targets.map(r => r.roleId))];
-    const stageGroups: string[][] = STAGES
-      .map(group => group.filter(r => usedRoleIds.includes(r)))
-      .filter(group => group.length > 0);
-    const pipeline = stageGroups.flat();
-    const firstGroup = stageGroups[0] ?? [];
+    if (authoringMode === 'graph') {
+      if (!globalGraph.nodes.length) {
+        throw new Error('Graph mode requires at least one task node and one agent node in the Node Graph pane.');
+      }
 
-    const workspaceDir = useWorkspaceStore.getState().workspaceDir;
+      const flow = workflowGraphToFlowGraph({
+        graph: globalGraph,
+        workspaceDir,
+        terminalRows: syncedRows,
+        agentInstructions,
+      });
 
+      return compileMission({
+        missionId,
+        graphId: globalGraph.id || `graph:${missionId}`,
+        nodes: flow.nodes,
+        edges: flow.edges,
+        workspaceDirFallback: workspaceDir,
+        terminalClis,
+        authoringMode: 'graph',
+        presetId: null,
+        runVersion: 1,
+      });
+    }
+
+    const adaptiveSeed = buildAdaptiveSeedFlowGraph({
+      missionId,
+      objective,
+      mode,
+      workspaceDir,
+      terminalRows: syncedRows,
+      agentInstructions,
+    });
+
+    return compileMission({
+      missionId,
+      graphId: `adaptive:${missionId}`,
+      nodes: adaptiveSeed.nodes,
+      edges: adaptiveSeed.edges,
+      workspaceDirFallback: workspaceDir,
+      terminalClis,
+      authoringMode: 'adaptive',
+      presetId: null,
+      runVersion: 1,
+    });
+  }
+
+  async function stagePrompts(mission: CompiledMission) {
+    const panesByTerminalId = new Map(
+      terminals
+        .filter(p => Boolean(p.data?.terminalId))
+        .map(p => [p.data?.terminalId as string, p])
+    );
+
+    const countByRole = new Map<string, number>();
+    for (const node of mission.nodes) {
+      countByRole.set(node.roleId, (countByRole.get(node.roleId) ?? 0) + 1);
+    }
+
+    const usedByRole = new Map<string, number>();
+    for (const node of mission.nodes) {
+      const pane = panesByTerminalId.get(node.terminal.terminalId);
+      if (!pane) {
+        throw new Error(`Terminal ${node.terminal.terminalTitle} (${node.terminal.terminalId}) is not open.`);
+      }
+
+      const currentRoleIndex = (usedByRole.get(node.roleId) ?? 0) + 1;
+      usedByRole.set(node.roleId, currentRoleIndex);
+
+      const ctx: LaunchContext = {
+        workspaceDir,
+        missionId: mission.missionId,
+        nodeId: node.id,
+        attempt: 1,
+        allowedOutgoingTargets: getAllowedOutgoingTargets(mission, node.id),
+        authoringMode: mission.metadata.authoringMode,
+        presetId: mission.metadata.presetId,
+        runVersion: mission.metadata.runVersion,
+        instanceNum: currentRoleIndex,
+        totalInstances: countByRole.get(node.roleId) ?? 1,
+        task: mission.task.prompt,
+        mode: mission.task.mode,
+      };
+
+      const prompt = buildLaunchPrompt(node.roleId, ctx, node.instructionOverride || undefined);
+      if (prompt) {
+        await writeToTerminal(pane, prompt);
+      }
+    }
+  }
+
+  async function handleLaunch() {
     setBusy(true);
     setStatus(null);
 
     try {
       if (!isConfirming) {
         const missionId = generateId();
-        const nodeRefs = targets.map((r, index) => ({
-          id: `node-${missionId}-${index}`,
-          roleId: r.roleId,
-        }));
+        const mission = compileLaunchMission(missionId);
 
-        const nodes = targets.map((r, index) => ({
-          id: nodeRefs[index].id,
-          roleId: r.roleId,
-          instructionOverride: agentInstructions[r.roleId] ?? '',
-          terminal: {
-            terminalId: r.pane.data?.terminalId ?? `term-${r.pane.id}`,
-            terminalTitle: r.pane.title,
-            cli: r.cli ?? 'claude',
-            paneId: r.pane.id,
-            reusedExisting: true,
-          },
-        }));
-
-        const agents: MissionAgent[] = targets.map((r, index) => ({
-          terminalId: r.pane.data?.terminalId ?? `term-${r.pane.id}`,
-          title: r.pane.title,
-          roleId: r.roleId,
-          paneId: r.pane.id,
+        const agents: MissionAgent[] = mission.nodes.map(node => ({
+          terminalId: node.terminal.terminalId,
+          title: node.terminal.terminalTitle,
+          roleId: node.roleId,
+          paneId: node.terminal.paneId,
           status: 'idle',
           attempt: 0,
           lastPayload: null,
           attemptHistory: [],
-          nodeId: nodeRefs[index].id,
+          nodeId: node.id,
         }));
 
-        const edges: Array<{ id: string; fromNodeId: string; toNodeId: string; condition: 'always' | 'on_failure' }> = [];
-        for (let i = 0; i < stageGroups.length - 1; i++) {
-          const currentGroupRoles = stageGroups[i];
-          const nextGroupRoles = stageGroups[i + 1];
-
-          const currentNodes = nodeRefs.filter(n => currentGroupRoles.includes(n.roleId));
-          const nextNodes = nodeRefs.filter(n => nextGroupRoles.includes(n.roleId));
-
-          for (const cNode of currentNodes) {
-            for (const nNode of nextNodes) {
-              edges.push({
-                id: `edge:${cNode.id}:always:${nNode.id}`,
-                fromNodeId: cNode.id,
-                toNodeId: nNode.id,
-                condition: 'always'
-              });
-            }
-          }
-        }
-
-        const reviewerNode = nodeRefs.find(n => n.roleId === 'reviewer');
-        if (reviewerNode) {
-          const retryTargets = nodeRefs.filter(n => ['builder', 'tester', 'security'].includes(n.roleId));
-          for (const target of retryTargets) {
-            edges.push({
-              id: `edge:${reviewerNode.id}:on_failure:${target.id}`,
-              fromNodeId: reviewerNode.id,
-              toNodeId: target.id,
-              condition: 'on_failure'
-            });
-          }
-        }
-
-        const mission: CompiledMission = {
-          missionId,
-          graphId: missionId,
-          task: {
-            nodeId: `launcher-task-${missionId}`,
-            prompt: task.trim(),
-            mode,
-            workspaceDir: workspaceDir ?? null,
-          },
-          metadata: {
-            compiledAt: Date.now(),
-            sourceGraphId: missionId,
-            startNodeIds: nodes
-              .map(node => ({ id: node.id }))
-              .filter(node => !edges.some(edge => edge.toNodeId === node.id))
-              .map(node => node.id),
-            executionLayers: stageGroups.map(group =>
-              nodeRefs.filter(node => group.includes(node.roleId)).map(node => node.id)
-            ),
-          },
-          nodes,
-          edges,
-        };
-
-        const firstGroupTerminalIds = targets
-          .filter(r => firstGroup.includes(r.roleId))
-          .map(r => r.pane.data?.terminalId ?? `term-${r.pane.id}`);
-
-        // Stage 1: Fill terminals with context-aware prompts (no execution yet)
-        for (let index = 0; index < targets.length; index += 1) {
-          const r = targets[index];
-          const sameRole = targets.filter(t => t.roleId === r.roleId);
-          // Predecessor / successor are resolved against stageGroups so parallel
-          // peers (builder, tester, security) see the Coordinator as predecessor
-          // and Reviewer as successor, not each other.
-          const groupIdx = stageGroups.findIndex(g => g.includes(r.roleId));
-          const prevGroup = groupIdx > 0 ? stageGroups[groupIdx - 1] : null;
-          const nextGroup = groupIdx >= 0 && groupIdx < stageGroups.length - 1 ? stageGroups[groupIdx + 1] : null;
-          const predecessorRole = prevGroup
-            ? agentsConfig.agents.find(a => a.id === prevGroup[prevGroup.length - 1]) ?? null
-            : null;
-          const successorRole = nextGroup
-            ? agentsConfig.agents.find(a => a.id === nextGroup[0]) ?? null
-            : null;
-
-          const ctx: LaunchContext = {
-            workspaceDir,
-            pipeline,
-            instanceNum: sameRole.indexOf(r) + 1,
-            totalInstances: sameRole.length,
-            predecessorRole,
-            successorRole,
-            missionId,
-            nodeId: nodeRefs[index].id,
-            attempt: 1,
-            allowedOutgoingTargets: getAllowedOutgoingTargets(mission, nodeRefs[index].id),
-            task: task.trim(),
-            mode,
-          };
-
-          const prompt = buildLaunchPrompt(r.roleId, ctx, agentInstructions[r.roleId]);
-          if (prompt) {
-            // Write prompt text into the input buffer without submitting.
-            // The CLI is already running (started via Connect). Stage 2 sends \r.
-            await writeToTerminal(r.pane, prompt);
-          }
-        }
-        setPendingLaunch({
-          missionId,
-          mission,
-          agents,
-          firstGroupTerminalIds,
-        });
-        setIsConfirming(true);
-        setStatus('Prompts staged. Verify in terminals and click Confirm to execute.');
-      } else {
-        if (!pendingLaunch) {
-          throw new Error('No staged mission found. Re-stage the prompts before confirming.');
-        }
-        // Stage 2: Execute — every agent in the first group fires immediately,
-        // the rest wait. Parallel within a group, sequential between groups.
-        // Notify Rust backend
-        await invoke('start_mission_graph', { missionId: pendingLaunch.missionId, graph: pendingLaunch.mission });
-        await Promise.all(
-          pendingLaunch.firstGroupTerminalIds.map(terminalId =>
-            invoke('write_to_pty', { id: terminalId, data: '\r' })
+        const nodeById = new Map(mission.nodes.map(node => [node.id, node]));
+        const startTerminalIds = Array.from(
+          new Set(
+            mission.metadata.startNodeIds
+              .map(nodeId => nodeById.get(nodeId)?.terminal.terminalId)
+              .filter((value): value is string => Boolean(value))
           )
         );
 
-        // Update UI
+        if (startTerminalIds.length === 0) {
+          throw new Error('Compiled mission has no start nodes with terminal bindings.');
+        }
+
+        await stagePrompts(mission);
+        setPendingLaunch({ missionId, mission, agents, startTerminalIds });
+        setIsConfirming(true);
+        setStatus('Prompts staged. Verify each terminal, then click Confirm to execute.');
+      } else {
+        if (!pendingLaunch) {
+          throw new Error('No staged mission found. Re-stage prompts before confirming.');
+        }
+
+        await invoke('start_mission_graph', {
+          missionId: pendingLaunch.missionId,
+          graph: pendingLaunch.mission,
+        });
+
+        await Promise.all(
+          pendingLaunch.startTerminalIds.map(terminalId => invoke('write_to_pty', { id: terminalId, data: '\r' }))
+        );
+
         addPane('missioncontrol', 'Mission Control', {
           taskDescription: task.trim(),
           agents: pendingLaunch.agents,
@@ -332,33 +527,25 @@ export function LauncherPane() {
           mission: pendingLaunch.mission,
         });
 
-        const firstCount = targets.filter(r => firstGroup.includes(r.roleId)).length;
-        const firstLabel = firstGroup.length === 1
-          ? agentsConfig.agents.find(a => a.id === firstGroup[0])?.name ?? firstGroup[0]
-          : firstGroup.map(id => agentsConfig.agents.find(a => a.id === id)?.name ?? id).join(' + ');
-        setStatus(`Launched ${firstCount > 1 ? `${firstCount}x ` : ''}${firstLabel}. Mission Control opened.`);
+        const modeLabel = pendingLaunch.mission.metadata.authoringMode ?? 'graph';
+        setStatus(`Launched ${pendingLaunch.startTerminalIds.length} start node(s) in ${modeLabel} mode. Mission Control opened.`);
         setIsConfirming(false);
         setPendingLaunch(null);
       }
-    } catch (e) {
-      setStatus(`Error: ${e}`);
+    } catch (error) {
+      setStatus(`Error: ${error}`);
       setPendingLaunch(null);
+      setIsConfirming(false);
     } finally {
       setBusy(false);
     }
   }
 
-  // Derive pipeline preview for the UI hint — grouped by parallel stage.
-  const assignedTargets = syncedRows.filter(r => r.roleId);
-  const previewUsed = new Set(assignedTargets.map(r => r.roleId));
-  const previewGroups: string[][] = STAGES
-    .map(g => g.filter(r => previewUsed.has(r)))
-    .filter(g => g.length > 0);
+  const detectedRoles = syncedRows.filter(row => row.roleId).map(row => row.roleId);
+  const selectedPreset = getWorkflowPreset(presetId);
 
   return (
     <div className="flex flex-col h-full bg-bg-panel overflow-hidden">
-
-      {/* Header */}
       <div className="flex items-center gap-2 px-4 py-2.5 border-b border-border-panel shrink-0">
         <Rocket size={14} className="text-accent-primary" />
         <span className="text-xs font-semibold text-text-secondary uppercase tracking-wider">Task Launcher</span>
@@ -366,9 +553,7 @@ export function LauncherPane() {
           <button
             onClick={() => setMode('build')}
             className={`flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-semibold transition-colors ${
-              mode === 'build'
-                ? 'bg-accent-primary text-accent-text'
-                : 'text-text-muted hover:text-text-secondary'
+              mode === 'build' ? 'bg-accent-primary text-accent-text' : 'text-text-muted hover:text-text-secondary'
             }`}
             title="Build mode: create new files and projects from scratch"
           >
@@ -378,9 +563,7 @@ export function LauncherPane() {
           <button
             onClick={() => setMode('edit')}
             className={`flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-semibold transition-colors ${
-              mode === 'edit'
-                ? 'bg-accent-primary text-accent-text'
-                : 'text-text-muted hover:text-text-secondary'
+              mode === 'edit' ? 'bg-accent-primary text-accent-text' : 'text-text-muted hover:text-text-secondary'
             }`}
             title="Edit mode: read and modify an existing codebase"
           >
@@ -391,36 +574,98 @@ export function LauncherPane() {
       </div>
 
       <div className="flex-1 overflow-y-auto px-4 py-3 space-y-4">
-
-        {/* Mode hint */}
         {mode === 'edit' && (
           <div className="text-[10px] text-text-muted bg-bg-surface border border-border-panel rounded-md px-2.5 py-2 leading-relaxed">
             Agents will <span className="text-accent-primary font-semibold">read the existing codebase first</span> and make targeted edits. Set the workspace directory to your project root.
           </div>
         )}
 
-        {/* Task input */}
+        <div className="space-y-1.5">
+          <label className="text-[11px] font-semibold text-text-muted uppercase tracking-wider">Authoring Mode</label>
+          <div className="grid grid-cols-3 gap-1.5">
+            <button
+              onClick={() => setAuthoringMode('preset')}
+              className={`px-2.5 py-1.5 rounded border text-[11px] font-medium transition-colors ${
+                authoringMode === 'preset'
+                  ? 'border-accent-primary bg-accent-primary/10 text-accent-primary'
+                  : 'border-border-panel text-text-muted hover:text-text-primary'
+              }`}
+            >
+              <Wand2 size={12} className="inline mr-1" />
+              Preset
+            </button>
+            <button
+              onClick={() => setAuthoringMode('graph')}
+              className={`px-2.5 py-1.5 rounded border text-[11px] font-medium transition-colors ${
+                authoringMode === 'graph'
+                  ? 'border-accent-primary bg-accent-primary/10 text-accent-primary'
+                  : 'border-border-panel text-text-muted hover:text-text-primary'
+              }`}
+            >
+              <GitBranch size={12} className="inline mr-1" />
+              Graph
+            </button>
+            <button
+              onClick={() => setAuthoringMode('adaptive')}
+              className={`px-2.5 py-1.5 rounded border text-[11px] font-medium transition-colors ${
+                authoringMode === 'adaptive'
+                  ? 'border-accent-primary bg-accent-primary/10 text-accent-primary'
+                  : 'border-border-panel text-text-muted hover:text-text-primary'
+              }`}
+            >
+              <Cpu size={12} className="inline mr-1" />
+              Adaptive
+            </button>
+          </div>
+        </div>
+
+        {authoringMode === 'preset' && (
+          <div className="space-y-1.5">
+            <label className="text-[11px] font-semibold text-text-muted uppercase tracking-wider">Preset</label>
+            <select
+              value={presetId}
+              onChange={event => setPresetId(event.target.value)}
+              className="w-full bg-bg-surface border border-border-panel rounded-md px-3 py-2 text-xs text-text-primary"
+            >
+              {PRESETS.map(preset => (
+                <option key={preset.id} value={preset.id}>
+                  {preset.name}
+                </option>
+              ))}
+            </select>
+            {selectedPreset && (
+              <p className="text-[10px] text-text-muted leading-relaxed">{selectedPreset.description}</p>
+            )}
+          </div>
+        )}
+
+        {authoringMode === 'graph' && (
+          <div className="text-[10px] text-text-muted bg-bg-surface border border-border-panel rounded-md px-2.5 py-2 leading-relaxed">
+            Compiles directly from Node Graph editor data. Current graph has {globalGraph.nodes.length} node(s) and {globalGraph.edges.length} edge(s).
+          </div>
+        )}
+
+        {authoringMode === 'adaptive' && (
+          <div className="text-[10px] text-text-muted bg-bg-surface border border-border-panel rounded-md px-2.5 py-2 leading-relaxed">
+            Seeds a supervisor node and runs graph patching at runtime. Start with a coordinator terminal; new nodes can be appended with adaptive patch tools.
+          </div>
+        )}
+
         <div className="space-y-1.5">
           <label className="text-[11px] font-semibold text-text-muted uppercase tracking-wider">
             {mode === 'edit' ? 'Change / Fix' : 'Task / Goal'}
           </label>
           <textarea
             value={task}
-            onChange={e => setTask(e.target.value)}
-            placeholder={mode === 'edit'
-              ? 'Describe what to change, fix, or refactor…'
-              : 'Describe the task or goal for this agent team…'
-            }
+            onChange={event => setTask(event.target.value)}
+            placeholder={mode === 'edit' ? 'Describe what to change, fix, or refactor...' : 'Describe the task or goal for this workflow...'}
             rows={3}
             className="w-full bg-bg-surface border border-border-panel rounded-md px-3 py-2 text-xs text-text-primary placeholder:text-text-muted resize-none focus:outline-none focus:border-accent-primary transition-colors"
           />
         </div>
 
-        {/* Terminal role assignment */}
         <div className="space-y-1.5">
-          <label className="text-[11px] font-semibold text-text-muted uppercase tracking-wider">
-            Auto Detected Agents
-          </label>
+          <label className="text-[11px] font-semibold text-text-muted uppercase tracking-wider">Auto Detected Agents</label>
 
           {terminals.length === 0 ? (
             <div className="flex items-center gap-2 text-xs text-text-muted opacity-50 py-3">
@@ -429,23 +674,17 @@ export function LauncherPane() {
             </div>
           ) : (
             <div className="space-y-1.5">
-              {syncedRows.map(r => (
-                <div key={r.pane.id} className="flex items-center gap-2">
+              {syncedRows.map(row => (
+                <div key={row.pane.id} className="flex items-center gap-2">
                   <div className="flex items-center gap-1.5 w-28 shrink-0">
                     <TerminalSquare size={11} className="text-text-muted shrink-0" />
-                    <span className="text-xs text-text-secondary truncate">{r.pane.title}</span>
+                    <span className="text-xs text-text-secondary truncate">{row.pane.title}</span>
                   </div>
-                  <div className={`w-24 shrink-0 text-[10px] uppercase tracking-wide px-2 py-1 border rounded text-center ${r.cli ? 'border-border-panel bg-bg-surface text-text-primary' : 'border-dashed border-border-panel bg-bg-surface text-text-muted'}`}>
-                    <span className="inline-flex items-center gap-1"><Cpu size={10} />{r.cli ?? 'N/A'}</span>
+                  <div className={`w-24 shrink-0 text-[10px] uppercase tracking-wide px-2 py-1 border rounded text-center ${row.cli ? 'border-border-panel bg-bg-surface text-text-primary' : 'border-dashed border-border-panel bg-bg-surface text-text-muted'}`}>
+                    <span className="inline-flex items-center gap-1"><Cpu size={10} />{row.cli ?? 'N/A'}</span>
                   </div>
-                  <div className="relative flex-1">
-                    <div className={`w-full border rounded px-2.5 py-1 text-xs ${
-                      r.roleId ? 'text-text-primary border-border-panel bg-bg-surface' : 'text-red-300 border-red-500/40 bg-red-500/10'
-                    }`}>
-                      {r.roleId
-                        ? (ROLES.find(role => role.id === r.roleId)?.label ?? r.roleId)
-                        : 'Role not detected (name terminal with role keyword)'}
-                    </div>
+                  <div className={`flex-1 border rounded px-2.5 py-1 text-xs ${row.roleId ? 'text-text-primary border-border-panel bg-bg-surface' : 'text-red-300 border-red-500/40 bg-red-500/10'}`}>
+                    {row.roleId || 'Role not detected (name terminal with role keyword)'}
                   </div>
                 </div>
               ))}
@@ -453,53 +692,14 @@ export function LauncherPane() {
           )}
         </div>
 
-        {/* Pipeline preview — one chip per stage group; parallel peers share. */}
-        {previewGroups.length > 0 && (
-          <div className="space-y-1.5">
-            <label className="text-[11px] font-semibold text-text-muted uppercase tracking-wider">
-              Pipeline
-            </label>
-            <div className="flex items-center flex-wrap gap-1 px-2.5 py-2 bg-bg-surface border border-border-panel rounded-md">
-              {previewGroups.map((group, idx) => {
-                const groupCount = assignedTargets.filter(r => group.includes(r.roleId)).length;
-                const label = group
-                  .map(id => agentsConfig.agents.find(a => a.id === id)?.name ?? id)
-                  .join(' + ');
-                return (
-                  <span key={group.join('+')} className="flex items-center gap-1">
-                    <span className="text-[10px] font-medium text-accent-primary bg-accent-primary/10 border border-accent-primary/20 rounded px-1.5 py-0.5">
-                      {groupCount > group.length ? `${groupCount}× ` : ''}{label}
-                    </span>
-                    {idx < previewGroups.length - 1 && (
-                      <span className="text-[10px] text-text-muted opacity-40">→</span>
-                    )}
-                  </span>
-                );
-              })}
-            </div>
-            <p className="text-[10px] text-text-muted opacity-50 leading-relaxed">
-              Groups run sequentially. Multiple roles in the same group run in parallel.
-            </p>
-          </div>
-        )}
-
-        {/* Role descriptions */}
-        {syncedRows.some(r => r.roleId) && (
+        {detectedRoles.length > 0 && (
           <div className="space-y-1 border border-border-panel rounded-md p-2.5 bg-bg-surface">
-            {syncedRows.filter(r => r.roleId).map(r => {
-              const agent = agentsConfig.agents.find(a => a.id === r.roleId);
-              if (!agent) return null;
-              return (
-                <div key={r.pane.id} className="text-[10px] text-text-muted leading-relaxed">
-                  <span className="text-accent-primary font-semibold">{r.pane.title}:</span>{' '}
-                  {agent.description}
-                </div>
-              );
-            })}
+            <div className="text-[10px] text-text-muted">
+              Detected roles: <span className="text-text-primary">{Array.from(new Set(detectedRoles)).join(', ')}</span>
+            </div>
           </div>
         )}
 
-        {/* Status */}
         {status && (
           <p className={`text-[11px] px-2.5 py-1.5 rounded border ${
             status.startsWith('Error')
@@ -509,10 +709,8 @@ export function LauncherPane() {
             {status}
           </p>
         )}
-
       </div>
 
-      {/* Action buttons */}
       <div className="shrink-0 border-t border-border-panel px-4 py-3 flex gap-2">
         <button
           onClick={handleConnect}
@@ -526,16 +724,13 @@ export function LauncherPane() {
           onClick={handleLaunch}
           disabled={busy || !task.trim()}
           className={`flex-1 flex items-center justify-center gap-1.5 px-3 py-1.5 rounded text-xs font-semibold transition-all disabled:opacity-40 ${
-            isConfirming
-              ? 'bg-red-600 text-white hover:bg-red-700 animate-pulse'
-              : 'bg-accent-primary text-accent-text hover:opacity-90'
+            isConfirming ? 'bg-red-600 text-white hover:bg-red-700 animate-pulse' : 'bg-accent-primary text-accent-text hover:opacity-90'
           }`}
         >
           {isConfirming ? <AlertCircle size={12} /> : <Rocket size={12} />}
           {isConfirming ? 'Confirm?' : 'Launch Task'}
         </button>
       </div>
-
     </div>
   );
 }

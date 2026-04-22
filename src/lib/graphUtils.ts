@@ -1,4 +1,4 @@
-import type { CompiledMissionEdge } from '../store/workspace';
+import type { CompiledMissionEdge } from '../store/workspace.js';
 
 export interface ExecutionLayerNode {
   id: string;

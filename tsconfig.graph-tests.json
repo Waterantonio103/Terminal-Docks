@@ -12,6 +12,7 @@
     "src/lib/buildPrompt.ts",
     "src/lib/graphCompiler.ts",
     "src/lib/graphUtils.ts",
-    "src/lib/missionRuntime.ts"
+    "src/lib/missionRuntime.ts",
+    "src/lib/workflowPresets.ts"
   ]
 }

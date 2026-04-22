@@ -27,6 +27,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             greet,
             pty::spawn_pty,
+            pty::spawn_pty_with_command,
             pty::write_to_pty,
             pty::resize_pty,
             pty::destroy_pty,
@@ -42,10 +43,15 @@ pub fn run() {
             db::save_session_event,
             db::get_session_history,
             mcp::get_mcp_url,
+            mcp::get_mcp_base_url,
+            mcp::mcp_notify_agent,
             swarm::get_swarm_status,
             swarm::watch_directory,
             workflow_log::export_workflow_log,
             workflow_engine::start_mission_graph,
+            workflow_engine::append_mission_patch,
+            workflow_engine::register_runtime_activation_dispatch,
+            workflow_engine::get_runtime_activation,
         ])
         .setup(|app| {
             db::init_db(app.handle()).expect("Failed to init db");

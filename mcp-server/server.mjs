@@ -5,6 +5,7 @@ import cors from 'cors';
 import { z } from 'zod';
 import { writeFileSync, mkdirSync, readFileSync } from 'fs';
 import { randomUUID } from 'crypto';
+import { EventEmitter } from 'node:events';
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import { fileURLToPath, pathToFileURL } from 'url';
 import { dirname, resolve } from 'path';
@@ -80,6 +81,35 @@ db.exec(`
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (mission_id, node_id)
   );
+  CREATE TABLE IF NOT EXISTS agent_runtime_sessions (
+    session_id TEXT PRIMARY KEY,
+    agent_id TEXT NOT NULL,
+    mission_id TEXT NOT NULL,
+    node_id TEXT NOT NULL,
+    attempt INTEGER NOT NULL,
+    terminal_id TEXT NOT NULL,
+    status TEXT NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
+  CREATE TABLE IF NOT EXISTS mission_timeline (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    mission_id TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    payload TEXT,
+    run_version INTEGER,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
+  CREATE TABLE IF NOT EXISTS task_pushes (
+    session_id TEXT NOT NULL,
+    mission_id TEXT NOT NULL,
+    node_id TEXT NOT NULL,
+    task_seq INTEGER NOT NULL,
+    attempt INTEGER,
+    pushed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    acked_at DATETIME,
+    PRIMARY KEY (session_id, mission_id, node_id, task_seq)
+  );
 `);
 
 // Migrate existing DBs created before Phase 1 (handoff columns).
@@ -119,6 +149,116 @@ function parseJsonSafe(value, fallback = null) {
   }
 }
 
+const WORKER_CAPABILITY_IDS = [
+  'planning',
+  'coding',
+  'testing',
+  'review',
+  'security',
+  'repo_analysis',
+  'shell_execution',
+];
+
+const ROLE_CAPABILITY_PRESETS = {
+  scout: [
+    { id: 'repo_analysis', level: 3 },
+    { id: 'planning', level: 2 },
+    { id: 'shell_execution', level: 2 },
+  ],
+  coordinator: [
+    { id: 'planning', level: 3 },
+    { id: 'repo_analysis', level: 2 },
+    { id: 'review', level: 2 },
+  ],
+  builder: [
+    { id: 'coding', level: 3 },
+    { id: 'shell_execution', level: 3 },
+    { id: 'repo_analysis', level: 2 },
+  ],
+  tester: [
+    { id: 'testing', level: 3 },
+    { id: 'coding', level: 2 },
+    { id: 'shell_execution', level: 2 },
+  ],
+  security: [
+    { id: 'security', level: 3 },
+    { id: 'review', level: 2 },
+    { id: 'repo_analysis', level: 2 },
+  ],
+  reviewer: [
+    { id: 'review', level: 3 },
+    { id: 'testing', level: 2 },
+    { id: 'security', level: 2 },
+    { id: 'coding', level: 1 },
+  ],
+};
+
+const normalizeCapabilityId = (value) => {
+  if (typeof value !== 'string') return null;
+  const normalized = value.trim().toLowerCase();
+  return WORKER_CAPABILITY_IDS.includes(normalized) ? normalized : null;
+};
+
+function normalizeCapabilityEntry(entry) {
+  if (typeof entry === 'string') {
+    const id = normalizeCapabilityId(entry);
+    return id ? { id, level: 2, verifiedBy: 'profile' } : null;
+  }
+  if (!entry || typeof entry !== 'object') return null;
+
+  const id = normalizeCapabilityId(entry.id);
+  if (!id) return null;
+  const rawLevel = Number.isFinite(entry.level) ? Math.floor(Number(entry.level)) : 2;
+  const level = Math.max(0, Math.min(3, rawLevel));
+  const verifiedBy = entry.verifiedBy === 'runtime' ? 'runtime' : 'profile';
+  return { id, level, verifiedBy };
+}
+
+function normalizeCapabilities(entries, fallback = []) {
+  const byId = new Map();
+  for (const entry of [...(Array.isArray(entries) ? entries : []), ...fallback]) {
+    const normalized = normalizeCapabilityEntry(entry);
+    if (!normalized) continue;
+    const current = byId.get(normalized.id);
+    if (!current || normalized.level > current.level) {
+      byId.set(normalized.id, normalized);
+    }
+  }
+  return Array.from(byId.values()).sort((left, right) => left.id.localeCompare(right.id));
+}
+
+function defaultCapabilitiesForRole(roleId) {
+  return normalizeCapabilities(ROLE_CAPABILITY_PRESETS[roleId] ?? []);
+}
+
+function effectiveSessionCapabilities(session) {
+  const explicit = normalizeCapabilities(session?.capabilities);
+  if (explicit.length > 0) return explicit;
+  return normalizeCapabilities(defaultCapabilitiesForRole(session?.role));
+}
+
+function summarizeSession(sessionId, session) {
+  return {
+    sessionId,
+    role: session.role ?? null,
+    profileId: session.profileId ?? session.role ?? null,
+    agentId: session.agentId ?? null,
+    terminalId: session.terminalId ?? null,
+    cli: session.cli ?? null,
+    status: session.status ?? 'idle',
+    availability: session.availability ?? 'available',
+    workingDir: session.workingDir ?? null,
+    capabilities: effectiveSessionCapabilities(session),
+    connectedAt: session.connectedAt ?? null,
+    updatedAt: session.updatedAt ?? null,
+  };
+}
+
+function sessionHasCapability(session, capabilityId) {
+  const capabilities = effectiveSessionCapabilities(session);
+  return capabilities.some(capability => capability.id === capabilityId);
+}
+
 function allowedOutcomesForCondition(condition) {
   if (condition === 'on_success') return ['success'];
   if (condition === 'on_failure') return ['failure'];
@@ -154,6 +294,20 @@ function getMissionNodeRuntime(missionId, nodeId) {
   ).get(missionId, nodeId) ?? null;
 }
 
+function getRuntimeSessionByAttempt(missionId, nodeId, attempt) {
+  return db.prepare(
+    "SELECT session_id, agent_id, mission_id, node_id, attempt, terminal_id, status, datetime(created_at, 'localtime') AS created_at, datetime(updated_at, 'localtime') AS updated_at FROM agent_runtime_sessions WHERE mission_id = ? AND node_id = ? AND attempt = ? ORDER BY updated_at DESC LIMIT 1"
+  ).get(missionId, nodeId, attempt) ?? null;
+}
+
+function requireRuntimeSessionForAttempt(missionId, nodeId, attempt) {
+  const row = getRuntimeSessionByAttempt(missionId, nodeId, attempt);
+  if (!row) {
+    return { error: `No runtime session registration found for ${missionId}/${nodeId} attempt ${attempt}.` };
+  }
+  return { row };
+}
+
 function getLegalOutgoingTargets(mission, fromNodeId) {
   const nodeById = new Map((mission?.nodes ?? []).map(node => [node.id, node]));
 
@@ -178,6 +332,10 @@ export function buildTaskDetails(missionId, nodeId) {
   if (!node) return null;
 
   const runtime = getMissionNodeRuntime(missionId, nodeId);
+  const runtimeSession =
+    runtime && Number.isInteger(runtime.attempt) && runtime.attempt > 0
+      ? getRuntimeSessionByAttempt(missionId, nodeId, runtime.attempt)
+      : null;
   const recentTasks = db.prepare(
     "SELECT id, title, description, status, datetime(created_at, 'localtime') AS created_at, parent_id, agent_id, from_role, target_role, payload, mission_id, node_id FROM tasks WHERE mission_id = ? AND node_id = ? ORDER BY id DESC LIMIT 10"
   ).all(missionId, nodeId).map(task => ({
@@ -192,10 +350,22 @@ export function buildTaskDetails(missionId, nodeId) {
     content_json: parseJsonSafe(message.content),
   }));
 
+  const pendingPushes = runtimeSession
+    ? db.prepare(
+        `SELECT mission_id, node_id, task_seq, attempt, datetime(pushed_at, 'localtime') AS pushed_at
+           FROM task_pushes
+          WHERE session_id = ? AND mission_id = ? AND node_id = ? AND acked_at IS NULL
+          ORDER BY task_seq ASC`
+      ).all(runtimeSession.session_id, missionId, nodeId)
+    : [];
+
   return {
     missionId,
     graphId: record.graphId,
     missionStatus: record.status,
+    authoringMode: record.mission.metadata?.authoringMode ?? null,
+    presetId: record.mission.metadata?.presetId ?? null,
+    runVersion: Number.isInteger(record.mission.metadata?.runVersion) ? record.mission.metadata.runVersion : 1,
     objective: record.mission.task?.prompt ?? '',
     task: record.mission.task ?? null,
     node: {
@@ -209,16 +379,30 @@ export function buildTaskDetails(missionId, nodeId) {
       lastPayload: runtime?.last_payload ?? null,
       updatedAt: runtime?.updated_at ?? null,
     },
+    runtimeSession: runtimeSession
+      ? {
+          sessionId: runtimeSession.session_id,
+          agentId: runtimeSession.agent_id,
+          terminalId: runtimeSession.terminal_id,
+          status: runtimeSession.status,
+          createdAt: runtimeSession.created_at,
+          updatedAt: runtimeSession.updated_at,
+        }
+      : null,
     legalNextTargets: getLegalOutgoingTargets(record.mission, nodeId),
     latestTask: recentTasks[0] ?? null,
     recentTasks,
     inbox,
+    pendingPushes,
   };
 }
 
-export function validateGraphHandoff({ missionId, fromNodeId, targetNodeId, outcome, fromRole, targetRole }) {
+export function validateGraphHandoff({ missionId, fromNodeId, targetNodeId, outcome, fromRole, targetRole, fromAttempt }) {
   if (!missionId || !fromNodeId || !targetNodeId || !outcome) {
     return { error: 'Graph-mode handoff_task requires missionId, fromNodeId, targetNodeId, and outcome.' };
+  }
+  if (!Number.isInteger(fromAttempt) || fromAttempt < 1) {
+    return { error: 'Graph-mode handoff_task requires fromAttempt as a positive integer.' };
   }
 
   const normalizedOutcome = outcome.trim().toLowerCase();
@@ -244,6 +428,15 @@ export function validateGraphHandoff({ missionId, fromNodeId, targetNodeId, outc
   const runtime = getMissionNodeRuntime(missionId, fromNodeId);
   if (!runtime || runtime.status !== 'running') {
     return { error: `Node ${fromNodeId} is not currently running in mission ${missionId}. Query get_task_details first.` };
+  }
+  if (runtime.attempt !== fromAttempt) {
+    return {
+      error: `Stale handoff attempt for ${fromNodeId}. fromAttempt=${fromAttempt}, currentAttempt=${runtime.attempt}.`,
+    };
+  }
+  const sessionValidation = requireRuntimeSessionForAttempt(missionId, fromNodeId, fromAttempt);
+  if (sessionValidation.error) {
+    return { error: `${sessionValidation.error} Activation drift detected; refresh with get_task_details.` };
   }
 
   const edge = (record.mission.edges ?? []).find(candidate =>
@@ -273,7 +466,226 @@ export function validateGraphHandoff({ missionId, fromNodeId, targetNodeId, outc
     targetNode,
     edge,
     runtime,
+    runtimeSession: sessionValidation.row,
     outcome: normalizedOutcome,
+    fromAttempt,
+  };
+}
+
+function normalizeEdgeCondition(condition) {
+  return condition === 'on_success' || condition === 'on_failure' ? condition : 'always';
+}
+
+function deriveExecutionLayers(nodes, edges) {
+  if (!Array.isArray(nodes) || nodes.length === 0) return [];
+  const nodeIds = new Set(nodes.map(node => node.id));
+  const indegree = new Map(nodes.map(node => [node.id, 0]));
+  const adjacency = new Map(nodes.map(node => [node.id, []]));
+
+  for (const edge of edges ?? []) {
+    if (normalizeEdgeCondition(edge.condition) === 'on_failure') {
+      continue;
+    }
+    if (!nodeIds.has(edge.fromNodeId) || !nodeIds.has(edge.toNodeId)) {
+      throw new Error(`Patch contains edge with unknown node reference: ${edge.fromNodeId} -> ${edge.toNodeId}`);
+    }
+    adjacency.get(edge.fromNodeId).push(edge.toNodeId);
+    indegree.set(edge.toNodeId, (indegree.get(edge.toNodeId) ?? 0) + 1);
+  }
+
+  const order = new Map(nodes.map((node, index) => [node.id, index]));
+  let frontier = nodes
+    .map(node => node.id)
+    .filter(id => (indegree.get(id) ?? 0) === 0)
+    .sort((left, right) => (order.get(left) ?? 0) - (order.get(right) ?? 0));
+  let visited = 0;
+  const layers = [];
+
+  while (frontier.length > 0) {
+    layers.push(frontier);
+    visited += frontier.length;
+    const next = new Set();
+    for (const sourceId of frontier) {
+      for (const targetId of adjacency.get(sourceId) ?? []) {
+        indegree.set(targetId, (indegree.get(targetId) ?? 0) - 1);
+        if ((indegree.get(targetId) ?? 0) === 0) {
+          next.add(targetId);
+        }
+      }
+    }
+    frontier = Array.from(next).sort((left, right) => (order.get(left) ?? 0) - (order.get(right) ?? 0));
+  }
+
+  if (visited !== nodes.length) {
+    throw new Error('Adaptive patch introduces a cycle. Append-only patches must keep the mission graph acyclic.');
+  }
+
+  return layers;
+}
+
+function deriveStartNodeIds(nodes, edges) {
+  const incoming = new Set(
+    (edges ?? [])
+      .filter(edge => normalizeEdgeCondition(edge.condition) !== 'on_failure')
+      .map(edge => edge.toNodeId)
+  );
+  return nodes.map(node => node.id).filter(nodeId => !incoming.has(nodeId));
+}
+
+export function appendAdaptivePatch({ missionId, runVersion, patch }) {
+  if (!missionId) {
+    return { error: 'submit_adaptive_patch requires missionId.' };
+  }
+  if (!Number.isInteger(runVersion) || runVersion < 1) {
+    return { error: 'submit_adaptive_patch requires runVersion as a positive integer.' };
+  }
+  if (!patch || typeof patch !== 'object') {
+    return { error: 'submit_adaptive_patch requires a patch object with nodes/edges arrays.' };
+  }
+
+  const record = loadCompiledMissionRecord(missionId);
+  if (!record || record.status !== 'active') {
+    return { error: `Active compiled mission ${missionId} was not found.` };
+  }
+
+  const currentVersion = Number.isInteger(record.mission?.metadata?.runVersion)
+    ? Number(record.mission.metadata.runVersion)
+    : 1;
+  if (runVersion !== currentVersion) {
+    return {
+      error: `Stale adaptive patch runVersion=${runVersion}. Current runVersion is ${currentVersion}. Refresh with get_task_details or get_workflow_graph.`,
+    };
+  }
+
+  const patchNodes = Array.isArray(patch.nodes) ? patch.nodes : [];
+  const patchEdges = Array.isArray(patch.edges) ? patch.edges : [];
+  if (patchNodes.length === 0 && patchEdges.length === 0) {
+    return { error: 'Adaptive patch is empty. Provide at least one node or edge.' };
+  }
+
+  const existingNodeIds = new Set((record.mission.nodes ?? []).map(node => node.id));
+  const patchNodeIds = new Set();
+  for (const node of patchNodes) {
+    if (!node || typeof node !== 'object') {
+      return { error: 'Adaptive patch nodes must be objects.' };
+    }
+    if (typeof node.id !== 'string' || !node.id.trim()) {
+      return { error: 'Adaptive patch nodes must include non-empty id.' };
+    }
+    if (patchNodeIds.has(node.id) || existingNodeIds.has(node.id)) {
+      return { error: `Adaptive patch node id collision: ${node.id}.` };
+    }
+    if (typeof node.roleId !== 'string' || !node.roleId.trim()) {
+      return { error: `Adaptive patch node ${node.id} is missing roleId.` };
+    }
+    if (!node.terminal || typeof node.terminal !== 'object') {
+      return { error: `Adaptive patch node ${node.id} is missing terminal binding.` };
+    }
+    if (!node.terminal.terminalId || !node.terminal.terminalTitle) {
+      return { error: `Adaptive patch node ${node.id} terminal requires terminalId and terminalTitle.` };
+    }
+    patchNodeIds.add(node.id);
+  }
+
+  const combinedNodeIds = new Set([...existingNodeIds, ...patchNodeIds]);
+  const nextEdges = [...(record.mission.edges ?? [])];
+  for (const edge of patchEdges) {
+    if (!edge || typeof edge !== 'object') {
+      return { error: 'Adaptive patch edges must be objects.' };
+    }
+    const fromNodeId = String(edge.fromNodeId ?? '').trim();
+    const toNodeId = String(edge.toNodeId ?? '').trim();
+    if (!fromNodeId || !toNodeId) {
+      return { error: 'Adaptive patch edges must include fromNodeId and toNodeId.' };
+    }
+    if (!combinedNodeIds.has(fromNodeId) || !combinedNodeIds.has(toNodeId)) {
+      return { error: `Adaptive patch edge references unknown node: ${fromNodeId} -> ${toNodeId}.` };
+    }
+    const condition = normalizeEdgeCondition(edge.condition);
+    const id = edge.id && String(edge.id).trim().length > 0
+      ? String(edge.id)
+      : `edge:${fromNodeId}:${condition}:${toNodeId}:${nextEdges.length + 1}`;
+    nextEdges.push({
+      id,
+      fromNodeId,
+      toNodeId,
+      condition,
+    });
+  }
+
+  const nextNodes = [...(record.mission.nodes ?? []), ...patchNodes.map(node => ({
+    id: String(node.id),
+    roleId: String(node.roleId),
+    instructionOverride: typeof node.instructionOverride === 'string' ? node.instructionOverride : '',
+    terminal: {
+      terminalId: String(node.terminal.terminalId),
+      terminalTitle: String(node.terminal.terminalTitle),
+      cli: node.terminal.cli ?? 'claude',
+      paneId: node.terminal.paneId ?? null,
+      reusedExisting: Boolean(node.terminal.reusedExisting),
+    },
+  }))];
+
+  let executionLayers;
+  try {
+    executionLayers = deriveExecutionLayers(nextNodes, nextEdges);
+  } catch (error) {
+    return { error: error instanceof Error ? error.message : String(error) };
+  }
+
+  const nextVersion = currentVersion + 1;
+  const nextMission = {
+    ...record.mission,
+    nodes: nextNodes,
+    edges: nextEdges,
+    metadata: {
+      ...(record.mission.metadata ?? {}),
+      runVersion: nextVersion,
+      executionLayers,
+      startNodeIds: deriveStartNodeIds(nextNodes, nextEdges),
+      authoringMode: record.mission.metadata?.authoringMode ?? 'adaptive',
+    },
+  };
+
+  db.prepare(
+    `INSERT INTO compiled_missions (mission_id, graph_id, mission_json, status, created_at, updated_at)
+     VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+     ON CONFLICT(mission_id) DO UPDATE SET
+       graph_id = excluded.graph_id,
+       mission_json = excluded.mission_json,
+       status = excluded.status,
+       updated_at = CURRENT_TIMESTAMP`
+  ).run(missionId, record.graphId, JSON.stringify(nextMission), 'active');
+
+  for (const node of patchNodes) {
+    db.prepare(
+      `INSERT INTO mission_node_runtime
+         (mission_id, node_id, role_id, status, attempt, current_wave_id, last_outcome, last_payload, updated_at)
+       VALUES (?, ?, ?, 'idle', 0, NULL, NULL, NULL, CURRENT_TIMESTAMP)
+       ON CONFLICT(mission_id, node_id) DO NOTHING`
+    ).run(missionId, node.id, node.roleId);
+  }
+
+  db.prepare(
+    'INSERT INTO mission_timeline (mission_id, event_type, payload, run_version, created_at) VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)'
+  ).run(
+    missionId,
+    'patch_applied',
+    JSON.stringify({
+      appendedNodeIds: patchNodes.map(node => node.id),
+      appendedEdgeIds: patchEdges.map(edge => edge.id ?? null),
+      previousRunVersion: currentVersion,
+      runVersion: nextVersion,
+    }),
+    nextVersion,
+  );
+
+  return {
+    mission: nextMission,
+    previousRunVersion: currentVersion,
+    runVersion: nextVersion,
+    appendedNodeIds: patchNodes.map(node => node.id),
+    appendedEdgeCount: patchEdges.length,
   };
 }
 
@@ -293,6 +705,68 @@ function resetInMemoryRuntime() {
   projects.length = 0;
   agents.length = 0;
   broadcastHistory.length = 0;
+  recentAgentEvents.length = 0;
+}
+
+// ── Typed agent events (Phase C) ────────────────────────────────────────────
+// Adapters subscribe per-session via /events/session?sid=<id>. Legacy /events
+// SSE feed stays untouched for the UI.
+export const agentEvents = new EventEmitter();
+agentEvents.setMaxListeners(0);
+const AGENT_EVENT_HISTORY_CAP = 500;
+const recentAgentEvents = [];
+
+export function emitAgentEvent(ev) {
+  if (!ev || typeof ev !== 'object' || typeof ev.type !== 'string') return;
+  if (typeof ev.sessionId !== 'string' || !ev.sessionId) return;
+  if (typeof ev.at !== 'number') ev.at = Date.now();
+  recentAgentEvents.push(ev);
+  if (recentAgentEvents.length > AGENT_EVENT_HISTORY_CAP) recentAgentEvents.shift();
+  agentEvents.emit('event', ev);
+  agentEvents.emit(`sid:${ev.sessionId}`, ev);
+}
+
+export function getRecentAgentEvents(sessionId = null) {
+  if (!sessionId) return [...recentAgentEvents];
+  return recentAgentEvents.filter(ev => ev.sessionId === sessionId);
+}
+
+// Idempotent task push record. Returns true on first insert, false on replay.
+// The registry side uses this as the choke point for duplicate sendTask calls;
+// agents see new rows via the pending-pushes join in buildTaskDetails.
+export function recordTaskPush({ sessionId, missionId, nodeId, taskSeq, attempt = null }) {
+  if (typeof sessionId !== 'string' || !sessionId) return { inserted: false, reason: 'missing_session' };
+  if (typeof missionId !== 'string' || !missionId) return { inserted: false, reason: 'missing_mission' };
+  if (typeof nodeId !== 'string' || !nodeId) return { inserted: false, reason: 'missing_node' };
+  if (!Number.isInteger(taskSeq) || taskSeq <= 0) return { inserted: false, reason: 'invalid_task_seq' };
+
+  const existing = db.prepare(
+    'SELECT task_seq FROM task_pushes WHERE session_id = ? AND mission_id = ? AND node_id = ? AND task_seq = ?'
+  ).get(sessionId, missionId, nodeId, taskSeq);
+  if (existing) return { inserted: false, reason: 'duplicate' };
+
+  db.prepare(
+    `INSERT INTO task_pushes (session_id, mission_id, node_id, task_seq, attempt, pushed_at)
+     VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`
+  ).run(sessionId, missionId, nodeId, taskSeq, attempt);
+  return { inserted: true };
+}
+
+export function getPendingTaskPushes(sessionId) {
+  return db.prepare(
+    `SELECT mission_id, node_id, task_seq, attempt, datetime(pushed_at, 'localtime') AS pushed_at
+       FROM task_pushes
+      WHERE session_id = ? AND acked_at IS NULL
+      ORDER BY task_seq ASC`
+  ).all(sessionId);
+}
+
+export function ackTaskPush({ sessionId, missionId, nodeId, taskSeq }) {
+  const info = db.prepare(
+    `UPDATE task_pushes SET acked_at = CURRENT_TIMESTAMP
+      WHERE session_id = ? AND mission_id = ? AND node_id = ? AND task_seq = ? AND acked_at IS NULL`
+  ).run(sessionId, missionId, nodeId, taskSeq);
+  return info.changes > 0;
 }
 
 export function resetBridgeState() {
@@ -303,6 +777,8 @@ export function resetBridgeState() {
     DELETE FROM workspace_context;
     DELETE FROM compiled_missions;
     DELETE FROM mission_node_runtime;
+    DELETE FROM agent_runtime_sessions;
+    DELETE FROM mission_timeline;
   `);
   resetInMemoryRuntime();
 }
@@ -345,15 +821,68 @@ export function seedMissionNodeRuntime({
   ).run(missionId, nodeId, roleId, status, attempt, currentWaveId, lastOutcome, lastPayload);
 }
 
+export function seedAgentRuntimeSession({
+  sessionId,
+  agentId,
+  missionId,
+  nodeId,
+  attempt,
+  terminalId,
+  status = 'activated',
+}) {
+  db.prepare(
+    `INSERT INTO agent_runtime_sessions
+       (session_id, agent_id, mission_id, node_id, attempt, terminal_id, status, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+     ON CONFLICT(session_id) DO UPDATE SET
+       agent_id = excluded.agent_id,
+       mission_id = excluded.mission_id,
+       node_id = excluded.node_id,
+       attempt = excluded.attempt,
+       terminal_id = excluded.terminal_id,
+       status = excluded.status,
+       updated_at = CURRENT_TIMESTAMP`
+  ).run(sessionId, agentId, missionId, nodeId, attempt, terminalId, status);
+}
+
 export function getBroadcastHistory() {
   return [...broadcastHistory];
 }
 
-export function executeConnectAgent({ role, agentId, terminalId, cli }, sessionId = 'unknown') {
+export function executeConnectAgent({ role, agentId, terminalId, cli, profileId, capabilities, workingDir }, sessionId = 'unknown') {
   const sid = sessionId ?? 'unknown';
+  const normalizedRole = typeof role === 'string' && role.trim() ? role.trim().toLowerCase() : null;
+  const explicitCapabilities = normalizeCapabilities(capabilities);
+  const normalizedCapabilities = explicitCapabilities.length > 0
+    ? explicitCapabilities
+    : normalizeCapabilities(defaultCapabilitiesForRole(normalizedRole));
+
+  sessions[sid] = sessions[sid] ?? {};
+  sessions[sid].role = normalizedRole;
+  sessions[sid].profileId = typeof profileId === 'string' && profileId.trim()
+    ? profileId.trim()
+    : (sessions[sid].profileId ?? normalizedRole);
+  sessions[sid].agentId = agentId;
+  sessions[sid].terminalId = terminalId ?? null;
+  sessions[sid].cli = cli ?? null;
+  sessions[sid].capabilities = normalizedCapabilities;
+  sessions[sid].status = 'idle';
+  sessions[sid].availability = 'available';
+  sessions[sid].workingDir = typeof workingDir === 'string' && workingDir.trim() ? workingDir.trim() : (sessions[sid].workingDir ?? null);
+  sessions[sid].connectedAt = sessions[sid].connectedAt ?? Date.now();
+  sessions[sid].updatedAt = Date.now();
+
   const message = `Role: ${role}. Agent "${agentId}" is online and ready. (Session: ${sid})`;
 
-  logSession(sid, 'connect', JSON.stringify({ agentId, role, terminalId: terminalId ?? null, cli: cli ?? null }));
+  logSession(sid, 'connect', JSON.stringify({
+    agentId,
+    role,
+    profileId: sessions[sid].profileId,
+    terminalId: terminalId ?? null,
+    cli: cli ?? null,
+    capabilities: normalizedCapabilities,
+    workingDir: sessions[sid].workingDir,
+  }));
 
   const targets = Object.keys(sessions).filter(id => id !== sid);
   const ts = Date.now();
@@ -366,52 +895,90 @@ export function executeConnectAgent({ role, agentId, terminalId, cli }, sessionI
     sessionId: sid,
     agentId,
     role,
+    profileId: sessions[sid].profileId,
     terminalId: terminalId ?? null,
     cli: cli ?? null,
+    capabilities: normalizedCapabilities,
+    workingDir: sessions[sid].workingDir,
   }), 'agent_connected');
 
   broadcast('Bridge', `Agent "${agentId}" (${role}) connected via session ${sid}`);
 
+  emitAgentEvent({
+    type: 'agent:ready',
+    sessionId: sid,
+    agentId: agentId ?? null,
+    profileId: sessions[sid].profileId ?? null,
+    role: normalizedRole,
+    at: Date.now(),
+  });
+
   return makeToolText(`Successfully connected to terminal-docks bridge.\nSession ID: ${sid}\nStatus: Online`);
 }
 
-export function executeReceiveMessages({ nodeId }, sessionId) {
+export function executeReceiveMessages({ missionId, nodeId, afterSeq, ackThroughSeq } = {}, sessionId) {
+  if (typeof sessionId === 'string' && sessionId) {
+    emitAgentEvent({ type: 'agent:heartbeat', sessionId, at: Date.now() });
+  }
+  if (missionId || nodeId || afterSeq !== undefined || ackThroughSeq !== undefined) {
+    if (!missionId || !nodeId) {
+      return makeToolText('Graph-mode receive_messages requires missionId and nodeId.', true);
+    }
+    if (!buildTaskDetails(missionId, nodeId)) {
+      return makeToolText(`Mission ${missionId} or node ${nodeId} was not found.`, true);
+    }
+
+    const fromSeq = Number.isInteger(afterSeq) && afterSeq > 0 ? afterSeq : 0;
+    const ackSeq = Number.isInteger(ackThroughSeq) && ackThroughSeq > 0 ? ackThroughSeq : null;
+    if (ackSeq !== null) {
+      db.prepare(
+        "UPDATE session_log SET is_read = 1 WHERE mission_id = ? AND recipient_node_id = ? AND event_type = 'message' AND id <= ?"
+      ).run(missionId, nodeId, ackSeq);
+    }
+
+    const messages = db.prepare(
+      "SELECT id, session_id, event_type, content, datetime(created_at, 'localtime') AS created_at, mission_id, node_id, recipient_node_id, is_read FROM session_log WHERE mission_id = ? AND recipient_node_id = ? AND event_type = 'message' AND id > ? ORDER BY id ASC LIMIT 100"
+    ).all(missionId, nodeId, fromSeq).map(message => ({
+      seq: message.id,
+      sessionId: message.session_id,
+      createdAt: message.created_at,
+      isRead: Boolean(message.is_read),
+      content: message.content,
+      contentJson: parseJsonSafe(message.content),
+    }));
+
+    const nextSeq = messages.length > 0 ? messages[messages.length - 1].seq : fromSeq;
+    return {
+      content: [{
+        type: 'text',
+        text: JSON.stringify({
+          missionId,
+          nodeId,
+          afterSeq: fromSeq,
+          ackThroughSeq: ackSeq,
+          nextSeq,
+          messages,
+        }, null, 2),
+      }],
+    };
+  }
+
   const sid = sessionId;
   const queuedMessages = sid ? (messageQueues[sid] ?? []) : [];
   if (sid) {
     messageQueues[sid] = [];
   }
-
-  let dbMessages = [];
-  if (nodeId) {
-    dbMessages = db.prepare(
-      "SELECT * FROM session_log WHERE recipient_node_id = ? AND event_type = 'message' AND is_read = 0"
-    ).all(nodeId);
-    if (dbMessages.length > 0) {
-      const ids = dbMessages.map(message => message.id);
-      db.prepare(`UPDATE session_log SET is_read = 1 WHERE id IN (${ids.join(',')})`).run();
-    }
-  }
-
-  if (queuedMessages.length === 0 && dbMessages.length === 0) {
+  if (queuedMessages.length === 0) {
     return makeToolText('No messages.');
   }
-
-  let text = queuedMessages
+  const text = queuedMessages
     .map(message => `[${new Date(message.timestamp).toISOString()}] from ${message.from}:\n${message.text}`)
     .join('\n\n');
-  if (dbMessages.length > 0) {
-    if (text) text += '\n\n';
-    text += dbMessages
-      .map(message => `[${new Date(message.created_at).toISOString()}] from ${message.session_id}:\n${message.content}`)
-      .join('\n\n');
-  }
-
   return makeToolText(text);
 }
 
 export function executeHandoffTask(
-  { fromRole: rawFrom, targetRole: rawTarget, title, description, payload, parentTaskId, missionId, fromNodeId, targetNodeId, outcome },
+  { fromRole: rawFrom, targetRole: rawTarget, title, description, payload, parentTaskId, missionId, fromNodeId, targetNodeId, outcome, fromAttempt },
   sessionId = 'unknown',
 ) {
   const sid = sessionId ?? 'unknown';
@@ -428,6 +995,7 @@ export function executeHandoffTask(
       outcome,
       fromRole,
       targetRole,
+      fromAttempt,
     });
     if (validatedGraph.error) {
       return makeToolText(validatedGraph.error, true);
@@ -467,10 +1035,11 @@ export function executeHandoffTask(
       fromNodeId: fromNodeId ?? null,
       targetNodeId,
       fromRole,
-      targetRole,
-      outcome: validatedGraph?.outcome ?? outcome ?? null,
-      payload: payloadStr,
-    });
+        targetRole,
+        outcome: validatedGraph?.outcome ?? outcome ?? null,
+        fromAttempt: validatedGraph?.fromAttempt ?? fromAttempt ?? null,
+        payload: payloadStr,
+      });
     db.prepare(
       "INSERT INTO session_log (session_id, event_type, content, mission_id, node_id, recipient_node_id, is_read) VALUES (?, 'message', ?, ?, ?, ?, 0)"
     ).run(sid, handoffMessage, missionId, fromNodeId ?? null, targetNodeId);
@@ -485,6 +1054,7 @@ export function executeHandoffTask(
     fromNodeId,
     targetNodeId,
     outcome: validatedGraph?.outcome ?? outcome ?? null,
+    fromAttempt: validatedGraph?.fromAttempt ?? fromAttempt ?? null,
   }));
 
   const eventBody = {
@@ -498,6 +1068,7 @@ export function executeHandoffTask(
     fromNodeId,
     targetNodeId,
     outcome: validatedGraph?.outcome ?? outcome ?? null,
+    fromAttempt: validatedGraph?.fromAttempt ?? fromAttempt ?? null,
   };
   broadcast(fromRole ?? 'graph', JSON.stringify(eventBody), 'handoff');
   if (taskId !== null) {
@@ -517,6 +1088,21 @@ export function executeHandoffTask(
     'Bridge',
     `Handoff: ${fromRole}${fromNodeId ? `(${fromNodeId})` : ''} → ${targetRole}${targetNodeId ? `(${targetNodeId})` : ''}${suffix}${taskSuffix}`,
   );
+
+  const finalOutcome = validatedGraph?.outcome ?? outcome ?? null;
+  const finalAttempt = validatedGraph?.fromAttempt ?? fromAttempt ?? null;
+  if (missionId && fromNodeId && (finalOutcome === 'success' || finalOutcome === 'failure')) {
+    emitAgentEvent({
+      type: 'task:completed',
+      sessionId: sid,
+      missionId,
+      nodeId: fromNodeId,
+      attempt: Number.isInteger(finalAttempt) ? finalAttempt : null,
+      outcome: finalOutcome,
+      targetNodeId: targetNodeId ?? null,
+      at: Date.now(),
+    });
+  }
 
   const resultText = targetRole === 'done'
     ? 'Workflow marked complete. Call publish_result with your final summary if you have not already.'
@@ -575,8 +1161,288 @@ function broadcast(from, content, type = 'message') {
   clients.forEach(res => res.write(data));
 }
 
-// Sessions map: sessionId -> { transport, mcpServer }
+// Sessions map: sessionId -> {
+//   transport, mcpServer, role, profileId, agentId, terminalId, cli,
+//   capabilities, status, availability, workingDir, connectedAt, updatedAt
+// }
 const sessions = {};
+
+function sessionLoadForAssignment(sessionId) {
+  const row = db.prepare(
+    "SELECT COUNT(1) AS active_count FROM tasks WHERE agent_id = ? AND status IN ('todo', 'in-progress')"
+  ).get(sessionId);
+  return Number(row?.active_count ?? 0);
+}
+
+function fileContentionForScope(fileScope, ownerSessionId) {
+  const scope = Array.isArray(fileScope) ? fileScope.filter(value => typeof value === 'string' && value.trim()) : [];
+  if (scope.length === 0) return { blocked: false, files: [] };
+
+  const blockedFiles = [];
+  for (const filePath of scope) {
+    const lock = fileLocks[filePath];
+    if (!lock) continue;
+    const sameOwner = lock.sessionId === ownerSessionId || lock.agentId === ownerSessionId;
+    if (!sameOwner) {
+      blockedFiles.push({ filePath, owner: lock.agentId, ownerSessionId: lock.sessionId ?? null });
+    }
+  }
+  return { blocked: blockedFiles.length > 0, files: blockedFiles };
+}
+
+function evaluateWorkerForRequirements(sessionId, session, options) {
+  const {
+    requiredCapabilities,
+    preferredCapabilities,
+    workingDir,
+    fileScope,
+    writeAccess,
+    excludedSessionIds,
+    previousSessionId,
+  } = options;
+
+  if (excludedSessionIds.has(sessionId)) {
+    return { eligible: false, sessionId, reason: 'excluded' };
+  }
+  if ((session.availability ?? 'available') !== 'available') {
+    return { eligible: false, sessionId, reason: 'unavailable' };
+  }
+  if (typeof workingDir === 'string' && workingDir.trim()) {
+    const candidateDir = typeof session.workingDir === 'string' ? session.workingDir.trim().toLowerCase() : '';
+    if (!candidateDir || candidateDir !== workingDir.trim().toLowerCase()) {
+      return { eligible: false, sessionId, reason: 'working_dir_mismatch' };
+    }
+  }
+
+  const capabilities = effectiveSessionCapabilities(session);
+  const byCapability = new Map(capabilities.map(capability => [capability.id, capability]));
+
+  const missing = requiredCapabilities.filter(capabilityId => !byCapability.has(capabilityId));
+  if (missing.length > 0) {
+    return { eligible: false, sessionId, reason: `missing_required:${missing.join(',')}` };
+  }
+
+  const contention = writeAccess ? fileContentionForScope(fileScope, sessionId) : { blocked: false, files: [] };
+  if (contention.blocked) {
+    return { eligible: false, sessionId, reason: 'file_contention', contention: contention.files };
+  }
+
+  const preferredMatches = preferredCapabilities.filter(capabilityId => byCapability.has(capabilityId));
+  const requiredLevelScore = requiredCapabilities
+    .map(capabilityId => byCapability.get(capabilityId)?.level ?? 0)
+    .reduce((sum, value) => sum + value, 0);
+  const preferredLevelScore = preferredMatches
+    .map(capabilityId => byCapability.get(capabilityId)?.level ?? 0)
+    .reduce((sum, value) => sum + value, 0);
+  const load = sessionLoadForAssignment(sessionId);
+  const retryPenalty = previousSessionId && previousSessionId === sessionId ? 15 : 0;
+
+  const score = (requiredLevelScore * 8) + (preferredMatches.length * 6) + (preferredLevelScore * 2) - (load * 5) - retryPenalty;
+  return {
+    eligible: true,
+    sessionId,
+    capabilities,
+    preferredMatches,
+    load,
+    score,
+  };
+}
+
+export function executeRegisterWorkerCapabilities(
+  {
+    profileId,
+    capabilities,
+    availability,
+    status,
+    workingDir,
+  },
+  sessionId = 'unknown',
+) {
+  const sid = sessionId ?? 'unknown';
+  if (!sessions[sid]) {
+    return makeToolText(`Session ${sid} is not connected.`, true);
+  }
+
+  const session = sessions[sid];
+  const explicitCapabilities = normalizeCapabilities(capabilities);
+  const normalizedCapabilities = explicitCapabilities.length > 0
+    ? explicitCapabilities
+    : effectiveSessionCapabilities(session);
+  session.profileId = typeof profileId === 'string' && profileId.trim() ? profileId.trim() : (session.profileId ?? session.role ?? null);
+  session.capabilities = normalizedCapabilities;
+  session.availability = availability === 'away' || availability === 'busy' ? availability : 'available';
+  session.status = status === 'offline' || status === 'busy' ? status : 'idle';
+  session.workingDir = typeof workingDir === 'string' && workingDir.trim() ? workingDir.trim() : (session.workingDir ?? null);
+  session.updatedAt = Date.now();
+
+  logSession(sid, 'register_worker_capabilities', JSON.stringify({
+    profileId: session.profileId,
+    capabilities: normalizedCapabilities,
+    availability: session.availability,
+    status: session.status,
+    workingDir: session.workingDir,
+  }));
+  broadcast('Bridge', JSON.stringify({ sessionId: sid, profileId: session.profileId }), 'session_update');
+
+  return makeToolText(JSON.stringify(summarizeSession(sid, session), null, 2));
+}
+
+export function executeAssignTaskByRequirements(
+  {
+    taskId,
+    requiredCapabilities = [],
+    preferredCapabilities = [],
+    workingDir,
+    fileScope = [],
+    writeAccess = true,
+    parallelSafe = true,
+    excludeSessionIds = [],
+    previousSessionId,
+    agentId,
+  },
+  sessionId = 'unknown',
+) {
+  const sid = sessionId ?? 'unknown';
+  const task = db.prepare('SELECT id, title, description, payload, status, agent_id FROM tasks WHERE id = ?').get(taskId);
+  if (!task) return makeToolText(`Task ${taskId} not found.`, true);
+
+  const required = Array.from(
+    new Set(
+      (Array.isArray(requiredCapabilities) ? requiredCapabilities : [])
+        .map(normalizeCapabilityId)
+        .filter(Boolean)
+    )
+  );
+  if (required.length === 0) {
+    return makeToolText('assign_task_by_requirements requires at least one valid required capability.', true);
+  }
+  const preferred = Array.from(
+    new Set(
+      (Array.isArray(preferredCapabilities) ? preferredCapabilities : [])
+        .map(normalizeCapabilityId)
+        .filter(Boolean)
+        .filter(capability => !required.includes(capability))
+    )
+  );
+
+  const excluded = new Set(
+    (Array.isArray(excludeSessionIds) ? excludeSessionIds : [])
+      .filter(value => typeof value === 'string' && value.trim())
+  );
+
+  const candidates = Object.entries(sessions)
+    .filter(([candidateSessionId]) => candidateSessionId !== sid)
+    .map(([candidateSessionId, session]) =>
+      evaluateWorkerForRequirements(candidateSessionId, session, {
+        requiredCapabilities: required,
+        preferredCapabilities: preferred,
+        workingDir,
+        fileScope,
+        writeAccess: Boolean(writeAccess),
+        excludedSessionIds: excluded,
+        previousSessionId: typeof previousSessionId === 'string' ? previousSessionId : null,
+      })
+    );
+
+  const eligible = candidates
+    .filter(candidate => candidate.eligible)
+    .sort((left, right) => {
+      if (right.score !== left.score) return right.score - left.score;
+      if (left.load !== right.load) return left.load - right.load;
+      return left.sessionId.localeCompare(right.sessionId);
+    });
+
+  if (eligible.length === 0) {
+    const blockedByContention = candidates.filter(candidate => candidate.reason === 'file_contention');
+    if (blockedByContention.length > 0) {
+      return makeToolText(
+        JSON.stringify({
+          status: 'queued',
+          reason: 'file_contention',
+          taskId,
+          requiredCapabilities: required,
+          blockedBy: blockedByContention.map(candidate => ({
+            sessionId: candidate.sessionId,
+            files: candidate.contention ?? [],
+          })),
+          parallelSafe: Boolean(parallelSafe),
+        }, null, 2)
+      );
+    }
+
+    const reasonCounts = candidates.reduce((acc, candidate) => {
+      const reason = candidate.reason ?? 'unknown';
+      acc[reason] = (acc[reason] ?? 0) + 1;
+      return acc;
+    }, {});
+    return makeToolText(
+      `No available worker can satisfy the assignment. Required capabilities: ${required.join(', ')}. Reason counts: ${JSON.stringify(reasonCounts)}.`,
+      true
+    );
+  }
+
+  const winner = eligible[0];
+  const assignee = (typeof agentId === 'string' && agentId.trim()) ? agentId.trim() : winner.sessionId;
+  db.prepare('UPDATE tasks SET agent_id = ? WHERE id = ?').run(assignee, taskId);
+
+  if (!messageQueues[winner.sessionId]) messageQueues[winner.sessionId] = [];
+  messageQueues[winner.sessionId].push({
+    from: 'Supervisor',
+    text:
+      `[ASSIGNED] Task ${taskId}: ${task.title}\n` +
+      `${task.description ?? ''}\n` +
+      `requirements: ${JSON.stringify({ requiredCapabilities: required, preferredCapabilities: preferred, writeAccess: Boolean(writeAccess), fileScope, workingDir: workingDir ?? null })}\n` +
+      `payload: ${task.payload ?? '(none)'}`,
+    timestamp: Date.now(),
+  });
+
+  logSession(sid, 'assign_task_by_requirements', JSON.stringify({
+    taskId,
+    targetSessionId: winner.sessionId,
+    assignee,
+    requiredCapabilities: required,
+    preferredCapabilities: preferred,
+    writeAccess: Boolean(writeAccess),
+    fileScope,
+    parallelSafe: Boolean(parallelSafe),
+    previousSessionId: previousSessionId ?? null,
+  }));
+  broadcast(sid, JSON.stringify({ taskId, targetSessionId: winner.sessionId, assignee }), 'task_assigned');
+  broadcast('Bridge', JSON.stringify({ id: taskId, agentId: assignee, status: task.status }), 'task_update');
+
+  return makeToolText(JSON.stringify({
+    status: 'assigned',
+    taskId,
+    targetSessionId: winner.sessionId,
+    assignee,
+    score: winner.score,
+    load: winner.load,
+    matchedPreferredCapabilities: winner.preferredMatches,
+    requiredCapabilities: required,
+    preferredCapabilities: preferred,
+  }, null, 2));
+}
+
+export function seedConnectedSession(sessionId, data = {}) {
+  sessions[sessionId] = {
+    ...(sessions[sessionId] ?? {}),
+    ...data,
+    connectedAt: sessions[sessionId]?.connectedAt ?? Date.now(),
+    updatedAt: Date.now(),
+  };
+  return summarizeSession(sessionId, sessions[sessionId]);
+}
+
+export function seedFileLock({ filePath, agentId, sessionId = null }) {
+  fileLocks[filePath] = {
+    agentId,
+    sessionId,
+    lockedAt: Date.now(),
+  };
+  db.prepare(
+    'INSERT INTO file_locks (file_path, agent_id, locked_at) VALUES (?, ?, CURRENT_TIMESTAMP) ON CONFLICT(file_path) DO UPDATE SET agent_id = excluded.agent_id, locked_at = CURRENT_TIMESTAMP'
+  ).run(filePath, agentId);
+}
 
 // Factory: creates a McpServer with all tools registered.
 function createMcpServer(getSessionId) {
@@ -652,7 +1518,7 @@ function createMcpServer(getSessionId) {
   // Phase 2: Hierarchical delegation
   server.registerTool('delegate_task', {
     title: 'Delegate Task',
-    description: 'Create a subtask assigned to a specific agent role. The task appears in Mission Control\'s task tree under its parent. Coordinators use this to break down work for parallel Builders.',
+    description: 'Create a subtask (optionally tagged with a semantic role). The task appears in Mission Control\'s task tree under its parent. Coordinators use this to break down work before assigning by capability requirements.',
     inputSchema: {
       title: z.string().min(1).describe('Short description of what this subtask must accomplish'),
       description: z.string().optional().describe('Detailed requirements or acceptance criteria'),
@@ -742,10 +1608,67 @@ function createMcpServer(getSessionId) {
       parentTaskId: z.number().int().optional().describe('Parent task id if this is a subtask of an existing task'),
       missionId: z.string().optional().describe('The ID of the active mission graph'),
       fromNodeId: z.string().optional().describe('Your specific node ID in the graph'),
+      fromAttempt: z.number().int().positive().optional().describe('Current running attempt for fromNodeId. Required in graph mode.'),
       targetNodeId: z.string().optional().describe('The target node ID in the graph'),
       outcome: z.enum(['success', 'failure']).optional().describe('Explicit result of the current node attempt. Required in graph mode.'),
     }
   }, async (args) => executeHandoffTask(args, getSessionId() ?? 'unknown'));
+
+  server.registerTool('submit_adaptive_patch', {
+    title: 'Submit Adaptive Patch',
+    description: 'Append new nodes/edges to an active adaptive mission graph. Patch application is append-only and guarded by runVersion.',
+    inputSchema: {
+      missionId: z.string().describe('Active mission ID'),
+      runVersion: z.number().int().positive().describe('Expected current runVersion of the mission graph'),
+      patch: z.object({
+        nodes: z.array(z.object({
+          id: z.string(),
+          roleId: z.string(),
+          instructionOverride: z.string().optional(),
+          terminal: z.object({
+            terminalId: z.string(),
+            terminalTitle: z.string(),
+            cli: z.enum(['claude', 'gemini', 'opencode', 'codex']).optional(),
+            paneId: z.string().optional(),
+            reusedExisting: z.boolean().optional(),
+          }),
+        })).default([]),
+        edges: z.array(z.object({
+          id: z.string().optional(),
+          fromNodeId: z.string(),
+          toNodeId: z.string(),
+          condition: z.enum(['always', 'on_success', 'on_failure']).optional(),
+        })).default([]),
+      }),
+    }
+  }, async ({ missionId, runVersion, patch }) => {
+    const result = appendAdaptivePatch({ missionId, runVersion, patch });
+    if (result.error) {
+      return { isError: true, content: [{ type: 'text', text: result.error }] };
+    }
+
+    broadcast('adaptive', JSON.stringify({
+      missionId,
+      runVersion: result.runVersion,
+      previousRunVersion: result.previousRunVersion,
+      appendedNodeIds: result.appendedNodeIds,
+      appendedEdgeCount: result.appendedEdgeCount,
+      patch,
+    }), 'adaptive_patch');
+
+    return {
+      content: [{
+        type: 'text',
+        text: JSON.stringify({
+          missionId,
+          previousRunVersion: result.previousRunVersion,
+          runVersion: result.runVersion,
+          appendedNodeIds: result.appendedNodeIds,
+          appendedEdgeCount: result.appendedEdgeCount,
+        }, null, 2),
+      }],
+    };
+  });
 
   server.registerTool('get_workflow_graph', {
     title: 'Get Workflow Graph',
@@ -835,7 +1758,7 @@ function createMcpServer(getSessionId) {
 
   server.registerTool('assign_task', {
     title: 'Assign Task',
-    description: "Supervisor routing: bind an existing task to a specific agent session. Coordinator uses this after delegate_task to give each Builder a concrete subtask. The target session receives a direct message; the task's agent_id is updated.",
+    description: "Explicit pinning path: bind an existing task to one specific agent session. Prefer assign_task_by_requirements for default capability-based routing; use this when exact ownership must be forced.",
     inputSchema: {
       taskId: z.number().int().describe('ID of the task to assign (from delegate_task or handoff_task)'),
       targetSessionId: z.string().min(1).describe('Session id of the agent instance that should own this task'),
@@ -867,6 +1790,27 @@ function createMcpServer(getSessionId) {
 
     return { content: [{ type: 'text', text: `Task ${taskId} assigned to ${assignee} (session ${targetSessionId}).` }] };
   });
+
+  server.registerTool('assign_task_by_requirements', {
+    title: 'Assign Task By Requirements',
+    description: 'Capability-based assignment policy. Picks the best available worker by required/preferred capabilities, load, and file contention.',
+    inputSchema: {
+      taskId: z.number().int().describe('ID of the task to assign'),
+      requiredCapabilities: z.array(z.enum(['planning', 'coding', 'testing', 'review', 'security', 'repo_analysis', 'shell_execution']))
+        .min(1)
+        .describe('Capabilities that must be present on the selected worker'),
+      preferredCapabilities: z.array(z.enum(['planning', 'coding', 'testing', 'review', 'security', 'repo_analysis', 'shell_execution']))
+        .optional()
+        .describe('Optional capabilities used for tie-breaking'),
+      workingDir: z.string().optional().describe('Optional required working directory affinity'),
+      fileScope: z.array(z.string()).optional().describe('Paths relevant to this task; used for lock contention checks'),
+      writeAccess: z.boolean().optional().describe('Whether write access is required (default true)'),
+      parallelSafe: z.boolean().optional().describe('Whether this task may run in parallel with related tasks (default true)'),
+      excludeSessionIds: z.array(z.string()).optional().describe('Sessions to exclude (retry/reassignment safety)'),
+      previousSessionId: z.string().optional().describe('Prior assignee session to penalize on retry'),
+      agentId: z.string().optional().describe('Optional display assignee id for tasks table'),
+    }
+  }, async (args) => executeAssignTaskByRequirements(args, getSessionId() ?? 'unknown'));
 
   // ── Agent tools ────────────────────────────────────────────────────────────
   server.registerTool('list_agents', {
@@ -906,20 +1850,42 @@ function createMcpServer(getSessionId) {
   server.registerTool('lock_file', {
     title: 'Lock File',
     description: 'Claim exclusive write access to a file path. If another agent holds the lock, you are automatically placed in the wait queue — do NOT poll. When the lock is released the server grants it to you and delivers a [LOCK GRANTED] message to your inbox. While queued, work on other unlocked files. Always call unlock_file when done.',
-    inputSchema: { filePath: z.string().min(1), agentId: z.string().min(1) }
-  }, async ({ filePath, agentId }) => {
+    inputSchema: {
+      filePath: z.string().min(1),
+      missionId: z.string().optional().describe('Graph mode owner mission ID'),
+      nodeId: z.string().optional().describe('Graph mode owner node ID'),
+      agentId: z.string().min(1).optional().describe('Legacy owner identifier when mission/node is absent'),
+    }
+  }, async ({ filePath, missionId, nodeId, agentId }) => {
     const sid = getSessionId();
+    const graphScoped = Boolean(missionId || nodeId);
+    if (graphScoped && (!missionId || !nodeId)) {
+      return { isError: true, content: [{ type: 'text', text: 'Graph-mode lock_file requires both missionId and nodeId.' }] };
+    }
+    const ownerId = graphScoped
+      ? `mission:${missionId}:node:${nodeId}`
+      : (agentId?.trim() ?? '');
+    if (!ownerId) {
+      return { isError: true, content: [{ type: 'text', text: 'lock_file requires missionId/nodeId in graph mode or agentId in legacy mode.' }] };
+    }
+
+    const persisted = db.prepare("SELECT file_path, agent_id FROM file_locks WHERE file_path = ?").get(filePath);
+    if (persisted && !fileLocks[filePath]) {
+      fileLocks[filePath] = { agentId: persisted.agent_id, sessionId: null, lockedAt: Date.now() };
+    }
     const existing = fileLocks[filePath];
 
     if (!existing) {
-      fileLocks[filePath] = { agentId, sessionId: sid, lockedAt: Date.now() };
-      try { db.prepare('INSERT INTO file_locks (file_path, agent_id) VALUES (?, ?)').run(filePath, agentId); } catch {}
-      bc(`Lock acquired: ${filePath} by ${agentId}`);
+      fileLocks[filePath] = { agentId: ownerId, sessionId: sid, lockedAt: Date.now() };
+      db.prepare(
+        'INSERT INTO file_locks (file_path, agent_id, locked_at) VALUES (?, ?, CURRENT_TIMESTAMP) ON CONFLICT(file_path) DO UPDATE SET agent_id = excluded.agent_id, locked_at = CURRENT_TIMESTAMP'
+      ).run(filePath, ownerId);
+      bc(`Lock acquired: ${filePath} by ${ownerId}`);
       broadcast('Bridge', 'lock_update', 'lock_update');
       return { content: [{ type: 'text', text: `Lock acquired: ${filePath}` }] };
     }
 
-    if (existing.agentId === agentId) {
+    if (existing.agentId === ownerId) {
       return { content: [{ type: 'text', text: `Lock already held by you: ${filePath}` }] };
     }
 
@@ -928,7 +1894,7 @@ function createMcpServer(getSessionId) {
     const queue = fileWaitQueues[filePath];
     const alreadyQueued = queue.some(w => w.sessionId === sid);
     if (!alreadyQueued) {
-      queue.push({ agentId, sessionId: sid, queuedAt: Date.now() });
+      queue.push({ ownerId, sessionId: sid, queuedAt: Date.now() });
     }
     const position = queue.findIndex(w => w.sessionId === sid) + 1;
 
@@ -937,27 +1903,47 @@ function createMcpServer(getSessionId) {
       if (!messageQueues[existing.sessionId]) messageQueues[existing.sessionId] = [];
       messageQueues[existing.sessionId].push({
         from: 'Bridge',
-        text: `Agent "${agentId}" is queued for your lock on: ${filePath} (queue depth ${queue.length}). Release when done.`,
+        text: `Agent "${ownerId}" is queued for your lock on: ${filePath} (queue depth ${queue.length}). Release when done.`,
         timestamp: Date.now(),
       });
     }
-    bc(`Lock queued: ${filePath} for ${agentId} (pos ${position})`);
+    bc(`Lock queued: ${filePath} for ${ownerId} (pos ${position})`);
     return { content: [{ type: 'text', text: `Locked by "${existing.agentId}". You are queued at position ${position} on ${filePath}. The lock will be granted automatically when released — do not poll. Watch your inbox for a [LOCK GRANTED] message.` }] };
   });
 
   server.registerTool('unlock_file', {
     title: 'Unlock File',
     description: 'Release a file lock. If any agents are queued, the next live waiter is auto-granted the lock and notified. Only the agent that owns the lock can unlock it.',
-    inputSchema: { filePath: z.string().min(1), agentId: z.string().min(1) }
-  }, async ({ filePath, agentId }) => {
+    inputSchema: {
+      filePath: z.string().min(1),
+      missionId: z.string().optional().describe('Graph mode owner mission ID'),
+      nodeId: z.string().optional().describe('Graph mode owner node ID'),
+      agentId: z.string().min(1).optional().describe('Legacy owner identifier when mission/node is absent'),
+    }
+  }, async ({ filePath, missionId, nodeId, agentId }) => {
+    const graphScoped = Boolean(missionId || nodeId);
+    if (graphScoped && (!missionId || !nodeId)) {
+      return { isError: true, content: [{ type: 'text', text: 'Graph-mode unlock_file requires both missionId and nodeId.' }] };
+    }
+    const ownerId = graphScoped
+      ? `mission:${missionId}:node:${nodeId}`
+      : (agentId?.trim() ?? '');
+    if (!ownerId) {
+      return { isError: true, content: [{ type: 'text', text: 'unlock_file requires missionId/nodeId in graph mode or agentId in legacy mode.' }] };
+    }
+
+    const persisted = db.prepare("SELECT file_path, agent_id FROM file_locks WHERE file_path = ?").get(filePath);
+    if (persisted && !fileLocks[filePath]) {
+      fileLocks[filePath] = { agentId: persisted.agent_id, sessionId: null, lockedAt: Date.now() };
+    }
     const existing = fileLocks[filePath];
     if (!existing) return { content: [{ type: 'text', text: `${filePath} was not locked.` }] };
-    if (existing.agentId !== agentId) {
+    if (existing.agentId !== ownerId) {
       return { isError: true, content: [{ type: 'text', text: `Cannot unlock: owned by "${existing.agentId}".` }] };
     }
     delete fileLocks[filePath];
-    try { db.prepare('DELETE FROM file_locks WHERE file_path = ?').run(filePath); } catch {}
-    bc(`Lock released: ${filePath} by ${agentId}`);
+    db.prepare('DELETE FROM file_locks WHERE file_path = ?').run(filePath);
+    bc(`Lock released: ${filePath} by ${ownerId}`);
 
     // Auto-grant to the next live waiter. Skip waiters whose session has gone away.
     const queue = fileWaitQueues[filePath] ?? [];
@@ -965,7 +1951,10 @@ function createMcpServer(getSessionId) {
     while (queue.length > 0) {
       const next = queue.shift();
       if (!sessions[next.sessionId]) continue;
-      fileLocks[filePath] = { agentId: next.agentId, sessionId: next.sessionId, lockedAt: Date.now() };
+      fileLocks[filePath] = { agentId: next.ownerId, sessionId: next.sessionId, lockedAt: Date.now() };
+      db.prepare(
+        'INSERT INTO file_locks (file_path, agent_id, locked_at) VALUES (?, ?, CURRENT_TIMESTAMP) ON CONFLICT(file_path) DO UPDATE SET agent_id = excluded.agent_id, locked_at = CURRENT_TIMESTAMP'
+      ).run(filePath, next.ownerId);
       if (!messageQueues[next.sessionId]) messageQueues[next.sessionId] = [];
       messageQueues[next.sessionId].push({
         from: 'Bridge',
@@ -973,14 +1962,14 @@ function createMcpServer(getSessionId) {
         timestamp: Date.now(),
       });
       granted = next;
-      bc(`Lock auto-granted: ${filePath} → ${next.agentId}`);
+      bc(`Lock auto-granted: ${filePath} → ${next.ownerId}`);
       break;
     }
     if (queue.length === 0) delete fileWaitQueues[filePath];
 
     broadcast('Bridge', 'lock_update', 'lock_update');
 
-    const tail = granted ? ` Auto-granted to "${granted.agentId}".` : '';
+    const tail = granted ? ` Auto-granted to "${granted.ownerId}".` : '';
     return { content: [{ type: 'text', text: `Lock released: ${filePath}.${tail}` }] };
   });
 
@@ -989,10 +1978,12 @@ function createMcpServer(getSessionId) {
     description: 'List all currently locked files, who holds them, and when they were locked.',
     inputSchema: {}
   }, async () => {
-    const entries = Object.entries(fileLocks);
-    if (entries.length === 0) return { content: [{ type: 'text', text: 'No files currently locked.' }] };
-    const text = entries.map(([path, l]) =>
-      `${path}\n  agent: ${l.agentId}\n  since: ${new Date(l.lockedAt).toISOString()}`
+    const rows = db.prepare(
+      "SELECT file_path, agent_id, datetime(locked_at, 'localtime') AS locked_at FROM file_locks ORDER BY file_path"
+    ).all();
+    if (rows.length === 0) return { content: [{ type: 'text', text: 'No files currently locked.' }] };
+    const text = rows.map(row =>
+      `${row.file_path}\n  owner: ${row.agent_id}\n  since: ${row.locked_at}`
     ).join('\n\n');
     return { content: [{ type: 'text', text }] };
   });
@@ -1000,20 +1991,49 @@ function createMcpServer(getSessionId) {
   // ── Session / messaging ────────────────────────────────────────────────────
   server.registerTool('connect_agent', {
     title: 'Connect Agent',
-    description: 'Initializes the agent session and announces presence to the team in one step.',
+    description: 'Legacy metadata tool. Announces presence to other sessions. Graph-mode activation no longer depends on this call.',
     inputSchema: {
       role: z.string().describe('Your assigned role (e.g. Coordinator, Scout, Builder, Reviewer)'),
       agentId: z.string().describe('A friendly name for your agent instance'),
       terminalId: z.string().optional().describe('Terminal pane ID in terminal-docks, if known'),
-      cli: z.enum(['claude', 'gemini', 'opencode']).optional().describe('CLI running in that terminal'),
+      cli: z.enum(['claude', 'gemini', 'opencode', 'codex']).optional().describe('CLI running in that terminal'),
+      profileId: z.string().optional().describe('Optional worker profile label (for example "reviewer_profile")'),
+      capabilities: z.array(z.union([
+        z.enum(['planning', 'coding', 'testing', 'review', 'security', 'repo_analysis', 'shell_execution']),
+        z.object({
+          id: z.enum(['planning', 'coding', 'testing', 'review', 'security', 'repo_analysis', 'shell_execution']),
+          level: z.number().int().min(0).max(3).optional(),
+          verifiedBy: z.enum(['profile', 'runtime']).optional(),
+        }),
+      ])).optional().describe('Optional explicit capability set for this worker session'),
+      workingDir: z.string().optional().describe('Optional default working directory for assignment affinity'),
     }
-  }, async ({ role, agentId, terminalId, cli }) =>
-    executeConnectAgent({ role, agentId, terminalId, cli }, getSessionId() ?? 'unknown')
+  }, async ({ role, agentId, terminalId, cli, profileId, capabilities, workingDir }) =>
+    executeConnectAgent({ role, agentId, terminalId, cli, profileId, capabilities, workingDir }, getSessionId() ?? 'unknown')
   );
+
+  server.registerTool('register_worker_capabilities', {
+    title: 'Register Worker Capabilities',
+    description: 'Update your session capability profile for capability-based delegation.',
+    inputSchema: {
+      profileId: z.string().optional().describe('Optional profile id/label for this worker'),
+      capabilities: z.array(z.union([
+        z.enum(['planning', 'coding', 'testing', 'review', 'security', 'repo_analysis', 'shell_execution']),
+        z.object({
+          id: z.enum(['planning', 'coding', 'testing', 'review', 'security', 'repo_analysis', 'shell_execution']),
+          level: z.number().int().min(0).max(3).optional(),
+          verifiedBy: z.enum(['profile', 'runtime']).optional(),
+        }),
+      ])).optional().describe('Capability entries for this worker'),
+      availability: z.enum(['available', 'busy', 'away']).optional().describe('Whether this worker can receive new assignments'),
+      status: z.enum(['idle', 'busy', 'offline']).optional().describe('Current session status'),
+      workingDir: z.string().optional().describe('Default working directory for assignment affinity'),
+    }
+  }, async (args) => executeRegisterWorkerCapabilities(args, getSessionId() ?? 'unknown'));
 
   server.registerTool('get_collaboration_protocol', {
     title: 'Get Collaboration Protocol',
-    description: 'Returns the standard operating procedure for multi-agent collaboration. All agents should call this first.',
+    description: 'Returns SOP guidance. In graph mode this is optional informational guidance, not a runtime prerequisite.',
     inputSchema: {}
   }, async () => {
     return {
@@ -1025,7 +2045,7 @@ You are part of a multi-agent team (Claude, Gemini, OpenCode, or other CLIs) wor
 
 ## On Session Start
 1. Call \`get_file_locks()\` — see what files teammates currently own.
-2. Call \`receive_messages()\` — read any updates sent while you were offline.
+2. Call \`receive_messages({ missionId, nodeId })\` in graph mode, or \`receive_messages()\` in legacy mode.
 3. Call \`get_session_history()\` — if reconnecting after a crash, see what was happening.
 4. Call \`read_resource("roster://agents")\` — understand your team's roles.
 5. Call \`announce({ message: "Online as <role>. Starting: <task>", agentId: "<your-id>" })\`.
@@ -1043,15 +2063,17 @@ You are part of a multi-agent team (Claude, Gemini, OpenCode, or other CLIs) wor
 
 ## Stage Handoffs (every role)
 - In graph mode, treat \`get_task_details({ missionId, nodeId })\` as the canonical source of your current node context. It tells you your attempt number, inbox payloads, and the exact legal next targets for this node.
-- In graph mode, when your stage is done, call \`handoff_task({ missionId, fromNodeId, targetNodeId, outcome, title, description?, payload?, parentTaskId? })\` with an explicit \`outcome\` of \`"success"\` or \`"failure"\`. Use the exact \`targetNodeId\` returned by \`get_task_details\`; do not guess from role names.
+- In graph mode, when your stage is done, call \`handoff_task({ missionId, fromNodeId, fromAttempt, targetNodeId, outcome, title, description?, payload?, parentTaskId? })\` with an explicit \`outcome\` of \`"success"\` or \`"failure"\`. Use the exact \`targetNodeId\` returned by \`get_task_details\`; do not guess from role names.
 - In legacy role-mode, call \`handoff_task({ fromRole, targetRole, title, description?, payload?, parentTaskId? })\`.
 - Do NOT announce literal phrases like "INTELLIGENCE REPORT" — Mission Control routes strictly on handoff_task events now.
 - The payload field is free-form JSON: include whatever structured context the next stage needs (file paths, findings, decisions, error diffs, etc.). Keep it compact.
 
 ## Delegation (Coordinator role)
 - Call \`get_task_tree()\` to see current workload before assigning new work.
-- Call \`delegate_task({ title, description, agentId, parentTaskId })\` to create subtasks for Builders.
-- For each subtask, call \`list_sessions()\` then \`assign_task({ taskId, targetSessionId, agentId })\` to bind the task to a specific Builder session. The Builder receives it in their inbox immediately.
+- Call \`delegate_task({ title, description, parentTaskId })\` to create subtasks.
+- Default assignment path: call \`assign_task_by_requirements({ taskId, requiredCapabilities, preferredCapabilities?, fileScope?, writeAccess? })\` so the scheduler picks the best available worker automatically.
+- Use \`list_sessions({ detailed: true })\` to inspect live worker capability profiles and availability.
+- Use explicit \`assign_task({ taskId, targetSessionId, agentId })\` only when you must pin ownership to one exact session.
 - After routing is done, use the graph-mode or legacy handoff format above to release the next stage. In graph mode you must hand off to an exact target node, not just a role.
 - Builders should call \`update_task({ taskId, status: "in-progress" })\` when starting and \`update_task({ taskId, status: "done" })\` when complete.
 - All task changes appear in Mission Control's task tree in real time.
@@ -1060,7 +2082,7 @@ You are part of a multi-agent team (Claude, Gemini, OpenCode, or other CLIs) wor
 - \`list_sessions()\` — discover active session IDs.
 - \`send_message({ targetSessionId, message })\` — direct message to one session.
 - \`announce({ message, agentId })\` — broadcast to all sessions at once.
-- \`receive_messages()\` — check your inbox (also shows lock-conflict auto-notifications).
+- \`receive_messages({ missionId, nodeId, afterSeq?, ackThroughSeq? })\` — deterministic node-scoped inbox reads in graph mode.
 
 ## Publishing Results
 When your work produces something the user should see, call \`publish_result\`:
@@ -1088,13 +2110,24 @@ The Mission Control panel displays published results in real time.
 
   server.registerTool('list_sessions', {
     title: 'List Sessions',
-    description: 'List all currently connected session IDs (excluding your own)',
-    inputSchema: {}
-  }, async () => {
+    description: 'List connected sessions. Use detailed=true to inspect profile/capability metadata.',
+    inputSchema: {
+      detailed: z.boolean().optional().describe('Return full session metadata instead of only IDs'),
+      capability: z.enum(['planning', 'coding', 'testing', 'review', 'security', 'repo_analysis', 'shell_execution']).optional()
+        .describe('Optional capability filter for detailed output'),
+    }
+  }, async ({ detailed, capability } = {}) => {
     const mySid = getSessionId();
     const ids = Object.keys(sessions).filter(id => id !== mySid);
     if (ids.length === 0) return { content: [{ type: 'text', text: 'No other sessions connected.' }] };
-    return { content: [{ type: 'text', text: ids.join('\n') }] };
+    if (!detailed) {
+      return { content: [{ type: 'text', text: ids.join('\n') }] };
+    }
+
+    const rows = ids
+      .map(id => summarizeSession(id, sessions[id]))
+      .filter(entry => (capability ? entry.capabilities.some(item => item.id === capability) : true));
+    return { content: [{ type: 'text', text: JSON.stringify(rows, null, 2) }] };
   });
 
   server.registerTool('send_message', {
@@ -1130,11 +2163,16 @@ The Mission Control panel displays published results in real time.
 
   server.registerTool('receive_messages', {
     title: 'Receive Messages',
-    description: 'Read all pending messages sent to your session or node. Marks them as read.',
+    description: 'Read pending messages. In graph mode use mission/node-scoped reads with sequence IDs and explicit acknowledgements.',
     inputSchema: {
-      nodeId: z.string().optional().describe('Your specific node ID in the graph, if applicable.')
+      missionId: z.string().optional().describe('Active mission ID (required for graph-mode deterministic reads).'),
+      nodeId: z.string().optional().describe('Your specific node ID in the graph (required with missionId).'),
+      afterSeq: z.number().int().min(0).optional().describe('Only return messages with sequence id > afterSeq.'),
+      ackThroughSeq: z.number().int().positive().optional().describe('Mark messages up to this sequence as read for mission/node.')
     }
-  }, async ({ nodeId }) => executeReceiveMessages({ nodeId }, getSessionId()));
+  }, async ({ missionId, nodeId, afterSeq, ackThroughSeq }) =>
+    executeReceiveMessages({ missionId, nodeId, afterSeq, ackThroughSeq }, getSessionId())
+  );
 
   server.registerTool('publish_result', {
     title: 'Publish Result',
@@ -1143,9 +2181,25 @@ The Mission Control panel displays published results in real time.
       content: z.string().min(1),
       type: z.enum(['markdown', 'url']).default('markdown'),
       agentId: z.string().optional(),
+      missionId: z.string().optional(),
+      nodeId: z.string().optional(),
+      attempt: z.number().int().positive().optional(),
+      outcome: z.enum(['success', 'failure']).optional(),
     }
-  }, async ({ content, type, agentId }) => {
-    broadcast(agentId ?? getSessionId() ?? 'Agent', content, `result:${type}`);
+  }, async ({ content, type, agentId, missionId, nodeId, attempt, outcome }) => {
+    const sid = getSessionId();
+    broadcast(agentId ?? sid ?? 'Agent', content, `result:${type}`);
+    if (sid && missionId && nodeId) {
+      emitAgentEvent({
+        type: 'task:completed',
+        sessionId: sid,
+        missionId,
+        nodeId,
+        attempt: Number.isInteger(attempt) ? attempt : null,
+        outcome: outcome ?? 'success',
+        at: Date.now(),
+      });
+    }
     return { content: [{ type: 'text', text: 'Result published to Mission Control.' }] };
   });
 
@@ -1215,9 +2269,13 @@ app.use(cors());
 app.use(express.json());
 
 const authToken = process.env.MCP_AUTH_TOKEN;
+const internalPushToken = process.env.MCP_INTERNAL_PUSH_TOKEN;
 
 app.use((req, res, next) => {
   if (req.path === '/health') return next();
+  // /internal/push uses its own token scheme — skip the general auth layer
+  // so a missing MCP_AUTH_TOKEN doesn't accidentally gate local pushes.
+  if (req.path.startsWith('/internal/')) return next();
   const token = req.query.token || req.headers.authorization?.replace('Bearer ', '');
   if (authToken && token !== authToken) {
     return res.status(401).send('Unauthorized');
@@ -1239,6 +2297,91 @@ app.get('/events', (req, res) => {
   clients.add(res);
   broadcast('Bridge', 'Client connected to activity feed', 'status');
   req.on('close', () => { clients.delete(res); });
+});
+
+// Phase C: per-session typed event stream consumed by WorkerAdapters.
+app.get('/events/session', (req, res) => {
+  const sid = String(req.query.sid || '');
+  if (!sid) return res.status(400).send('Missing sid');
+
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders();
+
+  const since = Number.parseInt(String(req.query.since || '0'), 10);
+  if (Number.isFinite(since) && since > 0) {
+    for (const ev of recentAgentEvents) {
+      if (ev.sessionId === sid && (ev.at ?? 0) > since) {
+        res.write(`data: ${JSON.stringify(ev)}\n\n`);
+      }
+    }
+  }
+
+  const send = ev => res.write(`data: ${JSON.stringify(ev)}\n\n`);
+  const channel = `sid:${sid}`;
+  agentEvents.on(channel, send);
+
+  const keepalive = setInterval(() => { res.write(': keepalive\n\n'); }, 15000);
+  req.on('close', () => {
+    agentEvents.off(channel, send);
+    clearInterval(keepalive);
+  });
+});
+
+// Phase C: privileged loopback endpoint used by the Tauri process to record
+// task pushes with idempotency. Never called by agents; token passed via env.
+app.post('/internal/push', (req, res) => {
+  const presented = req.headers['x-td-push-token'];
+  if (!internalPushToken) {
+    return res.status(503).json({ error: 'Internal push token not configured' });
+  }
+  if (presented !== internalPushToken) {
+    return res.status(401).json({ error: 'Bad push token' });
+  }
+
+  const body = req.body ?? {};
+  if (body.type === 'task_pushed') {
+    const record = recordTaskPush({
+      sessionId: body.sessionId,
+      missionId: body.missionId,
+      nodeId: body.nodeId,
+      taskSeq: body.taskSeq,
+      attempt: Number.isInteger(body.attempt) ? body.attempt : null,
+    });
+    if (record.inserted) {
+      emitAgentEvent({
+        type: 'task:pushed',
+        sessionId: body.sessionId,
+        missionId: body.missionId,
+        nodeId: body.nodeId,
+        taskSeq: body.taskSeq,
+        attempt: Number.isInteger(body.attempt) ? body.attempt : null,
+        at: Date.now(),
+      });
+    }
+    return res.json({ recorded: record.inserted, reason: record.reason ?? null });
+  }
+
+  if (body.type === 'bootstrap') {
+    emitAgentEvent({
+      type: 'bootstrap:requested',
+      sessionId: body.sessionId,
+      at: Date.now(),
+    });
+    return res.json({ ok: true });
+  }
+
+  return res.status(400).json({ error: 'Unsupported push type' });
+});
+
+app.get('/internal/events', (req, res) => {
+  const presented = req.headers['x-td-push-token'];
+  if (!internalPushToken || presented !== internalPushToken) {
+    return res.status(401).send('Unauthorized');
+  }
+  const sid = req.query.sid ? String(req.query.sid) : null;
+  res.json(getRecentAgentEvents(sid));
 });
 
 // ── MCP transport ─────────────────────────────────────────────────────────────

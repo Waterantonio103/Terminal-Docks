@@ -25,6 +25,8 @@ import ReactMarkdown from 'react-markdown';
 import { invoke } from '@tauri-apps/api/core';
 import { emit, listen } from '@tauri-apps/api/event';
 import { buildNewTaskSignal, summarizeHandoffPayload } from '../../lib/missionRuntime';
+import { registry } from '../../lib/workers/registry';
+import { getAdapter } from '../../lib/workers';
 
 type MissionTab = 'nodes' | 'preview' | 'output' | 'tasks';
 
@@ -360,16 +362,39 @@ export function MissionControlPane({ pane }: { pane: Pane }) {
       missionId: string;
       nodeId: string;
       roleId: string;
+      sessionId: string;
+      agentId: string;
+      terminalId: string;
+      activatedAt: number;
       attempt: number;
       payload?: string;
     }>('workflow-node-triggered', (event) => {
       if (unmounted) return;
-      const { missionId, nodeId, roleId, attempt, payload } = event.payload;
+      const {
+        missionId,
+        nodeId,
+        roleId,
+        sessionId,
+        agentId,
+        terminalId: activatedTerminalId,
+        activatedAt,
+        attempt,
+        payload,
+      } = event.payload;
       if (currentMissionId && currentMissionId !== missionId) return;
 
       const liveAgents = readAgentsForPane(pane.id, agents);
       let signal: string | null = null;
       let terminalId: string | null = null;
+      let runtimeActivation: {
+        missionId: string;
+        nodeId: string;
+        attempt: number;
+        sessionId: string;
+        agentId: string;
+        terminalId: string;
+        activatedAt: number;
+      } | null = null;
       let changed = false;
 
       const nextAgents = liveAgents.map(agent => {
@@ -385,10 +410,23 @@ export function MissionControlPane({ pane }: { pane: Pane }) {
           missionId,
           nodeId,
           roleId,
+          sessionId,
+          agentId,
+          terminalId: activatedTerminalId,
+          activatedAt,
           attempt,
           payload: payload ?? null,
         });
         terminalId = agent.terminalId;
+        runtimeActivation = {
+          missionId,
+          nodeId,
+          attempt,
+          sessionId,
+          agentId,
+          terminalId: activatedTerminalId,
+          activatedAt,
+        };
         changed = true;
 
         return {
@@ -413,8 +451,38 @@ export function MissionControlPane({ pane }: { pane: Pane }) {
 
       if (!changed) return;
 
-      if (terminalId && signal) {
-        invoke('write_to_pty', { id: terminalId, data: `${signal}\r` }).catch(console.error);
+      if (terminalId && signal && runtimeActivation) {
+        invoke('register_runtime_activation_dispatch', runtimeActivation)
+          .catch((error) => {
+            console.warn('Failed to register runtime activation dispatch', error);
+          })
+          .finally(() => {
+            const workerSession = registry.byPane(pane.id);
+            if (workerSession) {
+              const taskSeq = registry.nextTaskSeq(workerSession.sessionId);
+              const adapter = getAdapter(workerSession.kind);
+              adapter
+                .sendTask(workerSession, {
+                  missionId,
+                  nodeId,
+                  roleId,
+                  agentId,
+                  sessionId: workerSession.sessionId,
+                  terminalId: activatedTerminalId,
+                  attempt,
+                  taskSeq,
+                  activatedAt,
+                  payloadPreview: summarizeHandoffPayload(payload ?? null),
+                  handoffPayloadPreview: summarizeHandoffPayload(payload ?? null),
+                })
+                .catch(error => {
+                  console.warn('Adapter sendTask failed, falling back to write_to_pty', error);
+                  invoke('write_to_pty', { id: terminalId, data: `${signal}\r` }).catch(console.error);
+                });
+              return;
+            }
+            invoke('write_to_pty', { id: terminalId, data: `${signal}\r` }).catch(console.error);
+          });
       }
       updatePaneData(pane.id, { agents: nextAgents });
     }).then(fn => {
@@ -772,7 +840,8 @@ function TaskTreePanel({ tasks }: { tasks: DbTask[] }) {
         <ListTree size={28} className="opacity-20" />
         <p className="text-xs opacity-40 text-center px-4">
           Delegated tasks appear here. A Coordinator can call{' '}
-          <code className="text-accent-primary">delegate_task</code> to create subtasks.
+          <code className="text-accent-primary">delegate_task</code> to create subtasks, then{' '}
+          <code className="text-accent-primary">assign_task_by_requirements</code> to pick the best worker by capabilities.
         </p>
       </div>
     );

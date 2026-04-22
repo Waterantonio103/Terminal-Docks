@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { compileMission, validateGraph } from '../.tmp-tests/lib/graphCompiler.js';
+import { buildPresetFlowGraph, getWorkflowPreset } from '../.tmp-tests/lib/workflowPresets.js';
 
 function taskNode(id = 'task-1') {
   return {
@@ -192,4 +193,46 @@ run('cycles are rejected before runtime terminals are prepared', () => {
     ),
     /cycle/i
   );
+});
+
+run('preset-expanded graphs compile to explicit workflow layers', () => {
+  const preset = getWorkflowPreset('parallel_delivery');
+  assert.ok(preset, 'parallel_delivery preset must exist');
+
+  const flow = buildPresetFlowGraph({
+    preset,
+    missionId: 'preset-mission',
+    prompt: 'Ship feature',
+    mode: 'build',
+    workspaceDir: 'C:/workspace',
+    instructionOverrides: {},
+    bindingsByRole: {
+      coordinator: { terminalId: 'term-coordinator', terminalTitle: 'Coordinator' },
+      builder: { terminalId: 'term-builder', terminalTitle: 'Builder' },
+      tester: { terminalId: 'term-tester', terminalTitle: 'Tester' },
+      security: { terminalId: 'term-security', terminalTitle: 'Security' },
+      reviewer: { terminalId: 'term-reviewer', terminalTitle: 'Reviewer' },
+    },
+  });
+
+  const mission = compileMission({
+    graphId: 'preset:parallel_delivery',
+    missionId: 'preset-mission',
+    nodes: flow.nodes,
+    edges: flow.edges,
+    workspaceDirFallback: 'C:/workspace',
+    compiledAt: 123,
+    authoringMode: 'preset',
+    presetId: 'parallel_delivery',
+    runVersion: 1,
+  });
+
+  assert.equal(mission.metadata.authoringMode, 'preset');
+  assert.equal(mission.metadata.presetId, 'parallel_delivery');
+  assert.equal(mission.metadata.runVersion, 1);
+  assert.deepEqual(mission.metadata.executionLayers, [
+    ['coordinator'],
+    ['builder', 'tester', 'security'],
+    ['reviewer'],
+  ]);
 });

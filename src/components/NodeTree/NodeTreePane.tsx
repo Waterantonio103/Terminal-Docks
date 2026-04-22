@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ChevronLeft, ScanSearch, Trash2, Workflow } from 'lucide-react';
+import { ChevronLeft, ScanSearch, Sparkles, Trash2, Workflow } from 'lucide-react';
 import agentsConfig from '../../config/agents';
-import { validateGraph } from '../../lib/graphCompiler';
+import { compileMission, validateGraph } from '../../lib/graphCompiler';
+import { generateId } from '../../lib/graphUtils';
+import { buildPresetFlowGraph, getWorkflowPreset } from '../../lib/workflowPresets';
 import {
   legacyGraphToNodeDocument,
   nodeDocumentToFlowGraph,
@@ -12,6 +14,7 @@ import { createWorkflowNodeRegistry, materializeNode } from '../../lib/node-syst
 import { getActiveTreeId, getViewState } from '../../lib/node-system/editor';
 import { applyNodeEditorOperator } from '../../lib/node-system/operators';
 import type { MaterializedNode, NodeInstance, Point2D } from '../../lib/node-system/types';
+import { detectRoleForPane } from '../../lib/cliDetection';
 import { useWorkspaceStore, type WorkflowGraph } from '../../store/workspace';
 
 type ValidationTone = 'idle' | 'ok' | 'error';
@@ -219,6 +222,113 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
       setValidationMessage(error instanceof Error ? error.message : String(error));
     }
   }, [registry, state.document]);
+
+  const viewRuntimeMapping = useCallback(() => {
+    try {
+      const flow = nodeDocumentToFlowGraph(state.document, registry);
+      const hydratedNodes = flow.nodes.map(node => {
+        if (node.type !== 'agent') return node;
+        const data: Record<string, unknown> = { ...((node.data ?? {}) as Record<string, unknown>) };
+        if (!data.terminalId) data.terminalId = `preview-term-${node.id}`;
+        if (!data.terminalTitle) data.terminalTitle = `Preview ${data.roleId ?? node.id}`;
+        return { ...node, data };
+      });
+
+      const mission = compileMission({
+        missionId: 'preview-mission',
+        graphId: 'preview-graph',
+        nodes: hydratedNodes as never[],
+        edges: flow.edges as never[],
+        workspaceDirFallback: workspaceDir,
+        terminalClis: {},
+        authoringMode: 'graph',
+        runVersion: 1,
+      });
+
+      const layerText = mission.metadata.executionLayers
+        .map((layer, index) => `L${index + 1}: ${layer.join(', ')}`)
+        .join(' | ');
+
+      setValidationTone('ok');
+      setValidationMessage(`Runtime mapping: start=[${mission.metadata.startNodeIds.join(', ')}] ${layerText}`);
+    } catch (error) {
+      setValidationTone('error');
+      setValidationMessage(error instanceof Error ? error.message : String(error));
+    }
+  }, [registry, state.document, workspaceDir]);
+
+  const importPresetGraph = useCallback(() => {
+    const preset = getWorkflowPreset('parallel_delivery');
+    if (!preset) return;
+
+    const missionId = generateId();
+    const bindingsByRole: Record<string, { terminalId: string; terminalTitle: string; paneId?: string }> = {};
+    for (const terminal of openTerminals) {
+      const role = detectRoleForPane({ title: terminal.title, data: {} });
+      if (role && !bindingsByRole[role]) {
+        bindingsByRole[role] = {
+          terminalId: terminal.id,
+          terminalTitle: terminal.title,
+        };
+      }
+    }
+
+    const flow = buildPresetFlowGraph({
+      preset,
+      missionId,
+      prompt: 'Imported preset objective',
+      mode: 'build',
+      workspaceDir,
+      bindingsByRole,
+      instructionOverrides: {},
+    });
+
+    const workflowGraph: WorkflowGraph = {
+      id: `preset:${preset.id}`,
+      nodes: flow.nodes.map(node => {
+        const data = node.data as Record<string, unknown>;
+        if (node.type === 'task') {
+          return {
+            id: node.id,
+            roleId: 'task',
+            status: 'idle',
+            config: {
+              prompt: String(data.prompt ?? ''),
+              mode: data.mode === 'edit' ? 'edit' : 'build',
+              workspaceDir: String(data.workspaceDir ?? ''),
+              position: node.position,
+            },
+          };
+        }
+
+        return {
+          id: node.id,
+          roleId: String(data.roleId ?? 'agent'),
+          status: 'idle',
+          config: {
+            instructionOverride: String(data.instructionOverride ?? ''),
+            terminalId: String(data.terminalId ?? ''),
+            terminalTitle: String(data.terminalTitle ?? ''),
+            paneId: String(data.paneId ?? ''),
+            autoLinked: Boolean(data.autoLinked),
+            position: node.position,
+          },
+        };
+      }),
+      edges: flow.edges.map(edge => ({
+        fromNodeId: edge.source,
+        toNodeId: edge.target,
+        condition: edge.data.condition,
+      })),
+    };
+
+    const snapshot = JSON.stringify(workflowGraph);
+    lastGraphSnapshotRef.current = snapshot;
+    setState(legacyGraphToNodeDocument(workflowGraph));
+    onGraphChange?.(workflowGraph);
+    setValidationTone('ok');
+    setValidationMessage(`Imported preset "${preset.name}" into the graph editor.`);
+  }, [onGraphChange, openTerminals, workspaceDir]);
 
   const addNodeAt = useCallback(
     (nodeType: string, location: Point2D, linkFrom?: { nodeId: string; socketId: string }) => {
@@ -667,6 +777,13 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
           <button onClick={validateCurrentGraph} className="px-2.5 py-1 rounded border border-[#284867] text-[#8bc3ff] hover:bg-[#112030]">
             <ScanSearch size={12} className="inline mr-1" />
             Validate
+          </button>
+          <button onClick={viewRuntimeMapping} className="px-2.5 py-1 rounded border border-border-panel text-text-muted hover:text-text-primary hover:bg-bg-panel">
+            Runtime Map
+          </button>
+          <button onClick={importPresetGraph} className="px-2.5 py-1 rounded border border-border-panel text-text-muted hover:text-text-primary hover:bg-bg-panel">
+            <Sparkles size={12} className="inline mr-1" />
+            Import Preset
           </button>
           <button onClick={() => applyOperator({ type: 'delete_selection' })} className="px-2.5 py-1 rounded border border-border-panel text-text-muted hover:text-red-300 hover:bg-red-500/10">
             <Trash2 size={12} className="inline mr-1" />

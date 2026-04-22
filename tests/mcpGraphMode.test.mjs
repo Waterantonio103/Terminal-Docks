@@ -12,9 +12,15 @@ const {
   validateGraphHandoff,
   executeHandoffTask,
   executeReceiveMessages,
+  executeRegisterWorkerCapabilities,
+  executeAssignTaskByRequirements,
+  seedConnectedSession,
+  seedFileLock,
+  appendAdaptivePatch,
   resetBridgeState,
   seedCompiledMission,
   seedMissionNodeRuntime,
+  seedAgentRuntimeSession,
   getBroadcastHistory,
 } = await import('../mcp-server/server.mjs');
 
@@ -33,6 +39,9 @@ function demoMission() {
       sourceGraphId: 'graph-graph',
       startNodeIds: ['builder'],
       executionLayers: [['builder'], ['reviewer-a', 'reviewer-b']],
+      authoringMode: 'graph',
+      presetId: null,
+      runVersion: 1,
     },
     nodes: [
       {
@@ -99,6 +108,12 @@ async function run(name, fn) {
   }
 }
 
+function extractTaskIdFromHandoffResult(result) {
+  const text = result?.content?.[0]?.text ?? '';
+  const match = text.match(/task\s+(\d+)/i);
+  return match ? Number(match[1]) : null;
+}
+
 try {
   await run('get_task_details exposes exact legal same-role targets', async () => {
     resetBridgeState();
@@ -110,6 +125,15 @@ try {
       status: 'running',
       attempt: 1,
       currentWaveId: 'root:mission-graph',
+    });
+    seedAgentRuntimeSession({
+      sessionId: 'session:mission-graph:builder:1',
+      agentId: 'agent:mission-graph:builder:term-builder',
+      missionId: 'mission-graph',
+      nodeId: 'builder',
+      attempt: 1,
+      terminalId: 'term-builder',
+      status: 'dispatched',
     });
 
     const details = buildTaskDetails('mission-graph', 'builder');
@@ -134,10 +158,20 @@ try {
       attempt: 1,
       currentWaveId: 'root:mission-graph',
     });
+    seedAgentRuntimeSession({
+      sessionId: 'session:mission-graph:builder:1',
+      agentId: 'agent:mission-graph:builder:term-builder',
+      missionId: 'mission-graph',
+      nodeId: 'builder',
+      attempt: 1,
+      terminalId: 'term-builder',
+      status: 'dispatched',
+    });
 
     const illegalTarget = validateGraphHandoff({
       missionId: 'mission-graph',
       fromNodeId: 'builder',
+      fromAttempt: 1,
       targetNodeId: 'missing-node',
       outcome: 'success',
     });
@@ -146,10 +180,45 @@ try {
     const illegalOutcome = validateGraphHandoff({
       missionId: 'mission-graph',
       fromNodeId: 'builder',
+      fromAttempt: 1,
       targetNodeId: 'reviewer-a',
       outcome: 'maybe',
     });
     assert.match(illegalOutcome.error, /Invalid outcome/);
+  });
+
+  await run('handoff_task rejects stale fromAttempt values', async () => {
+    resetBridgeState();
+    seedCompiledMission(demoMission());
+    seedMissionNodeRuntime({
+      missionId: 'mission-graph',
+      nodeId: 'builder',
+      roleId: 'builder',
+      status: 'running',
+      attempt: 2,
+      currentWaveId: 'root:mission-graph',
+    });
+    seedAgentRuntimeSession({
+      sessionId: 'session:mission-graph:builder:2',
+      agentId: 'agent:mission-graph:builder:term-builder',
+      missionId: 'mission-graph',
+      nodeId: 'builder',
+      attempt: 2,
+      terminalId: 'term-builder',
+      status: 'dispatched',
+    });
+
+    const staleAttempt = executeHandoffTask({
+      missionId: 'mission-graph',
+      fromNodeId: 'builder',
+      fromAttempt: 1,
+      targetNodeId: 'reviewer-a',
+      outcome: 'success',
+      title: 'stale handoff',
+    }, 'builder-session');
+
+    assert.equal(staleAttempt.isError, true);
+    assert.match(staleAttempt.content[0].text, /Stale handoff attempt/);
   });
 
   await run('handoff_task persists the chosen target node deterministically', async () => {
@@ -163,10 +232,20 @@ try {
       attempt: 1,
       currentWaveId: 'root:mission-graph',
     });
+    seedAgentRuntimeSession({
+      sessionId: 'session:mission-graph:builder:1',
+      agentId: 'agent:mission-graph:builder:term-builder',
+      missionId: 'mission-graph',
+      nodeId: 'builder',
+      attempt: 1,
+      terminalId: 'term-builder',
+      status: 'dispatched',
+    });
 
     const result = executeHandoffTask({
       missionId: 'mission-graph',
       fromNodeId: 'builder',
+      fromAttempt: 1,
       targetNodeId: 'reviewer-b',
       outcome: 'success',
       title: 'Send to the second reviewer',
@@ -183,16 +262,223 @@ try {
     const otherTargetDetails = buildTaskDetails('mission-graph', 'reviewer-a');
     assert.equal(otherTargetDetails.latestTask, null);
 
-    const inbox = executeReceiveMessages({ nodeId: 'reviewer-b' }, 'reviewer-session');
-    assert.match(inbox.content[0].text, /Send to the second reviewer/);
-    assert.match(inbox.content[0].text, /"targetNodeId":"reviewer-b"/);
+    const inbox = executeReceiveMessages({
+      missionId: 'mission-graph',
+      nodeId: 'reviewer-b',
+      afterSeq: 0,
+    }, 'reviewer-session');
+    const inboxPayload = JSON.parse(inbox.content[0].text);
+    assert.equal(inboxPayload.missionId, 'mission-graph');
+    assert.equal(inboxPayload.nodeId, 'reviewer-b');
+    assert.equal(inboxPayload.messages.length, 1);
+    assert.match(inboxPayload.messages[0].content, /Send to the second reviewer/);
+    assert.match(inboxPayload.messages[0].content, /"targetNodeId":"reviewer-b"/);
 
-    const noInbox = executeReceiveMessages({ nodeId: 'reviewer-a' }, 'reviewer-a-session');
-    assert.equal(noInbox.content[0].text, 'No messages.');
+    const noInbox = executeReceiveMessages({
+      missionId: 'mission-graph',
+      nodeId: 'reviewer-a',
+      afterSeq: 0,
+    }, 'reviewer-a-session');
+    const noInboxPayload = JSON.parse(noInbox.content[0].text);
+    assert.equal(noInboxPayload.messages.length, 0);
 
     const broadcasts = getBroadcastHistory();
     assert.ok(broadcasts.some(message => message.type === 'handoff'));
     assert.ok(broadcasts.some(message => message.type === 'task_update'));
+  });
+
+  await run('assign_task_by_requirements picks the best available worker', async () => {
+    resetBridgeState();
+    seedConnectedSession('worker-a', { role: 'builder' });
+    seedConnectedSession('worker-b', { role: 'builder' });
+
+    executeRegisterWorkerCapabilities({
+      profileId: 'builder_profile',
+      capabilities: [{ id: 'coding', level: 3 }],
+      availability: 'available',
+    }, 'worker-a');
+    executeRegisterWorkerCapabilities({
+      profileId: 'builder_profile',
+      capabilities: [{ id: 'coding', level: 2 }, { id: 'testing', level: 3 }],
+      availability: 'available',
+    }, 'worker-b');
+
+    const handoff = executeHandoffTask({
+      fromRole: 'coordinator',
+      targetRole: 'builder',
+      title: 'Implement assignment policy',
+      description: 'Create deterministic assignment scoring',
+      payload: { fileScope: ['src/lib/graphCompiler.ts'] },
+    }, 'coordinator-session');
+    const taskId = extractTaskIdFromHandoffResult(handoff);
+    assert.ok(taskId, 'handoff should create a task');
+
+    const assignment = executeAssignTaskByRequirements({
+      taskId,
+      requiredCapabilities: ['coding'],
+      preferredCapabilities: ['testing'],
+      writeAccess: true,
+      fileScope: ['src/lib/graphCompiler.ts'],
+    }, 'coordinator-session');
+    assert.equal(assignment.isError, undefined);
+
+    const assignmentPayload = JSON.parse(assignment.content[0].text);
+    assert.equal(assignmentPayload.status, 'assigned');
+    assert.equal(assignmentPayload.targetSessionId, 'worker-b');
+
+    const workerInbox = executeReceiveMessages({}, 'worker-b');
+    assert.match(workerInbox.content[0].text, /\[ASSIGNED\] Task/);
+    assert.match(workerInbox.content[0].text, /requiredCapabilities/);
+  });
+
+  await run('assign_task_by_requirements reports queued when write scope is contended', async () => {
+    resetBridgeState();
+    seedConnectedSession('worker-c', { role: 'builder' });
+    executeRegisterWorkerCapabilities({
+      capabilities: [{ id: 'coding', level: 3 }],
+      availability: 'available',
+    }, 'worker-c');
+    seedFileLock({
+      filePath: 'src/components/Launcher/LauncherPane.tsx',
+      agentId: 'mission:demo:node:other',
+      sessionId: 'holder-session',
+    });
+
+    const handoff = executeHandoffTask({
+      fromRole: 'coordinator',
+      targetRole: 'builder',
+      title: 'Refactor launcher',
+      payload: { files: ['src/components/Launcher/LauncherPane.tsx'] },
+    }, 'coordinator-session');
+    const taskId = extractTaskIdFromHandoffResult(handoff);
+    assert.ok(taskId, 'handoff should create a task');
+
+    const queued = executeAssignTaskByRequirements({
+      taskId,
+      requiredCapabilities: ['coding'],
+      fileScope: ['src/components/Launcher/LauncherPane.tsx'],
+      writeAccess: true,
+    }, 'coordinator-session');
+    assert.equal(queued.isError, undefined);
+    const queuedPayload = JSON.parse(queued.content[0].text);
+    assert.equal(queuedPayload.status, 'queued');
+    assert.equal(queuedPayload.reason, 'file_contention');
+  });
+
+  await run('assign_task_by_requirements can reassign by excluding the previous worker', async () => {
+    resetBridgeState();
+    seedConnectedSession('worker-old', { role: 'builder' });
+    seedConnectedSession('worker-new', { role: 'builder' });
+    executeRegisterWorkerCapabilities({
+      capabilities: [{ id: 'coding', level: 3 }],
+      availability: 'available',
+    }, 'worker-old');
+    executeRegisterWorkerCapabilities({
+      capabilities: [{ id: 'coding', level: 2 }],
+      availability: 'available',
+    }, 'worker-new');
+
+    const handoff = executeHandoffTask({
+      fromRole: 'coordinator',
+      targetRole: 'builder',
+      title: 'Retry task',
+    }, 'coordinator-session');
+    const taskId = extractTaskIdFromHandoffResult(handoff);
+    assert.ok(taskId, 'handoff should create a task');
+
+    const firstAssignment = executeAssignTaskByRequirements({
+      taskId,
+      requiredCapabilities: ['coding'],
+      writeAccess: false,
+    }, 'coordinator-session');
+    const firstPayload = JSON.parse(firstAssignment.content[0].text);
+    assert.equal(firstPayload.targetSessionId, 'worker-old');
+
+    const reassignment = executeAssignTaskByRequirements({
+      taskId,
+      requiredCapabilities: ['coding'],
+      excludeSessionIds: ['worker-old'],
+      previousSessionId: 'worker-old',
+      writeAccess: false,
+    }, 'coordinator-session');
+    const reassignmentPayload = JSON.parse(reassignment.content[0].text);
+    assert.equal(reassignmentPayload.targetSessionId, 'worker-new');
+  });
+
+  await run('adaptive patch appends legal nodes and bumps runVersion', async () => {
+    resetBridgeState();
+    seedCompiledMission({
+      ...demoMission(),
+      metadata: {
+        ...demoMission().metadata,
+        authoringMode: 'adaptive',
+        runVersion: 1,
+      },
+    });
+
+    const patchResult = appendAdaptivePatch({
+      missionId: 'mission-graph',
+      runVersion: 1,
+      patch: {
+        nodes: [{
+          id: 'doc-node',
+          roleId: 'builder',
+          instructionOverride: 'write docs',
+          terminal: {
+            terminalId: 'term-doc',
+            terminalTitle: 'Doc Node',
+            cli: 'claude',
+            paneId: 'pane-doc',
+            reusedExisting: true,
+          },
+        }],
+        edges: [{
+          fromNodeId: 'reviewer-b',
+          toNodeId: 'doc-node',
+          condition: 'on_success',
+        }],
+      },
+    });
+
+    assert.equal(patchResult.error, undefined);
+    assert.equal(patchResult.previousRunVersion, 1);
+    assert.equal(patchResult.runVersion, 2);
+    assert.ok(patchResult.appendedNodeIds.includes('doc-node'));
+
+    const mission = buildTaskDetails('mission-graph', 'doc-node');
+    assert.ok(mission, 'newly patched node should be queryable');
+    assert.equal(mission.missionStatus, 'active');
+  });
+
+  await run('adaptive patch rejects stale runVersion', async () => {
+    resetBridgeState();
+    seedCompiledMission({
+      ...demoMission(),
+      metadata: {
+        ...demoMission().metadata,
+        authoringMode: 'adaptive',
+        runVersion: 3,
+      },
+    });
+
+    const stale = appendAdaptivePatch({
+      missionId: 'mission-graph',
+      runVersion: 2,
+      patch: {
+        nodes: [{
+          id: 'stale-node',
+          roleId: 'builder',
+          terminal: {
+            terminalId: 'term-stale',
+            terminalTitle: 'Stale Node',
+            cli: 'claude',
+          },
+        }],
+        edges: [],
+      },
+    });
+
+    assert.match(stale.error, /Stale adaptive patch runVersion/);
   });
 } finally {
   try {

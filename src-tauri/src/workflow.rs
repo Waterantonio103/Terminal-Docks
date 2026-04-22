@@ -24,6 +24,14 @@ pub enum WorkflowMode {
     Edit,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkflowAuthoringMode {
+    Preset,
+    Graph,
+    Adaptive,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct CompiledMissionTaskContext {
@@ -68,6 +76,9 @@ pub struct CompiledMissionMetadata {
     pub source_graph_id: String,
     pub start_node_ids: Vec<String>,
     pub execution_layers: Vec<Vec<String>>,
+    pub authoring_mode: Option<WorkflowAuthoringMode>,
+    pub preset_id: Option<String>,
+    pub run_version: Option<u32>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]

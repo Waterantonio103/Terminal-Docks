@@ -301,15 +301,34 @@ pub struct McpMessage {
 pub struct McpState {
     pub process: Arc<Mutex<Option<Child>>>,
     pub auth_token: Arc<Mutex<String>>,
+    pub internal_push_token: Arc<Mutex<String>>,
 }
 
 impl McpState {
     pub fn new() -> Self {
-        Self { 
+        Self {
             process: Arc::new(Mutex::new(None)),
             auth_token: Arc::new(Mutex::new(String::new())),
+            internal_push_token: Arc::new(Mutex::new(String::new())),
         }
     }
+}
+
+fn generate_push_token() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let mut bytes = [0u8; 24];
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    // Fold nanos + per-call counter into a deterministic but non-predictable
+    // token. Good enough for a loopback-only handshake; not a cryptographic
+    // secret but we never expose it past the Tauri process boundary.
+    for (i, b) in bytes.iter_mut().enumerate() {
+        *b = (((nanos as u64) >> ((i % 8) * 8)) as u8)
+            ^ (((i as u64).wrapping_mul(2654435761)) as u8);
+    }
+    bytes.iter().map(|b| format!("{:02x}", b)).collect()
 }
 
 const PORT: u16 = 3741;
@@ -340,10 +359,18 @@ pub fn init_mcp_server(app: &AppHandle) -> Result<(), String> {
         state.db_path.clone()
     };
 
+    let push_token = generate_push_token();
+    {
+        let state = app.state::<McpState>();
+        let mut guard = state.internal_push_token.lock().unwrap();
+        *guard = push_token.clone();
+    }
+
     let child = Command::new("node")
         .arg("server.mjs")
         .current_dir(&server_dir)
         .env("MCP_DB_PATH", &db_path)
+        .env("MCP_INTERNAL_PUSH_TOKEN", &push_token)
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
         .spawn()
@@ -393,10 +420,146 @@ pub fn init_mcp_server(app: &AppHandle) -> Result<(), String> {
             if let Some(data) = line.strip_prefix("data: ") {
                 if let Ok(msg) = serde_json::from_str::<McpMessage>(data) {
                     if msg.msg_type == "handoff" {
-                        if let Ok(event) = serde_json::from_str::<crate::workflow_engine::HandoffEvent>(&msg.content) {
-                            if let Ok(value) = serde_json::from_str::<serde_json::Value>(&msg.content) {
-                                if let Some(mission_id) = value.get("missionId").and_then(|v| v.as_str()) {
-                                    crate::workflow_engine::handle_handoff(&app_handle, mission_id, event);
+                        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&msg.content) {
+                            let mission_id = value
+                                .get("missionId")
+                                .and_then(|v| v.as_str())
+                                .map(str::to_string);
+                            let from_node_id = value
+                                .get("fromNodeId")
+                                .and_then(|v| v.as_str())
+                                .map(str::to_string);
+                            let target_node_id = value
+                                .get("targetNodeId")
+                                .and_then(|v| v.as_str())
+                                .map(str::to_string);
+                            let from_attempt = value.get("fromAttempt").and_then(|v| v.as_u64());
+
+                            let mission_for_diag = mission_id
+                                .clone()
+                                .unwrap_or_else(|| "unknown".to_string());
+                            let node_for_diag = from_node_id
+                                .clone()
+                                .unwrap_or_else(|| "unknown".to_string());
+
+                            let mut invalid_reasons = Vec::new();
+                            if mission_id.is_none() {
+                                invalid_reasons.push("missing missionId");
+                            }
+                            if from_node_id.is_none() {
+                                invalid_reasons.push("missing fromNodeId");
+                            }
+                            if target_node_id.is_none() {
+                                invalid_reasons.push("missing targetNodeId");
+                            }
+                            if from_attempt.is_none() {
+                                invalid_reasons.push("missing fromAttempt");
+                            }
+
+                            if !invalid_reasons.is_empty() {
+                                let reason = format!(
+                                    "Rejected handoff envelope: {}",
+                                    invalid_reasons.join(", ")
+                                );
+                                eprintln!("[mcp] {}", reason);
+                                let _ = app_handle.emit(
+                                    "workflow-runtime-warning",
+                                    serde_json::json!({
+                                        "missionId": mission_for_diag,
+                                        "nodeId": node_for_diag,
+                                        "message": reason,
+                                    }),
+                                );
+                            } else if let (Some(mid), Ok(event)) = (
+                                mission_id,
+                                serde_json::from_value::<crate::workflow_engine::HandoffEvent>(value),
+                            ) {
+                                crate::workflow_engine::handle_handoff(&app_handle, &mid, event);
+                            } else {
+                                let reason = "Rejected handoff envelope: failed to parse payload.";
+                                eprintln!("[mcp] {}", reason);
+                                let _ = app_handle.emit(
+                                    "workflow-runtime-warning",
+                                    serde_json::json!({
+                                        "missionId": mission_for_diag,
+                                        "nodeId": node_for_diag,
+                                        "message": reason,
+                                    }),
+                                );
+                            }
+                        }
+                    } else if msg.msg_type == "adaptive_patch" {
+                        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&msg.content) {
+                            let mission_id = value
+                                .get("missionId")
+                                .and_then(|v| v.as_str())
+                                .map(str::to_string);
+                            let run_version = value
+                                .get("previousRunVersion")
+                                .and_then(|v| v.as_u64());
+                            let patch = value.get("patch").cloned();
+
+                            let mission_for_diag = mission_id
+                                .clone()
+                                .unwrap_or_else(|| "unknown".to_string());
+
+                            let mut invalid_reasons = Vec::new();
+                            if mission_id.is_none() {
+                                invalid_reasons.push("missing missionId");
+                            }
+                            if run_version.is_none() {
+                                invalid_reasons.push("missing previousRunVersion");
+                            }
+                            if patch.is_none() {
+                                invalid_reasons.push("missing patch");
+                            }
+
+                            if !invalid_reasons.is_empty() {
+                                let reason = format!(
+                                    "Rejected adaptive patch envelope: {}",
+                                    invalid_reasons.join(", ")
+                                );
+                                eprintln!("[mcp] {}", reason);
+                                let _ = app_handle.emit(
+                                    "workflow-runtime-warning",
+                                    serde_json::json!({
+                                        "missionId": mission_for_diag,
+                                        "nodeId": "adaptive",
+                                        "message": reason,
+                                    }),
+                                );
+                            } else if let (Some(mid), Some(version), Some(patch_value)) =
+                                (mission_id, run_version, patch)
+                            {
+                                let parsed_patch = serde_json::from_value::<crate::workflow_engine::MissionGraphPatch>(patch_value);
+                                match parsed_patch {
+                                    Ok(patch_payload) => {
+                                        if let Err(error) = crate::workflow_engine::append_mission_patch(
+                                            app_handle.clone(),
+                                            mid.clone(),
+                                            version as u32,
+                                            patch_payload,
+                                        ) {
+                                            let _ = app_handle.emit(
+                                                "workflow-runtime-warning",
+                                                serde_json::json!({
+                                                    "missionId": mid,
+                                                    "nodeId": "adaptive",
+                                                    "message": format!("Adaptive patch rejected by scheduler: {}", error),
+                                                }),
+                                            );
+                                        }
+                                    }
+                                    Err(error) => {
+                                        let _ = app_handle.emit(
+                                            "workflow-runtime-warning",
+                                            serde_json::json!({
+                                                "missionId": mid,
+                                                "nodeId": "adaptive",
+                                                "message": format!("Adaptive patch parse error: {}", error),
+                                            }),
+                                        );
+                                    }
                                 }
                             }
                         }
@@ -422,4 +585,59 @@ pub fn kill_mcp_server(app: &AppHandle) {
 pub fn get_mcp_url(state: tauri::State<'_, McpState>) -> String {
     let token = state.auth_token.lock().unwrap().clone();
     format!("http://localhost:{}/mcp?token={}", PORT, token)
+}
+
+#[tauri::command]
+pub fn get_mcp_base_url() -> String {
+    format!("http://localhost:{}", PORT)
+}
+
+/// Privileged notification from the Rust process to the MCP server.
+/// Carries the push token as a loopback secret; renderer code never sees it.
+#[tauri::command]
+pub fn mcp_notify_agent(
+    state: tauri::State<'_, McpState>,
+    session_id: String,
+    kind: String,
+    mission_id: Option<String>,
+    node_id: Option<String>,
+    task_seq: Option<u64>,
+    attempt: Option<u64>,
+) -> Result<serde_json::Value, String> {
+    let token = state.internal_push_token.lock().unwrap().clone();
+    if token.is_empty() {
+        return Err("MCP push token not initialized".to_string());
+    }
+
+    let body = match kind.as_str() {
+        "task_pushed" => serde_json::json!({
+            "type": "task_pushed",
+            "sessionId": session_id,
+            "missionId": mission_id,
+            "nodeId": node_id,
+            "taskSeq": task_seq,
+            "attempt": attempt,
+        }),
+        "bootstrap" => serde_json::json!({
+            "type": "bootstrap",
+            "sessionId": session_id,
+        }),
+        other => return Err(format!("Unsupported notify kind: {}", other)),
+    };
+
+    let url = format!("http://localhost:{}/internal/push", PORT);
+    match ureq::post(&url)
+        .set("x-td-push-token", &token)
+        .set("Content-Type", "application/json")
+        .send_string(&body.to_string())
+    {
+        Ok(response) => {
+            let status = response.status();
+            let text = response.into_string().unwrap_or_default();
+            let parsed: serde_json::Value = serde_json::from_str(&text)
+                .unwrap_or(serde_json::json!({ "status": status, "raw": text }));
+            Ok(parsed)
+        }
+        Err(error) => Err(format!("mcp_notify_agent failed: {}", error)),
+    }
 }

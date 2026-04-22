@@ -3,14 +3,18 @@ import type {
   CompiledMission,
   CompiledMissionEdge,
   CompiledMissionNode,
+  TaskRequirements,
+  WorkerCapability,
+  WorkerCapabilityId,
+  WorkflowAuthoringMode,
   WorkflowAgentCli,
   WorkflowEdgeCondition,
   WorkflowGraph,
   WorkflowMode,
   WorkflowNode,
   WorkflowNodeStatus,
-} from '../store/workspace';
-import { deriveExecutionLayers } from './graphUtils';
+} from '../store/workspace.js';
+import { deriveExecutionLayers } from './graphUtils.js';
 
 type FlowNodeLike = Pick<Node, 'id' | 'type' | 'position' | 'parentId' | 'extent' | 'style'> & {
   data?: Record<string, unknown>;
@@ -31,6 +35,7 @@ const CONDITION_SORT_ORDER: Record<WorkflowEdgeCondition, number> = {
 const NODE_STATUS_FALLBACK: WorkflowNodeStatus = 'idle';
 const AGENT_CLI_FALLBACK: WorkflowAgentCli = 'claude';
 const MODE_FALLBACK: WorkflowMode = 'build';
+const WORKER_CAPABILITY_IDS: WorkerCapabilityId[] = ['planning', 'coding', 'testing', 'review', 'security', 'repo_analysis', 'shell_execution'];
 
 function asString(value: unknown): string | undefined {
   return typeof value === 'string' ? value : undefined;
@@ -39,6 +44,70 @@ function asString(value: unknown): string | undefined {
 function trimToUndefined(value: unknown): string | undefined {
   const str = asString(value)?.trim();
   return str ? str : undefined;
+}
+
+function normalizeCapabilityId(value: unknown): WorkerCapabilityId | undefined {
+  if (typeof value !== 'string') return undefined;
+  const normalized = value.trim().toLowerCase();
+  return WORKER_CAPABILITY_IDS.find(capability => capability === normalized);
+}
+
+function normalizeCapabilities(value: unknown): WorkerCapability[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const seen = new Set<string>();
+  const normalized: WorkerCapability[] = [];
+  for (const entry of value) {
+    const obj = entry as { id?: unknown; level?: unknown; verifiedBy?: unknown };
+    const id = normalizeCapabilityId(obj?.id);
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    const levelRaw = typeof obj.level === 'number' && Number.isFinite(obj.level) ? Math.floor(obj.level) : undefined;
+    const level = typeof levelRaw === 'number'
+      ? (Math.max(0, Math.min(3, levelRaw)) as 0 | 1 | 2 | 3)
+      : undefined;
+    const verifiedBy = obj.verifiedBy === 'runtime' || obj.verifiedBy === 'profile'
+      ? obj.verifiedBy
+      : undefined;
+    normalized.push({ id, level, verifiedBy });
+  }
+  return normalized.length > 0 ? normalized : undefined;
+}
+
+function normalizeTaskRequirements(value: unknown): TaskRequirements | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const input = value as Record<string, unknown>;
+  const requiredCapabilities = Array.isArray(input.requiredCapabilities)
+    ? Array.from(new Set(input.requiredCapabilities.map(normalizeCapabilityId).filter(Boolean))) as WorkerCapabilityId[]
+    : undefined;
+  const preferredCapabilities = Array.isArray(input.preferredCapabilities)
+    ? Array.from(new Set(input.preferredCapabilities.map(normalizeCapabilityId).filter(Boolean))) as WorkerCapabilityId[]
+    : undefined;
+  const fileScope = Array.isArray(input.fileScope)
+    ? input.fileScope.filter(path => typeof path === 'string' && path.trim()).map(path => String(path))
+    : undefined;
+  const workingDir = trimToUndefined(input.workingDir);
+  const writeAccess = typeof input.writeAccess === 'boolean' ? input.writeAccess : undefined;
+  const parallelSafe = typeof input.parallelSafe === 'boolean' ? input.parallelSafe : undefined;
+
+  if (
+    !requiredCapabilities?.length &&
+    !preferredCapabilities?.length &&
+    !fileScope?.length &&
+    !workingDir &&
+    typeof writeAccess !== 'boolean' &&
+    typeof parallelSafe !== 'boolean'
+  ) {
+    return undefined;
+  }
+
+  return {
+    requiredCapabilities: requiredCapabilities?.length ? requiredCapabilities : undefined,
+    preferredCapabilities: preferredCapabilities?.length ? preferredCapabilities : undefined,
+    fileScope: fileScope?.length ? fileScope : undefined,
+    workingDir,
+    writeAccess,
+    parallelSafe,
+  };
 }
 
 function getNodeKind(node: FlowNodeLike): RuntimeNodeKind {
@@ -64,6 +133,19 @@ function getNodeStatus(node: FlowNodeLike): WorkflowNodeStatus {
 function getWorkflowMode(node: FlowNodeLike): WorkflowMode {
   const mode = node.data?.mode;
   return mode === 'edit' ? 'edit' : MODE_FALLBACK;
+}
+
+function getAuthoringMode(value: unknown): WorkflowAuthoringMode | undefined {
+  if (value === 'preset' || value === 'adaptive' || value === 'graph') {
+    return value;
+  }
+  return undefined;
+}
+
+function getRunVersion(value: unknown): number | undefined {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return undefined;
+  const normalized = Math.floor(value);
+  return normalized > 0 ? normalized : undefined;
 }
 
 export function normalizeEdgeCondition(value: unknown): WorkflowEdgeCondition {
@@ -352,6 +434,9 @@ export function serializeWorkflowGraph(
             prompt: asString(node.data?.prompt) ?? '',
             mode: getWorkflowMode(node),
             workspaceDir: asString(node.data?.workspaceDir) ?? '',
+            authoringMode: getAuthoringMode(node.data?.authoringMode),
+            presetId: asString(node.data?.presetId) ?? undefined,
+            runVersion: getRunVersion(node.data?.runVersion),
             position: node.position,
             parentId: node.parentId,
             extent: node.extent as 'parent' | undefined,
@@ -411,6 +496,10 @@ export function serializeWorkflowGraph(
           terminalTitle: trimToUndefined(node.data?.terminalTitle),
           paneId: trimToUndefined(node.data?.paneId),
           autoLinked: Boolean(node.data?.autoLinked),
+          authoringMode: getAuthoringMode(node.data?.authoringMode),
+          presetId: asString(node.data?.presetId) ?? undefined,
+          runVersion: getRunVersion(node.data?.runVersion),
+          adaptiveSeed: Boolean(node.data?.adaptiveSeed),
           position: node.position,
           parentId: node.parentId,
           extent: node.extent as 'parent' | undefined,
@@ -441,6 +530,9 @@ export interface CompileMissionOptions {
   workspaceDirFallback?: string | null;
   compiledAt?: number;
   terminalClis?: Record<string, WorkflowAgentCli>;
+  authoringMode?: WorkflowAuthoringMode;
+  presetId?: string | null;
+  runVersion?: number;
 }
 
 export function compileMission({
@@ -451,12 +543,18 @@ export function compileMission({
   workspaceDirFallback = null,
   compiledAt = Date.now(),
   terminalClis = {},
+  authoringMode,
+  presetId,
+  runVersion,
 }: CompileMissionOptions): CompiledMission {
   const structure = compileMissionStructure(nodes, edges);
   const taskNode = nodes.find(node => node.id === structure.taskNodeId);
   if (!taskNode) {
     throw new Error(`Task node ${structure.taskNodeId} could not be found during mission compilation.`);
   }
+  const resolvedAuthoringMode = authoringMode ?? getAuthoringMode(taskNode.data?.authoringMode);
+  const resolvedPresetId = presetId ?? trimToUndefined(taskNode.data?.presetId) ?? null;
+  const resolvedRunVersion = runVersion ?? getRunVersion(taskNode.data?.runVersion) ?? 1;
 
   const compiledNodes: CompiledMissionNode[] = structure.agentNodeIds.map(nodeId => {
     const node = nodes.find(candidate => candidate.id === nodeId);
@@ -473,7 +571,10 @@ export function compileMission({
     return {
       id: node.id,
       roleId: trimToUndefined(node.data?.roleId) ?? 'agent',
+      profileId: trimToUndefined(node.data?.profileId),
       instructionOverride: asString(node.data?.instructionOverride) ?? '',
+      capabilities: normalizeCapabilities(node.data?.capabilities),
+      requirements: normalizeTaskRequirements(node.data?.requirements),
       terminal: {
         terminalId,
         terminalTitle,
@@ -498,6 +599,9 @@ export function compileMission({
       sourceGraphId: graphId,
       startNodeIds: structure.startNodeIds,
       executionLayers: structure.executionLayers,
+      authoringMode: resolvedAuthoringMode,
+      presetId: resolvedPresetId,
+      runVersion: resolvedRunVersion,
     },
     nodes: compiledNodes,
     edges: structure.compiledEdges,

@@ -137,6 +137,9 @@ export function createWorkflowNodeRegistry() {
       prompt: '',
       mode: 'build',
       workspaceDir: '',
+      authoringMode: 'graph',
+      presetId: '',
+      runVersion: 1,
     }),
     declare: (_context, builder) => {
       builder.addOutput('start', 'Start', 'flow');
@@ -155,6 +158,10 @@ export function createWorkflowNodeRegistry() {
       terminalTitle: '',
       paneId: '',
       autoLinked: false,
+      authoringMode: 'graph',
+      presetId: '',
+      runVersion: 1,
+      adaptiveSeed: false,
     }),
     declare: (_context, builder) => {
       builder.addInput('in', 'In', 'flow');

@@ -147,6 +147,90 @@ pub fn spawn_pty(
 }
 
 #[tauri::command]
+pub fn spawn_pty_with_command(
+    app: AppHandle,
+    state: State<'_, PtyState>,
+    id: String,
+    rows: u16,
+    cols: u16,
+    cwd: Option<String>,
+    command: String,
+    args: Vec<String>,
+    env: Option<HashMap<String, String>>,
+) -> Result<bool, String> {
+    let mut ptys = state.ptys.lock().unwrap();
+    if ptys.contains_key(&id) {
+        return Ok(false);
+    }
+
+    let pty_system = NativePtySystem::default();
+    let pty_size = PtySize { rows, cols, pixel_width: 0, pixel_height: 0 };
+    let pair = pty_system
+        .openpty(pty_size)
+        .map_err(|e| format!("Failed to open pty: {}", e))?;
+
+    let mut cmd = CommandBuilder::new(&command);
+    cmd.env("TERM", "xterm-256color");
+    for arg in &args {
+        cmd.arg(arg);
+    }
+    if let Some(vars) = env {
+        for (key, value) in vars {
+            cmd.env(key, value);
+        }
+    }
+    if let Some(path) = cwd {
+        if !path.is_empty() {
+            cmd.cwd(path);
+        }
+    }
+
+    let child = pair
+        .slave
+        .spawn_command(cmd)
+        .map_err(|e| format!("Failed to spawn command '{}': {}", command, e))?;
+
+    let master = pair.master;
+    let writer = master
+        .take_writer()
+        .map_err(|e| format!("Failed to take writer: {}", e))?;
+    let mut reader = master
+        .try_clone_reader()
+        .map_err(|e| format!("Failed to clone reader: {}", e))?;
+
+    let recent_output = Arc::new(Mutex::new(VecDeque::with_capacity(RECENT_OUTPUT_CAPACITY)));
+    let instance = PtyInstance {
+        master,
+        writer,
+        child,
+        recent_output: Arc::clone(&recent_output),
+    };
+
+    ptys.insert(id.clone(), instance);
+    drop(ptys);
+
+    thread::spawn(move || {
+        let mut buf = [0; 4096];
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    let data = buf[..n].to_vec();
+                    {
+                        let mut recent = recent_output.lock().unwrap();
+                        push_recent_output(&mut recent, &data);
+                    }
+                    let _ = app.emit("pty-out", Payload { id: id.clone(), data });
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    Ok(true)
+}
+
+#[tauri::command]
 pub fn get_pty_recent_output(
     state: State<'_, PtyState>,
     id: String,

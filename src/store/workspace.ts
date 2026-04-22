@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
-import { generateId } from '../lib/graphUtils';
+import { generateId } from '../lib/graphUtils.js';
 
 export function arrayMove<T>(array: T[], fromIndex: number, toIndex: number): T[] {
   const newArray = [...array];
@@ -14,6 +14,23 @@ export type WorkflowNodeStatus = 'idle' | 'waiting' | 'running' | 'completed' | 
 export type WorkflowMode = 'build' | 'edit';
 export type WorkflowEdgeCondition = 'always' | 'on_success' | 'on_failure';
 export type WorkflowAgentCli = 'claude' | 'gemini' | 'opencode' | 'codex';
+export type WorkflowAuthoringMode = 'preset' | 'graph' | 'adaptive';
+export type WorkerCapabilityId = 'planning' | 'coding' | 'testing' | 'review' | 'security' | 'repo_analysis' | 'shell_execution';
+
+export interface WorkerCapability {
+  id: WorkerCapabilityId;
+  level?: 0 | 1 | 2 | 3;
+  verifiedBy?: 'profile' | 'runtime';
+}
+
+export interface TaskRequirements {
+  requiredCapabilities?: WorkerCapabilityId[];
+  preferredCapabilities?: WorkerCapabilityId[];
+  fileScope?: string[];
+  workingDir?: string;
+  writeAccess?: boolean;
+  parallelSafe?: boolean;
+}
 
 export interface WorkflowNode {
   id: string;
@@ -28,6 +45,13 @@ export interface WorkflowNode {
     terminalTitle?: string;
     paneId?: string;
     autoLinked?: boolean;
+    authoringMode?: WorkflowAuthoringMode;
+    presetId?: string | null;
+    runVersion?: number;
+    adaptiveSeed?: boolean;
+    profileId?: string;
+    capabilities?: WorkerCapability[];
+    requirements?: TaskRequirements;
     parentId?: string;
     extent?: 'parent';
     width?: number;
@@ -67,7 +91,10 @@ export interface CompiledMissionTerminalBinding {
 export interface CompiledMissionNode {
   id: string;
   roleId: string;
+  profileId?: string;
   instructionOverride: string;
+  capabilities?: WorkerCapability[];
+  requirements?: TaskRequirements;
   terminal: CompiledMissionTerminalBinding;
 }
 
@@ -83,6 +110,9 @@ export interface CompiledMissionMetadata {
   sourceGraphId: string;
   startNodeIds: string[];
   executionLayers: string[][];
+  authoringMode?: WorkflowAuthoringMode;
+  presetId?: string | null;
+  runVersion?: number;
 }
 
 export interface CompiledMission {

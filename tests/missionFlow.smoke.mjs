@@ -7,7 +7,7 @@ const tempRoot = mkdtempSync(join(tmpdir(), 'terminal-docks-smoke-'));
 process.env.MCP_DB_PATH = join(tempRoot, 'tasks.db');
 process.env.MCP_DISABLE_HTTP = '1';
 
-const [{ buildLaunchPrompt }, { compileMission }, { buildNewTaskSignal }, bridge] = await Promise.all([
+const [{ buildLaunchPrompt }, { compileMission }, { buildNewTaskSignal, parseNewTaskSignal }, bridge] = await Promise.all([
   import('../.tmp-tests/lib/buildPrompt.js'),
   import('../.tmp-tests/lib/graphCompiler.js'),
   import('../.tmp-tests/lib/missionRuntime.js'),
@@ -18,7 +18,7 @@ const {
   resetBridgeState,
   seedCompiledMission,
   seedMissionNodeRuntime,
-  executeConnectAgent,
+  seedAgentRuntimeSession,
   executeHandoffTask,
   buildTaskDetails,
   executeReceiveMessages,
@@ -118,31 +118,25 @@ try {
     currentWaveId: 'root:smoke-mission',
   });
 
-  run('connect_agent publishes the agent registration event', () => {
-    const result = executeConnectAgent({
-      role: 'Builder',
-      agentId: 'Builder Terminal',
-      terminalId: 'term-builder-node',
-      cli: 'claude',
-    }, 'builder-session');
-
-    assert.equal(result.isError, undefined);
-    const broadcasts = getBroadcastHistory();
-    assert.ok(broadcasts.some(message => message.type === 'agent_connected'));
+  seedAgentRuntimeSession({
+    sessionId: 'session:smoke-mission:builder-node:1',
+    agentId: 'agent:smoke-mission:builder-node:term-builder-node',
+    missionId: mission.missionId,
+    nodeId: 'builder-node',
+    attempt: 1,
+    terminalId: 'term-builder-node',
+    status: 'dispatched',
   });
 
-  run('buildLaunchPrompt stages a node-aware handoff instruction', () => {
+  run('buildLaunchPrompt stages graph-mode instructions without protocol-first dependency', () => {
     const prompt = buildLaunchPrompt('builder', {
       workspaceDir: 'C:/workspace',
-      pipeline: ['builder', 'reviewer'],
-      instanceNum: 1,
-      totalInstances: 1,
-      predecessorRole: null,
-      successorRole: null,
       missionId: mission.missionId,
       nodeId: 'builder-node',
       attempt: 1,
       allowedOutgoingTargets: getAllowedOutgoingTargets(mission, 'builder-node'),
+      authoringMode: 'graph',
+      runVersion: 1,
       task: mission.task.prompt,
       mode: mission.task.mode,
     });
@@ -150,14 +144,20 @@ try {
     assert.match(prompt, /Treat `get_task_details` as the canonical source of truth/);
     assert.match(prompt, /missionId="smoke-mission"/);
     assert.match(prompt, /fromNodeId="builder-node"/);
+    assert.match(prompt, /fromAttempt=1/);
     assert.match(prompt, /targetNodeId/);
+    assert.doesNotMatch(prompt, /get_collaboration_protocol/);
   });
 
-  run('Mission Control writes a NEW_TASK signal with payload preview', () => {
+  run('Mission Control writes a NEW_TASK signal with runtime bootstrap metadata', () => {
     const signal = JSON.parse(buildNewTaskSignal({
       missionId: mission.missionId,
       nodeId: 'builder-node',
       roleId: 'builder',
+      sessionId: 'session:smoke-mission:builder-node:1',
+      agentId: 'agent:smoke-mission:builder-node:term-builder-node',
+      terminalId: 'term-builder-node',
+      activatedAt: 1710000000000,
       attempt: 1,
       payload: JSON.stringify([{ fromNodeId: 'task-1', payload: { scope: 'feature' } }]),
     }));
@@ -165,15 +165,21 @@ try {
     assert.equal(signal.signal, 'NEW_TASK');
     assert.equal(signal.missionId, mission.missionId);
     assert.equal(signal.nodeId, 'builder-node');
+    assert.equal(signal.sessionId, 'session:smoke-mission:builder-node:1');
+    assert.equal(signal.agentId, 'agent:smoke-mission:builder-node:term-builder-node');
+    assert.equal(signal.terminalId, 'term-builder-node');
+    assert.equal(signal.activatedAt, 1710000000000);
     assert.equal(signal.attempt, 1);
     assert.ok(typeof signal.payloadPreview === 'string' && signal.payloadPreview.length > 0);
     assert.equal(signal.payloadPreview, signal.handoffPayloadPreview);
+    assert.deepEqual(parseNewTaskSignal(JSON.stringify(signal)), signal);
   });
 
   run('handoff_task makes the target node queryable end-to-end', () => {
     const result = executeHandoffTask({
       missionId: mission.missionId,
       fromNodeId: 'builder-node',
+      fromAttempt: 1,
       targetNodeId: 'reviewer-node',
       outcome: 'success',
       title: 'Builder completed implementation',
@@ -189,9 +195,15 @@ try {
     assert.ok(reviewerDetails.latestTask);
     assert.equal(reviewerDetails.latestTask.node_id, 'reviewer-node');
 
-    const inbox = executeReceiveMessages({ nodeId: 'reviewer-node' }, 'reviewer-session');
-    assert.match(inbox.content[0].text, /Builder completed implementation/);
-    assert.match(inbox.content[0].text, /reviewer-node/);
+    const inbox = executeReceiveMessages({
+      missionId: mission.missionId,
+      nodeId: 'reviewer-node',
+      afterSeq: 0,
+    }, 'reviewer-session');
+    const inboxPayload = JSON.parse(inbox.content[0].text);
+    assert.equal(inboxPayload.messages.length, 1);
+    assert.match(inboxPayload.messages[0].content, /Builder completed implementation/);
+    assert.match(inboxPayload.messages[0].content, /reviewer-node/);
 
     const broadcasts = getBroadcastHistory();
     assert.ok(broadcasts.some(message => message.type === 'handoff'));

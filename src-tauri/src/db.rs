@@ -173,6 +173,49 @@ pub fn init_db(app: &AppHandle) -> Result<(), String> {
     )
     .map_err(|e| e.to_string())?;
 
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS agent_runtime_sessions (
+            session_id TEXT PRIMARY KEY,
+            agent_id TEXT NOT NULL,
+            mission_id TEXT NOT NULL,
+            node_id TEXT NOT NULL,
+            attempt INTEGER NOT NULL,
+            terminal_id TEXT NOT NULL,
+            status TEXT NOT NULL,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )",
+        (),
+    )
+    .map_err(|e| e.to_string())?;
+
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_agent_runtime_sessions_mission_node_attempt
+         ON agent_runtime_sessions (mission_id, node_id, attempt)",
+        (),
+    )
+    .map_err(|e| e.to_string())?;
+
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS mission_timeline (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            mission_id TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            payload TEXT,
+            run_version INTEGER,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )",
+        (),
+    )
+    .map_err(|e| e.to_string())?;
+
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_mission_timeline_mission_id
+         ON mission_timeline (mission_id, id)",
+        (),
+    )
+    .map_err(|e| e.to_string())?;
+
     app.manage(DbState {
         db: Mutex::new(Some(conn)),
         db_path: db_path_str,

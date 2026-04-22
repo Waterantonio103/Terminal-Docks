@@ -76,6 +76,10 @@ function legacyNodeToDocumentNode(node: WorkflowNode, index: number): NodeInstan
       terminalTitle: node.config?.terminalTitle ?? '',
       paneId: node.config?.paneId ?? '',
       autoLinked: Boolean(node.config?.autoLinked),
+      authoringMode: node.config?.authoringMode ?? 'graph',
+      presetId: node.config?.presetId ?? '',
+      runVersion: node.config?.runVersion ?? 1,
+      adaptiveSeed: Boolean(node.config?.adaptiveSeed),
       label: node.config?.label ?? '',
     },
   };
@@ -206,6 +210,16 @@ export function nodeDocumentToWorkflowGraph(
         terminalTitle: String(node.properties.terminalTitle ?? ''),
         paneId: String(node.properties.paneId ?? ''),
         autoLinked: Boolean(node.properties.autoLinked),
+        authoringMode:
+          node.properties.authoringMode === 'preset' || node.properties.authoringMode === 'adaptive'
+            ? node.properties.authoringMode
+            : 'graph',
+        presetId: String(node.properties.presetId ?? ''),
+        runVersion:
+          typeof node.properties.runVersion === 'number' && Number.isFinite(node.properties.runVersion)
+            ? Math.max(1, Math.floor(node.properties.runVersion))
+            : 1,
+        adaptiveSeed: Boolean(node.properties.adaptiveSeed),
         label: String(node.properties.label ?? node.label ?? ''),
         position: node.location,
         width: node.size?.width,
@@ -228,14 +242,16 @@ export function nodeDocumentToWorkflowGraph(
     return workflowNode;
   });
 
-  const edges = Object.values(tree.links).map(link => {
-    const sourceNode = tree.nodes[link.from.nodeId];
-    return {
-      fromNodeId: link.from.nodeId,
-      toNodeId: link.to.nodeId,
-      condition: legacyConditionFromSocket(sourceNode?.type ?? 'workflow.agent', link.from.socketId),
-    } satisfies WorkflowEdge;
-  });
+  const edges = Object.values(tree.links)
+    .filter(link => tree.nodes[link.from.nodeId] && tree.nodes[link.to.nodeId])
+    .map(link => {
+      const sourceNode = tree.nodes[link.from.nodeId];
+      return {
+        fromNodeId: link.from.nodeId,
+        toNodeId: link.to.nodeId,
+        condition: legacyConditionFromSocket(sourceNode?.type ?? 'workflow.agent', link.from.socketId),
+      } satisfies WorkflowEdge;
+    });
 
   return {
     id: tree.id,
@@ -272,6 +288,10 @@ export function nodeDocumentToFlowGraph(
         terminalTitle: node.config?.terminalTitle,
         paneId: node.config?.paneId,
         autoLinked: node.config?.autoLinked,
+        authoringMode: node.config?.authoringMode ?? 'graph',
+        presetId: node.config?.presetId ?? '',
+        runVersion: node.config?.runVersion ?? 1,
+        adaptiveSeed: node.config?.adaptiveSeed ?? false,
         label: node.config?.label ?? '',
       },
     })),
@@ -291,4 +311,3 @@ export type NodeDocumentState = {
   document: NodeTreeDocument;
   editor: NodeEditorState;
 };
-
