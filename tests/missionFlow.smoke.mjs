@@ -1,0 +1,206 @@
+import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+const tempRoot = mkdtempSync(join(tmpdir(), 'terminal-docks-smoke-'));
+process.env.MCP_DB_PATH = join(tempRoot, 'tasks.db');
+process.env.MCP_DISABLE_HTTP = '1';
+
+const [{ buildLaunchPrompt }, { compileMission }, { buildNewTaskSignal }, bridge] = await Promise.all([
+  import('../.tmp-tests/lib/buildPrompt.js'),
+  import('../.tmp-tests/lib/graphCompiler.js'),
+  import('../.tmp-tests/lib/missionRuntime.js'),
+  import('../mcp-server/server.mjs'),
+]);
+
+const {
+  resetBridgeState,
+  seedCompiledMission,
+  seedMissionNodeRuntime,
+  executeConnectAgent,
+  executeHandoffTask,
+  buildTaskDetails,
+  executeReceiveMessages,
+  getBroadcastHistory,
+} = bridge;
+
+function taskNode(id = 'task-1') {
+  return {
+    id,
+    type: 'task',
+    position: { x: 0, y: 0 },
+    data: {
+      roleId: 'task',
+      status: 'idle',
+      prompt: 'Build the feature and hand off cleanly',
+      mode: 'build',
+      workspaceDir: 'C:/workspace',
+    },
+  };
+}
+
+function agentNode(id, roleId, terminalTitle) {
+  return {
+    id,
+    type: 'agent',
+    position: { x: 0, y: 0 },
+    data: {
+      nodeId: id,
+      roleId,
+      status: 'idle',
+      cli: 'claude',
+      instructionOverride: '',
+      terminalId: `term-${id}`,
+      terminalTitle,
+      paneId: `pane-${id}`,
+      autoLinked: true,
+    },
+  };
+}
+
+function edge(source, target, condition = 'always') {
+  return {
+    id: `${source}-${condition}-${target}`,
+    source,
+    target,
+    data: { condition },
+  };
+}
+
+function getAllowedOutgoingTargets(mission, nodeId) {
+  const nodeById = new Map(mission.nodes.map(node => [node.id, node]));
+  return mission.edges
+    .filter(link => link.fromNodeId === nodeId)
+    .map(link => ({
+      targetNodeId: link.toNodeId,
+      targetRoleId: nodeById.get(link.toNodeId)?.roleId ?? 'unknown',
+      condition: link.condition,
+    }));
+}
+
+function run(name, fn) {
+  try {
+    fn();
+    console.log(`PASS ${name}`);
+  } catch (error) {
+    console.error(`FAIL ${name}`);
+    throw error;
+  }
+}
+
+try {
+  resetBridgeState();
+
+  const mission = compileMission({
+    graphId: 'smoke-graph',
+    missionId: 'smoke-mission',
+    nodes: [
+      taskNode(),
+      agentNode('builder-node', 'builder', 'Builder Terminal'),
+      agentNode('reviewer-node', 'reviewer', 'Reviewer Terminal'),
+    ],
+    edges: [
+      edge('task-1', 'builder-node'),
+      edge('builder-node', 'reviewer-node'),
+    ],
+    workspaceDirFallback: 'C:/workspace',
+    compiledAt: 123,
+  });
+
+  seedCompiledMission(mission);
+  seedMissionNodeRuntime({
+    missionId: mission.missionId,
+    nodeId: 'builder-node',
+    roleId: 'builder',
+    status: 'running',
+    attempt: 1,
+    currentWaveId: 'root:smoke-mission',
+  });
+
+  run('connect_agent publishes the agent registration event', () => {
+    const result = executeConnectAgent({
+      role: 'Builder',
+      agentId: 'Builder Terminal',
+      terminalId: 'term-builder-node',
+      cli: 'claude',
+    }, 'builder-session');
+
+    assert.equal(result.isError, undefined);
+    const broadcasts = getBroadcastHistory();
+    assert.ok(broadcasts.some(message => message.type === 'agent_connected'));
+  });
+
+  run('buildLaunchPrompt stages a node-aware handoff instruction', () => {
+    const prompt = buildLaunchPrompt('builder', {
+      workspaceDir: 'C:/workspace',
+      pipeline: ['builder', 'reviewer'],
+      instanceNum: 1,
+      totalInstances: 1,
+      predecessorRole: null,
+      successorRole: null,
+      missionId: mission.missionId,
+      nodeId: 'builder-node',
+      attempt: 1,
+      allowedOutgoingTargets: getAllowedOutgoingTargets(mission, 'builder-node'),
+      task: mission.task.prompt,
+      mode: mission.task.mode,
+    });
+
+    assert.match(prompt, /Treat `get_task_details` as the canonical source of truth/);
+    assert.match(prompt, /missionId="smoke-mission"/);
+    assert.match(prompt, /fromNodeId="builder-node"/);
+    assert.match(prompt, /targetNodeId/);
+  });
+
+  run('Mission Control writes a NEW_TASK signal with payload preview', () => {
+    const signal = JSON.parse(buildNewTaskSignal({
+      missionId: mission.missionId,
+      nodeId: 'builder-node',
+      roleId: 'builder',
+      attempt: 1,
+      payload: JSON.stringify([{ fromNodeId: 'task-1', payload: { scope: 'feature' } }]),
+    }));
+
+    assert.equal(signal.signal, 'NEW_TASK');
+    assert.equal(signal.missionId, mission.missionId);
+    assert.equal(signal.nodeId, 'builder-node');
+    assert.equal(signal.attempt, 1);
+    assert.ok(typeof signal.payloadPreview === 'string' && signal.payloadPreview.length > 0);
+    assert.equal(signal.payloadPreview, signal.handoffPayloadPreview);
+  });
+
+  run('handoff_task makes the target node queryable end-to-end', () => {
+    const result = executeHandoffTask({
+      missionId: mission.missionId,
+      fromNodeId: 'builder-node',
+      targetNodeId: 'reviewer-node',
+      outcome: 'success',
+      title: 'Builder completed implementation',
+      payload: {
+        filesChanged: ['src/components/MissionControl/MissionControlPane.tsx'],
+        previewUrl: null,
+      },
+    }, 'builder-session');
+
+    assert.equal(result.isError, undefined);
+
+    const reviewerDetails = buildTaskDetails(mission.missionId, 'reviewer-node');
+    assert.ok(reviewerDetails.latestTask);
+    assert.equal(reviewerDetails.latestTask.node_id, 'reviewer-node');
+
+    const inbox = executeReceiveMessages({ nodeId: 'reviewer-node' }, 'reviewer-session');
+    assert.match(inbox.content[0].text, /Builder completed implementation/);
+    assert.match(inbox.content[0].text, /reviewer-node/);
+
+    const broadcasts = getBroadcastHistory();
+    assert.ok(broadcasts.some(message => message.type === 'handoff'));
+    assert.ok(broadcasts.some(message => message.type === 'task_update'));
+  });
+} finally {
+  try {
+    rmSync(tempRoot, { recursive: true, force: true });
+  } catch {
+    // better-sqlite3 can keep the temp DB open until process exit on Windows
+  }
+}

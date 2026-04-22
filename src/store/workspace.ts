@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
+import { generateId } from '../lib/graphUtils';
 
 export function arrayMove<T>(array: T[], fromIndex: number, toIndex: number): T[] {
   const newArray = [...array];
@@ -9,18 +10,37 @@ export function arrayMove<T>(array: T[], fromIndex: number, toIndex: number): T[
 }
 
 export type PaneType = 'terminal' | 'editor' | 'taskboard' | 'activityfeed' | 'launcher' | 'missioncontrol' | 'nodetree';
+export type WorkflowNodeStatus = 'idle' | 'waiting' | 'running' | 'completed' | 'failed';
+export type WorkflowMode = 'build' | 'edit';
+export type WorkflowEdgeCondition = 'always' | 'on_success' | 'on_failure';
+export type WorkflowAgentCli = 'claude' | 'gemini' | 'opencode' | 'codex';
 
 export interface WorkflowNode {
   id: string;
   roleId: string;
-  status: 'idle' | 'waiting' | 'running' | 'completed' | 'failed';
-  config?: any;
+  status: WorkflowNodeStatus;
+  config?: {
+    prompt?: string;
+    mode?: WorkflowMode;
+    workspaceDir?: string;
+    instructionOverride?: string;
+    terminalId?: string;
+    terminalTitle?: string;
+    paneId?: string;
+    autoLinked?: boolean;
+    parentId?: string;
+    extent?: 'parent';
+    width?: number;
+    height?: number;
+    label?: string;
+    position?: { x: number; y: number };
+  };
 }
 
 export interface WorkflowEdge {
   fromNodeId: string;
   toNodeId: string;
-  condition?: 'always' | 'on_success' | 'on_failure';
+  condition?: WorkflowEdgeCondition;
 }
 
 export interface WorkflowGraph {
@@ -29,14 +49,73 @@ export interface WorkflowGraph {
   edges: WorkflowEdge[];
 }
 
+export interface CompiledMissionTaskContext {
+  nodeId: string;
+  prompt: string;
+  mode: WorkflowMode;
+  workspaceDir: string | null;
+}
+
+export interface CompiledMissionTerminalBinding {
+  terminalId: string;
+  terminalTitle: string;
+  cli: WorkflowAgentCli;
+  paneId?: string;
+  reusedExisting: boolean;
+}
+
+export interface CompiledMissionNode {
+  id: string;
+  roleId: string;
+  instructionOverride: string;
+  terminal: CompiledMissionTerminalBinding;
+}
+
+export interface CompiledMissionEdge {
+  id: string;
+  fromNodeId: string;
+  toNodeId: string;
+  condition: WorkflowEdgeCondition;
+}
+
+export interface CompiledMissionMetadata {
+  compiledAt: number;
+  sourceGraphId: string;
+  startNodeIds: string[];
+  executionLayers: string[][];
+}
+
+export interface CompiledMission {
+  missionId: string;
+  graphId: string;
+  task: CompiledMissionTaskContext;
+  metadata: CompiledMissionMetadata;
+  nodes: CompiledMissionNode[];
+  edges: CompiledMissionEdge[];
+}
+
+export interface MissionAttemptRecord {
+  attempt: number;
+  status: WorkflowNodeStatus;
+  startedAt?: number;
+  completedAt?: number;
+  outcome?: 'success' | 'failure';
+  payloadPreview?: string | null;
+}
+
 export interface MissionAgent {
   terminalId: string;
   title: string;
   roleId: string;
-  status?: 'idle' | 'waiting' | 'running' | 'completed';
+  paneId?: string;
+  status?: WorkflowNodeStatus;
   triggered?: boolean;
+  attempt?: number;
   startedAt?: number;
   completedAt?: number;
+  lastOutcome?: 'success' | 'failure';
+  lastPayload?: string | null;
+  attemptHistory?: MissionAttemptRecord[];
   nodeId?: string;
 }
 
@@ -64,6 +143,11 @@ export interface Pane {
   gridPos: GridPos;
   data?: {
     terminalId?: string;
+    cli?: 'claude' | 'gemini' | 'opencode' | 'codex';
+    cliSource?: 'connect_agent' | 'stdout' | 'heuristic';
+    cliConfidence?: 'low' | 'medium' | 'high';
+    cliUpdatedAt?: number;
+    roleId?: string;
     filePath?: string;
     initialCommand?: string;
     [key: string]: any;
@@ -129,11 +213,6 @@ export const TAB_COLORS = [
   '#ef4444', '#8b5cf6', '#06b6d4', '#f97316',
   '#ec4899', '#14b8a6',
 ];
-
-function generateId() {
-  try { return crypto.randomUUID(); }
-  catch { return Math.random().toString(36).substring(2, 15) + Date.now().toString(36); }
-}
 
 export function selectActivePanes(state: WorkspaceState): Pane[] {
   return state.tabs.find(t => t.id === state.activeTabId)?.panes ?? [];
@@ -202,6 +281,7 @@ interface WorkspaceState {
   removePane: (id: string) => void;
   movePane: (activeId: string, overId: string) => void;
   updatePaneData: (id: string, data: Partial<NonNullable<Pane['data']>>) => void;
+  updatePaneDataByTerminalId: (terminalId: string, data: Partial<NonNullable<Pane['data']>>) => void;
   renamePane: (id: string, title: string) => void;
   resizePane: (id: string, w: number, h: number) => void;
   updatePaneLayout: (id: string, gridPos: Partial<GridPos>) => void;
@@ -359,6 +439,17 @@ export const useWorkspaceStore = create<WorkspaceState>()(
         )
       ),
 
+      updatePaneDataByTerminalId: (terminalId, data) => set((state) => ({
+        tabs: state.tabs.map(tab => ({
+          ...tab,
+          panes: tab.panes.map(p =>
+            p.type === 'terminal' && p.data?.terminalId === terminalId
+              ? { ...p, data: { ...p.data, ...data } }
+              : p
+          ),
+        })),
+      })),
+
       renamePane: (id, title) => set((state) =>
         withActivePanes(state, panes =>
           panes.map(p => p.id === id ? { ...p, title } : p)
@@ -479,7 +570,7 @@ export const useWorkspaceStore = create<WorkspaceState>()(
     }),
     {
       name: 'workspace-storage',
-      version: 3,
+      version: 5,
       migrate: (persistedState: any, version: number) => {
         if (version <= 2) {
           const tabs = (persistedState as any).tabs || [];
@@ -492,6 +583,13 @@ export const useWorkspaceStore = create<WorkspaceState>()(
           }));
           return { ...persistedState, tabs: updatedTabs };
         }
+        if (version < 5) {
+          // Reset globalGraph to default if it's missing or looks broken
+          return {
+            ...persistedState,
+            globalGraph: { id: 'global-editor', nodes: [], edges: [] }
+          };
+        }
         return persistedState;
       },
       partialize: (state) => ({
@@ -503,6 +601,7 @@ export const useWorkspaceStore = create<WorkspaceState>()(
         savedLayouts: state.savedLayouts,
         results: state.results.slice(-100),
         agentInstructions: state.agentInstructions,
+        globalGraph: state.globalGraph,
       }),
     }
   )

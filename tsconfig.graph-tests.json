@@ -1,0 +1,17 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "outDir": "./.tmp-tests",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "lib": ["ES2020", "DOM", "DOM.Iterable"],
+    "allowImportingTsExtensions": false
+  },
+  "include": [
+    "src/lib/buildPrompt.ts",
+    "src/lib/graphCompiler.ts",
+    "src/lib/graphUtils.ts",
+    "src/lib/missionRuntime.ts"
+  ]
+}

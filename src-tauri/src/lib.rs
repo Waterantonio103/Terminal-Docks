@@ -1,6 +1,7 @@
 pub mod db;
 pub mod pty;
 pub mod mcp;
+pub mod node_graph;
 pub mod swarm;
 pub mod workflow;
 pub mod workflow_engine;
@@ -29,6 +30,7 @@ pub fn run() {
             pty::write_to_pty,
             pty::resize_pty,
             pty::destroy_pty,
+            pty::get_pty_recent_output,
             db::get_tasks,
             db::add_task,
             db::update_task_status,

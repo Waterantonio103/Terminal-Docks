@@ -1,112 +1,19 @@
 import { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { Rocket, Plug, TerminalSquare, ChevronDown, AlertCircle, Hammer, Wrench } from 'lucide-react';
+import { Rocket, Plug, TerminalSquare, AlertCircle, Hammer, Wrench, Cpu } from 'lucide-react';
 import { useWorkspaceStore, selectActivePanes, Pane } from '../../store/workspace';
-import agentsConfig from '../../config/agents.json';
-import type { MissionAgent } from '../../store/workspace';
-
-type AgentDef = typeof agentsConfig.agents[0];
-type LaunchMode = 'build' | 'edit';
+import agentsConfig from '../../config/agents';
+import type { CompiledMission, MissionAgent } from '../../store/workspace';
+import { buildLaunchPrompt, STAGES, type LaunchContext, type LaunchMode, type LaunchOutgoingTarget } from '../../lib/buildPrompt';
+import { generateId } from '../../lib/graphUtils';
+import { detectCliForPane, detectRoleForPane, type AgentCli } from '../../lib/cliDetection';
 
 const ROLES = [
   { id: '',            label: '— no role —' },
   ...agentsConfig.agents.map(a => ({ id: a.id, label: `${a.name} (${a.role})` })),
 ];
 
-// Phase 3: stage groups — roles inside one group run in parallel once the
-// previous group finishes. Builder/Tester/Security fan out from Coordinator.
-const STAGES: string[][] = [
-  ['scout'],
-  ['coordinator'],
-  ['builder', 'tester', 'security'],
-  ['reviewer'],
-];
 const ROLE_PRIORITY = STAGES.flat();
-
-const CLI_OPTIONS = ['claude', 'gemini', 'opencode'];
-
-// Edit-mode instruction overrides — what each role does when working on existing code
-const EDIT_INSTRUCTIONS: Record<string, string> = {
-  scout:
-    'Explore the workspace directory to understand the existing codebase. Use shell commands (ls, find, cat, grep) to read existing files — do NOT modify anything. Map out: file structure, naming conventions, tech stack, and which files are directly relevant to the objective. Record findings via `update_workspace_context` so downstream roles can read them without scrolling session history.',
-  coordinator:
-    'Based on the analysis, create a precise change plan. For each change specify: the exact file path, what currently exists (quote relevant lines if helpful), and exactly what it should become. Be specific enough that a Builder can implement without asking questions. Assign exclusive file ownership to each Builder to prevent edit conflicts. Fan out parallel work by handing off to Tester and Security alongside Builder.',
-  builder:
-    'Apply the targeted changes from the plan. Before touching any file call `lock_file` — if it returns "queued", keep working on other unlocked files until you receive a [LOCK GRANTED] message. Read each file first, then make MINIMAL targeted edits — change only what is specified. Preserve existing formatting, naming, and style. Do not rewrite files from scratch unless the plan explicitly says to.',
-  tester:
-    'Write tests for the planned changes in parallel with the Builder. Target the acceptance criteria from the plan, not the Builder\'s in-progress code. Always `lock_file` before editing any test file. Do not modify source files owned by the Builder.',
-  security:
-    'Audit the planned changes for security issues in parallel with the Builder: auth/authz, input validation, secret handling, injection surfaces, dependency CVEs. Record findings via `update_workspace_context` so the Builder can address them live. Only edit files for clear, low-risk fixes and always `lock_file` first.',
-  reviewer:
-    'Review the combined output of Builder, Tester, and Security. Verify: (1) the objective was achieved, (2) no existing behaviour was broken, (3) changes follow the project\'s existing conventions, (4) tests cover the acceptance criteria, (5) security findings are addressed. Apply minor fixes yourself. Give a clear pass or fail verdict with specifics; on fail, target the specific specialist responsible via handoff_task.',
-};
-
-interface LaunchContext {
-  workspaceDir: string | null;
-  pipeline: string[];
-  instanceNum: number;
-  totalInstances: number;
-  predecessorRole: AgentDef | null;
-  successorRole: AgentDef | null;
-  task: string;
-  mode: LaunchMode;
-}
-
-function buildLaunchPrompt(agentId: string, ctx: LaunchContext, instructionOverride?: string): string {
-  const agent = agentsConfig.agents.find(a => a.id === agentId);
-  if (!agent) return '';
-
-  const lines: string[] = [];
-  const isSolo = ctx.pipeline.length === 1 && ctx.totalInstances === 1;
-
-  lines.push('Call the `get_collaboration_protocol` MCP tool and follow the protocol it returns.');
-
-  if (ctx.workspaceDir) {
-    if (ctx.mode === 'edit') {
-      lines.push(`Existing project: ${ctx.workspaceDir}.`);
-      lines.push('This is an EXISTING codebase. Read files before making any changes. Make targeted, minimal edits — do not rewrite from scratch unless the plan explicitly says to.');
-    } else {
-      lines.push(`Working directory: ${ctx.workspaceDir}.`);
-      lines.push('Write ALL output files into this directory using your native file tools. Do not describe code — create actual files on disk.');
-    }
-  }
-
-  if (isSolo) {
-    lines.push(`You are the ${agent.name} (${agent.role}), working solo on this task.`);
-  } else {
-    const pos = ctx.pipeline.indexOf(agentId) + 1;
-    if (ctx.totalInstances > 1) {
-      lines.push(`You are ${agent.name} ${ctx.instanceNum} of ${ctx.totalInstances} (${agent.role}) — step ${pos} of ${ctx.pipeline.length} in the pipeline.`);
-      lines.push(`You and the other ${agent.name}s work in parallel on this step.`);
-    } else {
-      lines.push(`You are the ${agent.name} (${agent.role}) — step ${pos} of ${ctx.pipeline.length} in the pipeline.`);
-    }
-  }
-
-  if (ctx.predecessorRole) {
-    lines.push(`Your predecessor, the ${ctx.predecessorRole.name}, has finished and sent you a structured handoff. Call the \`receive_messages\` MCP tool to read their payload before proceeding.`);
-  } else {
-    lines.push('No predecessor — start work immediately from the objective below.');
-  }
-
-  lines.push(`Objective: ${ctx.task}.`);
-
-  // Instruction priority: user override from AgentsTab > mode-specific default > agent default
-  const modeDefault = ctx.mode === 'edit' ? EDIT_INSTRUCTIONS[agentId] : undefined;
-  lines.push(instructionOverride ?? modeDefault ?? agent.coreInstructions);
-
-  lines.push('CRITICAL: If you receive a raw JSON message starting with {"signal":"NEW_TASK"...}, you MUST parse it and immediately call the `get_task_details` tool using the provided missionId and nodeId, and then call `receive_messages` with that nodeId to process your inbox.');
-
-  lines.push('When your work is complete:');
-  let step = 1;
-  if (!isSolo && ctx.successorRole) {
-    lines.push(`${step++}. Call the \`handoff_task\` MCP tool with fromRole="${agent.id}", targetRole="${ctx.successorRole.id}", a short title, and a structured JSON payload summarizing your output for the next stage. This advances the pipeline — do not announce literal phrases.`);
-  }
-  lines.push(`${step}. Call the \`publish_result\` MCP tool with \`content\` = "${agent.name} Summary: <your summary>" and \`type\` = "markdown" so the user sees your work in Mission Control.`);
-
-  // Join with a space — never newlines, as \n in PTY input is treated as Enter on Windows
-  return lines.join(' ');
-}
 
 async function writeToTerminal(pane: Pane, text: string) {
   const terminalId = pane.data?.terminalId ?? `term-${pane.id}`;
@@ -117,7 +24,32 @@ async function writeToTerminal(pane: Pane, text: string) {
 interface TerminalRow {
   pane: Pane;
   roleId: string;
-  cli: string;
+  cli: AgentCli | null;
+}
+
+interface PendingLaunchState {
+  missionId: string;
+  mission: CompiledMission;
+  agents: MissionAgent[];
+  firstGroupTerminalIds: string[];
+}
+
+function getAllowedOutgoingTargets(mission: CompiledMission, nodeId: string): LaunchOutgoingTarget[] {
+  const nodeById = new Map(mission.nodes.map(node => [node.id, node]));
+
+  return mission.edges
+    .filter(edge => edge.fromNodeId === nodeId)
+    .map(edge => {
+      const targetNode = nodeById.get(edge.toNodeId);
+      const targetRoleId = targetNode?.roleId ?? 'unknown';
+      const targetRoleName = agentsConfig.agents.find(agent => agent.id === targetRoleId)?.name ?? targetRoleId;
+      return {
+        targetNodeId: edge.toNodeId,
+        targetRoleId,
+        targetRoleName,
+        condition: edge.condition,
+      } satisfies LaunchOutgoingTarget;
+    });
 }
 
 export function LauncherPane() {
@@ -128,12 +60,11 @@ export function LauncherPane() {
 
   const [mode, setMode]       = useState<LaunchMode>('build');
   const [task, setTask]       = useState('');
-  const [roleMap, setRoleMap] = useState<Record<string, string>>({});
-  const [cliMap, setCliMap]   = useState<Record<string, string>>({});
   const [status, setStatus]   = useState<string | null>(null);
   const [busy, setBusy]       = useState(false);
   const [isConfirming, setIsConfirming] = useState(false);
   const [mcpUrl, setMcpUrl]   = useState('http://localhost:3741/mcp');
+  const [pendingLaunch, setPendingLaunch] = useState<PendingLaunchState | null>(null);
 
   useEffect(() => {
     invoke<string>('get_mcp_url').then(url => setMcpUrl(url)).catch(() => {});
@@ -141,32 +72,26 @@ export function LauncherPane() {
 
   useEffect(() => {
     setIsConfirming(false);
-  }, [task, roleMap, cliMap, mode]);
+    setPendingLaunch(null);
+  }, [task, mode, allPanes]);
 
   const syncedRows: TerminalRow[] = terminals.map(p => ({
     pane: p,
-    roleId: roleMap[p.id] ?? '',
-    cli: cliMap[p.id] ?? 'claude',
+    roleId: detectRoleForPane(p as any) ?? '',
+    cli: detectCliForPane(p as any),
   }));
-
-  function setRole(paneId: string, roleId: string) {
-    setRoleMap(prev => ({ ...prev, [paneId]: roleId }));
-  }
-
-  function setCli(paneId: string, cli: string) {
-    setCliMap(prev => ({ ...prev, [paneId]: cli }));
-  }
 
   async function handleConnect() {
     const targets = syncedRows.filter(r => r.roleId);
     if (!targets.length) {
-      setStatus('Assign at least one role before connecting.');
+      setStatus('No detectable role found. Name a terminal with a role keyword (scout/coordinator/builder/tester/security/reviewer).');
       return;
     }
     setBusy(true);
     setStatus(null);
     try {
       await Promise.all(targets.map(async r => {
+        const cli = r.cli ?? 'claude';
         const role = ROLES.find(role => role.id === r.roleId)?.label || 'Unknown';
         const terminalId = r.pane.data?.terminalId ?? `term-${r.pane.id}`;
 
@@ -174,34 +99,34 @@ export function LauncherPane() {
         // interrupt whatever it is doing and immediately send the new prompt.
         // Other CLIs (OpenCode, Gemini, …) may EXIT on Ctrl+C — for those we
         // do NOT interrupt; we just send the prompt and let the CLI handle it.
-        if (r.cli === 'claude') {
+        if (cli === 'claude') {
           await invoke('write_to_pty', { id: terminalId, data: '\x03' });
           await new Promise(res => setTimeout(res, 200));
         }
 
         // CLI-specific hints. Claude Code can self-register via shell escape
         // (`!cmd`) if the MCP server was not loaded at session startup.
-        const cliHint = r.cli === 'claude'
+        const cliHint = cli === 'claude'
           ? `If the terminal-docks MCP tools are not yet available run this shell command first: !claude mcp add --transport http terminal-docks ${mcpUrl} --scope user `
-          : r.cli === 'gemini'
+          : cli === 'gemini'
           ? `The MCP server uses streamable-HTTP transport at ${mcpUrl}. `
           : '';
 
-        const connectTool = r.cli === 'gemini' ? 'mcp_terminal-docks_connect_agent' : 'connect_agent';
-        const protocolTool = r.cli === 'gemini' ? 'mcp_terminal-docks_get_collaboration_protocol' : 'get_collaboration_protocol';
-        const roleParam = r.cli === 'gemini' ? r.roleId : role;
+        const connectTool = cli === 'gemini' ? 'mcp_terminal-docks_connect_agent' : 'connect_agent';
+        const protocolTool = cli === 'gemini' ? 'mcp_terminal-docks_get_collaboration_protocol' : 'get_collaboration_protocol';
+        const roleParam = cli === 'gemini' ? r.roleId : role;
 
         const prompt =
           `The terminal-docks MCP server is at ${mcpUrl} (streamable-http). ` +
           cliHint +
           `CRITICAL: Execute the following sequentially, waiting for each to complete before starting the next. DO NOT call tools in parallel.\n` +
-          `1. Call the ${connectTool} MCP tool with role="${roleParam}" and agentId="${r.pane.title}" to register.\n` +
+          `1. Call the ${connectTool} MCP tool with role="${roleParam}", agentId="${r.pane.title}", terminalId="${terminalId}", and cli="${cli}" to register.\n` +
           `2. Call the ${protocolTool} tool to load the team SOP.\n` +
           `Do this now without asking for confirmation.`;
 
         await writeToTerminal(r.pane, prompt + '\r');
       }));
-      setStatus(`Connected ${targets.length} terminal(s) to MCP.`);
+      setStatus(`Connected ${targets.length} auto-detected terminal(s) to MCP.`);
     } catch (e) {
       setStatus(`Error: ${e}`);
     } finally {
@@ -224,7 +149,7 @@ export function LauncherPane() {
       });
 
     if (!targets.length) {
-      setStatus('Assign at least one role before launching.');
+      setStatus('No detectable role found. Name a terminal with a role keyword (scout/coordinator/builder/tester/security/reviewer).');
       return;
     }
 
@@ -246,8 +171,101 @@ export function LauncherPane() {
 
     try {
       if (!isConfirming) {
+        const missionId = generateId();
+        const nodeRefs = targets.map((r, index) => ({
+          id: `node-${missionId}-${index}`,
+          roleId: r.roleId,
+        }));
+
+        const nodes = targets.map((r, index) => ({
+          id: nodeRefs[index].id,
+          roleId: r.roleId,
+          instructionOverride: agentInstructions[r.roleId] ?? '',
+          terminal: {
+            terminalId: r.pane.data?.terminalId ?? `term-${r.pane.id}`,
+            terminalTitle: r.pane.title,
+            cli: r.cli ?? 'claude',
+            paneId: r.pane.id,
+            reusedExisting: true,
+          },
+        }));
+
+        const agents: MissionAgent[] = targets.map((r, index) => ({
+          terminalId: r.pane.data?.terminalId ?? `term-${r.pane.id}`,
+          title: r.pane.title,
+          roleId: r.roleId,
+          paneId: r.pane.id,
+          status: 'idle',
+          attempt: 0,
+          lastPayload: null,
+          attemptHistory: [],
+          nodeId: nodeRefs[index].id,
+        }));
+
+        const edges: Array<{ id: string; fromNodeId: string; toNodeId: string; condition: 'always' | 'on_failure' }> = [];
+        for (let i = 0; i < stageGroups.length - 1; i++) {
+          const currentGroupRoles = stageGroups[i];
+          const nextGroupRoles = stageGroups[i + 1];
+
+          const currentNodes = nodeRefs.filter(n => currentGroupRoles.includes(n.roleId));
+          const nextNodes = nodeRefs.filter(n => nextGroupRoles.includes(n.roleId));
+
+          for (const cNode of currentNodes) {
+            for (const nNode of nextNodes) {
+              edges.push({
+                id: `edge:${cNode.id}:always:${nNode.id}`,
+                fromNodeId: cNode.id,
+                toNodeId: nNode.id,
+                condition: 'always'
+              });
+            }
+          }
+        }
+
+        const reviewerNode = nodeRefs.find(n => n.roleId === 'reviewer');
+        if (reviewerNode) {
+          const retryTargets = nodeRefs.filter(n => ['builder', 'tester', 'security'].includes(n.roleId));
+          for (const target of retryTargets) {
+            edges.push({
+              id: `edge:${reviewerNode.id}:on_failure:${target.id}`,
+              fromNodeId: reviewerNode.id,
+              toNodeId: target.id,
+              condition: 'on_failure'
+            });
+          }
+        }
+
+        const mission: CompiledMission = {
+          missionId,
+          graphId: missionId,
+          task: {
+            nodeId: `launcher-task-${missionId}`,
+            prompt: task.trim(),
+            mode,
+            workspaceDir: workspaceDir ?? null,
+          },
+          metadata: {
+            compiledAt: Date.now(),
+            sourceGraphId: missionId,
+            startNodeIds: nodes
+              .map(node => ({ id: node.id }))
+              .filter(node => !edges.some(edge => edge.toNodeId === node.id))
+              .map(node => node.id),
+            executionLayers: stageGroups.map(group =>
+              nodeRefs.filter(node => group.includes(node.roleId)).map(node => node.id)
+            ),
+          },
+          nodes,
+          edges,
+        };
+
+        const firstGroupTerminalIds = targets
+          .filter(r => firstGroup.includes(r.roleId))
+          .map(r => r.pane.data?.terminalId ?? `term-${r.pane.id}`);
+
         // Stage 1: Fill terminals with context-aware prompts (no execution yet)
-        for (const r of targets) {
+        for (let index = 0; index < targets.length; index += 1) {
+          const r = targets[index];
           const sameRole = targets.filter(t => t.roleId === r.roleId);
           // Predecessor / successor are resolved against stageGroups so parallel
           // peers (builder, tester, security) see the Coordinator as predecessor
@@ -269,6 +287,10 @@ export function LauncherPane() {
             totalInstances: sameRole.length,
             predecessorRole,
             successorRole,
+            missionId,
+            nodeId: nodeRefs[index].id,
+            attempt: 1,
+            allowedOutgoingTargets: getAllowedOutgoingTargets(mission, nodeRefs[index].id),
             task: task.trim(),
             mode,
           };
@@ -280,78 +302,34 @@ export function LauncherPane() {
             await writeToTerminal(r.pane, prompt);
           }
         }
+        setPendingLaunch({
+          missionId,
+          mission,
+          agents,
+          firstGroupTerminalIds,
+        });
         setIsConfirming(true);
         setStatus('Prompts staged. Verify in terminals and click Confirm to execute.');
       } else {
+        if (!pendingLaunch) {
+          throw new Error('No staged mission found. Re-stage the prompts before confirming.');
+        }
         // Stage 2: Execute — every agent in the first group fires immediately,
         // the rest wait. Parallel within a group, sequential between groups.
-        const missionId = crypto.randomUUID();
-        
-        const nodes = targets.map((r, index) => ({
-          id: `node-${missionId}-${index}`,
-          roleId: r.roleId,
-          status: 'idle',
-        }));
-
-        const agents: MissionAgent[] = targets.map((r, index) => ({
-          terminalId: r.pane.data?.terminalId ?? `term-${r.pane.id}`,
-          title: r.pane.title,
-          roleId: r.roleId,
-          status: 'idle',
-          nodeId: `node-${missionId}-${index}`,
-        }));
-
-        // Build edges based on stageGroups
-        const edges = [];
-        for (let i = 0; i < stageGroups.length - 1; i++) {
-          const currentGroupRoles = stageGroups[i];
-          const nextGroupRoles = stageGroups[i + 1];
-
-          // Find nodes in current group
-          const currentNodes = nodes.filter(n => currentGroupRoles.includes(n.roleId));
-          const nextNodes = nodes.filter(n => nextGroupRoles.includes(n.roleId));
-
-          for (const cNode of currentNodes) {
-            for (const nNode of nextNodes) {
-              edges.push({
-                fromNodeId: cNode.id,
-                toNodeId: nNode.id,
-                condition: 'always'
-              });
-            }
-          }
-        }
-        
-        // Add review-to-specialist retry edges if Reviewer exists
-        const reviewerNode = nodes.find(n => n.roleId === 'reviewer');
-        if (reviewerNode) {
-            const retryTargets = nodes.filter(n => ['builder', 'tester', 'security'].includes(n.roleId));
-            for (const target of retryTargets) {
-               edges.push({
-                   fromNodeId: reviewerNode.id,
-                   toNodeId: target.id,
-                   condition: 'on_failure' // Optional semantic condition
-               });
-            }
-        }
-
-        const graph = {
-          id: missionId,
-          nodes,
-          edges,
-        };
-
         // Notify Rust backend
-        await invoke('start_mission_graph', { missionId, graph });
+        await invoke('start_mission_graph', { missionId: pendingLaunch.missionId, graph: pendingLaunch.mission });
+        await Promise.all(
+          pendingLaunch.firstGroupTerminalIds.map(terminalId =>
+            invoke('write_to_pty', { id: terminalId, data: '\r' })
+          )
+        );
 
         // Update UI
         addPane('missioncontrol', 'Mission Control', {
           taskDescription: task.trim(),
-          agents,
-          missionId,
-          pipeline,
-          stageGroups,
-          graph,
+          agents: pendingLaunch.agents,
+          missionId: pendingLaunch.missionId,
+          mission: pendingLaunch.mission,
         });
 
         const firstCount = targets.filter(r => firstGroup.includes(r.roleId)).length;
@@ -360,9 +338,11 @@ export function LauncherPane() {
           : firstGroup.map(id => agentsConfig.agents.find(a => a.id === id)?.name ?? id).join(' + ');
         setStatus(`Launched ${firstCount > 1 ? `${firstCount}x ` : ''}${firstLabel}. Mission Control opened.`);
         setIsConfirming(false);
+        setPendingLaunch(null);
       }
     } catch (e) {
       setStatus(`Error: ${e}`);
+      setPendingLaunch(null);
     } finally {
       setBusy(false);
     }
@@ -439,47 +419,33 @@ export function LauncherPane() {
         {/* Terminal role assignment */}
         <div className="space-y-1.5">
           <label className="text-[11px] font-semibold text-text-muted uppercase tracking-wider">
-            Assign Roles
+            Auto Detected Agents
           </label>
 
           {terminals.length === 0 ? (
             <div className="flex items-center gap-2 text-xs text-text-muted opacity-50 py-3">
               <TerminalSquare size={14} />
-              <span>No terminal panes open. Add a terminal to assign a role.</span>
+              <span>No terminal panes open. Add a terminal to detect role/CLI.</span>
             </div>
           ) : (
             <div className="space-y-1.5">
               {syncedRows.map(r => (
                 <div key={r.pane.id} className="flex items-center gap-2">
-                  <div className="flex items-center gap-1.5 w-24 shrink-0">
+                  <div className="flex items-center gap-1.5 w-28 shrink-0">
                     <TerminalSquare size={11} className="text-text-muted shrink-0" />
                     <span className="text-xs text-text-secondary truncate">{r.pane.title}</span>
                   </div>
-                  {/* CLI selector */}
-                  <div className="relative w-24 shrink-0">
-                    <select
-                      value={r.cli}
-                      onChange={e => setCli(r.pane.id, e.target.value)}
-                      className="w-full appearance-none bg-bg-surface border border-border-panel rounded px-2 py-1 text-xs text-text-primary focus:outline-none focus:border-accent-primary transition-colors cursor-pointer pr-5"
-                    >
-                      {CLI_OPTIONS.map(c => (
-                        <option key={c} value={c}>{c}</option>
-                      ))}
-                    </select>
-                    <ChevronDown size={10} className="absolute right-1.5 top-1/2 -translate-y-1/2 text-text-muted pointer-events-none" />
+                  <div className={`w-24 shrink-0 text-[10px] uppercase tracking-wide px-2 py-1 border rounded text-center ${r.cli ? 'border-border-panel bg-bg-surface text-text-primary' : 'border-dashed border-border-panel bg-bg-surface text-text-muted'}`}>
+                    <span className="inline-flex items-center gap-1"><Cpu size={10} />{r.cli ?? 'N/A'}</span>
                   </div>
-                  {/* Role selector */}
                   <div className="relative flex-1">
-                    <select
-                      value={r.roleId}
-                      onChange={e => setRole(r.pane.id, e.target.value)}
-                      className="w-full appearance-none bg-bg-surface border border-border-panel rounded px-2.5 py-1 text-xs text-text-primary focus:outline-none focus:border-accent-primary transition-colors cursor-pointer pr-6"
-                    >
-                      {ROLES.map(role => (
-                        <option key={role.id} value={role.id}>{role.label}</option>
-                      ))}
-                    </select>
-                    <ChevronDown size={10} className="absolute right-2 top-1/2 -translate-y-1/2 text-text-muted pointer-events-none" />
+                    <div className={`w-full border rounded px-2.5 py-1 text-xs ${
+                      r.roleId ? 'text-text-primary border-border-panel bg-bg-surface' : 'text-red-300 border-red-500/40 bg-red-500/10'
+                    }`}>
+                      {r.roleId
+                        ? (ROLES.find(role => role.id === r.roleId)?.label ?? r.roleId)
+                        : 'Role not detected (name terminal with role keyword)'}
+                    </div>
                   </div>
                 </div>
               ))}

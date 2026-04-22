@@ -1,14 +1,17 @@
 use portable_pty::{CommandBuilder, MasterPty, NativePtySystem, PtySize, PtySystem};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Write};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use tauri::{AppHandle, Emitter, State, Manager};
+
+const RECENT_OUTPUT_CAPACITY: usize = 16384;
 
 pub struct PtyInstance {
     pub master: Box<dyn MasterPty + Send>,
     pub writer: Box<dyn Write + Send>,
     pub child: Box<dyn portable_pty::Child + Send>,
+    pub recent_output: Arc<Mutex<VecDeque<u8>>>,
 }
 
 pub struct PtyState {
@@ -21,6 +24,24 @@ impl PtyState {
             ptys: Mutex::new(HashMap::new()),
         }
     }
+}
+
+fn push_recent_output(buf: &mut VecDeque<u8>, bytes: &[u8]) {
+    if bytes.len() >= RECENT_OUTPUT_CAPACITY {
+        buf.clear();
+        buf.extend(bytes[bytes.len() - RECENT_OUTPUT_CAPACITY..].iter().copied());
+        return;
+    }
+
+    let overflow = buf.len() + bytes.len();
+    if overflow > RECENT_OUTPUT_CAPACITY {
+        let to_drop = overflow - RECENT_OUTPUT_CAPACITY;
+        for _ in 0..to_drop {
+            let _ = buf.pop_front();
+        }
+    }
+
+    buf.extend(bytes.iter().copied());
 }
 
 #[derive(Clone, serde::Serialize)]
@@ -86,7 +107,13 @@ pub fn spawn_pty(
         .try_clone_reader()
         .map_err(|e| format!("Failed to clone reader: {}", e))?;
 
-    let instance = PtyInstance { master, writer, child };
+    let recent_output = Arc::new(Mutex::new(VecDeque::with_capacity(RECENT_OUTPUT_CAPACITY)));
+    let instance = PtyInstance {
+        master,
+        writer,
+        child,
+        recent_output: Arc::clone(&recent_output),
+    };
 
     ptys.insert(id.clone(), instance);
     drop(ptys); // Release lock before spawning thread
@@ -99,6 +126,10 @@ pub fn spawn_pty(
                 Ok(0) => break,
                 Ok(n) => {
                     let data = buf[..n].to_vec();
+                    {
+                        let mut recent = recent_output.lock().unwrap();
+                        push_recent_output(&mut recent, &data);
+                    }
                     let _ = app.emit(
                         "pty-out",
                         Payload {
@@ -113,6 +144,25 @@ pub fn spawn_pty(
     });
 
     Ok(true)
+}
+
+#[tauri::command]
+pub fn get_pty_recent_output(
+    state: State<'_, PtyState>,
+    id: String,
+    max_bytes: Option<usize>,
+) -> Result<String, String> {
+    let ptys = state.ptys.lock().unwrap();
+    let instance = ptys
+        .get(&id)
+        .ok_or_else(|| format!("PTY not found: {}", id))?;
+
+    let recent = instance.recent_output.lock().unwrap();
+    let cap = max_bytes.unwrap_or(RECENT_OUTPUT_CAPACITY).max(1);
+    let len = recent.len();
+    let start = len.saturating_sub(cap);
+    let bytes: Vec<u8> = recent.iter().skip(start).copied().collect();
+    Ok(String::from_utf8_lossy(&bytes).to_string())
 }
 
 #[tauri::command]

@@ -66,6 +66,8 @@ pub fn init_db(app: &AppHandle) -> Result<(), String> {
             from_role TEXT,
             target_role TEXT,
             payload TEXT,
+            mission_id TEXT,
+            node_id TEXT,
             FOREIGN KEY(parent_id) REFERENCES tasks(id)
         )",
         (),
@@ -73,7 +75,13 @@ pub fn init_db(app: &AppHandle) -> Result<(), String> {
     .map_err(|e| e.to_string())?;
 
     // Migrate tasks.db created before Phase 1 handoff columns existed.
-    for col in ["from_role TEXT", "target_role TEXT", "payload TEXT"] {
+    for col in [
+        "from_role TEXT",
+        "target_role TEXT",
+        "payload TEXT",
+        "mission_id TEXT",
+        "node_id TEXT",
+    ] {
         let sql = format!("ALTER TABLE tasks ADD COLUMN {}", col);
         if let Err(e) = conn.execute(&sql, ()) {
             let s = e.to_string();
@@ -99,11 +107,30 @@ pub fn init_db(app: &AppHandle) -> Result<(), String> {
             session_id TEXT NOT NULL,
             event_type TEXT NOT NULL,
             content TEXT,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            mission_id TEXT,
+            node_id TEXT,
+            recipient_node_id TEXT,
+            is_read BOOLEAN DEFAULT 0
         )",
         (),
     )
     .map_err(|e| e.to_string())?;
+
+    for col in [
+        "mission_id TEXT",
+        "node_id TEXT",
+        "recipient_node_id TEXT",
+        "is_read BOOLEAN DEFAULT 0",
+    ] {
+        let sql = format!("ALTER TABLE session_log ADD COLUMN {}", col);
+        if let Err(e) = conn.execute(&sql, ()) {
+            let s = e.to_string();
+            if !s.contains("duplicate column") {
+                return Err(s);
+            }
+        }
+    }
 
     conn.execute(
         "CREATE TABLE IF NOT EXISTS workspace_context (
@@ -111,6 +138,36 @@ pub fn init_db(app: &AppHandle) -> Result<(), String> {
             value TEXT,
             updated_by TEXT,
             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )",
+        (),
+    )
+    .map_err(|e| e.to_string())?;
+
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS compiled_missions (
+            mission_id TEXT PRIMARY KEY,
+            graph_id TEXT NOT NULL,
+            mission_json TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'active',
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )",
+        (),
+    )
+    .map_err(|e| e.to_string())?;
+
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS mission_node_runtime (
+            mission_id TEXT NOT NULL,
+            node_id TEXT NOT NULL,
+            role_id TEXT NOT NULL,
+            status TEXT NOT NULL,
+            attempt INTEGER NOT NULL DEFAULT 0,
+            current_wave_id TEXT,
+            last_outcome TEXT,
+            last_payload TEXT,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (mission_id, node_id)
         )",
         (),
     )

@@ -9,8 +9,11 @@ lerna-debug.log*
 
 node_modules
 dist
+.tmp-tests/
 dist-ssr
 *.local
+
+src-tauri/
 
 # Editor directories and files
 .vscode/*
@@ -22,3 +25,14 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# AI related
+.ai/
+ai/
+
+# Documentation and Metadata
+docs/
+.claude/
+
+# Assets/References
+references/

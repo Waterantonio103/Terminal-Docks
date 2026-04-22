@@ -2,7 +2,7 @@ import { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Plus, Trash2, Play } from "lucide-react";
 import { useWorkspaceStore } from "../../store/workspace";
-import agentConfig from "../../config/agents.json";
+import agentConfig from "../../config/agents";
 
 interface Task {
   id: number;
@@ -122,7 +122,9 @@ export function TaskBoardPane() {
     const prompt = `${cli}\nCRITICAL: You MUST call the \`${protocolTool}\` MCP tool FIRST and wait for its response before doing anything else. Do NOT execute other tools in parallel with it.\n\nYou are the ${agent.name} (${agent.role}), working solo.\n\n${wdLine}Objective: ${task.title}\n\n${agent.coreInstructions}`;
     
     useWorkspaceStore.getState().addPane('terminal', `[${agent.name}] ${task.title}`, {
-      initialCommand: prompt
+      initialCommand: prompt,
+      cli,
+      roleId: agent.id,
     });
   };
 

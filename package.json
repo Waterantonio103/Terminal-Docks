@@ -8,7 +8,12 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
-    "mcp:install": "npm install --prefix mcp-server"
+    "mcp:install": "npm install --prefix mcp-server",
+    "test:graph": "tsc -p tsconfig.graph-tests.json && node ./tests/graphCompiler.test.mjs",
+    "test:mcp": "node ./tests/mcpGraphMode.test.mjs",
+    "test:smoke": "tsc -p tsconfig.graph-tests.json && node ./tests/missionFlow.smoke.mjs",
+    "test:rust": "cargo test --manifest-path src-tauri/Cargo.toml workflow_engine",
+    "test:workflow": "npm run test:graph && npm run test:mcp && npm run test:smoke && npm run test:rust"
   },
   "dependencies": {
     "@codemirror/lang-javascript": "^6.2.5",

@@ -232,6 +232,25 @@ export function TerminalPane({ pane, dragEndSeq }: { pane: Pane; dragEndSeq?: nu
     };
   }, [terminalId]);
 
+  useEffect(() => {
+    let unlisten: UnlistenFn | null = null;
+
+    const bindFocus = async () => {
+      unlisten = await listen<{ terminalId: string }>('focus-terminal', (event) => {
+        if (event.payload.terminalId !== terminalId) return;
+        terminalInstance.current?.focus();
+        terminalInstance.current?.scrollToBottom();
+        emit('terminal-focused', { terminalId }).catch(() => {});
+      });
+    };
+
+    bindFocus();
+
+    return () => {
+      if (unlisten) unlisten();
+    };
+  }, [terminalId]);
+
   // Update terminal colors on theme change
   useEffect(() => {
     if (!terminalInstance.current) return;
@@ -353,7 +372,10 @@ export function TerminalPane({ pane, dragEndSeq }: { pane: Pane; dragEndSeq?: nu
 
       <div 
         className="flex-1 p-2 overflow-hidden relative cursor-text"
-        onClick={() => terminalInstance.current?.focus()}
+        onClick={() => {
+          terminalInstance.current?.focus();
+          emit('terminal-focused', { terminalId }).catch(() => {});
+        }}
       >
         <div ref={terminalRef} className="h-full w-full" />
 

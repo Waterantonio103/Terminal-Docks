@@ -39,7 +39,11 @@
       "Bash(find C:\\\\\\\\VSCODE\\\\\\\\terminal-docks\\\\\\\\src-tauri\\\\\\\\src -type f -name \"*.rs\")",
       "Bash(xargs ls *)",
       "Bash(node --check mcp-server/server.mjs)",
-      "Bash(node *)"
+      "Bash(node *)",
+      "Bash(opencode --version)",
+      "Bash(opencode)",
+      "Bash(where opencode *)",
+      "Bash(xxd)"
     ]
   }
 }

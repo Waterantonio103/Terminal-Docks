@@ -6,7 +6,7 @@ import { z } from 'zod';
 import { writeFileSync, mkdirSync, readFileSync } from 'fs';
 import { randomUUID } from 'crypto';
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
-import { fileURLToPath } from 'url';
+import { fileURLToPath, pathToFileURL } from 'url';
 import { dirname, resolve } from 'path';
 import Database from 'better-sqlite3';
 
@@ -60,6 +60,26 @@ db.exec(`
     updated_by TEXT,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
   );
+  CREATE TABLE IF NOT EXISTS compiled_missions (
+    mission_id TEXT PRIMARY KEY,
+    graph_id TEXT NOT NULL,
+    mission_json TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'active',
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
+  CREATE TABLE IF NOT EXISTS mission_node_runtime (
+    mission_id TEXT NOT NULL,
+    node_id TEXT NOT NULL,
+    role_id TEXT NOT NULL,
+    status TEXT NOT NULL,
+    attempt INTEGER NOT NULL DEFAULT 0,
+    current_wave_id TEXT,
+    last_outcome TEXT,
+    last_payload TEXT,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (mission_id, node_id)
+  );
 `);
 
 // Migrate existing DBs created before Phase 1 (handoff columns).
@@ -88,6 +108,420 @@ function logSession(sessionId, eventType, content) {
   try {
     db.prepare('INSERT INTO session_log (session_id, event_type, content) VALUES (?, ?, ?)').run(sessionId, eventType, content ?? null);
   } catch {}
+}
+
+function parseJsonSafe(value, fallback = null) {
+  if (typeof value !== 'string') return fallback;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return fallback;
+  }
+}
+
+function allowedOutcomesForCondition(condition) {
+  if (condition === 'on_success') return ['success'];
+  if (condition === 'on_failure') return ['failure'];
+  return ['success', 'failure'];
+}
+
+function loadCompiledMissionRecord(missionId) {
+  const row = db.prepare(
+    "SELECT mission_id, graph_id, mission_json, status, datetime(created_at, 'localtime') AS created_at, datetime(updated_at, 'localtime') AS updated_at FROM compiled_missions WHERE mission_id = ?"
+  ).get(missionId);
+  if (!row) return null;
+
+  const mission = parseJsonSafe(row.mission_json);
+  if (!mission) return null;
+
+  return {
+    missionId: row.mission_id,
+    graphId: row.graph_id,
+    status: row.status,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    mission,
+  };
+}
+
+function getMissionNode(mission, nodeId) {
+  return mission?.nodes?.find(node => node.id === nodeId) ?? null;
+}
+
+function getMissionNodeRuntime(missionId, nodeId) {
+  return db.prepare(
+    "SELECT mission_id, node_id, role_id, status, attempt, current_wave_id, last_outcome, last_payload, datetime(updated_at, 'localtime') AS updated_at FROM mission_node_runtime WHERE mission_id = ? AND node_id = ?"
+  ).get(missionId, nodeId) ?? null;
+}
+
+function getLegalOutgoingTargets(mission, fromNodeId) {
+  const nodeById = new Map((mission?.nodes ?? []).map(node => [node.id, node]));
+
+  return (mission?.edges ?? [])
+    .filter(edge => edge.fromNodeId === fromNodeId)
+    .map(edge => {
+      const targetNode = nodeById.get(edge.toNodeId) ?? null;
+      return {
+        targetNodeId: edge.toNodeId,
+        targetRoleId: targetNode?.roleId ?? null,
+        condition: edge.condition,
+        allowedOutcomes: allowedOutcomesForCondition(edge.condition),
+      };
+    });
+}
+
+export function buildTaskDetails(missionId, nodeId) {
+  const record = loadCompiledMissionRecord(missionId);
+  if (!record) return null;
+
+  const node = getMissionNode(record.mission, nodeId);
+  if (!node) return null;
+
+  const runtime = getMissionNodeRuntime(missionId, nodeId);
+  const recentTasks = db.prepare(
+    "SELECT id, title, description, status, datetime(created_at, 'localtime') AS created_at, parent_id, agent_id, from_role, target_role, payload, mission_id, node_id FROM tasks WHERE mission_id = ? AND node_id = ? ORDER BY id DESC LIMIT 10"
+  ).all(missionId, nodeId).map(task => ({
+    ...task,
+    payload_json: parseJsonSafe(task.payload),
+  }));
+
+  const inbox = db.prepare(
+    "SELECT id, session_id, event_type, content, datetime(created_at, 'localtime') AS created_at, is_read FROM session_log WHERE mission_id = ? AND recipient_node_id = ? ORDER BY id DESC LIMIT 20"
+  ).all(missionId, nodeId).map(message => ({
+    ...message,
+    content_json: parseJsonSafe(message.content),
+  }));
+
+  return {
+    missionId,
+    graphId: record.graphId,
+    missionStatus: record.status,
+    objective: record.mission.task?.prompt ?? '',
+    task: record.mission.task ?? null,
+    node: {
+      id: node.id,
+      roleId: node.roleId,
+      instructionOverride: node.instructionOverride ?? '',
+      status: runtime?.status ?? 'idle',
+      attempt: runtime?.attempt ?? 0,
+      currentWaveId: runtime?.current_wave_id ?? null,
+      lastOutcome: runtime?.last_outcome ?? null,
+      lastPayload: runtime?.last_payload ?? null,
+      updatedAt: runtime?.updated_at ?? null,
+    },
+    legalNextTargets: getLegalOutgoingTargets(record.mission, nodeId),
+    latestTask: recentTasks[0] ?? null,
+    recentTasks,
+    inbox,
+  };
+}
+
+export function validateGraphHandoff({ missionId, fromNodeId, targetNodeId, outcome, fromRole, targetRole }) {
+  if (!missionId || !fromNodeId || !targetNodeId || !outcome) {
+    return { error: 'Graph-mode handoff_task requires missionId, fromNodeId, targetNodeId, and outcome.' };
+  }
+
+  const normalizedOutcome = outcome.trim().toLowerCase();
+  if (!['success', 'failure'].includes(normalizedOutcome)) {
+    return { error: `Invalid outcome "${outcome}". Use "success" or "failure".` };
+  }
+
+  const record = loadCompiledMissionRecord(missionId);
+  if (!record || record.status !== 'active') {
+    return { error: `Active compiled mission ${missionId} was not found.` };
+  }
+
+  const fromNode = getMissionNode(record.mission, fromNodeId);
+  if (!fromNode) {
+    return { error: `Node ${fromNodeId} is not part of mission ${missionId}.` };
+  }
+
+  const targetNode = getMissionNode(record.mission, targetNodeId);
+  if (!targetNode) {
+    return { error: `Target node ${targetNodeId} is not part of mission ${missionId}.` };
+  }
+
+  const runtime = getMissionNodeRuntime(missionId, fromNodeId);
+  if (!runtime || runtime.status !== 'running') {
+    return { error: `Node ${fromNodeId} is not currently running in mission ${missionId}. Query get_task_details first.` };
+  }
+
+  const edge = (record.mission.edges ?? []).find(candidate =>
+    candidate.fromNodeId === fromNodeId &&
+    candidate.toNodeId === targetNodeId &&
+    allowedOutcomesForCondition(candidate.condition).includes(normalizedOutcome)
+  );
+  if (!edge) {
+    return {
+      error:
+        `Illegal graph handoff ${fromNodeId} -> ${targetNodeId} for outcome ${normalizedOutcome}. ` +
+        'Query get_task_details to inspect the legal outgoing targets for your current node.'
+    };
+  }
+
+  if (fromRole && fromRole.trim().toLowerCase() !== String(fromNode.roleId).trim().toLowerCase()) {
+    return { error: `fromRole ${fromRole} does not match mission node ${fromNodeId} (${fromNode.roleId}).` };
+  }
+
+  if (targetRole && targetRole.trim().toLowerCase() !== String(targetNode.roleId).trim().toLowerCase()) {
+    return { error: `targetRole ${targetRole} does not match mission node ${targetNodeId} (${targetNode.roleId}).` };
+  }
+
+  return {
+    mission: record.mission,
+    fromNode,
+    targetNode,
+    edge,
+    runtime,
+    outcome: normalizedOutcome,
+  };
+}
+
+function makeToolText(text, isError = false) {
+  return isError
+    ? { isError: true, content: [{ type: 'text', text }] }
+    : { content: [{ type: 'text', text }] };
+}
+
+function resetInMemoryRuntime() {
+  for (const bucket of [messageQueues, fileLocks, fileWaitQueues, sessions]) {
+    for (const key of Object.keys(bucket)) {
+      delete bucket[key];
+    }
+  }
+  clients.clear();
+  projects.length = 0;
+  agents.length = 0;
+  broadcastHistory.length = 0;
+}
+
+export function resetBridgeState() {
+  db.exec(`
+    DELETE FROM tasks;
+    DELETE FROM file_locks;
+    DELETE FROM session_log;
+    DELETE FROM workspace_context;
+    DELETE FROM compiled_missions;
+    DELETE FROM mission_node_runtime;
+  `);
+  resetInMemoryRuntime();
+}
+
+export function seedCompiledMission(mission, status = 'active') {
+  db.prepare(
+    `INSERT INTO compiled_missions (mission_id, graph_id, mission_json, status, created_at, updated_at)
+     VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+     ON CONFLICT(mission_id) DO UPDATE SET
+       graph_id = excluded.graph_id,
+       mission_json = excluded.mission_json,
+       status = excluded.status,
+       updated_at = CURRENT_TIMESTAMP`
+  ).run(mission.missionId, mission.graphId, JSON.stringify(mission), status);
+  return loadCompiledMissionRecord(mission.missionId);
+}
+
+export function seedMissionNodeRuntime({
+  missionId,
+  nodeId,
+  roleId,
+  status = 'idle',
+  attempt = 0,
+  currentWaveId = null,
+  lastOutcome = null,
+  lastPayload = null,
+}) {
+  db.prepare(
+    `INSERT INTO mission_node_runtime
+       (mission_id, node_id, role_id, status, attempt, current_wave_id, last_outcome, last_payload, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+     ON CONFLICT(mission_id, node_id) DO UPDATE SET
+       role_id = excluded.role_id,
+       status = excluded.status,
+       attempt = excluded.attempt,
+       current_wave_id = excluded.current_wave_id,
+       last_outcome = excluded.last_outcome,
+       last_payload = excluded.last_payload,
+       updated_at = CURRENT_TIMESTAMP`
+  ).run(missionId, nodeId, roleId, status, attempt, currentWaveId, lastOutcome, lastPayload);
+}
+
+export function getBroadcastHistory() {
+  return [...broadcastHistory];
+}
+
+export function executeConnectAgent({ role, agentId, terminalId, cli }, sessionId = 'unknown') {
+  const sid = sessionId ?? 'unknown';
+  const message = `Role: ${role}. Agent "${agentId}" is online and ready. (Session: ${sid})`;
+
+  logSession(sid, 'connect', JSON.stringify({ agentId, role, terminalId: terminalId ?? null, cli: cli ?? null }));
+
+  const targets = Object.keys(sessions).filter(id => id !== sid);
+  const ts = Date.now();
+  for (const targetSid of targets) {
+    if (!messageQueues[targetSid]) messageQueues[targetSid] = [];
+    messageQueues[targetSid].push({ from: agentId, text: `[BROADCAST] ${message}`, timestamp: ts });
+  }
+
+  broadcast('Bridge', JSON.stringify({
+    sessionId: sid,
+    agentId,
+    role,
+    terminalId: terminalId ?? null,
+    cli: cli ?? null,
+  }), 'agent_connected');
+
+  broadcast('Bridge', `Agent "${agentId}" (${role}) connected via session ${sid}`);
+
+  return makeToolText(`Successfully connected to terminal-docks bridge.\nSession ID: ${sid}\nStatus: Online`);
+}
+
+export function executeReceiveMessages({ nodeId }, sessionId) {
+  const sid = sessionId;
+  const queuedMessages = sid ? (messageQueues[sid] ?? []) : [];
+  if (sid) {
+    messageQueues[sid] = [];
+  }
+
+  let dbMessages = [];
+  if (nodeId) {
+    dbMessages = db.prepare(
+      "SELECT * FROM session_log WHERE recipient_node_id = ? AND event_type = 'message' AND is_read = 0"
+    ).all(nodeId);
+    if (dbMessages.length > 0) {
+      const ids = dbMessages.map(message => message.id);
+      db.prepare(`UPDATE session_log SET is_read = 1 WHERE id IN (${ids.join(',')})`).run();
+    }
+  }
+
+  if (queuedMessages.length === 0 && dbMessages.length === 0) {
+    return makeToolText('No messages.');
+  }
+
+  let text = queuedMessages
+    .map(message => `[${new Date(message.timestamp).toISOString()}] from ${message.from}:\n${message.text}`)
+    .join('\n\n');
+  if (dbMessages.length > 0) {
+    if (text) text += '\n\n';
+    text += dbMessages
+      .map(message => `[${new Date(message.created_at).toISOString()}] from ${message.session_id}:\n${message.content}`)
+      .join('\n\n');
+  }
+
+  return makeToolText(text);
+}
+
+export function executeHandoffTask(
+  { fromRole: rawFrom, targetRole: rawTarget, title, description, payload, parentTaskId, missionId, fromNodeId, targetNodeId, outcome },
+  sessionId = 'unknown',
+) {
+  const sid = sessionId ?? 'unknown';
+
+  let fromRole = rawFrom?.trim().toLowerCase() ?? null;
+  let targetRole = rawTarget?.trim().toLowerCase() ?? null;
+  let validatedGraph = null;
+
+  if (missionId || fromNodeId || targetNodeId || outcome) {
+    validatedGraph = validateGraphHandoff({
+      missionId,
+      fromNodeId,
+      targetNodeId,
+      outcome,
+      fromRole,
+      targetRole,
+    });
+    if (validatedGraph.error) {
+      return makeToolText(validatedGraph.error, true);
+    }
+    fromRole = String(validatedGraph.fromNode.roleId).trim().toLowerCase();
+    targetRole = String(validatedGraph.targetNode.roleId).trim().toLowerCase();
+  } else {
+    if (!fromRole || !targetRole) {
+      return makeToolText('Legacy handoff_task requires fromRole and targetRole.', true);
+    }
+
+    if (!isValidTransition(fromRole, targetRole)) {
+      const allowed = WORKFLOW_GRAPH[fromRole]?.next ?? [];
+      const message = WORKFLOW_GRAPH[fromRole]
+        ? `Invalid transition: ${fromRole} → ${targetRole}. Allowed next roles: ${allowed.join(', ') || '(none; this is a terminal role)'}.`
+        : `Unknown fromRole "${fromRole}". Valid roles: ${Object.keys(WORKFLOW_GRAPH).join(', ')}.`;
+      return makeToolText(message, true);
+    }
+  }
+
+  const payloadStr = payload === undefined ? null : (typeof payload === 'string' ? payload : JSON.stringify(payload));
+
+  let taskId = null;
+  if (targetRole !== 'done') {
+    const info = db.prepare(
+      'INSERT INTO tasks (title, description, agent_id, parent_id, status, from_role, target_role, payload, mission_id, node_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+    ).run(title, description ?? null, targetRole, parentTaskId ?? null, 'todo', fromRole, targetRole, payloadStr, missionId ?? null, targetNodeId ?? null);
+    taskId = info.lastInsertRowid;
+  }
+
+  if (missionId && targetNodeId) {
+    const handoffMessage = JSON.stringify({
+      taskId,
+      title,
+      description: description ?? null,
+      missionId,
+      fromNodeId: fromNodeId ?? null,
+      targetNodeId,
+      fromRole,
+      targetRole,
+      outcome: validatedGraph?.outcome ?? outcome ?? null,
+      payload: payloadStr,
+    });
+    db.prepare(
+      "INSERT INTO session_log (session_id, event_type, content, mission_id, node_id, recipient_node_id, is_read) VALUES (?, 'message', ?, ?, ?, ?, 0)"
+    ).run(sid, handoffMessage, missionId, fromNodeId ?? null, targetNodeId);
+  }
+
+  logSession(sid, 'handoff_task', JSON.stringify({
+    taskId,
+    fromRole,
+    targetRole,
+    title,
+    missionId,
+    fromNodeId,
+    targetNodeId,
+    outcome: validatedGraph?.outcome ?? outcome ?? null,
+  }));
+
+  const eventBody = {
+    taskId,
+    fromRole,
+    targetRole,
+    title,
+    description: description ?? null,
+    payload: payloadStr,
+    missionId,
+    fromNodeId,
+    targetNodeId,
+    outcome: validatedGraph?.outcome ?? outcome ?? null,
+  };
+  broadcast(fromRole ?? 'graph', JSON.stringify(eventBody), 'handoff');
+  if (taskId !== null) {
+    broadcast('Bridge', JSON.stringify({
+      id: taskId,
+      title,
+      agentId: targetRole,
+      parentTaskId: parentTaskId ?? null,
+      status: 'todo',
+      missionId,
+      targetNodeId,
+    }), 'task_update');
+  }
+  const suffix = validatedGraph?.outcome ? ` [${validatedGraph.outcome}]` : '';
+  const taskSuffix = taskId ? ` (task ${taskId}: "${title}")` : '';
+  broadcast(
+    'Bridge',
+    `Handoff: ${fromRole}${fromNodeId ? `(${fromNodeId})` : ''} → ${targetRole}${targetNodeId ? `(${targetNodeId})` : ''}${suffix}${taskSuffix}`,
+  );
+
+  const resultText = targetRole === 'done'
+    ? 'Workflow marked complete. Call publish_result with your final summary if you have not already.'
+    : `Handoff queued as task ${taskId}. The ${targetRole} stage will pick this up.`;
+  return makeToolText(resultText);
 }
 
 const PORT = parseInt(process.env.MCP_PORT || '3741');
@@ -132,8 +566,11 @@ const fileWaitQueues = {};
 
 // SSE clients for the /events feed
 const clients = new Set();
+const broadcastHistory = [];
 function broadcast(from, content, type = 'message') {
   const msg = { id: Date.now(), from, content, type, timestamp: Date.now() };
+  broadcastHistory.push(msg);
+  if (broadcastHistory.length > 500) broadcastHistory.shift();
   const data = `data: ${JSON.stringify(msg)}\n\n`;
   clients.forEach(res => res.write(data));
 }
@@ -240,7 +677,7 @@ function createMcpServer(getSessionId) {
     inputSchema: {}
   }, async () => {
     const allTasks = db.prepare(
-      'SELECT id, title, description, status, agent_id, parent_id, from_role, target_role, payload, datetime(created_at, "localtime") as created_at FROM tasks ORDER BY id'
+      "SELECT id, title, description, status, agent_id, parent_id, from_role, target_role, payload, datetime(created_at, 'localtime') as created_at FROM tasks ORDER BY id"
     ).all();
     const map = {};
     const roots = [];
@@ -262,7 +699,7 @@ function createMcpServer(getSessionId) {
     inputSchema: { limit: z.number().int().min(1).max(200).optional() }
   }, async ({ limit } = {}) => {
     const events = db.prepare(
-      'SELECT session_id, event_type, content, datetime(created_at, "localtime") as created_at FROM session_log ORDER BY id DESC LIMIT ?'
+      "SELECT session_id, event_type, content, datetime(created_at, 'localtime') as created_at FROM session_log ORDER BY id DESC LIMIT ?"
     ).all(limit ?? 50);
     if (events.length === 0) return { content: [{ type: 'text', text: 'No session history found.' }] };
     const text = events.reverse().map(e =>
@@ -273,19 +710,20 @@ function createMcpServer(getSessionId) {
 
   server.registerTool('get_task_details', {
     title: 'Get Task Details',
-    description: 'Get details about a task or your node objective. Use this when you receive a NEW_TASK signal via your terminal.',
+    description: 'Get the canonical runtime context for a mission node. Use this when you receive a NEW_TASK signal via your terminal and whenever you need the current attempt, inbox payloads, or legal next targets.',
     inputSchema: {
       missionId: z.string().describe('The active mission ID'),
       nodeId: z.string().describe('Your specific node ID in the graph')
     }
   }, async ({ missionId, nodeId }) => {
-    // If the node was triggered by a handoff, its task is recorded with mission_id and node_id
-    const tasks = db.prepare('SELECT * FROM tasks WHERE mission_id = ? AND node_id = ? ORDER BY id DESC LIMIT 1').all(missionId, nodeId);
-    if (tasks.length === 0) {
-      // Fallback: no explicit task row yet (e.g. start of mission), but the agent is part of a mission.
-      return { content: [{ type: 'text', text: `Node ${nodeId} in mission ${missionId} is active. Use receive_messages to check your inbox.` }] };
+    const details = buildTaskDetails(missionId, nodeId);
+    if (!details) {
+      return {
+        isError: true,
+        content: [{ type: 'text', text: `Mission ${missionId} or node ${nodeId} could not be found. Confirm the NEW_TASK payload and active mission.` }]
+      };
     }
-    return { content: [{ type: 'text', text: JSON.stringify(tasks[0], null, 2) }] };
+    return { content: [{ type: 'text', text: JSON.stringify(details, null, 2) }] };
   });
 
   // ── Handoff / supervisor routing ───────────────────────────────────────────
@@ -296,8 +734,8 @@ function createMcpServer(getSessionId) {
     title: 'Handoff Task',
     description: 'Hand off structured work to the next role or node in the pipeline. Creates a task row with a JSON payload and emits a handoff event that advances Mission Control. Use this when your stage is complete instead of announcing a literal phrase.',
     inputSchema: {
-      fromRole: z.string().min(1).describe('Your role id (e.g. "scout", "coordinator", "builder")'),
-      targetRole: z.string().min(1).describe('Role id that should run next (e.g. "coordinator", "builder", "reviewer")'),
+      fromRole: z.string().min(1).optional().describe('Your role id in legacy role-mode handoffs. Optional in graph mode if missionId/fromNodeId are provided.'),
+      targetRole: z.string().min(1).optional().describe('Target role in legacy role-mode handoffs. Optional in graph mode if missionId/targetNodeId are provided.'),
       title: z.string().min(1).describe('Short summary of what is being handed off'),
       description: z.string().optional().describe('Longer notes for the receiving role'),
       payload: z.any().optional().describe('Structured data for the next role (any JSON value)'),
@@ -305,59 +743,41 @@ function createMcpServer(getSessionId) {
       missionId: z.string().optional().describe('The ID of the active mission graph'),
       fromNodeId: z.string().optional().describe('Your specific node ID in the graph'),
       targetNodeId: z.string().optional().describe('The target node ID in the graph'),
+      outcome: z.enum(['success', 'failure']).optional().describe('Explicit result of the current node attempt. Required in graph mode.'),
     }
-  }, async ({ fromRole: rawFrom, targetRole: rawTarget, title, description, payload, parentTaskId, missionId, fromNodeId, targetNodeId }) => {
-    const sid = getSessionId() ?? 'unknown';
-
-    const fromRole = rawFrom.trim().toLowerCase();
-    const targetRole = rawTarget.trim().toLowerCase();
-
-    // If we're operating in Graph Mode (Phase 3), we don't strictly enforce WORKFLOW_GRAPH here,
-    // because the Rust WorkflowEngine manages the dynamic graph. But if we're in legacy mode, we enforce it.
-    if (!missionId && !isValidTransition(fromRole, targetRole)) {
-      const allowed = WORKFLOW_GRAPH[fromRole]?.next ?? [];
-      const msg = WORKFLOW_GRAPH[fromRole]
-        ? `Invalid transition: ${fromRole} → ${targetRole}. Allowed next roles: ${allowed.join(', ') || '(none; this is a terminal role)'}.`
-        : `Unknown fromRole "${fromRole}". Valid roles: ${Object.keys(WORKFLOW_GRAPH).join(', ')}.`;
-      return { isError: true, content: [{ type: 'text', text: msg }] };
-    }
-
-    const payloadStr = payload === undefined ? null : (typeof payload === 'string' ? payload : JSON.stringify(payload));
-
-    // `done` is a terminal pseudo-role — we still log the handoff so the UI
-    // can close out the workflow, but we don't create a task row for it to
-    // avoid polluting the task tree with phantom "done" entries.
-    let taskId = null;
-    if (targetRole !== 'done') {
-      const info = db.prepare(
-        'INSERT INTO tasks (title, description, agent_id, parent_id, status, from_role, target_role, payload, mission_id, node_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
-      ).run(title, description ?? null, targetRole, parentTaskId ?? null, 'todo', fromRole, targetRole, payloadStr, missionId ?? null, targetNodeId ?? null);
-      taskId = info.lastInsertRowid;
-    }
-
-    logSession(sid, 'handoff_task', JSON.stringify({ taskId, fromRole, targetRole, title, missionId, fromNodeId, targetNodeId }));
-
-    // Broadcast the handoff to the UI orchestrator and peers. The JSON content
-    // lets MissionControlPane advance the pipeline without string scraping.
-    const eventBody = { taskId, fromRole, targetRole, title, description: description ?? null, payload: payloadStr, missionId, fromNodeId, targetNodeId };
-    broadcast(fromRole, JSON.stringify(eventBody), 'handoff');
-    if (taskId !== null) {
-      broadcast('Bridge', JSON.stringify({ id: taskId, title, agentId: targetRole, parentTaskId: parentTaskId ?? null, status: 'todo', missionId, targetNodeId }), 'task_update');
-    }
-    bc(`Handoff: ${fromRole} → ${targetRole}${taskId ? ` (task ${taskId}: "${title}")` : ' (workflow complete)'}`);
-
-    const resultText = targetRole === 'done'
-      ? 'Workflow marked complete. Call publish_result with your final summary if you have not already.'
-      : `Handoff queued as task ${taskId}. The ${targetRole} stage will pick this up.`;
-    return { content: [{ type: 'text', text: resultText }] };
-  });
+  }, async (args) => executeHandoffTask(args, getSessionId() ?? 'unknown'));
 
   server.registerTool('get_workflow_graph', {
     title: 'Get Workflow Graph',
-    description: 'Returns the role transition graph. Use this to discover which roles you can hand off to from your current role. Reviewer has two outgoing edges: "done" (pass) and "builder|tester|security" (fail — retry loop with diff/reasons in payload).',
-    inputSchema: {}
-  }, async () => {
-    return { content: [{ type: 'text', text: JSON.stringify(WORKFLOW_GRAPH, null, 2) }] };
+    description: 'Return the workflow graph. With missionId, this returns the active compiled mission graph and, optionally, the exact legal next targets for one node. Without missionId, it returns the legacy role transition graph.',
+    inputSchema: {
+      missionId: z.string().optional().describe('Active mission ID for graph-mode inspection'),
+      nodeId: z.string().optional().describe('Optional node ID to inspect within the active mission graph'),
+    }
+  }, async ({ missionId, nodeId }) => {
+    if (!missionId) {
+      return { content: [{ type: 'text', text: JSON.stringify(WORKFLOW_GRAPH, null, 2) }] };
+    }
+
+    const record = loadCompiledMissionRecord(missionId);
+    if (!record) {
+      return {
+        isError: true,
+        content: [{ type: 'text', text: `Active compiled mission ${missionId} was not found.` }]
+      };
+    }
+
+    const response = {
+      missionId,
+      graphId: record.graphId,
+      status: record.status,
+      nodes: record.mission.nodes,
+      edges: record.mission.edges,
+      task: record.mission.task,
+      node: nodeId ? buildTaskDetails(missionId, nodeId)?.node ?? null : null,
+      legalNextTargets: nodeId ? getLegalOutgoingTargets(record.mission, nodeId) : null,
+    };
+    return { content: [{ type: 'text', text: JSON.stringify(response, null, 2) }] };
   });
 
   // ── Phase 3: Workspace context store ───────────────────────────────────────
@@ -583,30 +1003,13 @@ function createMcpServer(getSessionId) {
     description: 'Initializes the agent session and announces presence to the team in one step.',
     inputSchema: {
       role: z.string().describe('Your assigned role (e.g. Coordinator, Scout, Builder, Reviewer)'),
-      agentId: z.string().describe('A friendly name for your agent instance')
+      agentId: z.string().describe('A friendly name for your agent instance'),
+      terminalId: z.string().optional().describe('Terminal pane ID in terminal-docks, if known'),
+      cli: z.enum(['claude', 'gemini', 'opencode']).optional().describe('CLI running in that terminal'),
     }
-  }, async ({ role, agentId }) => {
-    const sid = getSessionId() ?? 'unknown';
-    const message = `Role: ${role}. Agent "${agentId}" is online and ready. (Session: ${sid})`;
-
-    logSession(sid, 'connect', JSON.stringify({ agentId, role }));
-
-    const targets = Object.keys(sessions).filter(id => id !== sid);
-    const ts = Date.now();
-    for (const targetSid of targets) {
-      if (!messageQueues[targetSid]) messageQueues[targetSid] = [];
-      messageQueues[targetSid].push({ from: agentId, text: `[BROADCAST] ${message}`, timestamp: ts });
-    }
-
-    broadcast('Bridge', `Agent "${agentId}" (${role}) connected via session ${sid}`);
-
-    return {
-      content: [{
-        type: 'text',
-        text: `Successfully connected to terminal-docks bridge.\nSession ID: ${sid}\nStatus: Online`
-      }]
-    };
-  });
+  }, async ({ role, agentId, terminalId, cli }) =>
+    executeConnectAgent({ role, agentId, terminalId, cli }, getSessionId() ?? 'unknown')
+  );
 
   server.registerTool('get_collaboration_protocol', {
     title: 'Get Collaboration Protocol',
@@ -639,7 +1042,9 @@ You are part of a multi-agent team (Claude, Gemini, OpenCode, or other CLIs) wor
 - Read it with \`get_workspace_context()\` or \`get_workspace_context({ keys: ["plan"] })\`. Prefer this to \`get_session_history\`; it is denser and stays current.
 
 ## Stage Handoffs (every role)
-- When your stage is done, call \`handoff_task({ fromRole, targetRole, title, description?, payload?, parentTaskId? })\` with a STRUCTURED payload for the next role.
+- In graph mode, treat \`get_task_details({ missionId, nodeId })\` as the canonical source of your current node context. It tells you your attempt number, inbox payloads, and the exact legal next targets for this node.
+- In graph mode, when your stage is done, call \`handoff_task({ missionId, fromNodeId, targetNodeId, outcome, title, description?, payload?, parentTaskId? })\` with an explicit \`outcome\` of \`"success"\` or \`"failure"\`. Use the exact \`targetNodeId\` returned by \`get_task_details\`; do not guess from role names.
+- In legacy role-mode, call \`handoff_task({ fromRole, targetRole, title, description?, payload?, parentTaskId? })\`.
 - Do NOT announce literal phrases like "INTELLIGENCE REPORT" — Mission Control routes strictly on handoff_task events now.
 - The payload field is free-form JSON: include whatever structured context the next stage needs (file paths, findings, decisions, error diffs, etc.). Keep it compact.
 
@@ -647,7 +1052,7 @@ You are part of a multi-agent team (Claude, Gemini, OpenCode, or other CLIs) wor
 - Call \`get_task_tree()\` to see current workload before assigning new work.
 - Call \`delegate_task({ title, description, agentId, parentTaskId })\` to create subtasks for Builders.
 - For each subtask, call \`list_sessions()\` then \`assign_task({ taskId, targetSessionId, agentId })\` to bind the task to a specific Builder session. The Builder receives it in their inbox immediately.
-- After routing is done, call \`handoff_task({ fromRole: "coordinator", targetRole: "builder", ... })\` once to release the Builder stage.
+- After routing is done, use the graph-mode or legacy handoff format above to release the next stage. In graph mode you must hand off to an exact target node, not just a role.
 - Builders should call \`update_task({ taskId, status: "in-progress" })\` when starting and \`update_task({ taskId, status: "done" })\` when complete.
 - All task changes appear in Mission Control's task tree in real time.
 
@@ -729,30 +1134,7 @@ The Mission Control panel displays published results in real time.
     inputSchema: {
       nodeId: z.string().optional().describe('Your specific node ID in the graph, if applicable.')
     }
-  }, async ({ nodeId }) => {
-    const sid = getSessionId();
-    const msgs = messageQueues[sid] ?? [];
-    messageQueues[sid] = [];
-    
-    let dbMsgs = [];
-    if (nodeId) {
-      dbMsgs = db.prepare("SELECT * FROM session_log WHERE recipient_node_id = ? AND event_type = 'message' AND is_read = 0").all(nodeId);
-      if (dbMsgs.length > 0) {
-        const ids = dbMsgs.map(m => m.id);
-        db.prepare(`UPDATE session_log SET is_read = 1 WHERE id IN (${ids.join(',')})`).run();
-      }
-    }
-
-    if (msgs.length === 0 && dbMsgs.length === 0) return { content: [{ type: 'text', text: 'No messages.' }] };
-    
-    let text = msgs.map(m => `[${new Date(m.timestamp).toISOString()}] from ${m.from}:\n${m.text}`).join('\n\n');
-    if (dbMsgs.length > 0) {
-      if (text) text += '\n\n';
-      text += dbMsgs.map(m => `[${new Date(m.created_at).toISOString()}] from ${m.session_id}:\n${m.content}`).join('\n\n');
-    }
-    
-    return { content: [{ type: 'text', text }] };
-  });
+  }, async ({ nodeId }) => executeReceiveMessages({ nodeId }, getSessionId()));
 
   server.registerTool('publish_result', {
     title: 'Publish Result',
@@ -919,9 +1301,39 @@ app.delete('/mcp', async (req, res) => {
   }
 });
 
-app.listen(PORT, () => {
-  mkdirSync('.mcp', { recursive: true });
-  writeFileSync('.mcp/server.json', JSON.stringify({ url: `http://localhost:${PORT}/mcp`, port: PORT }, null, 2));
-  console.log(`MCP server listening on port ${PORT} — db: ${dbPath}`);
-});
+let httpServer = null;
+
+export function startHttpServer(port = PORT) {
+  if (httpServer) return httpServer;
+  httpServer = app.listen(port, () => {
+    mkdirSync('.mcp', { recursive: true });
+    writeFileSync('.mcp/server.json', JSON.stringify({ url: `http://localhost:${port}/mcp`, port }, null, 2));
+    console.log(`MCP server listening on port ${port} — db: ${dbPath}`);
+  });
+  return httpServer;
+}
+
+export function stopHttpServer() {
+  return new Promise((resolvePromise, rejectPromise) => {
+    if (!httpServer) {
+      resolvePromise();
+      return;
+    }
+    httpServer.close((error) => {
+      if (error) {
+        rejectPromise(error);
+        return;
+      }
+      httpServer = null;
+      resolvePromise();
+    });
+  });
+}
+
+const isMainModule = Boolean(process.argv[1]) &&
+  pathToFileURL(resolve(process.argv[1])).href === import.meta.url;
+
+if (process.env.MCP_DISABLE_HTTP !== '1' && isMainModule) {
+  startHttpServer();
+}
 

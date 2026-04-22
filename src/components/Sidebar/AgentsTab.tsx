@@ -1,5 +1,5 @@
 import { Bot } from 'lucide-react';
-import defaultAgents from '../../config/agents.json';
+import defaultAgents from '../../config/agents';
 import { useWorkspaceStore } from '../../store/workspace';
 
 export function AgentsTab() {
