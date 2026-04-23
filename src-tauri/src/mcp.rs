@@ -592,6 +592,68 @@ pub fn get_mcp_base_url() -> String {
     format!("http://localhost:{}", PORT)
 }
 
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeBootstrapRequest {
+    pub session_id: String,
+    pub mission_id: String,
+    pub node_id: String,
+    pub attempt: u64,
+    pub role: String,
+    pub profile_id: Option<String>,
+    pub agent_id: String,
+    pub terminal_id: String,
+    pub cli: String,
+    pub capabilities: Option<serde_json::Value>,
+    pub working_dir: Option<String>,
+    pub activation_id: Option<String>,
+    pub run_id: Option<String>,
+}
+
+#[tauri::command]
+pub fn mcp_register_runtime_session(
+    state: tauri::State<'_, McpState>,
+    payload: RuntimeBootstrapRequest,
+) -> Result<serde_json::Value, String> {
+    let token = state.internal_push_token.lock().unwrap().clone();
+    if token.is_empty() {
+        return Err("MCP push token not initialized".to_string());
+    }
+
+    let body = serde_json::json!({
+      "type": "runtime_bootstrap",
+      "sessionId": payload.session_id,
+      "missionId": payload.mission_id,
+      "nodeId": payload.node_id,
+      "attempt": payload.attempt,
+      "role": payload.role,
+      "profileId": payload.profile_id,
+      "agentId": payload.agent_id,
+      "terminalId": payload.terminal_id,
+      "cli": payload.cli,
+      "capabilities": payload.capabilities,
+      "workingDir": payload.working_dir,
+      "activationId": payload.activation_id,
+      "runId": payload.run_id,
+    });
+
+    let url = format!("http://localhost:{}/internal/push", PORT);
+    match ureq::post(&url)
+        .set("x-td-push-token", &token)
+        .set("Content-Type", "application/json")
+        .send_string(&body.to_string())
+    {
+        Ok(response) => {
+            let status = response.status();
+            let text = response.into_string().unwrap_or_default();
+            let parsed: serde_json::Value = serde_json::from_str(&text)
+                .unwrap_or(serde_json::json!({ "status": status, "raw": text }));
+            Ok(parsed)
+        }
+        Err(error) => Err(format!("mcp_register_runtime_session failed: {}", error)),
+    }
+}
+
 /// Privileged notification from the Rust process to the MCP server.
 /// Carries the push token as a loopback secret; renderer code never sees it.
 #[tauri::command]
@@ -603,6 +665,7 @@ pub fn mcp_notify_agent(
     node_id: Option<String>,
     task_seq: Option<u64>,
     attempt: Option<u64>,
+    reason: Option<String>,
 ) -> Result<serde_json::Value, String> {
     let token = state.internal_push_token.lock().unwrap().clone();
     if token.is_empty() {
@@ -621,6 +684,14 @@ pub fn mcp_notify_agent(
         "bootstrap" => serde_json::json!({
             "type": "bootstrap",
             "sessionId": session_id,
+        }),
+        "runtime_disconnected" => serde_json::json!({
+            "type": "runtime_disconnected",
+            "sessionId": session_id,
+            "missionId": mission_id,
+            "nodeId": node_id,
+            "attempt": attempt,
+            "reason": reason,
         }),
         other => return Err(format!("Unsupported notify kind: {}", other)),
     };

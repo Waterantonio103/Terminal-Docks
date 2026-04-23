@@ -4,7 +4,8 @@ use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::thread;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager};
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -59,6 +60,93 @@ struct PendingActivation {
     inputs: Vec<TriggeredInput>,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeExpectedActionContract {
+    pub signal: String,
+    pub required_follow_up: Vec<String>,
+    pub handoff_contract: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeAssignmentLegalTarget {
+    pub target_node_id: String,
+    pub target_role_id: String,
+    pub condition: String,
+    pub allowed_outcomes: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeAssignmentWorkspaceContext {
+    pub workspace_dir: Option<String>,
+    pub mission_id: String,
+    pub node_id: String,
+    pub run_id: String,
+    pub attempt: u32,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeAssignmentExpectedDeliverable {
+    pub schema: String,
+    pub required_fields: Vec<String>,
+    pub status_options: Vec<String>,
+    pub notes: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeAssignmentHandoffMetadata {
+    pub from_node_ids: Vec<String>,
+    pub legal_targets: Vec<RuntimeAssignmentLegalTarget>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeAssignmentPayload {
+    pub role_instructions: String,
+    pub mission_goal: String,
+    pub upstream_outputs: serde_json::Value,
+    pub workspace_context: RuntimeAssignmentWorkspaceContext,
+    pub expected_deliverable: RuntimeAssignmentExpectedDeliverable,
+    pub handoff: RuntimeAssignmentHandoffMetadata,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeActivationPayload {
+    pub activation_id: String,
+    pub mission_id: String,
+    pub run_id: String,
+    pub node_id: String,
+    pub role: String,
+    pub profile_id: Option<String>,
+    pub capabilities: Option<Vec<crate::workflow::WorkerCapability>>,
+    pub cli_type: String,
+    pub terminal_id: String,
+    pub pane_id: Option<String>,
+    pub session_id: String,
+    pub agent_id: String,
+    pub attempt: u32,
+    pub goal: String,
+    pub workspace_dir: Option<String>,
+    pub input_payload: Option<String>,
+    pub assignment: RuntimeAssignmentPayload,
+    pub expected_next_action: RuntimeExpectedActionContract,
+    pub emitted_at: u64,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+struct PendingRuntimeActivation {
+    status: String,
+    reason: Option<String>,
+    deadline_at: u64,
+    payload: RuntimeActivationPayload,
+}
+
 #[derive(Debug, Clone)]
 struct ActiveMission {
     mission: CompiledMission,
@@ -66,7 +154,10 @@ struct ActiveMission {
     node_attempts: HashMap<String, u32>,
     node_waves: HashMap<String, String>,
     node_last_outcomes: HashMap<String, NodeOutcome>,
+    node_input_payloads: HashMap<String, String>,
     pending_activations: HashMap<(String, String), PendingActivation>,
+    pending_runtime_activations: HashMap<(String, u32), PendingRuntimeActivation>,
+    node_failure_reasons: HashMap<String, String>,
     layer_index: HashMap<String, usize>,
 }
 
@@ -89,20 +180,17 @@ struct NodeStatusEvent {
     status: String,
     attempt: Option<u32>,
     outcome: Option<NodeOutcome>,
+    reason: Option<String>,
 }
 
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
-struct TriggerEvent {
+struct RuntimeActivationRequestedEvent {
     mission_id: String,
     node_id: String,
-    role_id: String,
-    session_id: String,
-    agent_id: String,
-    terminal_id: String,
-    activated_at: u64,
     attempt: u32,
-    payload: Option<String>,
+    status: String,
+    payload: RuntimeActivationPayload,
 }
 
 #[derive(Serialize, Clone)]
@@ -133,6 +221,10 @@ pub struct RuntimeActivationRecord {
     pub attempt: u32,
     pub terminal_id: String,
     pub status: String,
+    pub activation_id: Option<String>,
+    pub run_id: Option<String>,
+    pub status_reason: Option<String>,
+    pub activation_payload: Option<String>,
     pub created_at: Option<String>,
     pub updated_at: Option<String>,
 }
@@ -246,10 +338,26 @@ fn derive_start_node_ids(mission: &CompiledMission) -> Vec<String> {
         .collect()
 }
 
+const ACTIVATION_TIMEOUT_MS: u64 = 20_000;
+
 fn outcome_to_status(outcome: &NodeOutcome) -> &'static str {
     match outcome {
-        NodeOutcome::Success => "completed",
+        NodeOutcome::Success => "done",
         NodeOutcome::Failure => "failed",
+    }
+}
+
+fn mission_run_id(mission: &CompiledMission) -> String {
+    let version = mission.metadata.run_version.unwrap_or(1);
+    format!("run:{}:v{}", mission.mission_id, version)
+}
+
+fn cli_type_label(cli: &crate::workflow::WorkflowAgentCli) -> &'static str {
+    match cli {
+        crate::workflow::WorkflowAgentCli::Claude => "claude",
+        crate::workflow::WorkflowAgentCli::Gemini => "gemini",
+        crate::workflow::WorkflowAgentCli::OpenCode => "opencode",
+        crate::workflow::WorkflowAgentCli::Codex => "codex",
     }
 }
 
@@ -258,6 +366,142 @@ fn edge_matches_outcome(condition: &WorkflowEdgeCondition, outcome: &NodeOutcome
         WorkflowEdgeCondition::Always => true,
         WorkflowEdgeCondition::OnSuccess => matches!(outcome, NodeOutcome::Success),
         WorkflowEdgeCondition::OnFailure => matches!(outcome, NodeOutcome::Failure),
+    }
+}
+
+fn edge_condition_label(condition: &WorkflowEdgeCondition) -> &'static str {
+    match condition {
+        WorkflowEdgeCondition::Always => "always",
+        WorkflowEdgeCondition::OnSuccess => "on_success",
+        WorkflowEdgeCondition::OnFailure => "on_failure",
+    }
+}
+
+fn allowed_outcomes_for_condition(condition: &WorkflowEdgeCondition) -> Vec<String> {
+    match condition {
+        WorkflowEdgeCondition::OnSuccess => vec!["success".to_string()],
+        WorkflowEdgeCondition::OnFailure => vec!["failure".to_string()],
+        WorkflowEdgeCondition::Always => vec!["success".to_string(), "failure".to_string()],
+    }
+}
+
+fn parse_upstream_outputs(input_payload: Option<&str>) -> serde_json::Value {
+    let Some(raw) = input_payload else {
+        return serde_json::Value::Null;
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return serde_json::Value::Null;
+    }
+    serde_json::from_str::<serde_json::Value>(trimmed)
+        .unwrap_or_else(|_| serde_json::Value::String(trimmed.to_string()))
+}
+
+fn collect_upstream_from_node_ids(upstream_outputs: &serde_json::Value) -> Vec<String> {
+    let mut ids = Vec::new();
+    let Some(items) = upstream_outputs.as_array() else {
+        return ids;
+    };
+
+    for item in items {
+        let Some(from_node_id) = item
+            .as_object()
+            .and_then(|entry| entry.get("fromNodeId"))
+            .and_then(|value| value.as_str())
+        else {
+            continue;
+        };
+
+        let normalized = from_node_id.trim();
+        if normalized.is_empty() {
+            continue;
+        }
+        if !ids.iter().any(|existing| existing == normalized) {
+            ids.push(normalized.to_string());
+        }
+    }
+
+    ids
+}
+
+fn legal_targets_for_node(
+    mission: &CompiledMission,
+    from_node_id: &str,
+) -> Vec<RuntimeAssignmentLegalTarget> {
+    let mut targets: Vec<RuntimeAssignmentLegalTarget> = mission
+        .edges
+        .iter()
+        .filter(|edge| edge.from_node_id == from_node_id)
+        .map(|edge| RuntimeAssignmentLegalTarget {
+            target_node_id: edge.to_node_id.clone(),
+            target_role_id: mission_node(mission, &edge.to_node_id)
+                .map(|node| node.role_id.clone())
+                .unwrap_or_else(|| "unknown".to_string()),
+            condition: edge_condition_label(&edge.condition).to_string(),
+            allowed_outcomes: allowed_outcomes_for_condition(&edge.condition),
+        })
+        .collect();
+
+    targets.sort_by(|left, right| {
+        left.target_node_id
+            .cmp(&right.target_node_id)
+            .then_with(|| left.condition.cmp(&right.condition))
+    });
+    targets
+}
+
+fn has_legal_handoff_edge(
+    mission: &CompiledMission,
+    from_node_id: &str,
+    target_node_id: &str,
+    outcome: &NodeOutcome,
+) -> bool {
+    mission.edges.iter().any(|edge| {
+        edge.from_node_id == from_node_id
+            && edge.to_node_id == target_node_id
+            && edge_matches_outcome(&edge.condition, outcome)
+    })
+}
+
+fn build_runtime_assignment_payload(
+    active_mission: &ActiveMission,
+    node: &crate::workflow::CompiledMissionNode,
+    node_id: &str,
+    attempt: u32,
+    run_id: &str,
+    input_payload: Option<&String>,
+) -> RuntimeAssignmentPayload {
+    let upstream_outputs = parse_upstream_outputs(input_payload.map(String::as_str));
+    let from_node_ids = collect_upstream_from_node_ids(&upstream_outputs);
+
+    RuntimeAssignmentPayload {
+        role_instructions: node.instruction_override.trim().to_string(),
+        mission_goal: active_mission.mission.task.prompt.clone(),
+        upstream_outputs,
+        workspace_context: RuntimeAssignmentWorkspaceContext {
+            workspace_dir: active_mission.mission.task.workspace_dir.clone(),
+            mission_id: active_mission.mission.mission_id.clone(),
+            node_id: node_id.to_string(),
+            run_id: run_id.to_string(),
+            attempt,
+        },
+        expected_deliverable: RuntimeAssignmentExpectedDeliverable {
+            schema: "completion_payload_v1".to_string(),
+            required_fields: vec![
+                "status".to_string(),
+                "summary".to_string(),
+                "artifactReferences".to_string(),
+                "filesChanged".to_string(),
+                "downstreamPayload".to_string(),
+            ],
+            status_options: vec!["success".to_string(), "failure".to_string()],
+            notes: "Produce a structured completion payload and route only through legal graph targets."
+                .to_string(),
+        },
+        handoff: RuntimeAssignmentHandoffMetadata {
+            from_node_ids,
+            legal_targets: legal_targets_for_node(&active_mission.mission, node_id),
+        },
     }
 }
 
@@ -271,6 +515,7 @@ fn emit_node_status(
     status: &str,
     attempt: Option<u32>,
     outcome: Option<NodeOutcome>,
+    reason: Option<String>,
 ) {
     let _ = app.emit(
         "workflow-node-update",
@@ -279,6 +524,7 @@ fn emit_node_status(
             status: status.to_string(),
             attempt,
             outcome,
+            reason,
         },
     );
 }
@@ -518,7 +764,7 @@ fn relevant_parent_ids_for_wave(
                 return None;
             }
 
-            if status == "completed" || status == "failed" {
+            if status == "done" || status == "failed" {
                 let outcome = active_mission.node_last_outcomes.get(&edge.from_node_id)?;
                 if !edge_matches_outcome(&edge.condition, outcome) {
                     return None;
@@ -564,20 +810,112 @@ fn next_wave_id(active_mission: &ActiveMission, from_node_id: &str, target_node_
     current_wave
 }
 
-fn trigger_node_locked(
+fn schedule_activation_timeout(app: &AppHandle, mission_id: String, node_id: String, attempt: u32) {
+    let app_handle = app.clone();
+    thread::spawn(move || {
+        thread::sleep(Duration::from_millis(ACTIVATION_TIMEOUT_MS));
+        let _ = timeout_runtime_activation(&app_handle, mission_id, node_id, attempt);
+    });
+}
+
+fn timeout_runtime_activation(app: &AppHandle, mission_id: String, node_id: String, attempt: u32) -> bool {
+    let (role_id, current_wave_id, input_payload, reason, run_version) = {
+        let state = app.state::<WorkflowState>();
+        let mut missions = state.active_missions.lock().unwrap();
+        let Some(active_mission) = missions.get_mut(&mission_id) else {
+            return false;
+        };
+        let key = (node_id.clone(), attempt);
+        let Some(pending) = active_mission.pending_runtime_activations.remove(&key) else {
+            return false;
+        };
+
+        let current_status = active_mission
+            .node_statuses
+            .get(&node_id)
+            .cloned()
+            .unwrap_or_else(|| "idle".to_string());
+        if current_status == "running" || current_status == "done" || current_status == "failed" {
+            return false;
+        }
+
+        let reason = pending
+            .reason
+            .unwrap_or_else(|| "Runtime never acknowledged activation before timeout.".to_string());
+        active_mission
+            .node_statuses
+            .insert(node_id.clone(), "failed".to_string());
+        active_mission
+            .node_failure_reasons
+            .insert(node_id.clone(), reason.clone());
+        (
+            mission_node(&active_mission.mission, &node_id).map(|node| node.role_id.clone()),
+            active_mission.node_waves.get(&node_id).cloned(),
+            pending.payload.input_payload.clone(),
+            reason,
+            active_mission.mission.metadata.run_version,
+        )
+    };
+
+    if let Some(role_id) = role_id {
+        persist_node_runtime(
+            app,
+            &mission_id,
+            &node_id,
+            &role_id,
+            "failed",
+            attempt,
+            current_wave_id.as_deref(),
+            None,
+            input_payload.as_deref(),
+        );
+    }
+    mark_runtime_session_status(app, &mission_id, &node_id, attempt, "failed");
+    emit_node_status(
+        app,
+        &node_id,
+        "failed",
+        Some(attempt),
+        None,
+        Some(reason.clone()),
+    );
+    emit_runtime_warning(app, &mission_id, &node_id, reason.clone());
+
+    let timeline_payload = serde_json::json!({
+        "nodeId": node_id,
+        "attempt": attempt,
+        "reason": reason,
+    })
+    .to_string();
+    persist_mission_timeline_event(
+        app,
+        &mission_id,
+        "activation_timeout",
+        Some(&timeline_payload),
+        run_version,
+    );
+
+    true
+}
+
+fn request_node_activation_locked(
     app: &AppHandle,
     mission_id: &str,
     active_mission: &mut ActiveMission,
     node_id: &str,
     wave_id: String,
-    payload: Option<String>,
+    input_payload: Option<String>,
 ) {
     let current_status = active_mission
         .node_statuses
         .get(node_id)
         .cloned()
         .unwrap_or_else(|| "idle".to_string());
-    if current_status == "running" {
+    if current_status == "launching"
+        || current_status == "connecting"
+        || current_status == "ready"
+        || current_status == "running"
+    {
         return;
     }
 
@@ -586,6 +924,39 @@ fn trigger_node_locked(
     };
     let role_id = node.role_id.clone();
     let terminal_id = node.terminal.terminal_id.clone();
+    let terminal_cli = cli_type_label(&node.terminal.cli).to_string();
+
+    if terminal_id.trim().is_empty() {
+        let reason = "No terminal bound to this node runtime.".to_string();
+        active_mission
+            .node_statuses
+            .insert(node_id.to_string(), "unbound".to_string());
+        active_mission
+            .node_failure_reasons
+            .insert(node_id.to_string(), reason.clone());
+        let attempt = active_mission.node_attempts.get(node_id).copied().unwrap_or(0);
+        persist_node_runtime(
+            app,
+            mission_id,
+            node_id,
+            &role_id,
+            "unbound",
+            attempt,
+            Some(&wave_id),
+            None,
+            input_payload.as_deref(),
+        );
+        emit_node_status(
+            app,
+            node_id,
+            "unbound",
+            Some(attempt),
+            None,
+            Some(reason.clone()),
+        );
+        emit_runtime_warning(app, mission_id, node_id, reason);
+        return;
+    }
 
     let attempt = {
         let counter = active_mission
@@ -598,24 +969,89 @@ fn trigger_node_locked(
     let session_id = runtime_session_id(mission_id, node_id, attempt);
     let agent_id = runtime_agent_id(mission_id, node_id, &terminal_id);
     let activated_at = unix_millis_now();
+    let activation_id = format!("activation:{mission_id}:{node_id}:{attempt}");
+    let run_id = mission_run_id(&active_mission.mission);
+    let assignment = build_runtime_assignment_payload(
+        active_mission,
+        node,
+        node_id,
+        attempt,
+        &run_id,
+        input_payload.as_ref(),
+    );
+
+    let payload = RuntimeActivationPayload {
+        activation_id: activation_id.clone(),
+        mission_id: mission_id.to_string(),
+        run_id,
+        node_id: node_id.to_string(),
+        role: role_id.clone(),
+        profile_id: node.profile_id.clone(),
+        capabilities: node.capabilities.clone(),
+        cli_type: terminal_cli,
+        terminal_id: terminal_id.clone(),
+        pane_id: node.terminal.pane_id.clone(),
+        session_id: session_id.clone(),
+        agent_id: agent_id.clone(),
+        attempt,
+        goal: active_mission.mission.task.prompt.clone(),
+        workspace_dir: active_mission.mission.task.workspace_dir.clone(),
+        input_payload: input_payload.clone(),
+        assignment,
+        expected_next_action: RuntimeExpectedActionContract {
+            signal: "NEW_TASK".to_string(),
+            required_follow_up: vec![
+                "Parse the NEW_TASK JSON envelope and preserve mission/node/attempt identifiers."
+                    .to_string(),
+                "Call get_task_details({ missionId, nodeId }) before execution.".to_string(),
+                "Call receive_messages({ missionId, nodeId }) to process mission inbox."
+                    .to_string(),
+            ],
+            handoff_contract:
+                "Route with handoff_task using exact targetNodeId and explicit outcome. Include fromAttempt."
+                    .to_string(),
+        },
+        emitted_at: activated_at,
+    };
+
+    if let Some(payload) = input_payload.as_ref() {
+        active_mission.node_input_payloads.insert(node_id.to_string(), payload.clone());
+    }
 
     active_mission
+        .pending_runtime_activations
+        .insert(
+            (node_id.to_string(), attempt),
+            PendingRuntimeActivation {
+                status: "launching".to_string(),
+                reason: None,
+                deadline_at: activated_at.saturating_add(ACTIVATION_TIMEOUT_MS),
+                payload: payload.clone(),
+            },
+        );
+    active_mission
         .node_statuses
-        .insert(node_id.to_string(), "running".to_string());
+        .insert(node_id.to_string(), "launching".to_string());
     active_mission
         .node_waves
         .insert(node_id.to_string(), wave_id.clone());
+    active_mission.node_failure_reasons.remove(node_id);
+
+    println!(
+        "[Mission {}] Requested activation for {} (attempt {}, session {})",
+        mission_id, node_id, attempt, session_id
+    );
 
     persist_node_runtime(
         app,
         mission_id,
         node_id,
         &role_id,
-        "running",
+        "launching",
         attempt,
         Some(&wave_id),
         None,
-        payload.as_deref(),
+        input_payload.as_deref(),
     );
     persist_runtime_session(
         app,
@@ -625,24 +1061,31 @@ fn trigger_node_locked(
         node_id,
         attempt,
         &terminal_id,
-        "activated",
+        "launching",
     );
-    emit_node_status(app, node_id, "running", Some(attempt), None);
+    emit_node_status(app, node_id, "launching", Some(attempt), None, None);
 
     let _ = app.emit(
-        "workflow-node-triggered",
-        TriggerEvent {
+        "workflow-runtime-activation-requested",
+        RuntimeActivationRequestedEvent {
             mission_id: mission_id.to_string(),
             node_id: node_id.to_string(),
-            role_id,
-            session_id,
-            agent_id,
-            terminal_id,
-            activated_at,
             attempt,
-            payload,
+            status: "launching".to_string(),
+            payload: payload.clone(),
         },
     );
+
+    let timeline_payload = serde_json::to_string(&payload).ok();
+    persist_mission_timeline_event(
+        app,
+        mission_id,
+        "activation_requested",
+        timeline_payload.as_deref(),
+        active_mission.mission.metadata.run_version,
+    );
+
+    schedule_activation_timeout(app, mission_id.to_string(), node_id.to_string(), attempt);
 }
 
 fn get_start_node_ids(mission: &CompiledMission) -> Vec<String> {
@@ -743,47 +1186,76 @@ pub fn start_mission(app: &AppHandle, mut mission: CompiledMission) {
 
     let mut node_statuses = HashMap::new();
     let mut node_attempts = HashMap::new();
+    let mut node_input_payloads = HashMap::new();
+    let mut node_failure_reasons = HashMap::new();
     for node in &mission.nodes {
-        node_statuses.insert(node.id.clone(), "idle".to_string());
+        let mut initial_status = "idle".to_string();
+        if node.terminal.terminal_id.trim().is_empty() {
+            initial_status = "unbound".to_string();
+            node_failure_reasons.insert(
+                node.id.clone(),
+                "No terminal is bound for this node.".to_string(),
+            );
+        }
+        node_statuses.insert(node.id.clone(), initial_status.clone());
         node_attempts.insert(node.id.clone(), 0);
         persist_node_runtime(
             app,
             &mission_id,
             &node.id,
             &node.role_id,
-            "idle",
+            &initial_status,
             0,
             None,
             None,
             None,
         );
+        emit_node_status(
+            app,
+            &node.id,
+            &initial_status,
+            Some(0),
+            None,
+            node_failure_reasons.get(&node.id).cloned(),
+        );
     }
 
-    let mut active_mission = ActiveMission {
+    println!(
+        "[Mission {}] Starting mission with {} start node(s)",
+        mission_id,
+        start_node_ids.len()
+    );
+
+    let active_mission = ActiveMission {
         mission,
         node_statuses,
         node_attempts,
+        node_input_payloads,
         node_waves: HashMap::new(),
         node_last_outcomes: HashMap::new(),
         pending_activations: HashMap::new(),
+        pending_runtime_activations: HashMap::new(),
+        node_failure_reasons,
         layer_index,
     };
-
-    let root_wave = root_wave_id(&mission_id);
-    for node_id in &start_node_ids {
-        trigger_node_locked(
-            app,
-            &mission_id,
-            &mut active_mission,
-            node_id,
-            root_wave.clone(),
-            None,
-        );
-    }
 
     let state = app.state::<WorkflowState>();
     let mut missions = state.active_missions.lock().unwrap();
     missions.insert(mission_id.clone(), active_mission);
+
+    let root_wave = root_wave_id(&mission_id);
+    if let Some(mission) = missions.get_mut(&mission_id) {
+        for node_id in &start_node_ids {
+            request_node_activation_locked(
+                app,
+                &mission_id,
+                mission,
+                node_id,
+                root_wave.clone(),
+                None,
+            );
+        }
+    }
 
     let run_version = missions
         .get(&mission_id)
@@ -793,6 +1265,10 @@ pub fn start_mission(app: &AppHandle, mut mission: CompiledMission) {
 }
 
 pub fn handle_handoff(app: &AppHandle, mission_id: &str, handoff: HandoffEvent) {
+    println!(
+        "[Mission {}] Received handoff: from={:?}, target={:?}, attempt={:?}, outcome={:?}",
+        mission_id, handoff.from_node_id, handoff.target_node_id, handoff.from_attempt, handoff.outcome
+    );
     let Some(from_id) = handoff.from_node_id.clone() else {
         return;
     };
@@ -851,6 +1327,60 @@ pub fn handle_handoff(app: &AppHandle, mission_id: &str, handoff: HandoffEvent) 
         return;
     }
 
+    let validated_target_id = if let Some(target_id) = handoff.target_node_id.as_ref() {
+        if mission_node(&active_mission.mission, target_id).is_none() {
+            emit_runtime_warning(
+                app,
+                mission_id,
+                &from_id,
+                format!(
+                    "Rejected handoff: target node \"{}\" is not part of mission {}.",
+                    target_id, mission_id
+                ),
+            );
+            return;
+        }
+        if !has_legal_handoff_edge(&active_mission.mission, &from_id, target_id, &outcome) {
+            emit_runtime_warning(
+                app,
+                mission_id,
+                &from_id,
+                format!(
+                    "Rejected handoff: illegal graph route {} -> {} for outcome {:?}.",
+                    from_id, target_id, outcome
+                ),
+            );
+            return;
+        }
+        Some(target_id.clone())
+    } else {
+        let has_legal_target_for_outcome = active_mission.mission.edges.iter().any(|edge| {
+            edge.from_node_id == from_id && edge_matches_outcome(&edge.condition, &outcome)
+        });
+        if has_legal_target_for_outcome {
+            emit_runtime_warning(
+                app,
+                mission_id,
+                &from_id,
+                "Rejected handoff: missing targetNodeId while legal downstream targets exist.",
+            );
+            return;
+        }
+        None
+    };
+
+    active_mission
+        .node_statuses
+        .insert(from_id.clone(), "handoff_pending".to_string());
+    emit_node_status(
+        app,
+        &from_id,
+        "handoff_pending",
+        Some(from_attempt),
+        None,
+        None,
+    );
+
     let from_status = outcome_to_status(&outcome).to_string();
     let from_wave = active_mission.node_waves.get(&from_id).cloned();
     active_mission
@@ -859,6 +1389,7 @@ pub fn handle_handoff(app: &AppHandle, mission_id: &str, handoff: HandoffEvent) 
     active_mission
         .node_last_outcomes
         .insert(from_id.clone(), outcome.clone());
+    active_mission.node_failure_reasons.remove(&from_id);
 
     if let Some(role_id) = mission_node(&active_mission.mission, &from_id).map(|node| node.role_id.clone()) {
         persist_node_runtime(
@@ -880,6 +1411,7 @@ pub fn handle_handoff(app: &AppHandle, mission_id: &str, handoff: HandoffEvent) 
         &from_status,
         Some(from_attempt),
         Some(outcome.clone()),
+        None,
     );
     let handoff_timeline_payload = serde_json::json!({
         "fromNodeId": from_id,
@@ -899,12 +1431,9 @@ pub fn handle_handoff(app: &AppHandle, mission_id: &str, handoff: HandoffEvent) 
         active_mission.mission.metadata.run_version,
     );
 
-    let Some(target_id) = handoff.target_node_id.clone() else {
+    let Some(target_id) = validated_target_id else {
         return;
     };
-    if mission_node(&active_mission.mission, &target_id).is_none() {
-        return;
-    }
 
     let wave_id = next_wave_id(active_mission, &from_id, &target_id);
     let pending_key = (target_id.clone(), wave_id.clone());
@@ -927,7 +1456,7 @@ pub fn handle_handoff(app: &AppHandle, mission_id: &str, handoff: HandoffEvent) 
             .remove(&pending_key)
             .unwrap_or_default();
         let aggregated_payload = serde_json::to_string(&pending.inputs).ok();
-        trigger_node_locked(
+        request_node_activation_locked(
             app,
             mission_id,
             active_mission,
@@ -948,7 +1477,7 @@ pub fn handle_handoff(app: &AppHandle, mission_id: &str, handoff: HandoffEvent) 
     if current_status != "running" {
         active_mission
             .node_statuses
-            .insert(target_id.clone(), "waiting".to_string());
+            .insert(target_id.clone(), "handoff_pending".to_string());
         active_mission
             .node_waves
             .insert(target_id.clone(), wave_id.clone());
@@ -959,14 +1488,21 @@ pub fn handle_handoff(app: &AppHandle, mission_id: &str, handoff: HandoffEvent) 
                 mission_id,
                 &target_id,
                 &role_id,
-                "waiting",
+                "handoff_pending",
                 target_attempt,
                 Some(&wave_id),
                 active_mission.node_last_outcomes.get(&target_id),
                 handoff.payload.as_deref(),
             );
         }
-        emit_node_status(app, &target_id, "waiting", Some(target_attempt), None);
+        emit_node_status(
+            app,
+            &target_id,
+            "handoff_pending",
+            Some(target_attempt),
+            None,
+            None,
+        );
     }
 }
 
@@ -1016,7 +1552,7 @@ pub fn append_mission_patch(
             None,
             None,
         );
-        emit_node_status(&app, &node.id, "idle", Some(0), None);
+        emit_node_status(&app, &node.id, "idle", Some(0), None, None);
     }
 
     {
@@ -1057,6 +1593,226 @@ pub fn append_mission_patch(
 }
 
 #[tauri::command]
+pub fn retry_mission_node(
+    app: AppHandle,
+    mission_id: String,
+    node_id: String,
+) -> Result<(), String> {
+    let state = app.state::<WorkflowState>();
+    let mut missions = state.active_missions.lock().unwrap();
+    let active_mission = missions
+        .get_mut(&mission_id)
+        .ok_or_else(|| format!("Mission {} is not active.", mission_id))?;
+
+    let current_status = active_mission
+        .node_statuses
+        .get(&node_id)
+        .cloned()
+        .unwrap_or_else(|| "idle".to_string());
+
+    if current_status == "launching"
+        || current_status == "connecting"
+        || current_status == "ready"
+        || current_status == "running"
+    {
+        return Err(format!(
+            "Node {} is already in an active state ({}). Stop it first or wait for completion.",
+            node_id, current_status
+        ));
+    }
+
+    let wave_id = active_mission
+        .node_waves
+        .get(&node_id)
+        .cloned()
+        .unwrap_or_else(|| root_wave_id(&mission_id));
+    let input_payload = active_mission.node_input_payloads.get(&node_id).cloned();
+
+    println!(
+        "[Mission {}] Manual retry requested for node {}",
+        mission_id, node_id
+    );
+
+    request_node_activation_locked(
+        &app,
+        &mission_id,
+        active_mission,
+        &node_id,
+        wave_id,
+        input_payload,
+    );
+
+    Ok(())
+}
+
+#[tauri::command]
+pub fn acknowledge_runtime_activation(
+    app: AppHandle,
+    mission_id: String,
+    node_id: String,
+    attempt: u32,
+    status: String,
+    reason: Option<String>,
+) -> Result<(), String> {
+    println!(
+        "[Mission {}] Acknowledge activation: node={}, attempt={}, status={}, reason={:?}",
+        mission_id, node_id, attempt, status, reason
+    );
+    let (role_id, current_wave_id, last_payload, next_status, next_reason, run_version) = {
+        let state = app.state::<WorkflowState>();
+        let mut missions = state
+            .active_missions
+            .lock()
+            .map_err(|_| "Failed to lock workflow state".to_string())?;
+        let active_mission = missions
+            .get_mut(&mission_id)
+            .ok_or_else(|| format!("Mission {} is not active.", mission_id))?;
+        let role_id = mission_node(&active_mission.mission, &node_id)
+            .map(|node| node.role_id.clone())
+            .ok_or_else(|| format!("Node {} is not part of mission {}.", node_id, mission_id))?;
+
+        let current_attempt = active_mission.node_attempts.get(&node_id).copied().unwrap_or(0);
+        if current_attempt != attempt {
+            return Err(format!(
+                "Activation attempt mismatch for {}/{}: got {}, current {}.",
+                mission_id, node_id, attempt, current_attempt
+            ));
+        }
+
+        let key = (node_id.clone(), attempt);
+        let mut next_reason = reason;
+        let mut last_payload = None;
+
+        match status.as_str() {
+            "connecting" => {
+                let pending = active_mission
+                    .pending_runtime_activations
+                    .get_mut(&key)
+                    .ok_or_else(|| {
+                        format!(
+                            "No pending activation request found for {}/{} attempt {}.",
+                            mission_id, node_id, attempt
+                        )
+                    })?;
+                pending.status = "connecting".to_string();
+                if next_reason.is_some() {
+                    pending.reason = next_reason.clone();
+                }
+                last_payload = pending.payload.input_payload.clone();
+                active_mission
+                    .node_statuses
+                    .insert(node_id.clone(), "connecting".to_string());
+                active_mission.node_failure_reasons.remove(&node_id);
+            }
+            "ready" => {
+                let pending = active_mission
+                    .pending_runtime_activations
+                    .get_mut(&key)
+                    .ok_or_else(|| {
+                        format!(
+                            "No pending activation request found for {}/{} attempt {}.",
+                            mission_id, node_id, attempt
+                        )
+                    })?;
+                pending.status = "ready".to_string();
+                if next_reason.is_some() {
+                    pending.reason = next_reason.clone();
+                }
+                last_payload = pending.payload.input_payload.clone();
+                active_mission
+                    .node_statuses
+                    .insert(node_id.clone(), "ready".to_string());
+                active_mission.node_failure_reasons.remove(&node_id);
+            }
+            "running" => {
+                if let Some(pending) = active_mission.pending_runtime_activations.remove(&key) {
+                    last_payload = pending.payload.input_payload;
+                }
+                active_mission
+                    .node_statuses
+                    .insert(node_id.clone(), "running".to_string());
+                active_mission.node_failure_reasons.remove(&node_id);
+                next_reason = None;
+            }
+            "failed" => {
+                let pending = active_mission.pending_runtime_activations.remove(&key);
+                if let Some(pending) = pending {
+                    last_payload = pending.payload.input_payload;
+                }
+                let resolved_reason =
+                    next_reason.unwrap_or_else(|| "Runtime activation failed.".to_string());
+                next_reason = Some(resolved_reason.clone());
+                active_mission
+                    .node_statuses
+                    .insert(node_id.clone(), "failed".to_string());
+                active_mission
+                    .node_failure_reasons
+                    .insert(node_id.clone(), resolved_reason);
+            }
+            other => {
+                return Err(format!(
+                    "Unsupported activation status \"{}\". Expected connecting|ready|running|failed.",
+                    other
+                ));
+            }
+        }
+
+        (
+            role_id,
+            active_mission.node_waves.get(&node_id).cloned(),
+            last_payload,
+            status,
+            next_reason,
+            active_mission.mission.metadata.run_version,
+        )
+    };
+
+    persist_node_runtime(
+        &app,
+        &mission_id,
+        &node_id,
+        &role_id,
+        &next_status,
+        attempt,
+        current_wave_id.as_deref(),
+        None,
+        last_payload.as_deref(),
+    );
+    mark_runtime_session_status(&app, &mission_id, &node_id, attempt, &next_status);
+    emit_node_status(
+        &app,
+        &node_id,
+        &next_status,
+        Some(attempt),
+        None,
+        next_reason.clone(),
+    );
+
+    if next_status == "failed" {
+        if let Some(message) = next_reason.clone() {
+            emit_runtime_warning(&app, &mission_id, &node_id, message);
+        }
+    }
+
+    let timeline_payload = serde_json::json!({
+        "nodeId": node_id,
+        "attempt": attempt,
+        "status": next_status,
+        "reason": next_reason,
+    })
+    .to_string();
+    persist_mission_timeline_event(
+        &app,
+        &mission_id,
+        "activation_status",
+        Some(&timeline_payload),
+        run_version,
+    );
+
+    Ok(())
+}
+
+#[tauri::command]
 pub fn register_runtime_activation_dispatch(
     app: AppHandle,
     mission_id: String,
@@ -1065,36 +1821,20 @@ pub fn register_runtime_activation_dispatch(
     session_id: String,
     agent_id: String,
     terminal_id: String,
-    _activated_at: u64,
+    activated_at: u64,
 ) -> Result<(), String> {
-    let state = app.state::<DbState>();
-    let db_lock = state
-        .db
-        .lock()
-        .map_err(|_| "Failed to lock database".to_string())?;
-    let conn = db_lock.as_ref().ok_or("Database not initialized")?;
-
-    let changed = conn
-        .execute(
-            "UPDATE agent_runtime_sessions
-             SET status = 'dispatched', updated_at = CURRENT_TIMESTAMP
-             WHERE session_id = ?1
-               AND agent_id = ?2
-               AND mission_id = ?3
-               AND node_id = ?4
-               AND attempt = ?5
-               AND terminal_id = ?6",
-            params![session_id, agent_id, mission_id, node_id, attempt, terminal_id],
-        )
-        .map_err(|e| e.to_string())?;
-
-    if changed == 0 {
-        return Err(
-            "Runtime activation row not found or mismatched while marking dispatch.".to_string(),
-        );
-    }
-
-    Ok(())
+    println!(
+        "[Mission {}] Runtime dispatch registered: node={}, attempt={}, session={}, agent={}, terminal={}",
+        mission_id, node_id, attempt, session_id, agent_id, terminal_id
+    );
+    acknowledge_runtime_activation(
+        app,
+        mission_id,
+        node_id,
+        attempt,
+        "connecting".to_string(),
+        None,
+    )
 }
 
 #[tauri::command]
@@ -1122,7 +1862,7 @@ pub fn get_runtime_activation(
              LIMIT 1",
         )
         .map_err(|e| e.to_string())?
-        .query_row(params![mission_id, node_id, attempt], |row| {
+        .query_row(params![&mission_id, &node_id, attempt], |row| {
             Ok(RuntimeActivationRecord {
                 session_id: row.get(0)?,
                 agent_id: row.get(1)?,
@@ -1131,13 +1871,37 @@ pub fn get_runtime_activation(
                 attempt: row.get(4)?,
                 terminal_id: row.get(5)?,
                 status: row.get(6)?,
+                activation_id: None,
+                run_id: None,
+                status_reason: None,
+                activation_payload: None,
                 created_at: row.get(7)?,
                 updated_at: row.get(8)?,
             })
         });
 
     match row {
-        Ok(value) => Ok(Some(value)),
+        Ok(mut value) => {
+            let workflow_state = app.state::<WorkflowState>();
+            if let Ok(missions) = workflow_state.active_missions.lock() {
+                if let Some(active_mission) = missions.get(&mission_id) {
+                    let key = (node_id.clone(), attempt);
+                    if let Some(pending) = active_mission.pending_runtime_activations.get(&key) {
+                        value.status = pending.status.clone();
+                        value.activation_id = Some(pending.payload.activation_id.clone());
+                        value.run_id = Some(pending.payload.run_id.clone());
+                        value.status_reason = pending
+                            .reason
+                            .clone()
+                            .or_else(|| active_mission.node_failure_reasons.get(&node_id).cloned());
+                        value.activation_payload = serde_json::to_string(&pending.payload).ok();
+                    } else {
+                        value.status_reason = active_mission.node_failure_reasons.get(&node_id).cloned();
+                    }
+                }
+            }
+            Ok(Some(value))
+        }
         Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
         Err(error) => Err(error.to_string()),
     }
@@ -1187,25 +1951,37 @@ mod tests {
                 CompiledMissionNode {
                     id: "builder".to_string(),
                     role_id: "builder".to_string(),
+                    profile_id: None,
                     instruction_override: String::new(),
+                    capabilities: None,
+                    requirements: None,
                     terminal: test_terminal("builder"),
                 },
                 CompiledMissionNode {
                     id: "tester".to_string(),
                     role_id: "tester".to_string(),
+                    profile_id: None,
                     instruction_override: String::new(),
+                    capabilities: None,
+                    requirements: None,
                     terminal: test_terminal("tester"),
                 },
                 CompiledMissionNode {
                     id: "security".to_string(),
                     role_id: "security".to_string(),
+                    profile_id: None,
                     instruction_override: String::new(),
+                    capabilities: None,
+                    requirements: None,
                     terminal: test_terminal("security"),
                 },
                 CompiledMissionNode {
                     id: "reviewer".to_string(),
                     role_id: "reviewer".to_string(),
+                    profile_id: None,
                     instruction_override: String::new(),
+                    capabilities: None,
+                    requirements: None,
                     terminal: test_terminal("reviewer"),
                 },
             ],
@@ -1276,19 +2052,28 @@ mod tests {
                 CompiledMissionNode {
                     id: "source".to_string(),
                     role_id: "builder".to_string(),
+                    profile_id: None,
                     instruction_override: String::new(),
+                    capabilities: None,
+                    requirements: None,
                     terminal: test_terminal("source"),
                 },
                 CompiledMissionNode {
                     id: "success-node".to_string(),
                     role_id: "reviewer".to_string(),
+                    profile_id: None,
                     instruction_override: String::new(),
+                    capabilities: None,
+                    requirements: None,
                     terminal: test_terminal("success"),
                 },
                 CompiledMissionNode {
                     id: "failure-node".to_string(),
                     role_id: "reviewer".to_string(),
+                    profile_id: None,
                     instruction_override: String::new(),
+                    capabilities: None,
+                    requirements: None,
                     terminal: test_terminal("failure"),
                 },
             ],
@@ -1325,6 +2110,8 @@ mod tests {
             node_waves: HashMap::new(),
             node_last_outcomes: HashMap::new(),
             pending_activations: HashMap::new(),
+            pending_runtime_activations: HashMap::new(),
+            node_failure_reasons: HashMap::new(),
         }
     }
 
@@ -1358,7 +2145,7 @@ mod tests {
 
     #[test]
     fn status_follows_outcome() {
-        assert_eq!(outcome_to_status(&NodeOutcome::Success), "completed");
+        assert_eq!(outcome_to_status(&NodeOutcome::Success), "done");
         assert_eq!(outcome_to_status(&NodeOutcome::Failure), "failed");
     }
 
@@ -1369,7 +2156,7 @@ mod tests {
 
         mission
             .node_statuses
-            .insert("source".to_string(), "completed".to_string());
+            .insert("source".to_string(), "done".to_string());
         mission.node_attempts.insert("source".to_string(), 1);
         mission.node_waves.insert("source".to_string(), wave.clone());
         mission
@@ -1391,7 +2178,7 @@ mod tests {
         for node_id in ["builder", "tester", "security"] {
             mission
                 .node_statuses
-                .insert(node_id.to_string(), "completed".to_string());
+                .insert(node_id.to_string(), "done".to_string());
             mission.node_attempts.insert(node_id.to_string(), 1);
             mission
                 .node_waves
@@ -1417,7 +2204,7 @@ mod tests {
 
         mission
             .node_statuses
-            .insert("builder".to_string(), "completed".to_string());
+            .insert("builder".to_string(), "done".to_string());
         mission.node_attempts.insert("builder".to_string(), 2);
         mission
             .node_waves
@@ -1438,7 +2225,7 @@ mod tests {
         for node_id in ["builder", "tester", "security"] {
             mission
                 .node_statuses
-                .insert(node_id.to_string(), "completed".to_string());
+                .insert(node_id.to_string(), "done".to_string());
             mission.node_attempts.insert(node_id.to_string(), 1);
             mission
                 .node_waves
@@ -1475,7 +2262,10 @@ mod tests {
             nodes: vec![CompiledMissionNode {
                 id: "doc".to_string(),
                 role_id: "builder".to_string(),
+                profile_id: None,
                 instruction_override: String::new(),
+                capabilities: None,
+                requirements: None,
                 terminal: test_terminal("doc"),
             }],
             edges: vec![],
@@ -1492,7 +2282,10 @@ mod tests {
             nodes: vec![CompiledMissionNode {
                 id: "doc".to_string(),
                 role_id: "builder".to_string(),
+                profile_id: None,
                 instruction_override: String::new(),
+                capabilities: None,
+                requirements: None,
                 terminal: test_terminal("doc"),
             }],
             edges: vec![CompiledMissionEdge {

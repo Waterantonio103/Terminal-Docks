@@ -849,7 +849,20 @@ export function getBroadcastHistory() {
   return [...broadcastHistory];
 }
 
-export function executeConnectAgent({ role, agentId, terminalId, cli, profileId, capabilities, workingDir }, sessionId = 'unknown') {
+export function executeConnectAgent(
+  { role, agentId, terminalId, cli, profileId, capabilities, workingDir },
+  sessionId = 'unknown',
+  options = {},
+) {
+  const {
+    silent = false,
+    source = 'connect',
+    missionId = null,
+    nodeId = null,
+    attempt = null,
+    activationId = null,
+    runId = null,
+  } = options;
   const sid = sessionId ?? 'unknown';
   const normalizedRole = typeof role === 'string' && role.trim() ? role.trim().toLowerCase() : null;
   const explicitCapabilities = normalizeCapabilities(capabilities);
@@ -874,7 +887,7 @@ export function executeConnectAgent({ role, agentId, terminalId, cli, profileId,
 
   const message = `Role: ${role}. Agent "${agentId}" is online and ready. (Session: ${sid})`;
 
-  logSession(sid, 'connect', JSON.stringify({
+  logSession(sid, source, JSON.stringify({
     agentId,
     role,
     profileId: sessions[sid].profileId,
@@ -882,27 +895,45 @@ export function executeConnectAgent({ role, agentId, terminalId, cli, profileId,
     cli: cli ?? null,
     capabilities: normalizedCapabilities,
     workingDir: sessions[sid].workingDir,
+    missionId,
+    nodeId,
+    attempt,
+    activationId,
+    runId,
   }));
 
-  const targets = Object.keys(sessions).filter(id => id !== sid);
-  const ts = Date.now();
-  for (const targetSid of targets) {
-    if (!messageQueues[targetSid]) messageQueues[targetSid] = [];
-    messageQueues[targetSid].push({ from: agentId, text: `[BROADCAST] ${message}`, timestamp: ts });
+  if (!silent) {
+    const targets = Object.keys(sessions).filter(id => id !== sid);
+    const ts = Date.now();
+    for (const targetSid of targets) {
+      if (!messageQueues[targetSid]) messageQueues[targetSid] = [];
+      messageQueues[targetSid].push({ from: agentId, text: `[BROADCAST] ${message}`, timestamp: ts });
+    }
+
+    broadcast('Bridge', JSON.stringify({
+      sessionId: sid,
+      agentId,
+      role,
+      profileId: sessions[sid].profileId,
+      terminalId: terminalId ?? null,
+      cli: cli ?? null,
+      capabilities: normalizedCapabilities,
+      workingDir: sessions[sid].workingDir,
+    }), 'agent_connected');
+
+    broadcast('Bridge', `Agent "${agentId}" (${role}) connected via session ${sid}`);
+  } else {
+    broadcast('Bridge', JSON.stringify({
+      sessionId: sid,
+      missionId,
+      nodeId,
+      attempt,
+      role,
+      profileId: sessions[sid].profileId,
+      terminalId: terminalId ?? null,
+      cli: cli ?? null,
+    }), 'runtime_registration');
   }
-
-  broadcast('Bridge', JSON.stringify({
-    sessionId: sid,
-    agentId,
-    role,
-    profileId: sessions[sid].profileId,
-    terminalId: terminalId ?? null,
-    cli: cli ?? null,
-    capabilities: normalizedCapabilities,
-    workingDir: sessions[sid].workingDir,
-  }), 'agent_connected');
-
-  broadcast('Bridge', `Agent "${agentId}" (${role}) connected via session ${sid}`);
 
   emitAgentEvent({
     type: 'agent:ready',
@@ -910,10 +941,184 @@ export function executeConnectAgent({ role, agentId, terminalId, cli, profileId,
     agentId: agentId ?? null,
     profileId: sessions[sid].profileId ?? null,
     role: normalizedRole,
+    missionId: missionId ?? undefined,
+    nodeId: nodeId ?? undefined,
+    attempt: Number.isInteger(attempt) ? attempt : undefined,
     at: Date.now(),
   });
 
   return makeToolText(`Successfully connected to terminal-docks bridge.\nSession ID: ${sid}\nStatus: Online`);
+}
+
+function validateRuntimeBootstrapRegistration({ sessionId, missionId, nodeId, attempt }) {
+  if (typeof sessionId !== 'string' || !sessionId.trim()) {
+    return { ok: false, code: 'missing_session', message: 'Runtime bootstrap is missing sessionId.' };
+  }
+  if (typeof missionId !== 'string' || !missionId.trim()) {
+    return { ok: false, code: 'missing_mission', message: 'Runtime bootstrap is missing missionId.' };
+  }
+  if (typeof nodeId !== 'string' || !nodeId.trim()) {
+    return { ok: false, code: 'missing_node', message: 'Runtime bootstrap is missing nodeId.' };
+  }
+  if (!Number.isInteger(attempt) || attempt <= 0) {
+    return { ok: false, code: 'invalid_attempt', message: 'Runtime bootstrap requires attempt >= 1.' };
+  }
+
+  const nodeRuntime = db.prepare(
+    `SELECT status, attempt
+       FROM mission_node_runtime
+      WHERE mission_id = ? AND node_id = ?`
+  ).get(missionId, nodeId);
+  if (!nodeRuntime) {
+    return {
+      ok: false,
+      code: 'missing_runtime',
+      message: `No mission runtime state found for ${missionId}/${nodeId}.`,
+    };
+  }
+
+  const currentAttempt = Number(nodeRuntime.attempt ?? 0);
+  if (currentAttempt !== attempt) {
+    return {
+      ok: false,
+      code: 'stale_attempt',
+      message: `Stale runtime bootstrap for ${missionId}/${nodeId}: got attempt ${attempt}, current attempt ${currentAttempt}.`,
+    };
+  }
+
+  if (['done', 'failed', 'unbound'].includes(String(nodeRuntime.status ?? ''))) {
+    return {
+      ok: false,
+      code: 'terminal_state',
+      message: `Runtime bootstrap rejected because node is already ${nodeRuntime.status}.`,
+    };
+  }
+
+  const runtimeSession = db.prepare(
+    `SELECT session_id, attempt
+       FROM agent_runtime_sessions
+      WHERE session_id = ? AND mission_id = ? AND node_id = ?
+      ORDER BY updated_at DESC
+      LIMIT 1`
+  ).get(sessionId, missionId, nodeId);
+  if (!runtimeSession) {
+    return {
+      ok: false,
+      code: 'missing_activation',
+      message: `No runtime activation row found for session ${sessionId}.`,
+    };
+  }
+
+  const recordedAttempt = Number(runtimeSession.attempt ?? 0);
+  if (recordedAttempt !== attempt) {
+    return {
+      ok: false,
+      code: 'stale_activation',
+      message: `Runtime session ${sessionId} attempt mismatch: got ${attempt}, recorded ${recordedAttempt}.`,
+    };
+  }
+
+  return { ok: true };
+}
+
+export function executeRuntimeBootstrapRegistration({
+  sessionId,
+  missionId,
+  nodeId,
+  attempt,
+  role,
+  profileId,
+  agentId,
+  terminalId,
+  cli,
+  capabilities,
+  workingDir,
+  activationId = null,
+  runId = null,
+}) {
+  const validation = validateRuntimeBootstrapRegistration({ sessionId, missionId, nodeId, attempt });
+  if (!validation.ok) {
+    return validation;
+  }
+
+  executeConnectAgent(
+    {
+      role,
+      agentId,
+      terminalId,
+      cli,
+      profileId,
+      capabilities,
+      workingDir,
+    },
+    sessionId,
+    {
+      silent: true,
+      source: 'runtime_bootstrap',
+      missionId,
+      nodeId,
+      attempt,
+      activationId,
+      runId,
+    },
+  );
+
+  db.prepare(
+    `UPDATE agent_runtime_sessions
+        SET status = 'registered', updated_at = CURRENT_TIMESTAMP
+      WHERE session_id = ?`
+  ).run(sessionId);
+
+  return {
+    ok: true,
+    sessionId,
+    missionId,
+    nodeId,
+    attempt,
+    connectedAt: Date.now(),
+    session: summarizeSession(sessionId, sessions[sessionId] ?? {}),
+  };
+}
+
+export function executeRuntimeDisconnect({
+  sessionId,
+  missionId = null,
+  nodeId = null,
+  attempt = null,
+  reason = null,
+}) {
+  if (typeof sessionId !== 'string' || !sessionId.trim()) {
+    return { ok: false, code: 'missing_session', message: 'runtime disconnect requires sessionId.' };
+  }
+  const sid = sessionId.trim();
+  const existed = Boolean(sessions[sid]);
+  if (existed) {
+    delete sessions[sid];
+  }
+
+  db.prepare(
+    `UPDATE agent_runtime_sessions
+        SET status = 'disconnected', updated_at = CURRENT_TIMESTAMP
+      WHERE session_id = ?`
+  ).run(sid);
+
+  logSession(
+    sid,
+    'runtime_disconnected',
+    JSON.stringify({ missionId, nodeId, attempt, reason }),
+  );
+
+  emitAgentEvent({
+    type: 'agent:disconnected',
+    sessionId: sid,
+    missionId: missionId ?? undefined,
+    nodeId: nodeId ?? undefined,
+    attempt: Number.isInteger(attempt) ? attempt : undefined,
+    reason: typeof reason === 'string' ? reason : undefined,
+    at: Date.now(),
+  });
+
+  return { ok: true, sessionId: sid, disconnected: existed };
 }
 
 export function executeReceiveMessages({ missionId, nodeId, afterSeq, ackThroughSeq } = {}, sessionId) {
@@ -977,8 +1182,46 @@ export function executeReceiveMessages({ missionId, nodeId, afterSeq, ackThrough
   return makeToolText(text);
 }
 
+function normalizeCompletionStatus(value) {
+  if (value === 'success' || value === 'failure') return value;
+  if (typeof value !== 'string') return null;
+  const normalized = value.trim().toLowerCase();
+  return normalized === 'success' || normalized === 'failure' ? normalized : null;
+}
+
+function normalizeStringArray(input) {
+  if (!Array.isArray(input)) return [];
+  return input
+    .map(value => (typeof value === 'string' ? value.trim() : ''))
+    .filter(Boolean);
+}
+
+function buildStructuredCompletionPayload({
+  completion,
+  payload,
+  title,
+  description,
+  finalOutcome,
+}) {
+  const completionObj = completion && typeof completion === 'object' ? completion : {};
+  const status = finalOutcome
+    ?? normalizeCompletionStatus(completionObj.status)
+    ?? 'success';
+  const summary = typeof completionObj.summary === 'string' && completionObj.summary.trim()
+    ? completionObj.summary.trim()
+    : (typeof description === 'string' && description.trim() ? description.trim() : String(title ?? 'Handoff completed'));
+
+  return {
+    status,
+    summary,
+    artifactReferences: normalizeStringArray(completionObj.artifactReferences),
+    filesChanged: normalizeStringArray(completionObj.filesChanged),
+    downstreamPayload: completionObj.downstreamPayload !== undefined ? completionObj.downstreamPayload : (payload ?? null),
+  };
+}
+
 export function executeHandoffTask(
-  { fromRole: rawFrom, targetRole: rawTarget, title, description, payload, parentTaskId, missionId, fromNodeId, targetNodeId, outcome, fromAttempt },
+  { fromRole: rawFrom, targetRole: rawTarget, title, description, payload, completion, parentTaskId, missionId, fromNodeId, targetNodeId, outcome, fromAttempt },
   sessionId = 'unknown',
 ) {
   const sid = sessionId ?? 'unknown';
@@ -1016,7 +1259,16 @@ export function executeHandoffTask(
     }
   }
 
-  const payloadStr = payload === undefined ? null : (typeof payload === 'string' ? payload : JSON.stringify(payload));
+  const finalOutcome = validatedGraph?.outcome ?? normalizeCompletionStatus(outcome);
+  const finalAttempt = validatedGraph?.fromAttempt ?? fromAttempt ?? null;
+  const structuredCompletion = buildStructuredCompletionPayload({
+    completion,
+    payload,
+    title,
+    description,
+    finalOutcome,
+  });
+  const payloadStr = JSON.stringify(structuredCompletion);
 
   let taskId = null;
   if (targetRole !== 'done') {
@@ -1036,9 +1288,10 @@ export function executeHandoffTask(
       targetNodeId,
       fromRole,
         targetRole,
-        outcome: validatedGraph?.outcome ?? outcome ?? null,
-        fromAttempt: validatedGraph?.fromAttempt ?? fromAttempt ?? null,
+        outcome: finalOutcome ?? structuredCompletion.status,
+        fromAttempt: finalAttempt,
         payload: payloadStr,
+        completion: structuredCompletion,
       });
     db.prepare(
       "INSERT INTO session_log (session_id, event_type, content, mission_id, node_id, recipient_node_id, is_read) VALUES (?, 'message', ?, ?, ?, ?, 0)"
@@ -1053,8 +1306,10 @@ export function executeHandoffTask(
     missionId,
     fromNodeId,
     targetNodeId,
-    outcome: validatedGraph?.outcome ?? outcome ?? null,
-    fromAttempt: validatedGraph?.fromAttempt ?? fromAttempt ?? null,
+    outcome: finalOutcome ?? structuredCompletion.status,
+    fromAttempt: finalAttempt,
+    completionStatus: structuredCompletion.status,
+    filesChanged: structuredCompletion.filesChanged,
   }));
 
   const eventBody = {
@@ -1064,11 +1319,12 @@ export function executeHandoffTask(
     title,
     description: description ?? null,
     payload: payloadStr,
+    completion: structuredCompletion,
     missionId,
     fromNodeId,
     targetNodeId,
-    outcome: validatedGraph?.outcome ?? outcome ?? null,
-    fromAttempt: validatedGraph?.fromAttempt ?? fromAttempt ?? null,
+    outcome: finalOutcome ?? structuredCompletion.status,
+    fromAttempt: finalAttempt,
   };
   broadcast(fromRole ?? 'graph', JSON.stringify(eventBody), 'handoff');
   if (taskId !== null) {
@@ -1082,23 +1338,22 @@ export function executeHandoffTask(
       targetNodeId,
     }), 'task_update');
   }
-  const suffix = validatedGraph?.outcome ? ` [${validatedGraph.outcome}]` : '';
+  const suffix = finalOutcome ? ` [${finalOutcome}]` : '';
   const taskSuffix = taskId ? ` (task ${taskId}: "${title}")` : '';
   broadcast(
     'Bridge',
     `Handoff: ${fromRole}${fromNodeId ? `(${fromNodeId})` : ''} → ${targetRole}${targetNodeId ? `(${targetNodeId})` : ''}${suffix}${taskSuffix}`,
   );
 
-  const finalOutcome = validatedGraph?.outcome ?? outcome ?? null;
-  const finalAttempt = validatedGraph?.fromAttempt ?? fromAttempt ?? null;
-  if (missionId && fromNodeId && (finalOutcome === 'success' || finalOutcome === 'failure')) {
+  const outcomeForEvent = finalOutcome ?? structuredCompletion.status;
+  if (missionId && fromNodeId && (outcomeForEvent === 'success' || outcomeForEvent === 'failure')) {
     emitAgentEvent({
       type: 'task:completed',
       sessionId: sid,
       missionId,
       nodeId: fromNodeId,
       attempt: Number.isInteger(finalAttempt) ? finalAttempt : null,
-      outcome: finalOutcome,
+      outcome: outcomeForEvent,
       targetNodeId: targetNodeId ?? null,
       at: Date.now(),
     });
@@ -1605,6 +1860,13 @@ function createMcpServer(getSessionId) {
       title: z.string().min(1).describe('Short summary of what is being handed off'),
       description: z.string().optional().describe('Longer notes for the receiving role'),
       payload: z.any().optional().describe('Structured data for the next role (any JSON value)'),
+      completion: z.object({
+        status: z.enum(['success', 'failure']).optional().describe('Structured completion status. In graph mode this is inferred from outcome when omitted.'),
+        summary: z.string().optional().describe('Execution summary of this node outcome.'),
+        artifactReferences: z.array(z.string()).optional().describe('Artifact references (URLs, ids, or generated outputs).'),
+        filesChanged: z.array(z.string()).optional().describe('Files touched during this node execution.'),
+        downstreamPayload: z.any().optional().describe('Explicit payload delivered to the downstream node.'),
+      }).optional(),
       parentTaskId: z.number().int().optional().describe('Parent task id if this is a subtask of an existing task'),
       missionId: z.string().optional().describe('The ID of the active mission graph'),
       fromNodeId: z.string().optional().describe('Your specific node ID in the graph'),
@@ -2185,11 +2447,39 @@ The Mission Control panel displays published results in real time.
       nodeId: z.string().optional(),
       attempt: z.number().int().positive().optional(),
       outcome: z.enum(['success', 'failure']).optional(),
+      label: z.string().optional().describe('Short label for the artifact list'),
     }
-  }, async ({ content, type, agentId, missionId, nodeId, attempt, outcome }) => {
+  }, async ({ content, type, agentId, missionId, nodeId, attempt, outcome, label }) => {
     const sid = getSessionId();
     broadcast(agentId ?? sid ?? 'Agent', content, `result:${type}`);
+    
     if (sid && missionId && nodeId) {
+      if (type === 'markdown') {
+        emitAgentEvent({
+          type: 'agent:artifact',
+          sessionId: sid,
+          at: Date.now(),
+          missionId,
+          nodeId,
+          attempt: attempt ?? 1,
+          artifactType: 'summary',
+          label: label ?? 'Summary',
+          content: content.slice(0, 200) + (content.length > 200 ? '...' : ''),
+        });
+      } else if (type === 'url') {
+        emitAgentEvent({
+          type: 'agent:artifact',
+          sessionId: sid,
+          at: Date.now(),
+          missionId,
+          nodeId,
+          attempt: attempt ?? 1,
+          artifactType: 'reference',
+          label: label ?? 'Preview URL',
+          content: content,
+        });
+      }
+
       emitAgentEvent({
         type: 'task:completed',
         sessionId: sid,
@@ -2201,6 +2491,41 @@ The Mission Control panel displays published results in real time.
       });
     }
     return { content: [{ type: 'text', text: 'Result published to Mission Control.' }] };
+  });
+
+  server.registerTool('report_artifact', {
+    title: 'Report Artifact',
+    description: 'Report a created or modified artifact (file, summary, or reference) during node execution for real-time progress surfacing.',
+    inputSchema: {
+      missionId: z.string().min(1),
+      nodeId: z.string().min(1),
+      attempt: z.number().int().positive(),
+      artifactType: z.enum(['file_change', 'summary', 'reference']),
+      label: z.string().min(1).describe('A short, descriptive label (e.g. filename or section title)'),
+      content: z.string().optional().describe('Optional content for summaries or small files'),
+      path: z.string().optional().describe('Optional file path for file_change artifacts'),
+    }
+  }, async ({ missionId, nodeId, attempt, artifactType, label, content, path }) => {
+    const sid = getSessionId();
+    const event = {
+      type: 'agent:artifact',
+      sessionId: sid ?? 'unknown',
+      at: Date.now(),
+      missionId,
+      nodeId,
+      attempt,
+      artifactType,
+      label,
+      content,
+      path,
+    };
+    
+    emitAgentEvent(event);
+    
+    // Also broadcast so UI can pick it up via mcp-message event
+    broadcast(nodeId, JSON.stringify(event), 'artifact');
+    
+    return { content: [{ type: 'text', text: `Artifact "${label}" reported.` }] };
   });
 
   server.registerTool('announce', {
@@ -2372,6 +2697,52 @@ app.post('/internal/push', (req, res) => {
     return res.json({ ok: true });
   }
 
+  if (body.type === 'runtime_bootstrap') {
+    emitAgentEvent({
+      type: 'bootstrap:requested',
+      sessionId: body.sessionId,
+      missionId: body.missionId,
+      nodeId: body.nodeId,
+      attempt: Number.isInteger(body.attempt) ? body.attempt : null,
+      at: Date.now(),
+    });
+
+    const result = executeRuntimeBootstrapRegistration({
+      sessionId: body.sessionId,
+      missionId: body.missionId,
+      nodeId: body.nodeId,
+      attempt: Number(body.attempt),
+      role: body.role,
+      profileId: body.profileId,
+      agentId: body.agentId,
+      terminalId: body.terminalId,
+      cli: body.cli,
+      capabilities: body.capabilities,
+      workingDir: body.workingDir,
+      activationId: body.activationId ?? null,
+      runId: body.runId ?? null,
+    });
+
+    if (!result.ok) {
+      return res.status(409).json(result);
+    }
+    return res.json(result);
+  }
+
+  if (body.type === 'runtime_disconnected') {
+    const result = executeRuntimeDisconnect({
+      sessionId: body.sessionId,
+      missionId: body.missionId ?? null,
+      nodeId: body.nodeId ?? null,
+      attempt: Number.isInteger(body.attempt) ? body.attempt : null,
+      reason: body.reason ?? null,
+    });
+    if (!result.ok) {
+      return res.status(400).json(result);
+    }
+    return res.json(result);
+  }
+
   return res.status(400).json({ error: 'Unsupported push type' });
 });
 
@@ -2479,4 +2850,3 @@ const isMainModule = Boolean(process.argv[1]) &&
 if (process.env.MCP_DISABLE_HTTP !== '1' && isMainModule) {
   startHttpServer();
 }
-

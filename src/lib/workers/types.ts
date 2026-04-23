@@ -78,6 +78,7 @@ export interface McpServerEvent {
     | 'agent:ready'
     | 'agent:heartbeat'
     | 'agent:disconnected'
+    | 'agent:artifact'
     | 'task:acked'
     | 'task:completed'
     | 'task:pushed'
@@ -94,4 +95,9 @@ export interface McpServerEvent {
   profileId?: string | null;
   role?: string | null;
   key?: string;
+  reason?: string;
+  artifactType?: 'file_change' | 'summary' | 'reference';
+  label?: string;
+  content?: string;
+  path?: string;
 }

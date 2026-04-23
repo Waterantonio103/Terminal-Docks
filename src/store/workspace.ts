@@ -10,7 +10,18 @@ export function arrayMove<T>(array: T[], fromIndex: number, toIndex: number): T[
 }
 
 export type PaneType = 'terminal' | 'editor' | 'taskboard' | 'activityfeed' | 'launcher' | 'missioncontrol' | 'nodetree';
-export type WorkflowNodeStatus = 'idle' | 'waiting' | 'running' | 'completed' | 'failed';
+export type WorkflowNodeStatus =
+  | 'idle'
+  | 'unbound'
+  | 'launching'
+  | 'connecting'
+  | 'ready'
+  | 'running'
+  | 'handoff_pending'
+  | 'waiting'
+  | 'done'
+  | 'completed'
+  | 'failed';
 export type WorkflowMode = 'build' | 'edit';
 export type WorkflowEdgeCondition = 'always' | 'on_success' | 'on_failure';
 export type WorkflowAgentCli = 'claude' | 'gemini' | 'opencode' | 'codex';
@@ -124,6 +135,15 @@ export interface CompiledMission {
   edges: CompiledMissionEdge[];
 }
 
+export interface MissionArtifact {
+  id: string;
+  type: 'file_change' | 'summary' | 'reference';
+  label: string;
+  content?: string;
+  path?: string;
+  timestamp: number;
+}
+
 export interface MissionAttemptRecord {
   attempt: number;
   status: WorkflowNodeStatus;
@@ -131,6 +151,7 @@ export interface MissionAttemptRecord {
   completedAt?: number;
   outcome?: 'success' | 'failure';
   payloadPreview?: string | null;
+  artifacts?: MissionArtifact[];
 }
 
 export interface MissionAgent {
@@ -145,8 +166,16 @@ export interface MissionAgent {
   completedAt?: number;
   lastOutcome?: 'success' | 'failure';
   lastPayload?: string | null;
+  lastError?: string | null;
   attemptHistory?: MissionAttemptRecord[];
   nodeId?: string;
+  runtimeSessionId?: string | null;
+  runtimeCli?: WorkflowAgentCli | null;
+  runtimeBootstrapState?: 'bound' | 'registering' | 'registered' | 'disconnected' | 'failed';
+  runtimeBootstrapReason?: string | null;
+  runtimeRegisteredAt?: number;
+  runtimeLastHeartbeatAt?: number;
+  artifacts?: MissionArtifact[];
 }
 
 export type ThemeType =

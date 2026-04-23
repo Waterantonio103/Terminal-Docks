@@ -1,7 +1,6 @@
 pub mod db;
 pub mod pty;
 pub mod mcp;
-pub mod node_graph;
 pub mod swarm;
 pub mod workflow;
 pub mod workflow_engine;
@@ -44,13 +43,16 @@ pub fn run() {
             db::get_session_history,
             mcp::get_mcp_url,
             mcp::get_mcp_base_url,
+            mcp::mcp_register_runtime_session,
             mcp::mcp_notify_agent,
             swarm::get_swarm_status,
             swarm::watch_directory,
             workflow_log::export_workflow_log,
             workflow_engine::start_mission_graph,
+            workflow_engine::retry_mission_node,
             workflow_engine::append_mission_patch,
             workflow_engine::register_runtime_activation_dispatch,
+            workflow_engine::acknowledge_runtime_activation,
             workflow_engine::get_runtime_activation,
         ])
         .setup(|app| {

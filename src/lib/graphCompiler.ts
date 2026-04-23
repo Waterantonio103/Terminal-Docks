@@ -15,6 +15,7 @@ import type {
   WorkflowNodeStatus,
 } from '../store/workspace.js';
 import { deriveExecutionLayers } from './graphUtils.js';
+import agentsConfig from '../config/agents.js';
 
 type FlowNodeLike = Pick<Node, 'id' | 'type' | 'position' | 'parentId' | 'extent' | 'style'> & {
   data?: Record<string, unknown>;
@@ -36,6 +37,9 @@ const NODE_STATUS_FALLBACK: WorkflowNodeStatus = 'idle';
 const AGENT_CLI_FALLBACK: WorkflowAgentCli = 'claude';
 const MODE_FALLBACK: WorkflowMode = 'build';
 const WORKER_CAPABILITY_IDS: WorkerCapabilityId[] = ['planning', 'coding', 'testing', 'review', 'security', 'repo_analysis', 'shell_execution'];
+const CORE_INSTRUCTION_BY_ROLE = new Map(
+  agentsConfig.agents.map(agent => [agent.id, agent.coreInstructions ?? ''])
+);
 
 function asString(value: unknown): string | undefined {
   return typeof value === 'string' ? value : undefined;
@@ -124,7 +128,18 @@ function getNodeKind(node: FlowNodeLike): RuntimeNodeKind {
 
 function getNodeStatus(node: FlowNodeLike): WorkflowNodeStatus {
   const status = node.data?.status;
-  if (status === 'waiting' || status === 'running' || status === 'completed' || status === 'failed') {
+  if (
+    status === 'unbound' ||
+    status === 'launching' ||
+    status === 'connecting' ||
+    status === 'ready' ||
+    status === 'handoff_pending' ||
+    status === 'waiting' ||
+    status === 'running' ||
+    status === 'done' ||
+    status === 'completed' ||
+    status === 'failed'
+  ) {
     return status;
   }
   return NODE_STATUS_FALLBACK;
@@ -568,11 +583,15 @@ export function compileMission({
       throw new Error(`Agent node ${nodeId} is missing a terminal binding. Please select a terminal in the node properties.`);
     }
 
+    const roleId = trimToUndefined(node.data?.roleId) ?? 'agent';
+    const instructionOverride = asString(node.data?.instructionOverride) ?? '';
+    const roleInstructions = instructionOverride.trim() || CORE_INSTRUCTION_BY_ROLE.get(roleId)?.trim() || '';
+
     return {
       id: node.id,
-      roleId: trimToUndefined(node.data?.roleId) ?? 'agent',
+      roleId,
       profileId: trimToUndefined(node.data?.profileId),
-      instructionOverride: asString(node.data?.instructionOverride) ?? '',
+      instructionOverride: roleInstructions,
       capabilities: normalizeCapabilities(node.data?.capabilities),
       requirements: normalizeTaskRequirements(node.data?.requirements),
       terminal: {

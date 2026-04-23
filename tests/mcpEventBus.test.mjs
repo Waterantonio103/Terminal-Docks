@@ -16,6 +16,8 @@ const {
   recordTaskPush,
   ackTaskPush,
   executeConnectAgent,
+  executeRuntimeBootstrapRegistration,
+  executeRuntimeDisconnect,
   executeReceiveMessages,
   executeHandoffTask,
   seedCompiledMission,
@@ -98,6 +100,85 @@ try {
     assert.ok(received.every(ev => ev.sessionId === 'connect-sess'));
   });
 
+  run('runtime bootstrap registration validates attempt and emits ready', () => {
+    resetBridgeState();
+    seedMissionNodeRuntime({
+      missionId: 'boot-mission',
+      nodeId: 'boot-node',
+      roleId: 'builder',
+      status: 'launching',
+      attempt: 2,
+    });
+    seedAgentRuntimeSession({
+      sessionId: 'session:boot-mission:boot-node:2',
+      agentId: 'agent:boot-mission:boot-node:term-boot',
+      missionId: 'boot-mission',
+      nodeId: 'boot-node',
+      attempt: 2,
+      terminalId: 'term-boot',
+      status: 'launching',
+    });
+
+    const received = [];
+    const handler = ev => received.push(ev);
+    agentEvents.on('sid:session:boot-mission:boot-node:2', handler);
+
+    const result = executeRuntimeBootstrapRegistration({
+      sessionId: 'session:boot-mission:boot-node:2',
+      missionId: 'boot-mission',
+      nodeId: 'boot-node',
+      attempt: 2,
+      role: 'builder',
+      profileId: 'builder_profile',
+      agentId: 'agent:boot-mission:boot-node:term-boot',
+      terminalId: 'term-boot',
+      cli: 'claude',
+      workingDir: '/tmp',
+      activationId: 'activation:boot-mission:boot-node:2',
+      runId: 'run:boot-mission:v1',
+    });
+
+    agentEvents.off('sid:session:boot-mission:boot-node:2', handler);
+    assert.equal(result.ok, true);
+    assert.equal(result.sessionId, 'session:boot-mission:boot-node:2');
+    assert.ok(received.some(ev => ev.type === 'agent:ready'));
+  });
+
+  run('runtime bootstrap registration rejects stale attempts', () => {
+    resetBridgeState();
+    seedMissionNodeRuntime({
+      missionId: 'stale-mission',
+      nodeId: 'stale-node',
+      roleId: 'builder',
+      status: 'launching',
+      attempt: 3,
+    });
+    seedAgentRuntimeSession({
+      sessionId: 'session:stale-mission:stale-node:3',
+      agentId: 'agent:stale-mission:stale-node:term-stale',
+      missionId: 'stale-mission',
+      nodeId: 'stale-node',
+      attempt: 3,
+      terminalId: 'term-stale',
+      status: 'launching',
+    });
+
+    const result = executeRuntimeBootstrapRegistration({
+      sessionId: 'session:stale-mission:stale-node:3',
+      missionId: 'stale-mission',
+      nodeId: 'stale-node',
+      attempt: 2,
+      role: 'builder',
+      profileId: 'builder_profile',
+      agentId: 'agent:stale-mission:stale-node:term-stale',
+      terminalId: 'term-stale',
+      cli: 'claude',
+    });
+
+    assert.equal(result.ok, false);
+    assert.equal(result.code, 'stale_attempt');
+  });
+
   run('agent:heartbeat emits on non-graph receive_messages', () => {
     const received = [];
     const handler = ev => received.push(ev);
@@ -160,6 +241,29 @@ try {
     assert.equal(completed.outcome, 'success');
     assert.equal(completed.missionId, 'evt-mission');
     assert.equal(completed.nodeId, 'builder-node');
+  });
+
+  run('runtime disconnect emits agent:disconnected', () => {
+    resetBridgeState();
+    executeConnectAgent(
+      { role: 'builder', agentId: 'builder-2', terminalId: 'term-z', cli: 'claude' },
+      'disconnect-sess',
+    );
+
+    const received = [];
+    const handler = ev => received.push(ev);
+    agentEvents.on('sid:disconnect-sess', handler);
+    const result = executeRuntimeDisconnect({
+      sessionId: 'disconnect-sess',
+      missionId: 'disc-mission',
+      nodeId: 'disc-node',
+      attempt: 1,
+      reason: 'pty exited',
+    });
+    agentEvents.off('sid:disconnect-sess', handler);
+
+    assert.equal(result.ok, true);
+    assert.ok(received.some(ev => ev.type === 'agent:disconnected'));
   });
 
   run('getRecentAgentEvents filters by session id', () => {

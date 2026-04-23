@@ -53,10 +53,24 @@ pub struct CompiledMissionTerminalBinding {
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
+pub struct WorkerCapability {
+    pub id: String,
+    pub level: Option<u8>,
+    pub verified_by: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct CompiledMissionNode {
     pub id: String,
     pub role_id: String,
+    #[serde(default)]
+    pub profile_id: Option<String>,
     pub instruction_override: String,
+    #[serde(default)]
+    pub capabilities: Option<Vec<WorkerCapability>>,
+    #[serde(default)]
+    pub requirements: Option<serde_json::Value>,
     pub terminal: CompiledMissionTerminalBinding,
 }
 

@@ -50,6 +50,11 @@ struct Payload {
     data: Vec<u8>,
 }
 
+#[derive(Clone, serde::Serialize)]
+struct PtyExitPayload {
+    id: String,
+}
+
 #[tauri::command]
 pub fn spawn_pty(
     app: AppHandle,
@@ -141,6 +146,7 @@ pub fn spawn_pty(
                 Err(_) => break,
             }
         }
+        let _ = app.emit("pty-exit", PtyExitPayload { id });
     });
 
     Ok(true)
@@ -225,6 +231,7 @@ pub fn spawn_pty_with_command(
                 Err(_) => break,
             }
         }
+        let _ = app.emit("pty-exit", PtyExitPayload { id });
     });
 
     Ok(true)

@@ -8,6 +8,84 @@ export interface WorkflowNodeTriggeredPayload {
   activatedAt: number;
   attempt: number;
   payload?: string | null;
+  runId?: string;
+  cliType?: string;
+  goal?: string;
+  workspaceDir?: string | null;
+  assignment?: RuntimeAssignmentPayload;
+}
+
+export interface RuntimeExpectedActionContract {
+  signal: string;
+  requiredFollowUp: string[];
+  handoffContract: string;
+}
+
+export type AssignmentEdgeCondition = 'always' | 'on_success' | 'on_failure';
+export type NodeCompletionStatus = 'success' | 'failure';
+
+export interface RuntimeAssignmentLegalTarget {
+  targetNodeId: string;
+  targetRoleId: string;
+  condition: AssignmentEdgeCondition;
+  allowedOutcomes: NodeCompletionStatus[];
+}
+
+export interface RuntimeAssignmentPayload {
+  roleInstructions: string;
+  missionGoal: string;
+  upstreamOutputs: unknown;
+  workspaceContext: {
+    workspaceDir: string | null;
+    missionId: string;
+    nodeId: string;
+    runId: string;
+    attempt: number;
+  };
+  expectedDeliverable: {
+    schema: 'completion_payload_v1';
+    requiredFields: ['status', 'summary', 'artifactReferences', 'filesChanged', 'downstreamPayload'];
+    statusOptions: NodeCompletionStatus[];
+    notes: string;
+  };
+  handoff: {
+    fromNodeIds: string[];
+    legalTargets: RuntimeAssignmentLegalTarget[];
+  };
+}
+
+export interface StructuredCompletionPayload {
+  status: NodeCompletionStatus;
+  summary: string;
+  artifactReferences: string[];
+  filesChanged: string[];
+  downstreamPayload: unknown;
+}
+
+export interface RuntimeActivationPayload {
+  activationId: string;
+  missionId: string;
+  runId: string;
+  nodeId: string;
+  role: string;
+  profileId?: string | null;
+  capabilities?: Array<{
+    id: string;
+    level?: number;
+    verifiedBy?: string;
+  }> | null;
+  cliType: string;
+  terminalId: string;
+  paneId?: string | null;
+  sessionId: string;
+  agentId: string;
+  attempt: number;
+  goal: string;
+  workspaceDir?: string | null;
+  inputPayload?: string | null;
+  assignment?: RuntimeAssignmentPayload;
+  expectedNextAction: RuntimeExpectedActionContract;
+  emittedAt: number;
 }
 
 export interface NewTaskSignalPayload {
@@ -22,9 +100,64 @@ export interface NewTaskSignalPayload {
   attempt: number;
   payloadPreview: string | null;
   handoffPayloadPreview: string | null;
+  runId?: string;
+  cliType?: string;
+  goal?: string;
+  workspaceDir?: string | null;
+  assignment: RuntimeAssignmentPayload;
 }
 
 const DEFAULT_PAYLOAD_PREVIEW_LENGTH = 280;
+
+function normalizeString(value: unknown): string {
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+function safeParseJson(value: string | null | undefined): unknown {
+  if (typeof value !== 'string' || !value.trim()) return null;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return value;
+  }
+}
+
+function collectFromNodeIds(upstreamOutputs: unknown): string[] {
+  if (!Array.isArray(upstreamOutputs)) return [];
+  const ids = new Set<string>();
+  for (const entry of upstreamOutputs) {
+    if (!entry || typeof entry !== 'object') continue;
+    const candidate = normalizeString((entry as Record<string, unknown>).fromNodeId);
+    if (candidate) ids.add(candidate);
+  }
+  return [...ids];
+}
+
+function defaultAssignment(payload: WorkflowNodeTriggeredPayload): RuntimeAssignmentPayload {
+  const upstreamOutputs = safeParseJson(payload.payload);
+  return {
+    roleInstructions: '',
+    missionGoal: payload.goal?.trim() || '',
+    upstreamOutputs,
+    workspaceContext: {
+      workspaceDir: payload.workspaceDir ?? null,
+      missionId: payload.missionId,
+      nodeId: payload.nodeId,
+      runId: payload.runId ?? '',
+      attempt: payload.attempt,
+    },
+    expectedDeliverable: {
+      schema: 'completion_payload_v1',
+      requiredFields: ['status', 'summary', 'artifactReferences', 'filesChanged', 'downstreamPayload'],
+      statusOptions: ['success', 'failure'],
+      notes: 'Return structured completion data and route downstream only through explicit graph targets.',
+    },
+    handoff: {
+      fromNodeIds: collectFromNodeIds(upstreamOutputs),
+      legalTargets: [],
+    },
+  };
+}
 
 export function summarizeHandoffPayload(
   payload?: string | null,
@@ -40,6 +173,7 @@ export function summarizeHandoffPayload(
 
 export function buildNewTaskSignal(payload: WorkflowNodeTriggeredPayload): string {
   const payloadPreview = summarizeHandoffPayload(payload.payload);
+  const assignment = payload.assignment ?? defaultAssignment(payload);
 
   const signal: NewTaskSignalPayload = {
     signal: 'NEW_TASK',
@@ -53,9 +187,25 @@ export function buildNewTaskSignal(payload: WorkflowNodeTriggeredPayload): strin
     attempt: payload.attempt,
     payloadPreview,
     handoffPayloadPreview: payloadPreview,
+    runId: payload.runId,
+    cliType: payload.cliType,
+    goal: payload.goal,
+    workspaceDir: payload.workspaceDir ?? null,
+    assignment,
   };
 
   return JSON.stringify(signal);
+}
+
+function isAssignmentPayload(value: unknown): value is RuntimeAssignmentPayload {
+  if (!value || typeof value !== 'object') return false;
+  const candidate = value as Record<string, unknown>;
+  if (typeof candidate.roleInstructions !== 'string') return false;
+  if (typeof candidate.missionGoal !== 'string') return false;
+  if (!candidate.workspaceContext || typeof candidate.workspaceContext !== 'object') return false;
+  if (!candidate.expectedDeliverable || typeof candidate.expectedDeliverable !== 'object') return false;
+  if (!candidate.handoff || typeof candidate.handoff !== 'object') return false;
+  return true;
 }
 
 export function isNewTaskSignalPayload(value: unknown): value is NewTaskSignalPayload {
@@ -77,7 +227,11 @@ export function isNewTaskSignalPayload(value: unknown): value is NewTaskSignalPa
   const payloadPreview = candidate.payloadPreview;
   const handoffPayloadPreview = candidate.handoffPayloadPreview;
   const nullableString = (input: unknown) => input === null || typeof input === 'string';
-  return nullableString(payloadPreview) && nullableString(handoffPayloadPreview);
+  return (
+    nullableString(payloadPreview) &&
+    nullableString(handoffPayloadPreview) &&
+    isAssignmentPayload(candidate.assignment)
+  );
 }
 
 export function parseNewTaskSignal(raw: string): NewTaskSignalPayload | null {

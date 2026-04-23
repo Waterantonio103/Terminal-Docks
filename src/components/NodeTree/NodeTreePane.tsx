@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ChevronLeft, Play, ScanSearch, Sparkles, Trash2, Workflow } from 'lucide-react';
+import { ArrowUpRight, ChevronLeft, Play, Plus, RefreshCw, ScanSearch, Sparkles, TerminalSquare, Trash2, Workflow, X } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
+import { emit, listen } from '@tauri-apps/api/event';
 import agentsConfig from '../../config/agents';
 import { compileMission, validateGraph } from '../../lib/graphCompiler';
 import { generateId } from '../../lib/graphUtils';
 import { buildPresetFlowGraph, getWorkflowPreset } from '../../lib/workflowPresets';
+import { workflowStatusLabel, workflowStatusTone } from '../../lib/workflowStatus';
 import {
   legacyGraphToNodeDocument,
   nodeDocumentToFlowGraph,
@@ -16,7 +18,7 @@ import { getActiveTreeId, getViewState } from '../../lib/node-system/editor';
 import { applyNodeEditorOperator } from '../../lib/node-system/operators';
 import type { MaterializedNode, NodeInstance, Point2D } from '../../lib/node-system/types';
 import { detectRoleForPane } from '../../lib/cliDetection';
-import { useWorkspaceStore, type MissionAgent, type WorkflowAgentCli, type WorkflowGraph } from '../../store/workspace';
+import { useWorkspaceStore, type MissionAgent, type ResultEntry, type WorkflowAgentCli, type WorkflowGraph } from '../../store/workspace';
 
 type ValidationTone = 'idle' | 'ok' | 'error';
 type ResizeEdge = 'n' | 's' | 'e' | 'w' | 'ne' | 'nw' | 'se' | 'sw';
@@ -51,6 +53,11 @@ const LINK_CANVAS_SIZE = 16384;
 const LINK_CANVAS_HALF = LINK_CANVAS_SIZE / 2;
 const FRAME_MIN_WIDTH = 160;
 const FRAME_MIN_HEIGHT = 100;
+const SUPPORTED_WORKFLOW_CLIS = new Set(['claude', 'gemini', 'opencode', 'codex']);
+const MAX_RUNTIME_SNIPPET_BYTES = 3072;
+const MAX_ACTIVITY_SUMMARY_LENGTH = 180;
+const ARTIFACT_PATH_REGEX = /\b(?:\.{0,2}\/)?[a-zA-Z0-9_\-./]+\.(?:ts|tsx|js|jsx|mjs|cjs|rs|md|json|yaml|yml|toml|css|scss|html|sh|py|go|java|kt|swift|sql)\b/g;
+const ANSI_ESCAPE_REGEX = /\u001b\[[0-9;?]*[ -/]*[@-~]/g;
 
 function clampZoom(nextZoom: number) {
   return Math.max(0.35, Math.min(1.8, nextZoom));
@@ -62,7 +69,7 @@ function worldRect(node: MaterializedNode) {
     node.node.type === 'workflow.task'
       ? 128
       : node.node.type === 'workflow.agent'
-        ? 160
+        ? 250
         : node.node.type === 'workflow.frame'
           ? 72
           : 56;
@@ -131,6 +138,47 @@ function borderClass(selected: boolean) {
     : 'border-border-panel shadow-[0_10px_24px_rgba(0,0,0,0.28)]';
 }
 
+function stripAnsi(raw: string): string {
+  return raw.replace(ANSI_ESCAPE_REGEX, '').replace(/\r/g, '');
+}
+
+function summarizeActivity(raw: string | undefined | null, maxLen = MAX_ACTIVITY_SUMMARY_LENGTH): string {
+  const normalized = stripAnsi(raw ?? '').replace(/\s+/g, ' ').trim();
+  if (!normalized) return 'No runtime output yet.';
+  if (normalized.length <= maxLen) return normalized;
+  return `${normalized.slice(0, Math.max(1, maxLen - 1))}…`;
+}
+
+function shortId(value: string | null | undefined, max = 26): string {
+  if (!value) return '—';
+  if (value.length <= max) return value;
+  return `${value.slice(0, max)}…`;
+}
+
+function decodePtyChunk(data: number[]): string {
+  try {
+    return stripAnsi(new TextDecoder().decode(new Uint8Array(data)));
+  } catch {
+    return '';
+  }
+}
+
+function extractArtifactHints(result: ResultEntry): string[] {
+  if (result.type === 'url') {
+    const url = result.content.trim();
+    return url ? [`Preview ${url}`] : [];
+  }
+  const hits = new Set<string>();
+  const text = stripAnsi(result.content);
+  for (const match of text.matchAll(ARTIFACT_PATH_REGEX)) {
+    const value = String(match[0] ?? '').trim();
+    if (!value) continue;
+    hits.add(value);
+    if (hits.size >= 4) break;
+  }
+  return [...hits];
+}
+
 function ccw(a: Point2D, b: Point2D, c: Point2D) {
   return (c.y - a.y) * (b.x - a.x) > (b.y - a.y) * (c.x - a.x);
 }
@@ -142,7 +190,9 @@ function segmentsIntersect(a: Point2D, b: Point2D, c: Point2D, d: Point2D) {
 export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (graph: WorkflowGraph) => void }) {
   const { graph, onGraphChange } = props;
   const workspaceDir = useWorkspaceStore(state => state.workspaceDir);
+  const activeTabId = useWorkspaceStore(state => state.activeTabId);
   const tabs = useWorkspaceStore(state => state.tabs);
+  const results = useWorkspaceStore(state => state.results);
   const addPane = useWorkspaceStore(state => state.addPane);
   const openTerminals = useMemo(() => {
     const terminals: Array<{ id: string; title: string; cli: string | null; paneId: string }> = [];
@@ -155,6 +205,10 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
     }
     return terminals;
   }, [tabs]);
+  const [inspectorNodeId, setInspectorNodeId] = useState<string | null>(null);
+  const [inspectorCommand, setInspectorCommand] = useState('');
+  const [inspectorError, setInspectorError] = useState<string | null>(null);
+  const [runtimeOutputByTerminalId, setRuntimeOutputByTerminalId] = useState<Record<string, string>>({});
 
   const registry = useMemo(() => createWorkflowNodeRegistry(), []);
   const [state, setState] = useState<NodeDocumentState>(() => legacyGraphToNodeDocument(graph));
@@ -163,6 +217,7 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
   const [hoveredInput, setHoveredInput] = useState<LinkHoverTarget>(null);
   const [validationMessage, setValidationMessage] = useState('Node graph editor is active.');
   const [validationTone, setValidationTone] = useState<ValidationTone>('idle');
+  const [activeMissionId, setActiveMissionId] = useState<string | null>(null);
   const canvasRef = useRef<HTMLDivElement | null>(null);
   const suppressContextMenuRef = useRef(false);
   const lastGraphSnapshotRef = useRef(JSON.stringify(graph));
@@ -172,6 +227,7 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
     if (incoming !== lastGraphSnapshotRef.current) {
       setState(legacyGraphToNodeDocument(graph));
       lastGraphSnapshotRef.current = incoming;
+      setActiveMissionId(null);
     }
   }, [graph]);
 
@@ -198,6 +254,111 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
     [activeTree, registry, state.document]
   );
   const materializedById = useMemo(() => new Map(materializedNodes.map(node => [node.node.id, node])), [materializedNodes]);
+  const missionAgents = useMemo(() => {
+    const activeTab = tabs.find(tab => tab.id === activeTabId);
+    const findMissionPane = (targetTabs: typeof tabs, missionId: string | null) => {
+      for (const tab of targetTabs) {
+        for (const pane of tab.panes) {
+          if (pane.type !== 'missioncontrol') continue;
+          const paneMissionId = typeof pane.data?.missionId === 'string' ? pane.data.missionId : null;
+          if (!missionId || paneMissionId === missionId) return pane;
+        }
+      }
+      return null;
+    };
+
+    let pane = activeTab ? findMissionPane([activeTab], activeMissionId) : null;
+    if (!pane) pane = findMissionPane(tabs, activeMissionId);
+    if (!pane && activeTab) pane = findMissionPane([activeTab], null);
+    if (!pane) pane = findMissionPane(tabs, null);
+
+    return ((pane?.data?.agents as MissionAgent[] | undefined) ?? []).filter(agent => Boolean(agent.nodeId));
+  }, [activeMissionId, activeTabId, tabs]);
+  const missionAgentByNodeId = useMemo(
+    () => new Map(missionAgents.filter(agent => agent.nodeId).map(agent => [agent.nodeId as string, agent])),
+    [missionAgents]
+  );
+  const artifactHintsByNodeId = useMemo(() => {
+    const map = new Map<string, string[]>();
+    for (const agent of missionAgents) {
+      if (!agent.nodeId) continue;
+
+      const hints: string[] = [];
+
+      // Priority 1: Structured artifacts
+      if (agent.artifacts && agent.artifacts.length > 0) {
+        for (const art of agent.artifacts) {
+          const label = art.label;
+          if (!hints.includes(label)) {
+            hints.push(label);
+            if (hints.length >= 5) break;
+          }
+        }
+      }
+
+      // Priority 2: Heuristic extraction from results (legacy support)
+      if (hints.length < 4) {
+        const candidates = new Set(
+          [
+            agent.runtimeSessionId,
+            agent.terminalId,
+            agent.title,
+            agent.roleId,
+          ]
+            .map(value => String(value ?? '').trim().toLowerCase())
+            .filter(Boolean)
+        );
+
+        if (candidates.size > 0) {
+          for (let index = results.length - 1; index >= 0; index -= 1) {
+            const result = results[index];
+            if (!result) continue;
+            if (!candidates.has(String(result.agentId ?? '').trim().toLowerCase())) continue;
+            for (const hint of extractArtifactHints(result)) {
+              if (!hints.includes(hint)) {
+                hints.push(hint);
+                if (hints.length >= 5) break;
+              }
+            }
+            if (hints.length >= 5) break;
+          }
+        }
+      }
+
+      if (hints.length > 0) map.set(agent.nodeId, hints);
+    }
+    return map;
+  }, [missionAgents, results]);
+  const setRuntimeNodeState = useCallback(
+    (nodeId: string, status: string, reason?: string | null) => {
+      setState(previous => {
+        const tree = previous.document.trees[getActiveTreeId(previous.editor)];
+        if (!tree?.nodes[nodeId]) {
+          return previous;
+        }
+        let next = applyNodeEditorOperator(previous.document, previous.editor, registry, {
+          type: 'set_node_property',
+          nodeId,
+          key: 'status',
+          value: status,
+        });
+        next = applyNodeEditorOperator(next.document, next.editor, registry, {
+          type: 'set_node_property',
+          nodeId,
+          key: 'runtimeReason',
+          value: reason ?? '',
+        });
+        next = applyNodeEditorOperator(next.document, next.editor, registry, {
+          type: 'set_node_property',
+          nodeId,
+          key: 'runtimeUpdatedAt',
+          value: Date.now(),
+        });
+        return next;
+      });
+    },
+    [registry]
+  );
   const selectedNodeIds = new Set(state.editor.selection.nodeIds);
   const nodeOptions = useMemo(
     () =>
@@ -208,10 +369,261 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
     [registry]
   );
 
+  useEffect(() => {
+    if (inspectorNodeId && !activeTree.nodes[inspectorNodeId]) {
+      setInspectorNodeId(null);
+      setInspectorCommand('');
+    }
+  }, [activeTree.nodes, inspectorNodeId]);
+
   const findNodeAtWorld = useCallback(
     (point: Point2D) => materializedNodes.find(node => isPointInsideRect(point, worldRect(node))),
     [materializedNodes]
   );
+  const boundAgentTerminalIds = useMemo(() => (
+    [...new Set(
+      Object.values(activeTree.nodes)
+        .filter(node => node.type === 'workflow.agent')
+        .map(node => String(node.properties.terminalId ?? '').trim())
+        .filter(Boolean)
+    )].sort()
+  ), [activeTree.nodes]);
+
+  useEffect(() => {
+    let unlistenActivation: (() => void) | undefined;
+    let unlistenUpdate: (() => void) | undefined;
+    let unlistenWarning: (() => void) | undefined;
+    let unmounted = false;
+
+    listen<{
+      missionId: string;
+      nodeId: string;
+      attempt: number;
+    }>('workflow-runtime-activation-requested', event => {
+      if (unmounted) return;
+      if (activeMissionId && event.payload.missionId !== activeMissionId) return;
+      setRuntimeNodeState(event.payload.nodeId, 'launching', null);
+    }).then(fn => {
+      unlistenActivation = fn;
+      if (unmounted) fn();
+    });
+
+    listen<{
+      id: string;
+      status: string;
+      attempt?: number;
+      outcome?: 'success' | 'failure';
+      reason?: string;
+    }>('workflow-node-update', event => {
+      if (unmounted) return;
+      const { id, status, reason, attempt, outcome } = event.payload;
+      setRuntimeNodeState(id, status, reason ?? null);
+      if (typeof attempt === 'number') {
+        setState(previous => {
+          const tree = previous.document.trees[getActiveTreeId(previous.editor)];
+          if (!tree?.nodes[id]) return previous;
+          return applyNodeEditorOperator(previous.document, previous.editor, registry, {
+            type: 'set_node_property',
+            nodeId: id,
+            key: 'attempt',
+            value: attempt,
+          });
+        });
+      }
+      if (outcome) {
+        setState(previous => {
+          const tree = previous.document.trees[getActiveTreeId(previous.editor)];
+          if (!tree?.nodes[id]) return previous;
+          return applyNodeEditorOperator(previous.document, previous.editor, registry, {
+            type: 'set_node_property',
+            nodeId: id,
+            key: 'lastOutcome',
+            value: outcome,
+          });
+        });
+      }
+    }).then(fn => {
+      unlistenUpdate = fn;
+      if (unmounted) fn();
+    });
+
+    listen<{
+      missionId: string;
+      nodeId: string;
+      message: string;
+    }>('workflow-runtime-warning', event => {
+      if (unmounted) return;
+      if (activeMissionId && event.payload.missionId !== activeMissionId) return;
+      setRuntimeNodeState(event.payload.nodeId, 'failed', event.payload.message);
+    }).then(fn => {
+      unlistenWarning = fn;
+      if (unmounted) fn();
+    });
+
+    return () => {
+      unmounted = true;
+      unlistenActivation?.();
+      unlistenUpdate?.();
+      unlistenWarning?.();
+    };
+  }, [activeMissionId, registry, setRuntimeNodeState]);
+
+  const openTerminalById = useCallback((terminalId: string) => {
+    const stateSnapshot = useWorkspaceStore.getState();
+    const targetTab = stateSnapshot.tabs.find(tab =>
+      tab.panes.some(pane => pane.type === 'terminal' && pane.data?.terminalId === terminalId)
+    );
+    if (!targetTab) {
+      setValidationTone('error');
+      setValidationMessage(`Terminal ${terminalId} is not available.`);
+      return;
+    }
+    if (stateSnapshot.activeTabId !== targetTab.id) {
+      stateSnapshot.switchTab(targetTab.id);
+    }
+    window.setTimeout(() => {
+      emit('focus-terminal', { terminalId }).catch(() => {});
+    }, 80);
+  }, []);
+
+  const refreshTerminalOutput = useCallback(async (terminalId: string) => {
+    if (!terminalId) return;
+    try {
+      const output = await invoke<string>('get_pty_recent_output', {
+        id: terminalId,
+        maxBytes: MAX_RUNTIME_SNIPPET_BYTES,
+      });
+      const normalized = stripAnsi(output ?? '');
+      setRuntimeOutputByTerminalId(previous => (
+        previous[terminalId] === normalized
+          ? previous
+          : { ...previous, [terminalId]: normalized }
+      ));
+      setInspectorError(null);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setInspectorError(message);
+    }
+  }, []);
+
+  const createAndBindRuntime = useCallback(
+    (nodeId: string) => {
+      const before = new Set(openTerminals.map(terminal => terminal.id));
+      const node = activeTree.nodes[nodeId];
+      const role = String(node?.properties.roleId ?? 'agent');
+      const title = `Runtime ${role}`;
+      addPane('terminal', title, {});
+      const nextTabs = useWorkspaceStore.getState().tabs;
+      let created: { id: string; paneId: string; title: string } | null = null;
+      for (const tab of nextTabs) {
+        for (const pane of tab.panes) {
+          if (pane.type !== 'terminal' || !pane.data?.terminalId) continue;
+          if (before.has(pane.data.terminalId)) continue;
+          created = { id: pane.data.terminalId, paneId: pane.id, title: pane.title };
+          break;
+        }
+        if (created) break;
+      }
+      if (!created) {
+        setValidationTone('error');
+        setValidationMessage('Failed to create terminal runtime binding.');
+        return;
+      }
+      applyOperator({ type: 'set_node_property', nodeId, key: 'terminalId', value: created.id });
+      applyOperator({ type: 'set_node_property', nodeId, key: 'terminalTitle', value: created.title });
+      applyOperator({ type: 'set_node_property', nodeId, key: 'paneId', value: created.paneId });
+      setValidationTone('ok');
+      setValidationMessage(`Node ${nodeId} bound to ${created.title}.`);
+    },
+    [activeTree.nodes, addPane, applyOperator, openTerminals]
+  );
+
+  const sendInspectorCommand = useCallback(async () => {
+    if (!inspectorNodeId) return;
+    const node = activeTree.nodes[inspectorNodeId];
+    const terminalId = String(node?.properties.terminalId ?? '');
+    const command = inspectorCommand.trim();
+    if (!terminalId || !command) return;
+    try {
+      await invoke('write_to_pty', { id: terminalId, data: `${command}\r` });
+      setInspectorCommand('');
+      setInspectorError(null);
+      setTimeout(() => {
+        void refreshTerminalOutput(terminalId);
+      }, 120);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setInspectorError(message);
+    }
+  }, [activeTree.nodes, inspectorCommand, inspectorNodeId, refreshTerminalOutput]);
+
+  useEffect(() => {
+    let unlistenPtyOut: (() => void) | undefined;
+    let unmounted = false;
+    listen<{ id: string; data: number[] }>('pty-out', event => {
+      if (unmounted) return;
+      const chunk = decodePtyChunk(event.payload.data);
+      if (!chunk) return;
+      const terminalId = event.payload.id;
+      setRuntimeOutputByTerminalId(previous => {
+        const merged = `${previous[terminalId] ?? ''}${chunk}`;
+        const next = merged.length > MAX_RUNTIME_SNIPPET_BYTES
+          ? merged.slice(merged.length - MAX_RUNTIME_SNIPPET_BYTES)
+          : merged;
+        return { ...previous, [terminalId]: next };
+      });
+    }).then(unlisten => {
+      unlistenPtyOut = unlisten;
+      if (unmounted) unlisten();
+    });
+    return () => {
+      unmounted = true;
+      unlistenPtyOut?.();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (boundAgentTerminalIds.length === 0) return;
+
+    let cancelled = false;
+    const poll = async () => {
+      await Promise.all(boundAgentTerminalIds.map(async terminalId => {
+        try {
+          const output = await invoke<string>('get_pty_recent_output', {
+            id: terminalId,
+            maxBytes: MAX_RUNTIME_SNIPPET_BYTES,
+          });
+          if (cancelled) return;
+          const normalized = stripAnsi(output ?? '');
+          setRuntimeOutputByTerminalId(previous => (
+            previous[terminalId] === normalized
+              ? previous
+              : { ...previous, [terminalId]: normalized }
+          ));
+        } catch {
+          // PTY may not be spawned yet; keep polling.
+        }
+      }));
+    };
+
+    void poll();
+    const interval = window.setInterval(() => {
+      void poll();
+    }, 3500);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [boundAgentTerminalIds]);
+
+  useEffect(() => {
+    if (!inspectorNodeId) return;
+    const node = activeTree.nodes[inspectorNodeId];
+    if (!node || node.type !== 'workflow.agent') return;
+    const terminalId = String(node.properties.terminalId ?? '').trim();
+    if (!terminalId) return;
+    void refreshTerminalOutput(terminalId);
+  }, [activeTree.nodes, inspectorNodeId, refreshTerminalOutput]);
 
   const validateCurrentGraph = useCallback(() => {
     try {
@@ -239,13 +651,18 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
       });
 
       const missionId = generateId();
+      const terminalClis = Object.fromEntries(
+        openTerminals
+          .filter(terminal => terminal.cli && SUPPORTED_WORKFLOW_CLIS.has(terminal.cli))
+          .map(terminal => [terminal.id, terminal.cli as WorkflowAgentCli])
+      );
       const mission = compileMission({
         missionId,
         graphId: graph.id || 'graph',
         nodes: hydratedNodes as never[],
         edges: flow.edges as never[],
         workspaceDirFallback: workspaceDir,
-        terminalClis: Object.fromEntries(openTerminals.map(t => [t.id, (t.cli || 'generic') as WorkflowAgentCli])),
+        terminalClis,
         authoringMode: 'graph',
         runVersion: 1,
       });
@@ -260,29 +677,37 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
         lastPayload: null,
         attemptHistory: [],
         nodeId: node.id,
+        runtimeSessionId: null,
+        runtimeCli: node.terminal.cli,
+        runtimeBootstrapState: 'bound',
+        runtimeBootstrapReason: null,
       }));
 
       const nodeById = new Map(mission.nodes.map(node => [node.id, node]));
-      const startTerminalIds = Array.from(
-        new Set(
-          mission.metadata.startNodeIds
-            .map(nodeId => nodeById.get(nodeId)?.terminal.terminalId)
-            .filter((value): value is string => Boolean(value))
-        )
-      );
-
-      if (startTerminalIds.length === 0) {
+      const startNodes = mission.metadata.startNodeIds
+        .map(nodeId => nodeById.get(nodeId))
+        .filter((node): node is NonNullable<typeof node> => Boolean(node));
+      if (startNodes.length === 0) {
         throw new Error('Compiled mission has no start nodes with terminal bindings.');
+      }
+      for (const startNode of startNodes) {
+        const terminal = openTerminals.find(entry => entry.id === startNode.terminal.terminalId);
+        if (!terminal) {
+          throw new Error(`No terminal bound for start node ${startNode.id}.`);
+        }
+        const cli = String(terminal.cli ?? '').trim().toLowerCase();
+        if (!SUPPORTED_WORKFLOW_CLIS.has(cli)) {
+          throw new Error(
+            `CLI not detected or unsupported for ${startNode.terminal.terminalTitle} (${startNode.id}).`
+          );
+        }
       }
 
       await invoke('start_mission_graph', {
         missionId,
         graph: mission,
       });
-
-      await Promise.all(
-        startTerminalIds.map(terminalId => invoke('write_to_pty', { id: terminalId, data: '\r' }))
-      );
+      setActiveMissionId(missionId);
 
       addPane('missioncontrol', 'Mission Control', {
         taskDescription: mission.task.prompt ?? '',
@@ -292,8 +717,11 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
       });
 
       setValidationTone('ok');
-      setValidationMessage(`Launched mission ${missionId.substring(0, 8)}. Opened Mission Control.`);
+      setValidationMessage(
+        `Launched mission ${missionId.substring(0, 8)}. Runtime flow: MCP server online -> runtime session registration -> NEW_TASK dispatch.`
+      );
     } catch (error) {
+      setActiveMissionId(null);
       setValidationTone('error');
       setValidationMessage(error instanceof Error ? error.message : String(error));
     }
@@ -833,6 +1261,14 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
     [applyOperator, materializedById]
   );
 
+  const inspectedNode = inspectorNodeId ? activeTree.nodes[inspectorNodeId] : null;
+  const inspectedRuntimeAgent = inspectorNodeId ? missionAgentByNodeId.get(inspectorNodeId) : undefined;
+  const inspectedTerminalId = String(inspectedNode?.properties.terminalId ?? inspectedRuntimeAgent?.terminalId ?? '').trim();
+  const inspectedTerminal = openTerminals.find(terminal => terminal.id === inspectedTerminalId);
+  const inspectorOutput = inspectedTerminalId
+    ? (runtimeOutputByTerminalId[inspectedTerminalId] ?? '')
+    : '';
+
   return (
     <div className="h-full w-full bg-[#0e1218] text-text-primary flex flex-col">
       <div className="h-12 shrink-0 border-b border-border-panel px-3 flex items-center justify-between bg-[#0a0f15]">
@@ -936,6 +1372,36 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
             const rect = worldRect(materializedNode);
             const isSelected = selectedNodeIds.has(materializedNode.node.id);
             const isFrame = materializedNode.node.type === 'workflow.frame';
+            const runtimeAgent = missionAgentByNodeId.get(materializedNode.node.id);
+            const runtimeStatus = String(
+              runtimeAgent?.status ??
+              materializedNode.node.properties.status ??
+              'idle'
+            );
+            const runtimeReason = String(
+              runtimeAgent?.lastError ??
+              materializedNode.node.properties.runtimeReason ??
+              ''
+            ).trim();
+            const terminalId = String(
+              materializedNode.node.properties.terminalId ??
+              runtimeAgent?.terminalId ??
+              ''
+            ).trim();
+            const terminal = openTerminals.find(entry => entry.id === terminalId);
+            const runtimeCli = String(
+              runtimeAgent?.runtimeCli ??
+              terminal?.cli ??
+              materializedNode.node.properties.runtimeCli ??
+              ''
+            ).trim();
+            const runtimeSessionId = String(runtimeAgent?.runtimeSessionId ?? '').trim();
+            const runtimeSummary = summarizeActivity(
+              runtimeOutputByTerminalId[terminalId] ??
+              (runtimeAgent?.lastPayload ?? null)
+            );
+            const artifactHints = artifactHintsByNodeId.get(materializedNode.node.id) ?? [];
+            const isInspectorOpen = inspectorNodeId === materializedNode.node.id;
             return (
               <div
                 key={materializedNode.node.id}
@@ -951,6 +1417,9 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
                   <div>
                     <div className="text-[10px] uppercase tracking-[0.22em] text-[#8bc3ff]">{registry.get(materializedNode.node.type).category}</div>
                     <div className="text-sm font-semibold text-text-primary">{materializedNode.node.label ?? registry.get(materializedNode.node.type).label}</div>
+                  </div>
+                  <div className={`text-[9px] uppercase tracking-wide px-1.5 py-0.5 rounded border ${workflowStatusTone(runtimeStatus, 'graph')}`}>
+                    {workflowStatusLabel(runtimeStatus)}
                   </div>
                 </div>
 
@@ -980,6 +1449,12 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
                     <div />
                     <div className="space-y-2 text-right">{materializedNode.outputs.map(socket => <div key={socket.id}>{socket.name}</div>)}</div>
                   </div>
+
+                  {runtimeReason && (
+                    <div className="mb-3 rounded border border-red-400/20 bg-red-500/10 px-2 py-1.5 text-[10px] text-red-200 break-words">
+                      {runtimeReason}
+                    </div>
+                  )}
 
                   {materializedNode.node.type === 'workflow.task' && (
                     <div className="space-y-2">
@@ -1024,31 +1499,97 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
                           ))}
                         </select>
                         <div className="bg-[#0b1118] border border-border-panel rounded-lg px-2 py-1.5 text-[11px] text-text-muted flex items-center shrink-0">
-                          CLI: {(() => {
-                            const termId = materializedNode.node.properties.terminalId;
-                            const term = openTerminals.find(t => t.id === termId);
-                            return term?.cli ? term.cli.charAt(0).toUpperCase() + term.cli.slice(1) : 'Unknown';
-                          })()}
+                          CLI: {runtimeCli ? runtimeCli.toUpperCase() : 'Unknown'}
                         </div>
                       </div>
+                      <div className="grid grid-cols-2 gap-2 text-[10px]">
+                        <div className="rounded border border-border-panel bg-[#0b1118] px-2 py-1.5">
+                          <div className="uppercase tracking-wide text-text-muted">Terminal</div>
+                          <div className="text-text-primary truncate">{terminalId || 'Unbound'}</div>
+                        </div>
+                        <div className="rounded border border-border-panel bg-[#0b1118] px-2 py-1.5">
+                          <div className="uppercase tracking-wide text-text-muted">Session</div>
+                          <div className="text-text-primary truncate">{shortId(runtimeSessionId)}</div>
+                        </div>
+                        <div className="rounded border border-border-panel bg-[#0b1118] px-2 py-1.5">
+                          <div className="uppercase tracking-wide text-text-muted">Status</div>
+                          <div className="text-text-primary">{workflowStatusLabel(runtimeStatus)}</div>
+                        </div>
+                        <div className="rounded border border-border-panel bg-[#0b1118] px-2 py-1.5">
+                          <div className="uppercase tracking-wide text-text-muted">Recent Activity</div>
+                          <div className="text-text-primary line-clamp-2 break-words">{runtimeSummary}</div>
+                        </div>
+                      </div>
+                      {artifactHints.length > 0 && (
+                        <div className="rounded border border-border-panel bg-[#0b1118] px-2 py-1.5">
+                          <div className="text-[10px] uppercase tracking-wide text-text-muted mb-1">Artifacts / Files</div>
+                          <div className="flex flex-wrap gap-1">
+                            {artifactHints.map(hint => (
+                              <span key={hint} className="px-1.5 py-0.5 text-[10px] rounded border border-border-panel bg-[#111a24] text-text-secondary">
+                                {hint}
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+                      )}
                       <select
-                        value={String(materializedNode.node.properties.terminalId ?? '')}
+                        value={terminalId}
                         onChange={event => {
                           const value = event.target.value;
                           const term = openTerminals.find(t => t.id === value);
                           applyOperator({ type: 'set_node_property', nodeId: materializedNode.node.id, key: 'terminalId', value });
                           applyOperator({ type: 'set_node_property', nodeId: materializedNode.node.id, key: 'terminalTitle', value: term?.title ?? '' });
                           applyOperator({ type: 'set_node_property', nodeId: materializedNode.node.id, key: 'paneId', value: term?.paneId ?? '' });
+                          if (value) {
+                            void refreshTerminalOutput(value);
+                          }
                         }}
                         className="w-full bg-[#0b1118] border border-border-panel rounded-lg px-2 py-1.5 text-[11px]"
                       >
                         <option value="">Terminal binding id</option>
                         {openTerminals.map(terminal => (
                           <option key={terminal.id} value={terminal.id}>
-                            {terminal.title} ({terminal.id.substring(0, 8)})
+                            {terminal.title} ({terminal.id.substring(0, 8)}){terminal.cli ? ` · ${terminal.cli}` : ''}
                           </option>
                         ))}
                       </select>
+                      <div className="grid grid-cols-3 gap-2">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setInspectorNodeId(current => (current === materializedNode.node.id ? null : materializedNode.node.id));
+                            setInspectorError(null);
+                            if (terminalId) {
+                              void refreshTerminalOutput(terminalId);
+                            }
+                          }}
+                          className={`flex items-center justify-center gap-1 rounded border px-2 py-1.5 text-[10px] transition-colors ${
+                            isInspectorOpen
+                              ? 'border-accent-primary text-accent-primary bg-accent-primary/10'
+                              : 'border-border-panel text-text-muted hover:text-text-primary hover:bg-[#111826]'
+                          }`}
+                        >
+                          <TerminalSquare size={11} />
+                          {isInspectorOpen ? 'Hide' : 'Inspect'}
+                        </button>
+                        <button
+                          type="button"
+                          disabled={!terminalId || !terminal}
+                          onClick={() => terminalId && openTerminalById(terminalId)}
+                          className="flex items-center justify-center gap-1 rounded border border-border-panel px-2 py-1.5 text-[10px] text-text-muted hover:text-text-primary hover:bg-[#111826] disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                        >
+                          <ArrowUpRight size={11} />
+                          Open PTY
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => createAndBindRuntime(materializedNode.node.id)}
+                          className="flex items-center justify-center gap-1 rounded border border-border-panel px-2 py-1.5 text-[10px] text-text-muted hover:text-text-primary hover:bg-[#111826] transition-colors"
+                        >
+                          <Plus size={11} />
+                          New Runtime
+                        </button>
+                      </div>
                     </div>
                   )}
 
@@ -1138,6 +1679,112 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
             )}
           </div>
         )}
+
+        {inspectorNodeId && (
+          <div
+            className="absolute z-40 right-3 top-3 bottom-3 w-[420px] rounded-xl border border-border-panel bg-[#0f151e] shadow-2xl flex flex-col"
+            onMouseDown={event => event.stopPropagation()}
+          >
+            <div className="px-3 py-2 border-b border-border-panel bg-[#101826] flex items-center justify-between">
+              <div className="min-w-0">
+                <div className="text-[10px] uppercase tracking-[0.2em] text-[#8bc3ff]">Node Runtime Inspector</div>
+                <div className="text-[12px] text-text-primary truncate">
+                  {inspectedNode?.label ?? inspectedNode?.id ?? inspectorNodeId}
+                </div>
+              </div>
+              <div className="flex items-center gap-1">
+                {inspectedTerminalId && (
+                  <button
+                    type="button"
+                    onClick={() => openTerminalById(inspectedTerminalId)}
+                    className="p-1.5 rounded border border-border-panel text-text-muted hover:text-text-primary hover:bg-[#111826]"
+                    title="Open full terminal pane"
+                  >
+                    <ArrowUpRight size={12} />
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => setInspectorNodeId(null)}
+                  className="p-1.5 rounded border border-border-panel text-text-muted hover:text-text-primary hover:bg-[#111826]"
+                  title="Close inspector"
+                >
+                  <X size={12} />
+                </button>
+              </div>
+            </div>
+
+            {!inspectedNode ? (
+              <div className="flex-1 flex items-center justify-center text-[12px] text-text-muted px-4 text-center">
+                Selected node is no longer available.
+              </div>
+            ) : !inspectedTerminalId ? (
+              <div className="flex-1 flex flex-col items-center justify-center text-[12px] text-text-muted px-4 text-center gap-3">
+                <p>This node has no terminal runtime binding.</p>
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (inspectorNodeId) createAndBindRuntime(inspectorNodeId);
+                  }}
+                  className="px-2.5 py-1.5 rounded border border-border-panel text-text-muted hover:text-text-primary hover:bg-[#111826] text-[11px] inline-flex items-center gap-1"
+                >
+                  <Plus size={11} />
+                  Create Runtime Binding
+                </button>
+              </div>
+            ) : (
+              <>
+                <div className="px-3 py-2 border-b border-border-panel text-[10px] text-text-muted flex items-center justify-between gap-2">
+                  <span className="truncate">
+                    {inspectedTerminal?.title ?? inspectedTerminalId}
+                    {inspectedRuntimeAgent?.runtimeSessionId ? ` · ${shortId(inspectedRuntimeAgent.runtimeSessionId)}` : ''}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => void refreshTerminalOutput(inspectedTerminalId)}
+                    className="inline-flex items-center gap-1 px-2 py-1 rounded border border-border-panel hover:bg-[#111826] text-text-muted hover:text-text-primary"
+                    title="Refresh runtime output"
+                  >
+                    <RefreshCw size={11} />
+                    Refresh
+                  </button>
+                </div>
+
+                <pre className="flex-1 overflow-auto px-3 py-3 text-[11px] leading-relaxed text-[#c5d2e4] whitespace-pre-wrap bg-[#0a0f16]">
+                  {inspectorOutput || 'Waiting for runtime output...'}
+                </pre>
+
+                {inspectorError && (
+                  <div className="px-3 py-1.5 text-[10px] text-red-200 bg-red-500/10 border-t border-red-400/20">
+                    {inspectorError}
+                  </div>
+                )}
+
+                <form
+                  className="px-3 py-2 border-t border-border-panel bg-[#101826] flex gap-2"
+                  onSubmit={event => {
+                    event.preventDefault();
+                    void sendInspectorCommand();
+                  }}
+                >
+                  <input
+                    value={inspectorCommand}
+                    onChange={event => setInspectorCommand(event.target.value)}
+                    placeholder="Send command to runtime"
+                    className="flex-1 bg-[#0b1118] border border-border-panel rounded px-2 py-1.5 text-[11px] text-text-primary"
+                  />
+                  <button
+                    type="submit"
+                    disabled={!inspectorCommand.trim()}
+                    className="px-2.5 py-1.5 rounded border border-accent-primary text-accent-primary hover:bg-accent-primary/10 disabled:opacity-40 disabled:cursor-not-allowed text-[11px]"
+                  >
+                    Send
+                  </button>
+                </form>
+              </>
+            )}
+          </div>
+        )}
       </div>
 
       <div className="px-3 py-2 shrink-0 border-t border-border-panel bg-[#0a0f15] flex items-center justify-between text-[11px] text-text-muted">
@@ -1146,7 +1793,7 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
           <span className="text-text-primary">{Object.keys(activeTree.links).length}</span>
         </div>
         <div>
-          Right-click to add/delete, drag output to input, <span className="text-text-primary">Ctrl+Right Drag</span> for knife, <span className="text-text-primary">F</span> to frame selected.
+          Right-click to add/delete, drag output to input, <span className="text-text-primary">Ctrl+Right Drag</span> for knife, <span className="text-text-primary">F</span> to frame selected, and use <span className="text-text-primary">Inspect</span> on agent nodes for live runtime details.
         </div>
       </div>
     </div>
