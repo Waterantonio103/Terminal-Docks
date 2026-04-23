@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ChevronLeft, ScanSearch, Sparkles, Trash2, Workflow } from 'lucide-react';
+import { ChevronLeft, Play, ScanSearch, Sparkles, Trash2, Workflow } from 'lucide-react';
+import { invoke } from '@tauri-apps/api/core';
 import agentsConfig from '../../config/agents';
 import { compileMission, validateGraph } from '../../lib/graphCompiler';
 import { generateId } from '../../lib/graphUtils';
@@ -15,7 +16,7 @@ import { getActiveTreeId, getViewState } from '../../lib/node-system/editor';
 import { applyNodeEditorOperator } from '../../lib/node-system/operators';
 import type { MaterializedNode, NodeInstance, Point2D } from '../../lib/node-system/types';
 import { detectRoleForPane } from '../../lib/cliDetection';
-import { useWorkspaceStore, type WorkflowGraph } from '../../store/workspace';
+import { useWorkspaceStore, type MissionAgent, type WorkflowAgentCli, type WorkflowGraph } from '../../store/workspace';
 
 type ValidationTone = 'idle' | 'ok' | 'error';
 type ResizeEdge = 'n' | 's' | 'e' | 'w' | 'ne' | 'nw' | 'se' | 'sw';
@@ -142,12 +143,13 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
   const { graph, onGraphChange } = props;
   const workspaceDir = useWorkspaceStore(state => state.workspaceDir);
   const tabs = useWorkspaceStore(state => state.tabs);
+  const addPane = useWorkspaceStore(state => state.addPane);
   const openTerminals = useMemo(() => {
-    const terminals: Array<{ id: string; title: string; cli: string | null }> = [];
+    const terminals: Array<{ id: string; title: string; cli: string | null; paneId: string }> = [];
     for (const tab of tabs) {
       for (const pane of tab.panes) {
         if (pane.type === 'terminal' && pane.data?.terminalId) {
-          terminals.push({ id: pane.data.terminalId, title: pane.title, cli: (pane.data?.cli as string) ?? null });
+          terminals.push({ id: pane.data.terminalId, title: pane.title, cli: (pane.data?.cli as string) ?? null, paneId: pane.id });
         }
       }
     }
@@ -222,6 +224,80 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
       setValidationMessage(error instanceof Error ? error.message : String(error));
     }
   }, [registry, state.document]);
+
+  const runWorkflow = useCallback(async () => {
+    try {
+      const flow = nodeDocumentToFlowGraph(state.document, registry);
+      validateGraph(flow.nodes as never[], flow.edges as never[]);
+
+      const hydratedNodes = flow.nodes.map(node => {
+        if (node.type !== 'agent') return node;
+        const data: Record<string, unknown> = { ...((node.data ?? {}) as Record<string, unknown>) };
+        if (!data.terminalId) throw new Error(`Agent node ${node.id} missing terminal binding.`);
+        if (!data.terminalTitle) data.terminalTitle = `Terminal ${data.roleId ?? node.id}`;
+        return { ...node, data };
+      });
+
+      const missionId = generateId();
+      const mission = compileMission({
+        missionId,
+        graphId: graph.id || 'graph',
+        nodes: hydratedNodes as never[],
+        edges: flow.edges as never[],
+        workspaceDirFallback: workspaceDir,
+        terminalClis: Object.fromEntries(openTerminals.map(t => [t.id, (t.cli || 'generic') as WorkflowAgentCli])),
+        authoringMode: 'graph',
+        runVersion: 1,
+      });
+
+      const agents: MissionAgent[] = mission.nodes.map(node => ({
+        terminalId: node.terminal.terminalId,
+        title: node.terminal.terminalTitle,
+        roleId: node.roleId,
+        paneId: node.terminal.paneId,
+        status: 'idle',
+        attempt: 0,
+        lastPayload: null,
+        attemptHistory: [],
+        nodeId: node.id,
+      }));
+
+      const nodeById = new Map(mission.nodes.map(node => [node.id, node]));
+      const startTerminalIds = Array.from(
+        new Set(
+          mission.metadata.startNodeIds
+            .map(nodeId => nodeById.get(nodeId)?.terminal.terminalId)
+            .filter((value): value is string => Boolean(value))
+        )
+      );
+
+      if (startTerminalIds.length === 0) {
+        throw new Error('Compiled mission has no start nodes with terminal bindings.');
+      }
+
+      await invoke('start_mission_graph', {
+        missionId,
+        graph: mission,
+      });
+
+      await Promise.all(
+        startTerminalIds.map(terminalId => invoke('write_to_pty', { id: terminalId, data: '\r' }))
+      );
+
+      addPane('missioncontrol', 'Mission Control', {
+        taskDescription: mission.task.prompt ?? '',
+        agents,
+        missionId,
+        mission,
+      });
+
+      setValidationTone('ok');
+      setValidationMessage(`Launched mission ${missionId.substring(0, 8)}. Opened Mission Control.`);
+    } catch (error) {
+      setValidationTone('error');
+      setValidationMessage(error instanceof Error ? error.message : String(error));
+    }
+  }, [registry, state.document, workspaceDir, graph.id, openTerminals, addPane]);
 
   const viewRuntimeMapping = useCallback(() => {
     try {
@@ -774,6 +850,10 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
               Back
             </button>
           )}
+          <button onClick={runWorkflow} className="px-2.5 py-1 rounded border border-accent-primary text-accent-primary hover:bg-accent-primary/10">
+            <Play size={12} className="inline mr-1" />
+            Run
+          </button>
           <button onClick={validateCurrentGraph} className="px-2.5 py-1 rounded border border-[#284867] text-[#8bc3ff] hover:bg-[#112030]">
             <ScanSearch size={12} className="inline mr-1" />
             Validate
@@ -953,7 +1033,13 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
                       </div>
                       <select
                         value={String(materializedNode.node.properties.terminalId ?? '')}
-                        onChange={event => applyOperator({ type: 'set_node_property', nodeId: materializedNode.node.id, key: 'terminalId', value: event.target.value })}
+                        onChange={event => {
+                          const value = event.target.value;
+                          const term = openTerminals.find(t => t.id === value);
+                          applyOperator({ type: 'set_node_property', nodeId: materializedNode.node.id, key: 'terminalId', value });
+                          applyOperator({ type: 'set_node_property', nodeId: materializedNode.node.id, key: 'terminalTitle', value: term?.title ?? '' });
+                          applyOperator({ type: 'set_node_property', nodeId: materializedNode.node.id, key: 'paneId', value: term?.paneId ?? '' });
+                        }}
                         className="w-full bg-[#0b1118] border border-border-panel rounded-lg px-2 py-1.5 text-[11px]"
                       >
                         <option value="">Terminal binding id</option>

@@ -565,7 +565,7 @@ export function compileMission({
     const terminalId = trimToUndefined(node.data?.terminalId);
     const terminalTitle = trimToUndefined(node.data?.terminalTitle);
     if (!terminalId || !terminalTitle) {
-      throw new Error(`Agent node ${nodeId} is missing a terminal binding. Run terminal preparation before compiling the mission.`);
+      throw new Error(`Agent node ${nodeId} is missing a terminal binding. Please select a terminal in the node properties.`);
     }
 
     return {
