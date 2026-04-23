@@ -9,6 +9,7 @@ import type {
   WorkflowAuthoringMode,
   WorkflowAgentCli,
   WorkflowEdgeCondition,
+  WorkflowExecutionMode,
   WorkflowGraph,
   WorkflowMode,
   WorkflowNode,
@@ -35,6 +36,7 @@ const CONDITION_SORT_ORDER: Record<WorkflowEdgeCondition, number> = {
 
 const NODE_STATUS_FALLBACK: WorkflowNodeStatus = 'idle';
 const AGENT_CLI_FALLBACK: WorkflowAgentCli = 'claude';
+const EXECUTION_MODE_FALLBACK: WorkflowExecutionMode = 'streaming_headless';
 const MODE_FALLBACK: WorkflowMode = 'build';
 const WORKER_CAPABILITY_IDS: WorkerCapabilityId[] = ['planning', 'coding', 'testing', 'review', 'security', 'repo_analysis', 'shell_execution'];
 const CORE_INSTRUCTION_BY_ROLE = new Map(
@@ -115,9 +117,12 @@ function normalizeTaskRequirements(value: unknown): TaskRequirements | undefined
 }
 
 function getNodeKind(node: FlowNodeLike): RuntimeNodeKind {
-  if (node.type === 'task' || node.type === 'agent' || node.type === 'barrier' || node.type === 'frame' || node.type === 'reroute') {
-    return node.type;
-  }
+  const type = node.type ?? '';
+  if (type === 'task' || type === 'workflow.task') return 'task';
+  if (type === 'agent' || type === 'workflow.agent') return 'agent';
+  if (type === 'barrier' || type === 'workflow.barrier') return 'barrier';
+  if (type === 'frame' || type === 'workflow.frame') return 'frame';
+  if (type === 'reroute' || type === 'workflow.reroute') return 'reroute';
 
   const roleId = trimToUndefined(node.data?.roleId);
   if (roleId === 'task' || roleId === 'barrier' || roleId === 'frame' || roleId === 'reroute') {
@@ -148,6 +153,13 @@ function getNodeStatus(node: FlowNodeLike): WorkflowNodeStatus {
 function getWorkflowMode(node: FlowNodeLike): WorkflowMode {
   const mode = node.data?.mode;
   return mode === 'edit' ? 'edit' : MODE_FALLBACK;
+}
+
+function normalizeExecutionMode(value: unknown): WorkflowExecutionMode {
+  if (value === 'headless' || value === 'streaming_headless' || value === 'interactive_pty') {
+    return value;
+  }
+  return EXECUTION_MODE_FALLBACK;
 }
 
 function getAuthoringMode(value: unknown): WorkflowAuthoringMode | undefined {
@@ -510,6 +522,7 @@ export function serializeWorkflowGraph(
           terminalId: trimToUndefined(node.data?.terminalId),
           terminalTitle: trimToUndefined(node.data?.terminalTitle),
           paneId: trimToUndefined(node.data?.paneId),
+          executionMode: normalizeExecutionMode(node.data?.executionMode),
           autoLinked: Boolean(node.data?.autoLinked),
           authoringMode: getAuthoringMode(node.data?.authoringMode),
           presetId: asString(node.data?.presetId) ?? undefined,
@@ -598,6 +611,7 @@ export function compileMission({
         terminalId,
         terminalTitle,
         cli: terminalClis[terminalId] ?? AGENT_CLI_FALLBACK,
+        executionMode: normalizeExecutionMode(node.data?.executionMode),
         paneId: trimToUndefined(node.data?.paneId),
         reusedExisting: Boolean(node.data?.autoLinked),
       },

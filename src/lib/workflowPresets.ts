@@ -1,4 +1,4 @@
-import type { WorkflowAgentCli, WorkflowEdgeCondition, WorkflowMode } from '../store/workspace.js';
+import type { WorkflowAgentCli, WorkflowEdgeCondition, WorkflowExecutionMode, WorkflowMode } from '../store/workspace.js';
 
 export interface PresetNodeDefinition {
   id: string;
@@ -24,6 +24,7 @@ interface TerminalBindingLike {
   terminalTitle: string;
   paneId?: string;
   cli?: WorkflowAgentCli | null;
+  executionMode?: WorkflowExecutionMode | null;
 }
 
 export const WORKFLOW_PRESETS: PresetDefinition[] = [
@@ -137,6 +138,7 @@ export function buildPresetFlowGraph(options: {
           terminalId: binding?.terminalId ?? '',
           terminalTitle: binding?.terminalTitle ?? '',
           paneId: binding?.paneId ?? '',
+          executionMode: binding?.executionMode ?? 'streaming_headless',
           autoLinked: true,
         },
       };

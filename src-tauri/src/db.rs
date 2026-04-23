@@ -181,6 +181,7 @@ pub fn init_db(app: &AppHandle) -> Result<(), String> {
             node_id TEXT NOT NULL,
             attempt INTEGER NOT NULL,
             terminal_id TEXT NOT NULL,
+            run_id TEXT,
             status TEXT NOT NULL,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -189,9 +190,53 @@ pub fn init_db(app: &AppHandle) -> Result<(), String> {
     )
     .map_err(|e| e.to_string())?;
 
+    if let Err(e) = conn.execute("ALTER TABLE agent_runtime_sessions ADD COLUMN run_id TEXT", ()) {
+        let s = e.to_string();
+        if !s.contains("duplicate column") {
+            return Err(s);
+        }
+    }
+
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_agent_runtime_sessions_mission_node_attempt
          ON agent_runtime_sessions (mission_id, node_id, attempt)",
+        (),
+    )
+    .map_err(|e| e.to_string())?;
+
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS agent_runs (
+            run_id TEXT PRIMARY KEY,
+            mission_id TEXT NOT NULL,
+            node_id TEXT NOT NULL,
+            attempt INTEGER NOT NULL,
+            session_id TEXT NOT NULL,
+            agent_id TEXT NOT NULL,
+            cli TEXT NOT NULL,
+            execution_mode TEXT NOT NULL,
+            cwd TEXT,
+            command TEXT NOT NULL,
+            args_json TEXT NOT NULL,
+            env_json TEXT NOT NULL,
+            prompt_path TEXT,
+            stdout_path TEXT,
+            stderr_path TEXT,
+            transcript_path TEXT,
+            status TEXT NOT NULL,
+            exit_code INTEGER,
+            error TEXT,
+            started_at DATETIME,
+            completed_at DATETIME,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )",
+        (),
+    )
+    .map_err(|e| e.to_string())?;
+
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_agent_runs_mission_id
+         ON agent_runs (mission_id, created_at)",
         (),
     )
     .map_err(|e| e.to_string())?;

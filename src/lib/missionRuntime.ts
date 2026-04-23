@@ -10,6 +10,7 @@ export interface WorkflowNodeTriggeredPayload {
   payload?: string | null;
   runId?: string;
   cliType?: string;
+  executionMode?: 'headless' | 'streaming_headless' | 'interactive_pty';
   goal?: string;
   workspaceDir?: string | null;
   assignment?: RuntimeAssignmentPayload;
@@ -75,6 +76,7 @@ export interface RuntimeActivationPayload {
     verifiedBy?: string;
   }> | null;
   cliType: string;
+  executionMode: 'headless' | 'streaming_headless' | 'interactive_pty';
   terminalId: string;
   paneId?: string | null;
   sessionId: string;
@@ -98,10 +100,12 @@ export interface NewTaskSignalPayload {
   terminalId: string;
   activatedAt: number;
   attempt: number;
+  mcpUrl?: string;
   payloadPreview: string | null;
   handoffPayloadPreview: string | null;
   runId?: string;
   cliType?: string;
+  executionMode?: 'headless' | 'streaming_headless' | 'interactive_pty';
   goal?: string;
   workspaceDir?: string | null;
   assignment: RuntimeAssignmentPayload;
@@ -171,7 +175,7 @@ export function summarizeHandoffPayload(
   return `${normalized.slice(0, Math.max(0, maxLength - 1))}…`;
 }
 
-export function buildNewTaskSignal(payload: WorkflowNodeTriggeredPayload): string {
+export function buildNewTaskSignal(payload: WorkflowNodeTriggeredPayload, mcpUrl?: string): string {
   const payloadPreview = summarizeHandoffPayload(payload.payload);
   const assignment = payload.assignment ?? defaultAssignment(payload);
 
@@ -185,16 +189,29 @@ export function buildNewTaskSignal(payload: WorkflowNodeTriggeredPayload): strin
     terminalId: payload.terminalId,
     activatedAt: payload.activatedAt,
     attempt: payload.attempt,
+    mcpUrl,
     payloadPreview,
     handoffPayloadPreview: payloadPreview,
     runId: payload.runId,
     cliType: payload.cliType,
+    executionMode: payload.executionMode,
     goal: payload.goal,
     workspaceDir: payload.workspaceDir ?? null,
     assignment,
   };
 
-  return JSON.stringify(signal);
+  const json = JSON.stringify(signal);
+  
+  // Return a structured task prompt that an AI CLI can parse or read naturally.
+  // We include a clear marker and the JSON envelope.
+  return `### MISSION_CONTROL_ACTIVATION_REQUEST ###
+You have been assigned to a mission graph node. 
+Please call 'get_task_details({ missionId: "${payload.missionId}", nodeId: "${payload.nodeId}" })' to retrieve your full context, inbox, and legal next targets.
+
+--- ENVELOPE ---
+${json}
+--- END ENVELOPE ---
+`;
 }
 
 function isAssignmentPayload(value: unknown): value is RuntimeAssignmentPayload {

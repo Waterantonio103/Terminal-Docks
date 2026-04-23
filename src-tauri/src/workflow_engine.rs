@@ -1,5 +1,5 @@
 use crate::db::DbState;
-use crate::workflow::{CompiledMission, WorkflowEdgeCondition};
+use crate::workflow::{CompiledMission, WorkflowEdgeCondition, WorkflowExecutionMode};
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -125,6 +125,7 @@ pub struct RuntimeActivationPayload {
     pub profile_id: Option<String>,
     pub capabilities: Option<Vec<crate::workflow::WorkerCapability>>,
     pub cli_type: String,
+    pub execution_mode: WorkflowExecutionMode,
     pub terminal_id: String,
     pub pane_id: Option<String>,
     pub session_id: String,
@@ -338,7 +339,7 @@ fn derive_start_node_ids(mission: &CompiledMission) -> Vec<String> {
         .collect()
 }
 
-const ACTIVATION_TIMEOUT_MS: u64 = 20_000;
+const ACTIVATION_TIMEOUT_MS: u64 = 60_000;
 
 fn outcome_to_status(outcome: &NodeOutcome) -> &'static str {
     match outcome {
@@ -347,17 +348,21 @@ fn outcome_to_status(outcome: &NodeOutcome) -> &'static str {
     }
 }
 
-fn mission_run_id(mission: &CompiledMission) -> String {
-    let version = mission.metadata.run_version.unwrap_or(1);
-    format!("run:{}:v{}", mission.mission_id, version)
-}
-
 fn cli_type_label(cli: &crate::workflow::WorkflowAgentCli) -> &'static str {
     match cli {
         crate::workflow::WorkflowAgentCli::Claude => "claude",
         crate::workflow::WorkflowAgentCli::Gemini => "gemini",
         crate::workflow::WorkflowAgentCli::OpenCode => "opencode",
         crate::workflow::WorkflowAgentCli::Codex => "codex",
+        crate::workflow::WorkflowAgentCli::Custom => "custom",
+    }
+}
+
+fn execution_mode_label(mode: &WorkflowExecutionMode) -> &'static str {
+    match mode {
+        WorkflowExecutionMode::Headless => "headless",
+        WorkflowExecutionMode::StreamingHeadless => "streaming_headless",
+        WorkflowExecutionMode::InteractivePty => "interactive_pty",
     }
 }
 
@@ -555,6 +560,10 @@ fn runtime_agent_id(mission_id: &str, node_id: &str, terminal_id: &str) -> Strin
     format!("agent:{mission_id}:{node_id}:{terminal_id}")
 }
 
+fn runtime_agent_run_id(mission_id: &str, node_id: &str, attempt: u32) -> String {
+    format!("run:{mission_id}:{node_id}:{attempt}")
+}
+
 fn persist_compiled_mission(app: &AppHandle, mission: &CompiledMission, status: &str) {
     let serialized = match serde_json::to_string(mission) {
         Ok(value) => value,
@@ -640,6 +649,7 @@ fn persist_runtime_session(
     node_id: &str,
     attempt: u32,
     terminal_id: &str,
+    run_id: &str,
     status: &str,
 ) {
     let state = app.state::<DbState>();
@@ -653,14 +663,15 @@ fn persist_runtime_session(
 
     let _ = conn.execute(
         "INSERT INTO agent_runtime_sessions
-           (session_id, agent_id, mission_id, node_id, attempt, terminal_id, status, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+           (session_id, agent_id, mission_id, node_id, attempt, terminal_id, run_id, status, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
          ON CONFLICT(session_id) DO UPDATE SET
            agent_id = excluded.agent_id,
            mission_id = excluded.mission_id,
            node_id = excluded.node_id,
            attempt = excluded.attempt,
            terminal_id = excluded.terminal_id,
+           run_id = excluded.run_id,
            status = excluded.status,
            updated_at = CURRENT_TIMESTAMP",
         params![
@@ -670,9 +681,52 @@ fn persist_runtime_session(
             node_id,
             attempt,
             terminal_id,
+            run_id,
             status
         ],
     );
+}
+
+fn persist_initial_agent_run(
+    app: &AppHandle,
+    payload: &RuntimeActivationPayload,
+) {
+    let mut env = HashMap::new();
+    env.insert("TD_SESSION_ID".to_string(), payload.session_id.clone());
+    env.insert("TD_AGENT_ID".to_string(), payload.agent_id.clone());
+    env.insert("TD_MISSION_ID".to_string(), payload.mission_id.clone());
+    env.insert("TD_NODE_ID".to_string(), payload.node_id.clone());
+    env.insert("TD_ATTEMPT".to_string(), payload.attempt.to_string());
+    env.insert("TD_RUN_ID".to_string(), payload.run_id.clone());
+    env.insert("TD_EXECUTION_MODE".to_string(), execution_mode_label(&payload.execution_mode).to_string());
+    if let Some(workspace) = payload.workspace_dir.as_ref() {
+        env.insert("TD_WORKSPACE".to_string(), workspace.clone());
+    }
+
+    let record = crate::agent_run::AgentRunRecord {
+        run_id: payload.run_id.clone(),
+        mission_id: payload.mission_id.clone(),
+        node_id: payload.node_id.clone(),
+        attempt: payload.attempt,
+        session_id: payload.session_id.clone(),
+        agent_id: payload.agent_id.clone(),
+        cli: payload.cli_type.clone(),
+        execution_mode: execution_mode_label(&payload.execution_mode).to_string(),
+        cwd: payload.workspace_dir.clone(),
+        command: payload.cli_type.clone(),
+        args: Vec::new(),
+        env,
+        prompt_path: None,
+        stdout_path: None,
+        stderr_path: None,
+        transcript_path: None,
+        status: "queued".to_string(),
+        exit_code: None,
+        started_at: None,
+        completed_at: None,
+        error: None,
+    };
+    let _ = crate::agent_run::persist_agent_run(app, &record);
 }
 
 fn mark_runtime_session_status(
@@ -711,6 +765,10 @@ fn clear_runtime_sessions_for_mission(app: &AppHandle, mission_id: &str) {
 
     let _ = conn.execute(
         "DELETE FROM agent_runtime_sessions WHERE mission_id = ?1",
+        params![mission_id],
+    );
+    let _ = conn.execute(
+        "DELETE FROM agent_runs WHERE mission_id = ?1",
         params![mission_id],
     );
 }
@@ -926,6 +984,7 @@ fn request_node_activation_locked(
     let role_id = node.role_id.clone();
     let terminal_id = node.terminal.terminal_id.clone();
     let terminal_cli = cli_type_label(&node.terminal.cli).to_string();
+    let execution_mode = node.terminal.execution_mode.clone();
 
     if terminal_id.trim().is_empty() {
         let reason = "No terminal bound to this node runtime.".to_string();
@@ -971,7 +1030,7 @@ fn request_node_activation_locked(
     let agent_id = runtime_agent_id(mission_id, node_id, &terminal_id);
     let activated_at = unix_millis_now();
     let activation_id = format!("activation:{mission_id}:{node_id}:{attempt}");
-    let run_id = mission_run_id(&active_mission.mission);
+    let run_id = runtime_agent_run_id(mission_id, node_id, attempt);
     let assignment = build_runtime_assignment_payload(
         active_mission,
         node,
@@ -990,6 +1049,7 @@ fn request_node_activation_locked(
         profile_id: node.profile_id.clone(),
         capabilities: node.capabilities.clone(),
         cli_type: terminal_cli,
+        execution_mode,
         terminal_id: terminal_id.clone(),
         pane_id: node.terminal.pane_id.clone(),
         session_id: session_id.clone(),
@@ -1062,8 +1122,10 @@ fn request_node_activation_locked(
         node_id,
         attempt,
         &terminal_id,
+        &payload.run_id,
         "launching",
     );
+    persist_initial_agent_run(app, &payload);
     emit_node_status(app, node_id, "launching", Some(attempt), None, None);
 
     let _ = app.emit(
@@ -1192,7 +1254,7 @@ pub fn start_mission(app: &AppHandle, mut mission: CompiledMission) {
 
     let mut node_statuses = HashMap::new();
     let mut node_attempts = HashMap::new();
-    let mut node_input_payloads = HashMap::new();
+    let node_input_payloads = HashMap::new();
     let mut node_failure_reasons = HashMap::new();
     for node in &mission.nodes {
         let initial_status = if node.terminal.terminal_id.trim().is_empty() {
@@ -1869,7 +1931,7 @@ pub fn register_runtime_activation_dispatch(
     session_id: String,
     agent_id: String,
     terminal_id: String,
-    activated_at: u64,
+    _activated_at: u64,
 ) -> Result<(), String> {
     println!(
         "[Mission {}] Runtime dispatch registered: node={}, attempt={}, session={}, agent={}, terminal={}",
@@ -1901,7 +1963,7 @@ pub fn get_runtime_activation(
 
     let row = conn
         .prepare(
-            "SELECT session_id, agent_id, mission_id, node_id, attempt, terminal_id, status,
+            "SELECT session_id, agent_id, mission_id, node_id, attempt, terminal_id, status, run_id,
                     datetime(created_at, 'localtime') AS created_at,
                     datetime(updated_at, 'localtime') AS updated_at
              FROM agent_runtime_sessions
@@ -1920,11 +1982,11 @@ pub fn get_runtime_activation(
                 terminal_id: row.get(5)?,
                 status: row.get(6)?,
                 activation_id: None,
-                run_id: None,
+                run_id: row.get(7)?,
                 status_reason: None,
                 activation_payload: None,
-                created_at: row.get(7)?,
-                updated_at: row.get(8)?,
+                created_at: row.get(8)?,
+                updated_at: row.get(9)?,
             })
         });
 
@@ -1968,6 +2030,7 @@ mod tests {
             terminal_id: format!("term-{title}"),
             terminal_title: title.to_string(),
             cli: WorkflowAgentCli::Claude,
+            execution_mode: crate::workflow::WorkflowExecutionMode::InteractivePty,
             pane_id: None,
             reused_existing: true,
         }
@@ -2155,6 +2218,7 @@ mod tests {
             mission,
             node_statuses,
             node_attempts,
+            node_input_payloads: HashMap::new(),
             node_waves: HashMap::new(),
             node_last_outcomes: HashMap::new(),
             pending_activations: HashMap::new(),

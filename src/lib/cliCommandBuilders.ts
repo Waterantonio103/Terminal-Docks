@@ -1,0 +1,94 @@
+import type { RuntimeActivationPayload } from './missionRuntime.js';
+
+export type PromptDelivery = 'arg_file' | 'arg_text' | 'stdin' | 'unsupported';
+
+export interface CliRunCommand {
+  command: string;
+  args: string[];
+  env: Record<string, string>;
+  promptDelivery: PromptDelivery;
+  unsupportedReason?: string;
+}
+
+export interface CliCommandBuilderOptions {
+  customCommand?: string | null;
+  customArgs?: string[] | null;
+  customEnv?: Record<string, string> | null;
+  mcpUrl?: string | null;
+}
+
+function normalizeCli(value: unknown): string {
+  return typeof value === 'string' ? value.trim().toLowerCase() : '';
+}
+
+function baseEnv(payload: RuntimeActivationPayload, mcpUrl?: string | null): Record<string, string> {
+  const env: Record<string, string> = {
+    TD_SESSION_ID: payload.sessionId,
+    TD_AGENT_ID: payload.agentId,
+    TD_MISSION_ID: payload.missionId,
+    TD_NODE_ID: payload.nodeId,
+    TD_ATTEMPT: String(payload.attempt),
+    TD_RUN_ID: payload.runId,
+    TD_EXECUTION_MODE: payload.executionMode,
+  };
+  if (mcpUrl) env.TD_MCP_URL = mcpUrl;
+  if (payload.workspaceDir) env.TD_WORKSPACE = payload.workspaceDir;
+  return env;
+}
+
+function unsupported(reason: string, env: Record<string, string>): CliRunCommand {
+  return {
+    command: '',
+    args: [],
+    env,
+    promptDelivery: 'unsupported',
+    unsupportedReason: reason,
+  };
+}
+
+export function buildCliRunCommand(
+  payload: RuntimeActivationPayload,
+  options: CliCommandBuilderOptions = {},
+): CliRunCommand {
+  const cli = normalizeCli(payload.cliType);
+  const env = { ...baseEnv(payload, options.mcpUrl), ...(options.customEnv ?? {}) };
+
+  if (cli === 'custom') {
+    const command = options.customCommand?.trim();
+    if (!command) {
+      return unsupported('Custom headless execution requires a configured command.', env);
+    }
+    return {
+      command,
+      args: options.customArgs ?? ['{promptPath}'],
+      env,
+      promptDelivery: 'arg_file',
+    };
+  }
+
+  if (cli === 'claude') {
+    return {
+      command: 'claude',
+      args: ['--print', '{prompt}'],
+      env,
+      promptDelivery: 'arg_text',
+    };
+  }
+
+  if (cli === 'gemini' || cli === 'opencode' || cli === 'codex') {
+    return unsupported(
+      `Headless command builder for "${cli}" is not configured yet. Switch this node to interactive PTY or use a custom command template.`,
+      env,
+    );
+  }
+
+  return unsupported(`Unknown CLI "${payload.cliType || 'unknown'}".`, env);
+}
+
+export function materializePromptArgs(command: CliRunCommand, prompt: string): CliRunCommand {
+  if (command.promptDelivery !== 'arg_text') return command;
+  return {
+    ...command,
+    args: command.args.map(arg => arg.split('{prompt}').join(prompt)),
+  };
+}

@@ -150,7 +150,7 @@ try {
   });
 
   run('Mission Control writes a NEW_TASK signal with runtime bootstrap metadata', () => {
-    const signal = JSON.parse(buildNewTaskSignal({
+    const prompt = buildNewTaskSignal({
       missionId: mission.missionId,
       nodeId: 'builder-node',
       roleId: 'builder',
@@ -160,7 +160,10 @@ try {
       activatedAt: 1710000000000,
       attempt: 1,
       payload: JSON.stringify([{ fromNodeId: 'task-1', payload: { scope: 'feature' } }]),
-    }));
+    });
+    const envelope = prompt.match(/--- ENVELOPE ---\n([\s\S]+?)\n--- END ENVELOPE ---/);
+    assert.ok(envelope, 'activation prompt should contain a JSON envelope');
+    const signal = JSON.parse(envelope[1]);
 
     assert.equal(signal.signal, 'NEW_TASK');
     assert.equal(signal.missionId, mission.missionId);

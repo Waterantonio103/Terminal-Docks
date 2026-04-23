@@ -13,8 +13,9 @@
     "test:mcp": "node ./tests/mcpGraphMode.test.mjs",
     "test:smoke": "tsc -p tsconfig.graph-tests.json && node ./tests/missionFlow.smoke.mjs",
     "test:prompt-parity": "node ./tests/promptToolParity.test.mjs",
+    "test:headless": "tsc -p tsconfig.graph-tests.json && node ./tests/headlessRuntime.test.mjs",
     "test:rust": "cargo test --manifest-path src-tauri/Cargo.toml workflow_engine",
-    "test:workflow": "npm run test:graph && npm run test:mcp && npm run test:smoke && npm run test:prompt-parity && npm run test:rust"
+    "test:workflow": "npm run test:graph && npm run test:mcp && npm run test:smoke && npm run test:prompt-parity && npm run test:headless && npm run test:rust"
   },
   "dependencies": {
     "@codemirror/lang-javascript": "^6.2.5",

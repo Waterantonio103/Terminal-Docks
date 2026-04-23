@@ -650,7 +650,7 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
       const freshBindings = new Map<string, { id: string; title: string; paneId: string }>();
       const storedBindings = useWorkspaceStore.getState().nodeTerminalBindings;
       for (const node of flow.nodes) {
-        if (node.type !== 'agent') continue;
+        if (node.type !== 'workflow.agent' && node.type !== 'agent') continue;
         const nodeId = String(node.id);
         const data = node.data as Record<string, unknown>;
         if (data.terminalId) continue;
@@ -674,7 +674,7 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
       }
 
       const hydratedNodes = flow.nodes.map(node => {
-        if (node.type !== 'agent') return node;
+        if (node.type !== 'workflow.agent' && node.type !== 'agent') return node;
         const nodeId = String(node.id);
         const data: Record<string, unknown> = { ...((node.data ?? {}) as Record<string, unknown>) };
         const fresh = freshBindings.get(nodeId);
@@ -781,7 +781,7 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
     try {
       const flow = nodeDocumentToFlowGraph(state.document, registry);
       const hydratedNodes = flow.nodes.map(node => {
-        if (node.type !== 'agent') return node;
+        if (node.type !== 'workflow.agent' && node.type !== 'agent') return node;
         const data: Record<string, unknown> = { ...((node.data ?? {}) as Record<string, unknown>) };
         if (!data.terminalId) data.terminalId = `preview-term-${node.id}`;
         if (!data.terminalTitle) data.terminalTitle = `Preview ${data.roleId ?? node.id}`;

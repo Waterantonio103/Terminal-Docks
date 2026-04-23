@@ -74,7 +74,7 @@ fn merge_json_config(
 
 fn register_claude(mcp_url: &str) -> CliRegistrationResult {
     let args = vec![
-        "mcp", "add", "--transport", "http",
+        "mcp", "add", "--transport", "sse",
         "terminal-docks", mcp_url, "--scope", "user",
     ];
     let output = Command::new("claude")
@@ -617,6 +617,7 @@ pub struct RuntimeBootstrapRequest {
     pub working_dir: Option<String>,
     pub activation_id: Option<String>,
     pub run_id: Option<String>,
+    pub execution_mode: Option<String>,
 }
 
 #[tauri::command]
@@ -644,6 +645,7 @@ pub fn mcp_register_runtime_session(
       "workingDir": payload.working_dir,
       "activationId": payload.activation_id,
       "runId": payload.run_id,
+      "executionMode": payload.execution_mode,
     });
 
     let url = format!("http://localhost:{}/internal/push", PORT);

@@ -1,6 +1,7 @@
 import type { RuntimeActivationPayload } from './missionRuntime';
 
-export type SupportedRuntimeCli = 'claude' | 'gemini' | 'opencode' | 'codex';
+export type SupportedRuntimeCli = 'claude' | 'gemini' | 'opencode' | 'codex' | 'custom';
+export type RuntimeExecutionMode = 'headless' | 'streaming_headless' | 'interactive_pty';
 
 export interface RuntimeBootstrapContract {
   cli: SupportedRuntimeCli;
@@ -28,6 +29,7 @@ export interface RuntimeBootstrapRegistrationRequest {
   workingDir?: string | null;
   activationId?: string;
   runId?: string;
+  executionMode?: RuntimeExecutionMode;
 }
 
 const CONTRACTS: Record<SupportedRuntimeCli, RuntimeBootstrapContract> = {
@@ -59,12 +61,19 @@ const CONTRACTS: Record<SupportedRuntimeCli, RuntimeBootstrapContract> = {
     handshakeEvent: 'agent:ready',
     notes: 'Bootstrap is sent by Mission Control; runtime readiness is gated on MCP session registration.',
   },
+  custom: {
+    cli: 'custom',
+    endpoint: '/internal/push',
+    registrationType: 'runtime_bootstrap',
+    handshakeEvent: 'agent:ready',
+    notes: 'Custom headless commands receive Terminal Docks runtime identifiers in the environment.',
+  },
 };
 
 export function normalizeRuntimeCli(value: unknown): SupportedRuntimeCli | null {
   if (typeof value !== 'string') return null;
   const cli = value.trim().toLowerCase();
-  if (cli === 'claude' || cli === 'gemini' || cli === 'opencode' || cli === 'codex') {
+  if (cli === 'claude' || cli === 'gemini' || cli === 'opencode' || cli === 'codex' || cli === 'custom') {
     return cli;
   }
   return null;
@@ -106,5 +115,6 @@ export function buildRuntimeBootstrapRegistrationRequest(
     workingDir: payload.workspaceDir ?? null,
     activationId: payload.activationId,
     runId: payload.runId,
+    executionMode: payload.executionMode,
   };
 }

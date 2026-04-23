@@ -7,6 +7,19 @@ pub enum WorkflowAgentCli {
     Gemini,
     OpenCode,
     Codex,
+    Custom,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkflowExecutionMode {
+    Headless,
+    StreamingHeadless,
+    InteractivePty,
+}
+
+fn default_execution_mode() -> WorkflowExecutionMode {
+    WorkflowExecutionMode::InteractivePty
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -47,6 +60,8 @@ pub struct CompiledMissionTerminalBinding {
     pub terminal_id: String,
     pub terminal_title: String,
     pub cli: WorkflowAgentCli,
+    #[serde(default = "default_execution_mode")]
+    pub execution_mode: WorkflowExecutionMode,
     pub pane_id: Option<String>,
     pub reused_existing: bool,
 }

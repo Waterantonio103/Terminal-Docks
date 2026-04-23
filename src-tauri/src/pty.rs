@@ -264,6 +264,20 @@ pub fn get_pty_recent_output(
 }
 
 #[tauri::command]
+pub fn is_pty_active(state: State<'_, PtyState>, id: String) -> bool {
+    let mut ptys = state.ptys.lock().unwrap();
+    if let Some(instance) = ptys.get_mut(&id) {
+        // Check if the child process is still alive by trying to wait without blocking
+        match instance.child.try_wait() {
+            Ok(None) => true, // Still running
+            _ => false,       // Exited or error
+        }
+    } else {
+        false
+    }
+}
+
+#[tauri::command]
 pub fn write_to_pty(state: State<'_, PtyState>, id: String, data: String) -> Result<(), String> {
     let mut ptys = state.ptys.lock().unwrap();
     if let Some(instance) = ptys.get_mut(&id) {

@@ -1,4 +1,5 @@
 pub mod db;
+pub mod agent_run;
 pub mod pty;
 pub mod mcp;
 pub mod swarm;
@@ -20,6 +21,7 @@ pub fn run() {
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_opener::init())
         .manage(pty::PtyState::new())
+        .manage(agent_run::AgentRunState::new())
         .manage(mcp::McpState::new())
         .manage(swarm::WatcherState::new())
         .manage(workflow_engine::WorkflowState::new())
@@ -31,6 +33,7 @@ pub fn run() {
             pty::resize_pty,
             pty::destroy_pty,
             pty::get_pty_recent_output,
+            pty::is_pty_active,
             db::get_tasks,
             db::add_task,
             db::update_task_status,
@@ -41,6 +44,10 @@ pub fn run() {
             db::get_db_path,
             db::save_session_event,
             db::get_session_history,
+            agent_run::start_agent_run,
+            agent_run::cancel_agent_run,
+            agent_run::get_agent_run,
+            agent_run::list_agent_runs,
             mcp::get_mcp_url,
             mcp::get_mcp_base_url,
             mcp::mcp_register_runtime_session,

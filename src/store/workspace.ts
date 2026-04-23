@@ -27,6 +27,7 @@ export type WorkflowNodeStatus =
 export type WorkflowMode = 'build' | 'edit';
 export type WorkflowEdgeCondition = 'always' | 'on_success' | 'on_failure';
 export type WorkflowAgentCli = 'claude' | 'gemini' | 'opencode' | 'codex' | 'custom';
+export type WorkflowExecutionMode = 'headless' | 'streaming_headless' | 'interactive_pty';
 export type WorkflowAuthoringMode = 'preset' | 'graph' | 'adaptive';
 export type WorkerCapabilityId = 'planning' | 'coding' | 'testing' | 'review' | 'security' | 'repo_analysis' | 'shell_execution';
 
@@ -58,6 +59,7 @@ export interface WorkflowNode {
     terminalId?: string;
     terminalTitle?: string;
     paneId?: string;
+    executionMode?: WorkflowExecutionMode;
     autoLinked?: boolean;
     authoringMode?: WorkflowAuthoringMode;
     presetId?: string | null;
@@ -98,6 +100,7 @@ export interface CompiledMissionTerminalBinding {
   terminalId: string;
   terminalTitle: string;
   cli: WorkflowAgentCli;
+  executionMode: WorkflowExecutionMode;
   paneId?: string;
   reusedExisting: boolean;
 }
@@ -174,7 +177,9 @@ export interface MissionAgent {
   nodeId?: string;
   runtimeSessionId?: string | null;
   runtimeCli?: WorkflowAgentCli | null;
-  runtimeBootstrapState?: 'NOT_CONNECTED' | 'CONNECTING' | 'CONNECTED';
+  executionMode?: WorkflowExecutionMode | null;
+  activeRunId?: string | null;
+  runtimeBootstrapState?: 'NOT_CONNECTED' | 'CONNECTING' | 'CONNECTED' | 'registered' | 'failed';
   runtimeBootstrapReason?: string | null;
   runtimeRegisteredAt?: number;
   runtimeLastHeartbeatAt?: number;
@@ -414,7 +419,7 @@ export const useWorkspaceStore = create<WorkspaceState>()(
         delete bindings[nodeId];
         return { nodeTerminalBindings: bindings };
       }),
-      addMissionArtifact: (missionId, nodeId, artifact) => set((state) => ({
+      addMissionArtifact: (_missionId, nodeId, artifact) => set((state) => ({
         tabs: state.tabs.map(tab => ({
           ...tab,
           panes: tab.panes.map(pane => {
@@ -671,7 +676,7 @@ export const useWorkspaceStore = create<WorkspaceState>()(
     }),
     {
       name: 'workspace-storage',
-      version: 6,
+      version: 7,
       migrate: (persistedState: any, version: number) => {
         if (version <= 2) {
           const tabs = (persistedState as any).tabs || [];
@@ -692,6 +697,27 @@ export const useWorkspaceStore = create<WorkspaceState>()(
         }
         if (version < 6) {
           return { ...persistedState, nodeTerminalBindings: {} };
+        }
+        if (version < 7) {
+          const tabs = persistedState?.tabs ?? [];
+          return {
+            ...persistedState,
+            tabs: tabs.map((tab: any) => ({
+              ...tab,
+              panes: (tab.panes ?? []).map((pane: any) => ({
+                ...pane,
+                data: pane.data ? {
+                  ...pane.data,
+                  agents: Array.isArray(pane.data.agents)
+                    ? pane.data.agents.map((agent: any) => ({
+                        ...agent,
+                        executionMode: agent.executionMode ?? 'interactive_pty',
+                      }))
+                    : pane.data.agents,
+                } : pane.data,
+              })),
+            })),
+          };
         }
         return persistedState;
       },

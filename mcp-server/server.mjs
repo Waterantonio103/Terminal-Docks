@@ -947,6 +947,22 @@ export function executeConnectAgent(
     at: Date.now(),
   });
 
+  // Also emit for the explicit graph-mode session ID if it differs
+  const graphSid = options.sessionId || null;
+  if (graphSid && graphSid !== sid) {
+    emitAgentEvent({
+      type: 'agent:ready',
+      sessionId: graphSid,
+      agentId: agentId ?? null,
+      profileId: sessions[sid].profileId ?? null,
+      role: normalizedRole,
+      missionId: missionId ?? undefined,
+      nodeId: nodeId ?? undefined,
+      attempt: Number.isInteger(attempt) ? attempt : undefined,
+      at: Date.now(),
+    });
+  }
+
   return makeToolText(`Successfully connected to terminal-docks bridge.\nSession ID: ${sid}\nStatus: Online`);
 }
 
@@ -1035,6 +1051,7 @@ export function executeRuntimeBootstrapRegistration({
   workingDir,
   activationId = null,
   runId = null,
+  executionMode = null,
 }) {
   const validation = validateRuntimeBootstrapRegistration({ sessionId, missionId, nodeId, attempt });
   if (!validation.ok) {
@@ -1060,6 +1077,7 @@ export function executeRuntimeBootstrapRegistration({
       attempt,
       activationId,
       runId,
+      executionMode,
     },
   );
 
@@ -1847,7 +1865,34 @@ function createMcpServer(getSessionId) {
     
     const sid = getSessionId();
     if (sid) {
-      emitAgentEvent({ type: 'activation:acked', sessionId: sid, missionId, nodeId, attempt: details.attempt });
+      // Find the graph-mode session ID (TD_SESSION_ID) to ack back to Mission Control
+      const runtimeSession = db.prepare(
+        `SELECT session_id
+           FROM agent_runtime_sessions
+          WHERE mission_id = ? AND node_id = ?
+          ORDER BY created_at DESC
+          LIMIT 1`
+      ).get(missionId, nodeId);
+
+      const targetSid = runtimeSession ? runtimeSession.session_id : sid;
+      emitAgentEvent({ 
+        type: 'activation:acked', 
+        sessionId: targetSid, 
+        missionId, 
+        nodeId, 
+        attempt: details.attempt 
+      });
+      
+      // Also emit for the SSE session itself just in case
+      if (targetSid !== sid) {
+        emitAgentEvent({ 
+          type: 'activation:acked', 
+          sessionId: sid, 
+          missionId, 
+          nodeId, 
+          attempt: details.attempt 
+        });
+      }
     }
 
     return { content: [{ type: 'text', text: JSON.stringify(details, null, 2) }] };
@@ -2727,6 +2772,7 @@ app.post('/internal/push', (req, res) => {
       workingDir: body.workingDir,
       activationId: body.activationId ?? null,
       runId: body.runId ?? null,
+      executionMode: body.executionMode ?? null,
     });
 
     if (!result.ok) {

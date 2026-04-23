@@ -80,13 +80,21 @@ export const claudeAdapter: WorkerAdapter = {
     }
 
     const mcpUrl = await getMcpUrl();
-    const primer = JSON.stringify({
+    const payload = {
       signal: 'BOOTSTRAP',
       sessionId: session.sessionId,
       mcpUrl,
       agentId: session.agentId,
       profileId: session.profileId,
-    }) + '\r';
+    };
+    const primer = `### MISSION_CONTROL_BOOTSTRAP_REQUEST ###
+Please connect to the MCP server at: ${mcpUrl}
+Use sessionId: ${session.sessionId}
+
+--- ENVELOPE ---
+${JSON.stringify(payload)}
+--- END ENVELOPE ---
+\r`;
     await invoke('write_to_pty', { id: session.terminalId, data: primer });
 
     await waitForMcpEvent('agent:ready', session.sessionId, REPRIME_TIMEOUT_MS);
@@ -106,7 +114,15 @@ export const claudeAdapter: WorkerAdapter = {
     };
     session.readyState = 'busy';
 
-    const stdinPayload = JSON.stringify({ signal: 'NEW_TASK', ...envelope }) + '\r';
+    const payload = { signal: 'NEW_TASK', ...envelope };
+    const stdinPayload = `### MISSION_CONTROL_ACTIVATION_REQUEST ###
+You have been assigned a new task.
+Please call 'get_task_details({ missionId: "${envelope.missionId}", nodeId: "${envelope.nodeId}" })' to retrieve your full context.
+
+--- ENVELOPE ---
+${JSON.stringify(payload)}
+--- END ENVELOPE ---
+\r`;
     await Promise.all([
       invoke('write_to_pty', { id: session.terminalId, data: stdinPayload }),
       notifyTaskPushed({

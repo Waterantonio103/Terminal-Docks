@@ -8,6 +8,7 @@ import {
   type MissionAgent,
   type WorkflowAuthoringMode,
   type WorkflowEdgeCondition,
+  type WorkflowExecutionMode,
   type WorkflowGraph,
   useWorkspaceStore,
 } from '../../store/workspace';
@@ -153,6 +154,7 @@ function workflowGraphToFlowGraph(options: {
         terminalId,
         terminalTitle,
         paneId,
+        executionMode: node.config?.executionMode ?? 'streaming_headless',
         autoLinked: Boolean(node.config?.autoLinked ?? picked),
       },
     };
@@ -209,6 +211,7 @@ function buildAdaptiveSeedFlowGraph(options: {
         terminalId: coordinator.pane.data?.terminalId ?? `term-${coordinator.pane.id}`,
         terminalTitle: coordinator.pane.title,
         paneId: coordinator.pane.id,
+        executionMode: (coordinator.pane.data?.executionMode as WorkflowExecutionMode | undefined) ?? 'streaming_headless',
         autoLinked: true,
       },
     },
@@ -308,13 +311,13 @@ export function LauncherPane() {
 
           const cliHint =
             cli === 'claude'
-              ? `If terminal-docks MCP tools are not yet available run: !claude mcp add --transport http terminal-docks ${mcpUrl} --scope user `
+              ? `If terminal-docks MCP tools are not yet available run: !claude mcp add --transport sse terminal-docks ${mcpUrl} --scope user `
               : cli === 'gemini'
-                ? `The MCP server uses streamable-HTTP transport at ${mcpUrl}. `
+                ? `The MCP server uses SSE transport at ${mcpUrl}. `
                 : cli === 'custom'
                   ? ((row.pane.data?.customCliMcpHint as string | undefined)
                     ? `${row.pane.data?.customCliMcpHint} `
-                    : `Add this MCP URL to your CLI config (streamable-HTTP): ${mcpUrl} `)
+                    : `Add this MCP URL to your CLI config (SSE): ${mcpUrl} `)
                   : '';
 
           const roleParam = cli === 'gemini' ? role : `${role}`;
@@ -323,7 +326,7 @@ export function LauncherPane() {
           const profileId = profile?.profileId ?? `${role}_profile`;
           const escapedWorkingDir = workspaceDir ? workspaceDir.replace(/\\/g, '\\\\') : '';
           const prompt =
-            `The terminal-docks MCP server is at ${mcpUrl} (streamable-http). ` +
+            `The terminal-docks MCP server is at ${mcpUrl} (SSE). ` +
             cliHint +
             `Graph runtime is control-plane driven: wait for NEW_TASK payloads and use mission/node-scoped tools. ` +
             `Session bootstrap: call connect_agent with role="${roleParam}", agentId="${row.pane.title}", terminalId="${terminalId}", cli="${cli}", profileId="${profileId}", capabilities=${capabilityJson}${workspaceDir ? `, workingDir="${escapedWorkingDir}"` : ''}. ` +
@@ -366,7 +369,7 @@ export function LauncherPane() {
         }
       }
 
-      const bindingByRole: Record<string, { terminalId: string; terminalTitle: string; paneId?: string; cli?: AgentCli | null }> = {};
+      const bindingByRole: Record<string, { terminalId: string; terminalTitle: string; paneId?: string; cli?: AgentCli | null; executionMode?: WorkflowExecutionMode }> = {};
       for (const node of preset.nodes) {
         const picked = pools.take(node.roleId);
         if (!picked) continue;
@@ -375,6 +378,7 @@ export function LauncherPane() {
           terminalTitle: picked.pane.title,
           paneId: picked.pane.id,
           cli: picked.cli,
+          executionMode: (picked.pane.data?.executionMode as WorkflowExecutionMode | undefined) ?? 'streaming_headless',
         };
       }
 
@@ -511,6 +515,12 @@ export function LauncherPane() {
           lastPayload: null,
           attemptHistory: [],
           nodeId: node.id,
+          runtimeCli: node.terminal.cli,
+          executionMode: node.terminal.executionMode,
+          activeRunId: null,
+          runtimeSessionId: null,
+          runtimeBootstrapState: 'NOT_CONNECTED',
+          runtimeBootstrapReason: null,
         }));
 
         const nodeById = new Map(mission.nodes.map(node => [node.id, node]));
