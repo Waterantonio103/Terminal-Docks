@@ -9,6 +9,11 @@ export function workflowStatusTone(
   status: string | undefined,
   variant: 'graph' | 'mission' = 'graph',
 ): string {
+  if (status === 'bound') {
+    return variant === 'mission'
+      ? 'text-slate-300 border-slate-300/30 bg-slate-300/10'
+      : 'text-slate-200 border-slate-300/40 bg-slate-500/10';
+  }
   if (status === 'launching') {
     return variant === 'mission'
       ? 'text-blue-300 border-blue-300/30 bg-blue-300/10'
@@ -23,6 +28,11 @@ export function workflowStatusTone(
     return variant === 'mission'
       ? 'text-emerald-300 border-emerald-300/30 bg-emerald-300/10'
       : 'text-emerald-200 border-emerald-300/40 bg-emerald-500/10';
+  }
+  if (status === 'activated') {
+    return variant === 'mission'
+      ? 'text-violet-300 border-violet-300/30 bg-violet-300/10'
+      : 'text-violet-200 border-violet-300/40 bg-violet-500/10';
   }
   if (status === 'running') {
     return variant === 'mission'

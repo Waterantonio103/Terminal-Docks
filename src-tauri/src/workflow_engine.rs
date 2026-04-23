@@ -914,6 +914,7 @@ fn request_node_activation_locked(
     if current_status == "launching"
         || current_status == "connecting"
         || current_status == "ready"
+        || current_status == "activated"
         || current_status == "running"
     {
         return;
@@ -1157,10 +1158,15 @@ fn apply_append_patch(active_mission: &mut ActiveMission, run_version: u32, patc
     active_mission.layer_index = build_layer_index(&active_mission.mission);
 
     for node in &patch.nodes {
+        let initial = if node.terminal.terminal_id.trim().is_empty() {
+            "unbound"
+        } else {
+            "bound"
+        };
         active_mission
             .node_statuses
             .entry(node.id.clone())
-            .or_insert_with(|| "idle".to_string());
+            .or_insert_with(|| initial.to_string());
         active_mission.node_attempts.entry(node.id.clone()).or_insert(0);
     }
 
@@ -1189,9 +1195,12 @@ pub fn start_mission(app: &AppHandle, mut mission: CompiledMission) {
     let mut node_input_payloads = HashMap::new();
     let mut node_failure_reasons = HashMap::new();
     for node in &mission.nodes {
-        let mut initial_status = "idle".to_string();
-        if node.terminal.terminal_id.trim().is_empty() {
-            initial_status = "unbound".to_string();
+        let initial_status = if node.terminal.terminal_id.trim().is_empty() {
+            "unbound"
+        } else {
+            "bound"
+        }.to_string();
+        if initial_status == "unbound" {
             node_failure_reasons.insert(
                 node.id.clone(),
                 "No terminal is bound for this node.".to_string(),
@@ -1541,18 +1550,23 @@ pub fn append_mission_patch(
     };
 
     for node in &appended_nodes {
+        let initial_status = if node.terminal.terminal_id.trim().is_empty() {
+            "unbound"
+        } else {
+            "bound"
+        };
         persist_node_runtime(
             &app,
             &mission_id,
             &node.id,
             &node.role_id,
-            "idle",
+            initial_status,
             0,
             None,
             None,
             None,
         );
-        emit_node_status(&app, &node.id, "idle", Some(0), None, None);
+        emit_node_status(&app, &node.id, initial_status, Some(0), None, None);
     }
 
     {
@@ -1613,6 +1627,7 @@ pub fn retry_mission_node(
     if current_status == "launching"
         || current_status == "connecting"
         || current_status == "ready"
+        || current_status == "activated"
         || current_status == "running"
     {
         return Err(format!(
@@ -1724,9 +1739,42 @@ pub fn acknowledge_runtime_activation(
                     .insert(node_id.clone(), "ready".to_string());
                 active_mission.node_failure_reasons.remove(&node_id);
             }
+            "activated" => {
+                let pending = active_mission
+                    .pending_runtime_activations
+                    .get_mut(&key)
+                    .ok_or_else(|| {
+                        format!(
+                            "No pending activation request found for {}/{} attempt {}.",
+                            mission_id, node_id, attempt
+                        )
+                    })?;
+                pending.status = "activated".to_string();
+                if next_reason.is_some() {
+                    pending.reason = next_reason.clone();
+                }
+                last_payload = pending.payload.input_payload.clone();
+                active_mission
+                    .node_statuses
+                    .insert(node_id.clone(), "activated".to_string());
+                active_mission.node_failure_reasons.remove(&node_id);
+            }
             "running" => {
                 if let Some(pending) = active_mission.pending_runtime_activations.remove(&key) {
                     last_payload = pending.payload.input_payload;
+                }
+                // Enforce: READY → RUNNING must go through ACTIVATED first.
+                // If the node skipped activated, auto-emit activated before running.
+                let prev_status = active_mission
+                    .node_statuses
+                    .get(&node_id)
+                    .cloned()
+                    .unwrap_or_default();
+                if prev_status == "ready" {
+                    active_mission
+                        .node_statuses
+                        .insert(node_id.clone(), "activated".to_string());
+                    emit_node_status(&app, &node_id, "activated", Some(attempt), None, None);
                 }
                 active_mission
                     .node_statuses
@@ -1751,7 +1799,7 @@ pub fn acknowledge_runtime_activation(
             }
             other => {
                 return Err(format!(
-                    "Unsupported activation status \"{}\". Expected connecting|ready|running|failed.",
+                    "Unsupported activation status \"{}\". Expected connecting|activated|ready|running|failed.",
                     other
                 ));
             }

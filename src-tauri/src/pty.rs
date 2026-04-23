@@ -89,6 +89,13 @@ pub fn spawn_pty(
 
     let mut cmd = CommandBuilder::new(shell);
     cmd.env("TERM", "xterm-256color");
+    
+    // Phase 1: Inject MCP auto-connection config
+    cmd.env("TD_SESSION_ID", &id);
+    let mcp_state = app.state::<crate::mcp::McpState>();
+    let mcp_url = crate::mcp::get_mcp_url(mcp_state);
+    cmd.env("TD_MCP_URL", mcp_url);
+
     if !cfg!(target_os = "windows") {
         cmd.args(["-l", "-i"]);
     }

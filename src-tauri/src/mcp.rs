@@ -334,6 +334,15 @@ fn generate_push_token() -> String {
 const PORT: u16 = 3741;
 
 pub fn init_mcp_server(app: &AppHandle) -> Result<(), String> {
+    {
+        let state = app.state::<McpState>();
+        let guard = state.process.lock().unwrap();
+        if guard.is_some() {
+            // Already running
+            return Ok(());
+        }
+    }
+
     let mut server_dir = std::env::current_dir()
         .map_err(|e| e.to_string())?
         .join("mcp-server");

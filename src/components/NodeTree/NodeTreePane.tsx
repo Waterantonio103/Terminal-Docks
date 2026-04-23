@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ArrowUpRight, ChevronLeft, Play, Plus, RefreshCw, ScanSearch, Sparkles, TerminalSquare, Trash2, Workflow, X } from 'lucide-react';
+import { ArrowUpRight, ChevronDown, ChevronLeft, Play, Plus, RefreshCw, ScanSearch, Sparkles, TerminalSquare, Trash2, Workflow, X } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
 import { emit, listen } from '@tauri-apps/api/event';
 import agentsConfig from '../../config/agents';
@@ -194,6 +194,7 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
   const tabs = useWorkspaceStore(state => state.tabs);
   const results = useWorkspaceStore(state => state.results);
   const addPane = useWorkspaceStore(state => state.addPane);
+  const setNodeTerminalBinding = useWorkspaceStore(state => state.setNodeTerminalBinding);
   const openTerminals = useMemo(() => {
     const terminals: Array<{ id: string; title: string; cli: string | null; paneId: string }> = [];
     for (const tab of tabs) {
@@ -209,6 +210,7 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
   const [inspectorCommand, setInspectorCommand] = useState('');
   const [inspectorError, setInspectorError] = useState<string | null>(null);
   const [runtimeOutputByTerminalId, setRuntimeOutputByTerminalId] = useState<Record<string, string>>({});
+  const [expandedTerminalNodeId, setExpandedTerminalNodeId] = useState<string | null>(null);
 
   const registry = useMemo(() => createWorkflowNodeRegistry(), []);
   const [state, setState] = useState<NodeDocumentState>(() => legacyGraphToNodeDocument(graph));
@@ -507,7 +509,7 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
   }, []);
 
   const createAndBindRuntime = useCallback(
-    (nodeId: string) => {
+    (nodeId: string): { id: string; paneId: string; title: string } | null => {
       const before = new Set(openTerminals.map(terminal => terminal.id));
       const node = activeTree.nodes[nodeId];
       const role = String(node?.properties.roleId ?? 'agent');
@@ -527,15 +529,17 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
       if (!created) {
         setValidationTone('error');
         setValidationMessage('Failed to create terminal runtime binding.');
-        return;
+        return null;
       }
       applyOperator({ type: 'set_node_property', nodeId, key: 'terminalId', value: created.id });
       applyOperator({ type: 'set_node_property', nodeId, key: 'terminalTitle', value: created.title });
       applyOperator({ type: 'set_node_property', nodeId, key: 'paneId', value: created.paneId });
+      setNodeTerminalBinding(nodeId, created.id);
       setValidationTone('ok');
       setValidationMessage(`Node ${nodeId} bound to ${created.title}.`);
+      return created;
     },
-    [activeTree.nodes, addPane, applyOperator, openTerminals]
+    [activeTree.nodes, addPane, applyOperator, openTerminals, setNodeTerminalBinding]
   );
 
   const sendInspectorCommand = useCallback(async () => {
@@ -642,11 +646,45 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
       const flow = nodeDocumentToFlowGraph(state.document, registry);
       validateGraph(flow.nodes as never[], flow.edges as never[]);
 
+      // Auto-bind any unbound agent nodes — node owns its terminal
+      const freshBindings = new Map<string, { id: string; title: string; paneId: string }>();
+      const storedBindings = useWorkspaceStore.getState().nodeTerminalBindings;
+      for (const node of flow.nodes) {
+        if (node.type !== 'agent') continue;
+        const nodeId = String(node.id);
+        const data = node.data as Record<string, unknown>;
+        if (data.terminalId) continue;
+
+        // Re-attach persisted binding if the terminal pane is still open
+        const persistedId = storedBindings[nodeId];
+        if (persistedId) {
+          const existing = openTerminals.find(t => t.id === persistedId);
+          if (existing) {
+            applyOperator({ type: 'set_node_property', nodeId, key: 'terminalId', value: persistedId });
+            applyOperator({ type: 'set_node_property', nodeId, key: 'terminalTitle', value: existing.title });
+            applyOperator({ type: 'set_node_property', nodeId, key: 'paneId', value: existing.paneId });
+            freshBindings.set(nodeId, { id: persistedId, title: existing.title, paneId: existing.paneId });
+            continue;
+          }
+        }
+
+        // Spawn a new terminal for this node
+        const binding = createAndBindRuntime(nodeId);
+        if (binding) freshBindings.set(nodeId, binding);
+      }
+
       const hydratedNodes = flow.nodes.map(node => {
         if (node.type !== 'agent') return node;
+        const nodeId = String(node.id);
         const data: Record<string, unknown> = { ...((node.data ?? {}) as Record<string, unknown>) };
-        if (!data.terminalId) throw new Error(`Agent node ${node.id} missing terminal binding.`);
-        if (!data.terminalTitle) data.terminalTitle = `Terminal ${data.roleId ?? node.id}`;
+        const fresh = freshBindings.get(nodeId);
+        if (fresh) {
+          data.terminalId = fresh.id;
+          data.terminalTitle = fresh.title;
+          data.paneId = fresh.paneId;
+        }
+        if (!data.terminalId) throw new Error(`Agent node ${nodeId}: failed to create or find terminal binding.`);
+        if (!data.terminalTitle) data.terminalTitle = `Terminal ${data.roleId ?? nodeId}`;
         return { ...node, data };
       });
 
@@ -656,6 +694,10 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
           .filter(terminal => terminal.cli && SUPPORTED_WORKFLOW_CLIS.has(terminal.cli))
           .map(terminal => [terminal.id, terminal.cli as WorkflowAgentCli])
       );
+      // Default freshly spawned terminals to claude since CLI detection hasn't run yet
+      for (const [, binding] of freshBindings) {
+        if (!terminalClis[binding.id]) terminalClis[binding.id] = 'claude';
+      }
       const mission = compileMission({
         missionId,
         graphId: graph.id || 'graph',
@@ -679,7 +721,7 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
         nodeId: node.id,
         runtimeSessionId: null,
         runtimeCli: node.terminal.cli,
-        runtimeBootstrapState: 'bound',
+        runtimeBootstrapState: 'NOT_CONNECTED',
         runtimeBootstrapReason: null,
       }));
 
@@ -690,16 +732,24 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
       if (startNodes.length === 0) {
         throw new Error('Compiled mission has no start nodes with terminal bindings.');
       }
+      // Build a lookup that includes freshly spawned terminals not yet in the openTerminals memo
+      const allKnownTerminals = new Map([
+        ...openTerminals.map(t => [t.id, t] as const),
+        ...[...freshBindings.entries()].map(([, b]) => [b.id, { id: b.id, title: b.title, paneId: b.paneId, cli: null }] as const),
+      ]);
       for (const startNode of startNodes) {
-        const terminal = openTerminals.find(entry => entry.id === startNode.terminal.terminalId);
+        const terminal = allKnownTerminals.get(startNode.terminal.terminalId);
         if (!terminal) {
           throw new Error(`No terminal bound for start node ${startNode.id}.`);
         }
-        const cli = String(terminal.cli ?? '').trim().toLowerCase();
-        if (!SUPPORTED_WORKFLOW_CLIS.has(cli)) {
-          throw new Error(
-            `CLI not detected or unsupported for ${startNode.terminal.terminalTitle} (${startNode.id}).`
-          );
+        // Skip CLI check for freshly spawned terminals — CLI is detected after first output
+        if (terminal.cli !== null) {
+          const cli = String(terminal.cli ?? '').trim().toLowerCase();
+          if (!SUPPORTED_WORKFLOW_CLIS.has(cli)) {
+            throw new Error(
+              `CLI not detected or unsupported for ${startNode.terminal.terminalTitle} (${startNode.id}).`
+            );
+          }
         }
       }
 
@@ -725,7 +775,7 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
       setValidationTone('error');
       setValidationMessage(error instanceof Error ? error.message : String(error));
     }
-  }, [registry, state.document, workspaceDir, graph.id, openTerminals, addPane]);
+  }, [registry, state.document, workspaceDir, graph.id, openTerminals, addPane, applyOperator, createAndBindRuntime]);
 
   const viewRuntimeMapping = useCallback(() => {
     try {
@@ -1505,20 +1555,48 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
                       <div className="grid grid-cols-2 gap-2 text-[10px]">
                         <div className="rounded border border-border-panel bg-[#0b1118] px-2 py-1.5">
                           <div className="uppercase tracking-wide text-text-muted">Terminal</div>
-                          <div className="text-text-primary truncate">{terminalId || 'Unbound'}</div>
+                          <div className={`truncate font-medium ${terminalId ? 'text-emerald-300' : 'text-red-300'}`}>
+                            {terminalId ? 'bound' : 'unbound'}
+                          </div>
                         </div>
                         <div className="rounded border border-border-panel bg-[#0b1118] px-2 py-1.5">
                           <div className="uppercase tracking-wide text-text-muted">Session</div>
                           <div className="text-text-primary truncate">{shortId(runtimeSessionId)}</div>
                         </div>
-                        <div className="rounded border border-border-panel bg-[#0b1118] px-2 py-1.5">
-                          <div className="uppercase tracking-wide text-text-muted">Status</div>
-                          <div className="text-text-primary">{workflowStatusLabel(runtimeStatus)}</div>
+                        <div className={`rounded border px-2 py-1.5 ${workflowStatusTone(runtimeStatus, 'graph')}`}>
+                          <div className="uppercase tracking-wide opacity-70">Status</div>
+                          <div className="font-medium">{workflowStatusLabel(runtimeStatus)}</div>
                         </div>
                         <div className="rounded border border-border-panel bg-[#0b1118] px-2 py-1.5">
-                          <div className="uppercase tracking-wide text-text-muted">Recent Activity</div>
-                          <div className="text-text-primary line-clamp-2 break-words">{runtimeSummary}</div>
+                          <div className="uppercase tracking-wide text-text-muted">CLI</div>
+                          <div className="text-text-primary">{runtimeCli ? runtimeCli.toUpperCase() : 'Unknown'}</div>
                         </div>
+                      </div>
+                      {/* Collapsible terminal preview — node owns terminal output */}
+                      <div className="rounded border border-border-panel bg-[#080d12] overflow-hidden">
+                        <button
+                          type="button"
+                          className="w-full flex items-center justify-between px-2 py-1.5 bg-[#0a0f16] hover:bg-[#0e1520] transition-colors"
+                          onClick={() => setExpandedTerminalNodeId(current => current === materializedNode.node.id ? null : materializedNode.node.id)}
+                        >
+                          <div className="flex items-center gap-1.5 text-[10px] text-text-muted">
+                            <TerminalSquare size={10} />
+                            Terminal Output
+                            {terminalId && <span className="text-[8px] text-text-muted opacity-50">({terminalId.slice(0, 8)})</span>}
+                          </div>
+                          <ChevronDown size={10} className={`text-text-muted transition-transform ${expandedTerminalNodeId === materializedNode.node.id ? 'rotate-180' : ''}`} />
+                        </button>
+                        {expandedTerminalNodeId === materializedNode.node.id ? (
+                          <pre className="px-2 py-2 text-[10px] leading-relaxed text-[#c5d2e4] whitespace-pre-wrap overflow-x-hidden max-h-36 overflow-y-auto bg-[#080d12]">
+                            {terminalId
+                              ? ((runtimeOutputByTerminalId[terminalId] || '').split('\n').slice(-25).join('\n') || 'Waiting for output…')
+                              : 'No terminal bound. Click Run to auto-create one.'}
+                          </pre>
+                        ) : (
+                          <div className="px-2 py-1 text-[10px] text-text-muted font-mono opacity-60 truncate bg-[#080d12]">
+                            {terminalId ? (runtimeSummary || 'No output yet') : 'Unbound — will auto-create on Run'}
+                          </div>
+                        )}
                       </div>
                       {artifactHints.length > 0 && (
                         <div className="rounded border border-border-panel bg-[#0b1118] px-2 py-1.5">
@@ -1574,12 +1652,12 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
                         </button>
                         <button
                           type="button"
-                          disabled={!terminalId || !terminal}
+                          disabled={!terminalId}
                           onClick={() => terminalId && openTerminalById(terminalId)}
-                          className="flex items-center justify-center gap-1 rounded border border-border-panel px-2 py-1.5 text-[10px] text-text-muted hover:text-text-primary hover:bg-[#111826] disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                          className="flex items-center justify-center gap-1 rounded border border-accent-primary/40 px-2 py-1.5 text-[10px] text-accent-primary hover:bg-accent-primary/10 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
                         >
                           <ArrowUpRight size={11} />
-                          Open PTY
+                          Open Terminal
                         </button>
                         <button
                           type="button"

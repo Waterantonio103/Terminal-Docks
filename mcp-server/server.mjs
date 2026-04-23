@@ -1844,6 +1844,12 @@ function createMcpServer(getSessionId) {
         content: [{ type: 'text', text: `Mission ${missionId} or node ${nodeId} could not be found. Confirm the NEW_TASK payload and active mission.` }]
       };
     }
+    
+    const sid = getSessionId();
+    if (sid) {
+      emitAgentEvent({ type: 'activation:acked', sessionId: sid, missionId, nodeId, attempt: details.attempt });
+    }
+
     return { content: [{ type: 'text', text: JSON.stringify(details, null, 2) }] };
   });
 

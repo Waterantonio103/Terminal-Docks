@@ -85,6 +85,16 @@ function applyToRegistry(ev: McpServerEvent): void {
     case 'agent:disconnected':
       registry.markDead(ev.sessionId, 'disconnected');
       break;
+    case 'activation:acked':
+      if (ev.missionId && ev.nodeId) {
+        invoke('acknowledge_runtime_activation', {
+          missionId: ev.missionId,
+          nodeId: ev.nodeId,
+          attempt: ev.attempt || 1,
+          status: 'running'
+        }).catch(err => console.warn('Failed to ack activation from mcp', err));
+      }
+      break;
   }
 }
 

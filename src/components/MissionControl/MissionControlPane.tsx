@@ -45,6 +45,7 @@ const RUNTIME_ACTIVE_STATES = new Set<MissionAgent['status']>([
   'launching',
   'connecting',
   'ready',
+  'activated',
   'running',
   'handoff_pending',
   'waiting',
@@ -225,11 +226,10 @@ function focusAgentTerminal(terminalId: string) {
 }
 
 function runtimeBootstrapLabel(state?: MissionAgent['runtimeBootstrapState']): string {
-  if (!state) return 'bound';
-  if (state === 'registering') return 'registering';
-  if (state === 'registered') return 'registered';
-  if (state === 'disconnected') return 'disconnected';
-  if (state === 'failed') return 'failed';
+  if (!state) return 'NOT_CONNECTED';
+  if (state === 'CONNECTING') return 'CONNECTING';
+  if (state === 'CONNECTED') return 'CONNECTED';
+  if (state === 'NOT_CONNECTED') return 'NOT_CONNECTED';
   return state;
 }
 
@@ -623,7 +623,7 @@ export function MissionControlPane({ pane }: { pane: Pane }) {
               status: 'idle',
               triggered: false,
               lastError: null,
-              runtimeBootstrapState: 'bound',
+              runtimeBootstrapState: 'NOT_CONNECTED',
               runtimeBootstrapReason: null,
               runtimeSessionId: null,
               runtimeRegisteredAt: undefined,
@@ -652,7 +652,7 @@ export function MissionControlPane({ pane }: { pane: Pane }) {
               ...agent,
               status: shouldForceFailed ? 'failed' : agent.status,
               lastError: reason,
-              runtimeBootstrapState: 'disconnected',
+              runtimeBootstrapState: 'NOT_CONNECTED',
               runtimeBootstrapReason: reason,
             }
           : agent
@@ -780,7 +780,7 @@ export function MissionControlPane({ pane }: { pane: Pane }) {
                   ...agent,
                   status: RUNTIME_ACTIVE_STATES.has(agent.status) ? 'failed' : agent.status,
                   lastError: reason,
-                  runtimeBootstrapState: 'disconnected',
+                  runtimeBootstrapState: 'NOT_CONNECTED',
                   runtimeBootstrapReason: reason,
                 }
               : agent
@@ -831,8 +831,7 @@ export function MissionControlPane({ pane }: { pane: Pane }) {
           lastError: null,
           runtimeSessionId: payload.sessionId,
           runtimeCli: cli,
-          runtimeBootstrapState: 'registering',
-          runtimeBootstrapReason: null,
+          runtimeBootstrapState: 'CONNECTING',          runtimeBootstrapReason: null,
           runtimeRegisteredAt: undefined,
           attemptHistory: upsertAttemptHistory(agent.attemptHistory, attempt, {
             attempt,
@@ -847,22 +846,6 @@ export function MissionControlPane({ pane }: { pane: Pane }) {
       updatePaneData(pane.id, { agents: nextAgents });
 
       const terminalId = payload.terminalId;
-      const signal = buildNewTaskSignal({
-        missionId,
-        nodeId,
-        roleId: payload.role,
-        sessionId: payload.sessionId,
-        agentId: payload.agentId,
-        terminalId: payload.terminalId,
-        activatedAt: payload.emittedAt,
-        attempt,
-        payload: payload.inputPayload ?? null,
-        runId: payload.runId,
-        cliType: payload.cliType,
-        goal: payload.goal,
-        workspaceDir: payload.workspaceDir ?? null,
-        assignment: payload.assignment,
-      });
       const contract = getRuntimeBootstrapContract(payload.cliType);
       const bootstrapRequest = buildRuntimeBootstrapRegistrationRequest(payload);
       ensureSessionSubscription(payload.sessionId, missionId, nodeId, attempt);
@@ -895,11 +878,14 @@ export function MissionControlPane({ pane }: { pane: Pane }) {
 
       void (async () => {
         try {
-          await invoke('acknowledge_runtime_activation', {
+          await invoke('register_runtime_activation_dispatch', {
             missionId,
             nodeId,
             attempt,
-            status: 'connecting',
+            sessionId: payload.sessionId,
+            agentId: payload.agentId,
+            terminalId: payload.terminalId,
+            activatedAt: payload.emittedAt || Date.now(),
           });
 
           if (!terminalId) {
@@ -941,19 +927,31 @@ export function MissionControlPane({ pane }: { pane: Pane }) {
           }
 
           await readyEvent;
+
+          const signal = buildNewTaskSignal({
+            missionId,
+            nodeId,
+            roleId: payload.role,
+            sessionId: payload.sessionId,
+            agentId: payload.agentId,
+            terminalId: payload.terminalId,
+            activatedAt: payload.emittedAt,
+            attempt,
+            payload: payload.inputPayload ?? null,
+            runId: payload.runId,
+            cliType: payload.cliType,
+            goal: payload.goal,
+            workspaceDir: payload.workspaceDir ?? null,
+            assignment: payload.assignment,
+          });
+          const ackEvent = waitForMcpEvent('activation:acked', payload.sessionId, 30_000);
           await invoke('write_to_pty', { id: terminalId, data: `${signal}\r` });
-          await invoke('acknowledge_runtime_activation', {
-            missionId,
-            nodeId,
-            attempt,
-            status: 'ready',
-          });
-          await invoke('acknowledge_runtime_activation', {
-            missionId,
-            nodeId,
-            attempt,
-            status: 'running',
-          });
+          try {
+            await ackEvent;
+          } catch {
+            await failActivation('Agent did not call get_task_details within 30s of receiving NEW_TASK.');
+            return;
+          }
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
           await failActivation(`Activation payload could not be delivered: ${message}`);
@@ -1020,11 +1018,11 @@ export function MissionControlPane({ pane }: { pane: Pane }) {
           attempt: nextAttempt,
           runtimeBootstrapState:
             nextStatus === 'failed' || nextStatus === 'unbound'
-              ? 'failed'
+              ? 'NOT_CONNECTED'
               : nextStatus === 'ready' || nextStatus === 'running'
-                ? (agent.runtimeBootstrapState === 'disconnected' ? 'disconnected' : 'registered')
+                ? (agent.runtimeBootstrapState === 'NOT_CONNECTED' ? 'NOT_CONNECTED' : 'CONNECTED')
                 : nextStatus === 'launching' || nextStatus === 'connecting'
-                  ? 'registering'
+                  ? 'CONNECTING'
                   : agent.runtimeBootstrapState,
           runtimeBootstrapReason:
             nextStatus === 'failed' || nextStatus === 'unbound'
