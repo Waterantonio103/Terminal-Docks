@@ -13,9 +13,11 @@ export type PaneType = 'terminal' | 'editor' | 'taskboard' | 'activityfeed' | 'l
 export type WorkflowNodeStatus =
   | 'idle'
   | 'unbound'
+  | 'bound'
   | 'launching'
   | 'connecting'
   | 'ready'
+  | 'activated'
   | 'running'
   | 'handoff_pending'
   | 'waiting'
@@ -24,7 +26,7 @@ export type WorkflowNodeStatus =
   | 'failed';
 export type WorkflowMode = 'build' | 'edit';
 export type WorkflowEdgeCondition = 'always' | 'on_success' | 'on_failure';
-export type WorkflowAgentCli = 'claude' | 'gemini' | 'opencode' | 'codex';
+export type WorkflowAgentCli = 'claude' | 'gemini' | 'opencode' | 'codex' | 'custom';
 export type WorkflowAuthoringMode = 'preset' | 'graph' | 'adaptive';
 export type WorkerCapabilityId = 'planning' | 'coding' | 'testing' | 'review' | 'security' | 'repo_analysis' | 'shell_execution';
 
@@ -47,6 +49,7 @@ export interface WorkflowNode {
   id: string;
   roleId: string;
   status: WorkflowNodeStatus;
+  mcpState?: 'NOT_CONNECTED' | 'CONNECTING' | 'CONNECTED';
   config?: {
     prompt?: string;
     mode?: WorkflowMode;
@@ -171,7 +174,7 @@ export interface MissionAgent {
   nodeId?: string;
   runtimeSessionId?: string | null;
   runtimeCli?: WorkflowAgentCli | null;
-  runtimeBootstrapState?: 'bound' | 'registering' | 'registered' | 'disconnected' | 'failed';
+  runtimeBootstrapState?: 'NOT_CONNECTED' | 'CONNECTING' | 'CONNECTED';
   runtimeBootstrapReason?: string | null;
   runtimeRegisteredAt?: number;
   runtimeLastHeartbeatAt?: number;
@@ -202,13 +205,17 @@ export interface Pane {
   gridPos: GridPos;
   data?: {
     terminalId?: string;
-    cli?: 'claude' | 'gemini' | 'opencode' | 'codex';
+    cli?: 'claude' | 'gemini' | 'opencode' | 'codex' | 'custom';
     cliSource?: 'connect_agent' | 'stdout' | 'heuristic';
     cliConfidence?: 'low' | 'medium' | 'high';
     cliUpdatedAt?: number;
     roleId?: string;
     filePath?: string;
     initialCommand?: string;
+    customCliCommand?: string;
+    customCliArgs?: string[];
+    customCliEnv?: Record<string, string>;
+    customCliMcpHint?: string;
     [key: string]: any;
   };
 }
@@ -332,6 +339,7 @@ interface WorkspaceState {
   tasks: DbTask[];
   agentInstructions: Record<string, string>;
   globalGraph: WorkflowGraph;
+  nodeTerminalBindings: Record<string, string>;
   toggleSidebar: () => void;
   setActiveSidebarTab: (tab: SidebarTabType) => void;
   setGlobalGraph: (graph: WorkflowGraph) => void;
@@ -359,6 +367,8 @@ interface WorkspaceState {
   addResult: (result: ResultEntry) => void;
   setTasks: (tasks: DbTask[]) => void;
   setAgentInstruction: (id: string, value: string) => void;
+  setNodeTerminalBinding: (nodeId: string, terminalId: string) => void;
+  removeNodeTerminalBinding: (nodeId: string) => void;
 }
 
 const _initTabId = generateId();
@@ -386,6 +396,7 @@ export const useWorkspaceStore = create<WorkspaceState>()(
       tasks: [],
       agentInstructions: {},
       globalGraph: { id: 'global-editor', nodes: [], edges: [] },
+      nodeTerminalBindings: {},
 
       setActiveSidebarTab: (tab) => set({ activeSidebarTab: tab }),
       setGlobalGraph: (graph) => set({ globalGraph: graph }),
@@ -394,6 +405,14 @@ export const useWorkspaceStore = create<WorkspaceState>()(
       addResult: (result) => set((s) => ({ results: [...s.results, result].slice(-200) })),
       setTasks: (tasks) => set({ tasks }),
       setAgentInstruction: (id, value) => set((s) => ({ agentInstructions: { ...s.agentInstructions, [id]: value } })),
+      setNodeTerminalBinding: (nodeId, terminalId) => set((s) => ({
+        nodeTerminalBindings: { ...s.nodeTerminalBindings, [nodeId]: terminalId },
+      })),
+      removeNodeTerminalBinding: (nodeId) => set((s) => {
+        const bindings = { ...s.nodeTerminalBindings };
+        delete bindings[nodeId];
+        return { nodeTerminalBindings: bindings };
+      }),
 
       toggleSidebar: () => set((s) => ({ sidebarOpen: !s.sidebarOpen })),
 
@@ -629,7 +648,7 @@ export const useWorkspaceStore = create<WorkspaceState>()(
     }),
     {
       name: 'workspace-storage',
-      version: 5,
+      version: 6,
       migrate: (persistedState: any, version: number) => {
         if (version <= 2) {
           const tabs = (persistedState as any).tabs || [];
@@ -643,11 +662,13 @@ export const useWorkspaceStore = create<WorkspaceState>()(
           return { ...persistedState, tabs: updatedTabs };
         }
         if (version < 5) {
-          // Reset globalGraph to default if it's missing or looks broken
           return {
             ...persistedState,
             globalGraph: { id: 'global-editor', nodes: [], edges: [] }
           };
+        }
+        if (version < 6) {
+          return { ...persistedState, nodeTerminalBindings: {} };
         }
         return persistedState;
       },
@@ -661,6 +682,7 @@ export const useWorkspaceStore = create<WorkspaceState>()(
         results: state.results.slice(-100),
         agentInstructions: state.agentInstructions,
         globalGraph: state.globalGraph,
+        nodeTerminalBindings: state.nodeTerminalBindings,
       }),
     }
   )

@@ -1,4 +1,4 @@
-export type WorkerKind = 'claude' | 'gemini' | 'codex' | 'opencode' | 'generic';
+export type WorkerKind = 'claude' | 'gemini' | 'codex' | 'opencode' | 'generic' | 'custom';
 
 export type ReadyState = 'spawning' | 'booting' | 'ready' | 'busy' | 'stale' | 'dead';
 
@@ -83,7 +83,8 @@ export interface McpServerEvent {
     | 'task:completed'
     | 'task:pushed'
     | 'bootstrap:requested'
-    | 'workspace:context-updated';
+    | 'workspace:context-updated'
+    | 'activation:acked';
   sessionId: string;
   at: number;
   missionId?: string;

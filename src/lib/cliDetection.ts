@@ -1,10 +1,10 @@
-export type AgentCli = 'claude' | 'gemini' | 'opencode' | 'codex';
+export type AgentCli = 'claude' | 'gemini' | 'opencode' | 'codex' | 'custom';
 export type CliDetectionConfidence = 'low' | 'medium' | 'high';
 
 const ROLE_IDS = ['scout', 'coordinator', 'builder', 'tester', 'security', 'reviewer'] as const;
 export type AgentRoleId = (typeof ROLE_IDS)[number];
 
-const CLI_ALIASES: Record<AgentCli, string[]> = {
+const CLI_ALIASES: Partial<Record<AgentCli, string[]>> = {
   claude: ['claude', 'claude.cmd'],
   gemini: ['gemini', 'gemini.cmd'],
   opencode: ['opencode', 'opencode.cmd'],
@@ -20,7 +20,7 @@ function normalizeToken(token: string): string {
 }
 
 export function normalizeCli(value: unknown): AgentCli | null {
-  if (value === 'claude' || value === 'gemini' || value === 'opencode' || value === 'codex') return value;
+  if (value === 'claude' || value === 'gemini' || value === 'opencode' || value === 'codex' || value === 'custom') return value;
   return null;
 }
 
@@ -41,6 +41,10 @@ export function detectCliFromText(text: string | null | undefined): AgentCli | n
 }
 
 export function detectCliForPane(pane: { title?: string; data?: Record<string, unknown> }): AgentCli | null {
+  if (typeof pane.data?.customCliCommand === 'string' && pane.data.customCliCommand.trim()) {
+    return 'custom';
+  }
+
   const fromData = normalizeCli(pane.data?.cli);
   if (fromData) return fromData;
 

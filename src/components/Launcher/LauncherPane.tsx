@@ -229,6 +229,7 @@ function buildAdaptiveSeedFlowGraph(options: {
 export function LauncherPane() {
   const allPanes = useWorkspaceStore(selectActivePanes);
   const addPane = useWorkspaceStore(s => s.addPane);
+  const updatePaneData = useWorkspaceStore(s => s.updatePaneData);
   const workspaceDir = useWorkspaceStore(s => s.workspaceDir);
   const globalGraph = useWorkspaceStore(s => s.globalGraph);
   const agentInstructions = useWorkspaceStore(s => s.agentInstructions);
@@ -244,6 +245,9 @@ export function LauncherPane() {
   const [isConfirming, setIsConfirming] = useState(false);
   const [mcpUrl, setMcpUrl] = useState('http://localhost:3741/mcp');
   const [pendingLaunch, setPendingLaunch] = useState<PendingLaunchState | null>(null);
+  const [editingCliPaneId, setEditingCliPaneId] = useState<string | null>(null);
+  const [editCliCommand, setEditCliCommand] = useState('');
+  const [editCliArgs, setEditCliArgs] = useState('');
 
   useEffect(() => {
     invoke<string>('get_mcp_url').then(url => setMcpUrl(url)).catch(() => {});
@@ -263,6 +267,22 @@ export function LauncherPane() {
       })),
     [terminals]
   );
+
+  function saveCustomCli(paneId: string) {
+    const cmd = editCliCommand.trim();
+    if (!cmd) {
+      clearCustomCli(paneId);
+      return;
+    }
+    const args = editCliArgs.trim().split(/\s+/).filter(Boolean);
+    updatePaneData(paneId, { customCliCommand: cmd, customCliArgs: args });
+    setEditingCliPaneId(null);
+  }
+
+  function clearCustomCli(paneId: string) {
+    updatePaneData(paneId, { customCliCommand: undefined, customCliArgs: undefined });
+    setEditingCliPaneId(null);
+  }
 
   async function handleConnect() {
     const targets = syncedRows.filter(r => r.roleId);
@@ -291,7 +311,11 @@ export function LauncherPane() {
               ? `If terminal-docks MCP tools are not yet available run: !claude mcp add --transport http terminal-docks ${mcpUrl} --scope user `
               : cli === 'gemini'
                 ? `The MCP server uses streamable-HTTP transport at ${mcpUrl}. `
-                : '';
+                : cli === 'custom'
+                  ? ((row.pane.data?.customCliMcpHint as string | undefined)
+                    ? `${row.pane.data?.customCliMcpHint} `
+                    : `Add this MCP URL to your CLI config (streamable-HTTP): ${mcpUrl} `)
+                  : '';
 
           const roleParam = cli === 'gemini' ? role : `${role}`;
           const profile = agentsConfig.agents.find(agent => agent.id === role);
@@ -511,14 +535,10 @@ export function LauncherPane() {
           throw new Error('No staged mission found. Re-stage prompts before confirming.');
         }
 
-        await invoke('start_mission_graph', {
+        await invoke('mcp_store_mission', {
           missionId: pendingLaunch.missionId,
           graph: pendingLaunch.mission,
         });
-
-        await Promise.all(
-          pendingLaunch.startTerminalIds.map(terminalId => invoke('write_to_pty', { id: terminalId, data: '\r' }))
-        );
 
         addPane('missioncontrol', 'Mission Control', {
           taskDescription: task.trim(),
@@ -674,20 +694,100 @@ export function LauncherPane() {
             </div>
           ) : (
             <div className="space-y-1.5">
-              {syncedRows.map(row => (
-                <div key={row.pane.id} className="flex items-center gap-2">
-                  <div className="flex items-center gap-1.5 w-28 shrink-0">
-                    <TerminalSquare size={11} className="text-text-muted shrink-0" />
-                    <span className="text-xs text-text-secondary truncate">{row.pane.title}</span>
+              {syncedRows.map(row => {
+                const isEditing = editingCliPaneId === row.pane.id;
+                const customCommand = row.pane.data?.customCliCommand as string | undefined;
+                const cliLabel = row.cli === 'custom' && customCommand
+                  ? (customCommand.split(/[\\/]/).pop() ?? 'custom')
+                  : row.cli;
+
+                return (
+                  <div key={row.pane.id} className="space-y-1">
+                    <div className="flex items-center gap-2">
+                      <div className="flex items-center gap-1.5 w-28 shrink-0">
+                        <TerminalSquare size={11} className="text-text-muted shrink-0" />
+                        <span className="text-xs text-text-secondary truncate">{row.pane.title}</span>
+                      </div>
+                      <button
+                        onClick={() => {
+                          if (isEditing) {
+                            setEditingCliPaneId(null);
+                          } else {
+                            setEditingCliPaneId(row.pane.id);
+                            setEditCliCommand(customCommand ?? '');
+                            setEditCliArgs((row.pane.data?.customCliArgs as string[] | undefined)?.join(' ') ?? '');
+                          }
+                        }}
+                        title={row.cli === 'custom' ? `Custom: ${customCommand} — click to edit` : row.cli ? `Detected: ${row.cli} — click to override` : 'Click to set custom CLI'}
+                        className={`w-24 shrink-0 text-[10px] uppercase tracking-wide px-2 py-1 border rounded text-center transition-colors ${
+                          row.cli === 'custom'
+                            ? 'border-accent-primary/50 bg-accent-primary/10 text-accent-primary hover:bg-accent-primary/20'
+                            : row.cli
+                              ? 'border-border-panel bg-bg-surface text-text-primary hover:border-accent-primary/50'
+                              : 'border-dashed border-border-panel bg-bg-surface text-text-muted hover:border-accent-primary/50 hover:text-text-secondary'
+                        }`}
+                      >
+                        <span className="inline-flex items-center gap-1"><Cpu size={10} />{cliLabel ?? 'N/A'}</span>
+                      </button>
+                      <div className={`flex-1 border rounded px-2.5 py-1 text-xs ${row.roleId ? 'text-text-primary border-border-panel bg-bg-surface' : 'text-red-300 border-red-500/40 bg-red-500/10'}`}>
+                        {row.roleId || 'Role not detected (name terminal with role keyword)'}
+                      </div>
+                    </div>
+
+                    {isEditing && (
+                      <div className="ml-[7.5rem] flex flex-col gap-1.5 px-2 py-1.5 bg-bg-surface border border-accent-primary/30 rounded-md">
+                        <div className="flex gap-1.5">
+                          <input
+                            type="text"
+                            value={editCliCommand}
+                            onChange={e => setEditCliCommand(e.target.value)}
+                            placeholder="command (e.g. aider)"
+                            autoFocus
+                            className="flex-1 min-w-0 bg-bg-panel border border-border-panel rounded px-2 py-1 text-xs text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent-primary"
+                            onKeyDown={e => {
+                              if (e.key === 'Enter') saveCustomCli(row.pane.id);
+                              if (e.key === 'Escape') setEditingCliPaneId(null);
+                            }}
+                          />
+                          <input
+                            type="text"
+                            value={editCliArgs}
+                            onChange={e => setEditCliArgs(e.target.value)}
+                            placeholder="flags (e.g. --model gpt-4o)"
+                            className="flex-1 min-w-0 bg-bg-panel border border-border-panel rounded px-2 py-1 text-xs text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent-primary"
+                            onKeyDown={e => {
+                              if (e.key === 'Enter') saveCustomCli(row.pane.id);
+                              if (e.key === 'Escape') setEditingCliPaneId(null);
+                            }}
+                          />
+                        </div>
+                        <div className="flex gap-1.5">
+                          <button
+                            onClick={() => saveCustomCli(row.pane.id)}
+                            className="flex-1 px-2 py-1 text-[10px] font-semibold bg-accent-primary text-accent-text rounded hover:opacity-90 transition-opacity"
+                          >
+                            Set CLI
+                          </button>
+                          {customCommand && (
+                            <button
+                              onClick={() => clearCustomCli(row.pane.id)}
+                              className="px-2 py-1 text-[10px] border border-border-panel text-text-muted hover:text-text-primary rounded transition-colors"
+                            >
+                              Clear
+                            </button>
+                          )}
+                          <button
+                            onClick={() => setEditingCliPaneId(null)}
+                            className="px-2 py-1 text-[10px] border border-border-panel text-text-muted hover:text-text-primary rounded transition-colors"
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                      </div>
+                    )}
                   </div>
-                  <div className={`w-24 shrink-0 text-[10px] uppercase tracking-wide px-2 py-1 border rounded text-center ${row.cli ? 'border-border-panel bg-bg-surface text-text-primary' : 'border-dashed border-border-panel bg-bg-surface text-text-muted'}`}>
-                    <span className="inline-flex items-center gap-1"><Cpu size={10} />{row.cli ?? 'N/A'}</span>
-                  </div>
-                  <div className={`flex-1 border rounded px-2.5 py-1 text-xs ${row.roleId ? 'text-text-primary border-border-panel bg-bg-surface' : 'text-red-300 border-red-500/40 bg-red-500/10'}`}>
-                    {row.roleId || 'Role not detected (name terminal with role keyword)'}
-                  </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           )}
         </div>

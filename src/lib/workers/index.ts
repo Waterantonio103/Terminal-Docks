@@ -1,4 +1,5 @@
 import { claudeAdapter } from './claudeAdapter';
+import { customAdapter } from './customAdapter';
 import { genericAdapter } from './genericAdapter';
 import type { WorkerAdapter, WorkerKind } from './types';
 
@@ -8,6 +9,7 @@ const ADAPTERS: Record<WorkerKind, WorkerAdapter> = {
   codex: genericAdapter,
   opencode: genericAdapter,
   generic: genericAdapter,
+  custom: customAdapter,
 };
 
 export function getAdapter(kind: WorkerKind | null | undefined): WorkerAdapter {
