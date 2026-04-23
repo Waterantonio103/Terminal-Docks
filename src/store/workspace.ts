@@ -369,6 +369,7 @@ interface WorkspaceState {
   setAgentInstruction: (id: string, value: string) => void;
   setNodeTerminalBinding: (nodeId: string, terminalId: string) => void;
   removeNodeTerminalBinding: (nodeId: string) => void;
+  addMissionArtifact: (missionId: string, nodeId: string, artifact: MissionArtifact) => void;
 }
 
 const _initTabId = generateId();
@@ -413,6 +414,28 @@ export const useWorkspaceStore = create<WorkspaceState>()(
         delete bindings[nodeId];
         return { nodeTerminalBindings: bindings };
       }),
+      addMissionArtifact: (missionId, nodeId, artifact) => set((state) => ({
+        tabs: state.tabs.map(tab => ({
+          ...tab,
+          panes: tab.panes.map(pane => {
+            if (pane.type !== 'missioncontrol') return pane;
+            const agents = (pane.data?.agents as MissionAgent[] | undefined) ?? [];
+            const updatedAgents = agents.map(agent => {
+              if (agent.nodeId !== nodeId) return agent;
+              const exists = agent.artifacts?.some(a => a.id === artifact.id);
+              if (exists) return agent;
+              return {
+                ...agent,
+                artifacts: [...(agent.artifacts ?? []), artifact],
+              };
+            });
+            return {
+              ...pane,
+              data: { ...pane.data, agents: updatedAgents },
+            };
+          }),
+        })),
+      })),
 
       toggleSidebar: () => set((s) => ({ sidebarOpen: !s.sidebarOpen })),
 

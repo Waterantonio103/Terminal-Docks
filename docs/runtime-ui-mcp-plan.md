@@ -22,34 +22,12 @@ Into one system where:
 
 ---
 
-# PHASE 1 — OUTPUT NODE + ARTIFACT STREAM
-
-## Goal
-Show real progress
-
----
-
-## TASKS
-
-### 1. Capture file changes
-
-### 2. Stream updates to UI
-
-### 3. Display in output node
-
----
-
-## COMPLETION CHECK
-- User sees files appear in real time
-
----
-
 # FINAL RULE (IMPORTANT)
 
 After completing a phase:
 
 1. Delete it entirely
-2. Rename next phase → Phase 1
+2. Rename next phase -> Phase 1
 3. Commit changes
 
 ---

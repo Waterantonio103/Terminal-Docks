@@ -1671,6 +1671,74 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
                     </div>
                   )}
 
+                  {materializedNode.node.type === 'workflow.output' && (
+                    <div className="space-y-3">
+                      <div className="text-[10px] uppercase tracking-wide text-text-muted mb-1 font-semibold flex items-center gap-1.5">
+                        <Workflow size={10} className="text-[#8bc3ff]" />
+                        Live Artifact Stream
+                      </div>
+                      <div className="space-y-2 max-h-80 overflow-y-auto pr-1 custom-scrollbar">
+                        {(() => {
+                          const allArtifacts = missionAgents.flatMap(a => a.artifacts ?? []);
+                          const sorted = [...allArtifacts].sort((a, b) => b.timestamp - a.timestamp);
+                          
+                          if (sorted.length === 0) {
+                            return (
+                              <div className="py-12 flex flex-col items-center justify-center text-center px-4">
+                                <Sparkles size={24} className="text-text-muted opacity-20 mb-2" />
+                                <div className="text-[10px] text-text-muted italic opacity-40">Waiting for artifacts...</div>
+                                <div className="text-[9px] text-text-muted opacity-30 mt-1 max-w-[140px]">File changes and summaries will appear here in real-time.</div>
+                              </div>
+                            );
+                          }
+                          
+                          return sorted.map(art => (
+                            <div 
+                              key={art.id} 
+                              className="p-2.5 rounded-lg border border-border-panel bg-[#080d13] hover:border-[#8bc3ff]/30 hover:bg-[#0c141d] transition-all group cursor-pointer"
+                              onClick={() => {
+                                if (art.path) {
+                                  addPane('editor', art.label, { filePath: art.path });
+                                }
+                              }}
+                            >
+                              <div className="flex items-center justify-between mb-1.5">
+                                <div className="flex items-center gap-1.5">
+                                  <div className={`w-1.5 h-1.5 rounded-full ${
+                                    art.type === 'file_change' ? 'bg-emerald-400' : 
+                                    art.type === 'summary' ? 'bg-amber-400' : 'bg-blue-400'
+                                  } shadow-[0_0_8px_rgba(0,0,0,0.5)]`} />
+                                  <span className="text-[9px] font-bold text-[#8bc3ff] uppercase tracking-tighter">
+                                    {art.type.replace('_', ' ')}
+                                  </span>
+                                </div>
+                                <span className="text-[9px] text-text-muted font-mono opacity-50">
+                                  {new Date(art.timestamp).toLocaleTimeString([], { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' })}
+                                </span>
+                              </div>
+                              <div className="text-[11px] text-text-primary font-semibold leading-tight group-hover:text-[#8bc3ff] transition-colors">{art.label}</div>
+                              {art.path && (
+                                <div className="flex items-center gap-1 mt-1.5">
+                                  <div className="text-[9px] text-text-muted truncate opacity-50 font-mono bg-black/20 px-1 py-0.5 rounded border border-white/5 flex-1">
+                                    {art.path}
+                                  </div>
+                                  <ArrowUpRight size={10} className="text-text-muted opacity-0 group-hover:opacity-100 transition-opacity" />
+                                </div>
+                              )}
+                            </div>
+                          ));
+                        })()}
+                      </div>
+                      <div className="pt-2 border-t border-border-panel/50 flex items-center justify-between text-[9px] text-text-muted px-1">
+                        <span>{missionAgents.flatMap(a => a.artifacts ?? []).length} items captured</span>
+                        <div className="flex items-center gap-1">
+                          <span className="w-1 h-1 rounded-full bg-emerald-400 animate-pulse" />
+                          Live
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
                   {materializedNode.node.type === 'workflow.frame' && (
                     <input
                       value={String(materializedNode.node.properties.label ?? 'Frame')}

@@ -1,6 +1,8 @@
 import { invoke } from '@tauri-apps/api/core';
 import { registry } from './registry';
 import type { McpServerEvent } from './types';
+import { useWorkspaceStore, type MissionArtifact } from '../../store/workspace';
+import { generateId } from '../graphUtils';
 
 type Handler = (ev: McpServerEvent) => void;
 
@@ -68,6 +70,23 @@ class McpEventBus {
 
 function applyToRegistry(ev: McpServerEvent): void {
   switch (ev.type) {
+    case 'agent:artifact':
+      if (ev.artifactType === 'file_change' || ev.artifactType === 'summary' || ev.artifactType === 'reference') {
+        const session = registry.get(ev.sessionId);
+        const task = session?.currentTask;
+        if (task) {
+          const artifact: MissionArtifact = {
+            id: ev.key || generateId(),
+            type: ev.artifactType,
+            label: ev.label || (ev.artifactType === 'file_change' ? 'File Change' : 'Artifact'),
+            content: ev.content,
+            path: ev.path,
+            timestamp: ev.at || Date.now(),
+          };
+          useWorkspaceStore.getState().addMissionArtifact(task.missionId, task.nodeId, artifact);
+        }
+      }
+      break;
     case 'agent:ready':
       registry.onReady(ev.sessionId);
       break;

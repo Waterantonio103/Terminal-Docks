@@ -270,6 +270,20 @@ export function createWorkflowNodeRegistry() {
     },
   });
 
+  registry.register({
+    type: 'workflow.output',
+    label: 'Output',
+    category: 'Execution',
+    width: 240,
+    createProperties: () => ({
+      missionId: '',
+      label: 'Artifacts',
+    }),
+    declare: (_context, builder) => {
+      builder.addInput('in', 'In', 'flow');
+    },
+  });
+
   return registry;
 }
 
