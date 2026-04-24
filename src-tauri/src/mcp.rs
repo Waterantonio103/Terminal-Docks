@@ -75,12 +75,14 @@ fn merge_json_config(
 fn register_claude(mcp_url: &str) -> CliRegistrationResult {
     // First, try to remove existing to ensure URL/token is updated
     let _ = Command::new("claude")
-        .args(["mcp", "remove", "terminal-docks", "--scope", "user"])
+        .args(["mcp", "remove", "--scope", "user", "terminal-docks"])
         .output();
 
+    // Use --transport http (streamable-HTTP, Claude Code's current transport).
+    // All options must come BEFORE the server name per claude mcp add syntax.
     let args = vec![
-        "mcp", "add", "--transport", "sse",
-        "terminal-docks", mcp_url, "--scope", "user",
+        "mcp", "add", "--transport", "http", "--scope", "user",
+        "terminal-docks", mcp_url,
     ];
     let output = Command::new("claude")
         .args(&args)
@@ -334,6 +336,34 @@ fn generate_push_token() -> String {
 
 const PORT: u16 = 3741;
 
+/// Load the persisted auth token, or generate and save a new one.
+/// Persisting across restarts means already-running Claude instances keep working.
+fn load_or_generate_auth_token(app: &AppHandle) -> String {
+    let token_path = app
+        .path()
+        .app_local_data_dir()
+        .ok()
+        .map(|d| d.join("mcp_auth.token"));
+
+    if let Some(ref path) = token_path {
+        if let Ok(token) = fs::read_to_string(path) {
+            let t = token.trim().to_string();
+            if !t.is_empty() {
+                return t;
+            }
+        }
+    }
+
+    let token = generate_push_token();
+    if let Some(path) = token_path {
+        if let Some(parent) = path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let _ = fs::write(&path, &token);
+    }
+    token
+}
+
 pub fn init_mcp_server(app: &AppHandle) -> Result<(), String> {
     {
         let state = app.state::<McpState>();
@@ -370,7 +400,8 @@ pub fn init_mcp_server(app: &AppHandle) -> Result<(), String> {
     };
 
     let push_token = generate_push_token();
-    let auth_token = generate_push_token(); // Generate a separate token for general auth
+    // auth_token persists across restarts so already-running Claude instances keep working
+    let auth_token = load_or_generate_auth_token(app);
     {
         let state = app.state::<McpState>();
         let mut p_guard = state.internal_push_token.lock().unwrap();

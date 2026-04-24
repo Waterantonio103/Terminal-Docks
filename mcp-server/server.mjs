@@ -1,5 +1,5 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
+import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import express from 'express';
 import cors from 'cors';
 import { z } from 'zod';
@@ -3346,63 +3346,73 @@ app.get('/internal/events', (req, res) => {
   res.json(getRecentAgentEvents(sid));
 });
 
-// ── MCP transport ─────────────────────────────────────────────────────────────
-app.get('/mcp', async (req, res) => {
-  console.log(`[mcp] Incoming SSE connection request from ${req.ip}`);
+// ── MCP transport (Streamable HTTP) ──────────────────────────────────────────
+// Handles both POST (client→server messages) and GET (server→client SSE stream)
+// on the same /mcp endpoint, per the MCP 2025-11-25 spec.
+app.post('/mcp', async (req, res) => {
+  console.log(`[mcp] Incoming POST from ${req.ip}`);
   try {
-    const transport = new SSEServerTransport('/mcp/message', res);
-    const sid = transport.sessionId;
-    
-    sessions[sid] = sessions[sid] || {};
-    sessions[sid].transport = transport;
+    // Reuse existing transport for this session if the client sends a session ID
+    const existingSessionId = req.headers['mcp-session-id'];
+    let sid = existingSessionId;
+    let transport;
 
-    const mcpServer = createMcpServer(() => sid);
-    sessions[sid].mcpServer = mcpServer;
+    if (sid && sessions[sid]?.transport) {
+      transport = sessions[sid].transport;
+    } else {
+      // New session
+      transport = new StreamableHTTPServerTransport({ sessionIdGenerator: () => randomUUID() });
+      sid = transport.sessionId;
 
-    transport.onclose = () => {
-      console.log(`Transport closed for session ${sid}`);
-      logSession(sid, 'disconnect', null);
-      delete sessions[sid];
+      sessions[sid] = sessions[sid] || {};
+      sessions[sid].transport = transport;
+
+      const mcpServer = createMcpServer(() => sid);
+      sessions[sid].mcpServer = mcpServer;
+
+      transport.onclose = () => {
+        console.log(`[mcp] Transport closed for session ${sid}`);
+        logSession(sid, 'disconnect', null);
+        delete sessions[sid];
+        broadcast('Bridge', 'session_update', 'session_update');
+      };
+
+      await mcpServer.connect(transport);
+      console.log(`[mcp] Registered session ${sid}`);
       broadcast('Bridge', 'session_update', 'session_update');
-    };
+    }
 
-    // mcpServer.connect calls transport.start() automatically, which sends the SSE headers.
-    await mcpServer.connect(transport);
-
-    console.log(`Registered session ${sid}`);
-    broadcast('Bridge', 'session_update', 'session_update');
+    await transport.handleRequest(req, res, req.body);
   } catch (error) {
-    console.error('Error starting SSE transport:', error);
+    console.error('[mcp] Error handling POST:', error);
     if (!res.headersSent) res.status(500).json({ error: 'Internal server error' });
   }
 });
 
-app.post('/mcp/message', async (req, res) => {
-  try {
-    const sessionId = req.query.sessionId;
-    if (!sessionId || !sessions[sessionId] || !sessions[sessionId].transport) {
-      return res.status(400).send('Invalid or missing session ID');
-    }
-    await sessions[sessionId].transport.handlePostMessage(req, res, req.body);
-  } catch (error) {
-    console.error('Error handling message POST:', error);
-    if (!res.headersSent) res.status(500).send('Internal server error');
+app.get('/mcp', async (req, res) => {
+  // GET /mcp opens the server→client SSE stream for an existing session
+  const sid = req.headers['mcp-session-id'];
+  if (!sid || !sessions[sid]?.transport) {
+    return res.status(400).json({ error: 'Invalid or missing mcp-session-id header' });
   }
-});
-
-app.post('/mcp', async (req, res) => {
-  res.status(400).json({ error: 'Please use GET /mcp for SSE connections (SSEServerTransport).' });
+  try {
+    await sessions[sid].transport.handleRequest(req, res);
+  } catch (error) {
+    console.error('[mcp] Error handling GET stream:', error);
+    if (!res.headersSent) res.status(500).json({ error: 'Internal server error' });
+  }
 });
 
 app.delete('/mcp', async (req, res) => {
-  const sessionId = req.query.sessionId;
-  if (!sessionId || !sessions[sessionId] || !sessions[sessionId].transport) {
-    return res.status(400).send('Invalid or missing session ID');
+  const sid = req.headers['mcp-session-id'];
+  if (!sid || !sessions[sid]?.transport) {
+    return res.status(400).send('Invalid or missing mcp-session-id header');
   }
   try {
-    await sessions[sessionId].transport.close();
+    await sessions[sid].transport.close();
+    res.status(200).send('OK');
   } catch (err) {
-    console.error('Error terminating session:', err);
+    console.error('[mcp] Error terminating session:', err);
     if (!res.headersSent) res.status(500).send('Error processing session termination');
   }
 });

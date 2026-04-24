@@ -545,7 +545,7 @@ export function LauncherPane() {
           throw new Error('No staged mission found. Re-stage prompts before confirming.');
         }
 
-        await invoke('mcp_store_mission', {
+        await invoke('start_mission_graph', {
           missionId: pendingLaunch.missionId,
           graph: pendingLaunch.mission,
         });
