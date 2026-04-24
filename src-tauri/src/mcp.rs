@@ -73,6 +73,11 @@ fn merge_json_config(
 }
 
 fn register_claude(mcp_url: &str) -> CliRegistrationResult {
+    // First, try to remove existing to ensure URL/token is updated
+    let _ = Command::new("claude")
+        .args(["mcp", "remove", "terminal-docks", "--scope", "user"])
+        .output();
+
     let args = vec![
         "mcp", "add", "--transport", "sse",
         "terminal-docks", mcp_url, "--scope", "user",
@@ -91,11 +96,7 @@ fn register_claude(mcp_url: &str) -> CliRegistrationResult {
                 CliRegistrationResult {
                     cli: "claude".into(),
                     success: true,
-                    message: if already {
-                        "claude MCP server already registered".into()
-                    } else {
-                        "claude MCP server registered successfully".into()
-                    },
+                    message: "claude MCP server registered successfully".into(),
                 }
             } else {
                 CliRegistrationResult {
@@ -159,7 +160,7 @@ fn register_aider(_mcp_url: &str) -> CliRegistrationResult {
     CliRegistrationResult {
         cli: "aider".into(),
         success: true,
-        message: "Detected! Use with: aider --mcp http://localhost:3741/mcp".into(),
+        message: "Detected! Use with: aider --mcp http://127.0.0.1:3741/mcp".into(),
     }
 }
 
@@ -203,7 +204,7 @@ fn register_interpreter(_mcp_url: &str) -> CliRegistrationResult {
     CliRegistrationResult {
         cli: "interpreter".into(),
         success: true,
-        message: "Detected! Use with: interpreter --mcp http://localhost:3741/mcp".into(),
+        message: "Detected! Use with: interpreter --mcp http://127.0.0.1:3741/mcp".into(),
     }
 }
 
@@ -369,10 +370,13 @@ pub fn init_mcp_server(app: &AppHandle) -> Result<(), String> {
     };
 
     let push_token = generate_push_token();
+    let auth_token = generate_push_token(); // Generate a separate token for general auth
     {
         let state = app.state::<McpState>();
-        let mut guard = state.internal_push_token.lock().unwrap();
-        *guard = push_token.clone();
+        let mut p_guard = state.internal_push_token.lock().unwrap();
+        *p_guard = push_token.clone();
+        let mut a_guard = state.auth_token.lock().unwrap();
+        *a_guard = auth_token.clone();
     }
 
     let child = Command::new("node")
@@ -380,6 +384,7 @@ pub fn init_mcp_server(app: &AppHandle) -> Result<(), String> {
         .current_dir(&server_dir)
         .env("MCP_DB_PATH", &db_path)
         .env("MCP_INTERNAL_PUSH_TOKEN", &push_token)
+        .env("MCP_AUTH_TOKEN", &auth_token)
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
         .spawn()
@@ -394,7 +399,7 @@ pub fn init_mcp_server(app: &AppHandle) -> Result<(), String> {
     let app_handle = app.clone();
     thread::spawn(move || {
         // Wait for server to become ready (up to 10s)
-        let base = format!("http://localhost:{}", PORT);
+        let base = format!("http://127.0.0.1:{}", PORT);
         let mut ready = false;
         for _ in 0..20 {
             thread::sleep(Duration::from_millis(500));
@@ -586,12 +591,12 @@ pub fn kill_mcp_server(app: &AppHandle) {
 #[tauri::command]
 pub fn get_mcp_url(state: tauri::State<'_, McpState>) -> String {
     let token = state.auth_token.lock().unwrap().clone();
-    format!("http://localhost:{}/mcp?token={}", PORT, token)
+    format!("http://127.0.0.1:{}/mcp?token={}", PORT, token)
 }
 
 #[tauri::command]
 pub fn get_mcp_base_url() -> String {
-    format!("http://localhost:{}", PORT)
+    format!("http://127.0.0.1:{}", PORT)
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]

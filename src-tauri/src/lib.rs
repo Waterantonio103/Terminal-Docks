@@ -61,6 +61,7 @@ pub fn run() {
             workflow_engine::register_runtime_activation_dispatch,
             workflow_engine::acknowledge_runtime_activation,
             workflow_engine::get_runtime_activation,
+            workflow_engine::get_mission_activations,
         ])
         .setup(|app| {
             db::init_db(app.handle()).expect("Failed to init db");

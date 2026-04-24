@@ -3348,6 +3348,7 @@ app.get('/internal/events', (req, res) => {
 
 // ── MCP transport ─────────────────────────────────────────────────────────────
 app.get('/mcp', async (req, res) => {
+  console.log(`[mcp] Incoming SSE connection request from ${req.ip}`);
   try {
     const transport = new SSEServerTransport('/mcp/message', res);
     const sid = transport.sessionId;
@@ -3412,7 +3413,7 @@ export function startHttpServer(port = PORT) {
   if (httpServer) return httpServer;
   httpServer = app.listen(port, () => {
     mkdirSync('.mcp', { recursive: true });
-    writeFileSync('.mcp/server.json', JSON.stringify({ url: `http://localhost:${port}/mcp`, port }, null, 2));
+    writeFileSync('.mcp/server.json', JSON.stringify({ url: `http://127.0.0.1:${port}/mcp`, port }, null, 2));
     console.log(`MCP server listening on port ${port} — db: ${dbPath}`);
   });
   return httpServer;

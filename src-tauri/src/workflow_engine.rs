@@ -2031,6 +2031,26 @@ pub fn register_runtime_activation_dispatch(
 }
 
 #[tauri::command]
+pub fn get_mission_activations(
+    app: AppHandle,
+    mission_id: String,
+) -> Result<Vec<RuntimeActivationPayload>, String> {
+    let state = app.state::<WorkflowState>();
+    let missions = state.active_missions.lock().unwrap();
+    let mission = missions
+        .get(&mission_id)
+        .ok_or_else(|| format!("Mission {} is not active.", mission_id))?;
+
+    let mut payloads = Vec::new();
+    for pending in mission.pending_runtime_activations.values() {
+        if pending.status == "activation_pending" {
+            payloads.push(pending.payload.clone());
+        }
+    }
+    Ok(payloads)
+}
+
+#[tauri::command]
 pub fn get_runtime_activation(
     app: AppHandle,
     mission_id: String,
