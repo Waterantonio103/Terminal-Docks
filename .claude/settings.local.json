@@ -43,7 +43,10 @@
       "Bash(opencode --version)",
       "Bash(opencode)",
       "Bash(where opencode *)",
-      "Bash(xxd)"
+      "Bash(xxd)",
+      "Bash(tsc -p tsconfig.graph-tests.json --noEmit)",
+      "Bash(git check-ignore *)",
+      "Bash(python -c ' *)"
     ]
   }
 }

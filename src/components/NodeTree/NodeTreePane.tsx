@@ -18,6 +18,7 @@ import { getActiveTreeId, getViewState } from '../../lib/node-system/editor';
 import { applyNodeEditorOperator } from '../../lib/node-system/operators';
 import type { MaterializedNode, NodeInstance, Point2D } from '../../lib/node-system/types';
 import { detectRoleForPane } from '../../lib/cliDetection';
+import { completeAgentNode, launchMissionStartNodes, type NodeOutcome, type RuntimeStatus } from '../../lib/workflowRuntimeAdapter';
 import { useWorkspaceStore, type MissionAgent, type ResultEntry, type WorkflowAgentCli, type WorkflowExecutionMode, type WorkflowGraph } from '../../store/workspace';
 
 type ValidationTone = 'idle' | 'ok' | 'error';
@@ -59,7 +60,6 @@ const SELECTABLE_EXECUTION_MODES: WorkflowExecutionMode[] = ['streaming_headless
 const MAX_RUNTIME_SNIPPET_BYTES = 3072;
 const MAX_ACTIVITY_SUMMARY_LENGTH = 180;
 const ARTIFACT_PATH_REGEX = /\b(?:\.{0,2}\/)?[a-zA-Z0-9_\-./]+\.(?:ts|tsx|js|jsx|mjs|cjs|rs|md|json|yaml|yml|toml|css|scss|html|sh|py|go|java|kt|swift|sql)\b/g;
-const ANSI_ESCAPE_REGEX = /\u001b\[[0-9;?]*[ -/]*[@-~]/g;
 
 function clampZoom(nextZoom: number) {
   return Math.max(0.35, Math.min(1.8, nextZoom));
@@ -140,8 +140,40 @@ function borderClass(selected: boolean) {
     : 'border-border-panel shadow-[0_10px_24px_rgba(0,0,0,0.28)]';
 }
 
+const CLEAR_SCREEN_MARKERS = ['[2J', '[3J', '[H[J', 'c'];
+
 function stripAnsi(raw: string): string {
-  return raw.replace(ANSI_ESCAPE_REGEX, '').replace(/\r/g, '');
+  // For TUI apps (Claude/Ink, etc.) the buffer is a series of re-renders.
+  // Start from the last full-screen clear so the inspector shows the current
+  // frame, not ten stacked frames of cursor-positioned garbage.
+  let start = -1;
+  for (const marker of CLEAR_SCREEN_MARKERS) {
+    const idx = raw.lastIndexOf(marker);
+    if (idx > start) start = idx;
+  }
+  const tail = start >= 0 ? raw.slice(start) : raw;
+
+  const stripped = tail
+    // OSC (title, clipboard, hyperlinks) — terminated by BEL or ST.
+    .replace(/\][^]*(?:|\\)/g, '')
+    // DCS / SOS / PM / APC — terminated by ST.
+    .replace(/[PX^_][\s\S]*?\\/g, '')
+    // CSI (cursor/colour/etc).
+    .replace(/\[[0-9;?]*[ -/]*[@-~]/g, '')
+    // Character-set / single-shift / other short escapes.
+    .replace(/[()#][\dA-Z]/g, '')
+    .replace(/[=>DMHc78]/g, '');
+
+  // Handle carriage returns as "overwrite the line so far" instead of dropping
+  // them, so progress bars and re-printed lines show their final text only.
+  return stripped
+    .split('\n')
+    .map(line => {
+      if (!line.includes('\r')) return line;
+      const parts = line.split('\r');
+      return parts[parts.length - 1] ?? '';
+    })
+    .join('\n');
 }
 
 function summarizeActivity(raw: string | undefined | null, maxLen = MAX_ACTIVITY_SUMMARY_LENGTH): string {
@@ -224,6 +256,7 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
   const [validationMessage, setValidationMessage] = useState('Node graph editor is active.');
   const [validationTone, setValidationTone] = useState<ValidationTone>('idle');
   const [activeMissionId, setActiveMissionId] = useState<string | null>(null);
+  const activeMissionRef = useRef<import('../../store/workspace').CompiledMission | null>(null);
   const canvasRef = useRef<HTMLDivElement | null>(null);
   const suppressContextMenuRef = useRef(false);
   const lastGraphSnapshotRef = useRef(JSON.stringify(graph));
@@ -708,23 +741,30 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
       const flow = nodeDocumentToFlowGraph(state.document, registry);
       validateGraph(flow.nodes as never[], flow.edges as never[]);
 
-      // Auto-bind any unbound agent nodes — node owns its terminal
+      // Phase 1 runtime adapter: every agent node owns a REAL terminal (PTY),
+      // regardless of the node's selected executionMode. This keeps Run on a
+      // direct graph -> PTY path and avoids the MCP-session dependency.
       const freshBindings = new Map<string, { id: string; title: string; paneId: string; cli: WorkflowAgentCli }>();
       const storedBindings = useWorkspaceStore.getState().nodeTerminalBindings;
       for (const node of flow.nodes) {
         if (node.type !== 'workflow.agent' && node.type !== 'agent') continue;
         const nodeId = String(node.id);
         const data = node.data as Record<string, unknown>;
-        const executionMode = SELECTABLE_EXECUTION_MODES.includes(data.executionMode as WorkflowExecutionMode)
-          ? data.executionMode as WorkflowExecutionMode
-          : 'streaming_headless';
-        if (data.terminalId && executionMode === 'interactive_pty') continue;
 
-        if (executionMode !== 'interactive_pty') {
-          const binding = createAndBindRuntime(nodeId);
-          if (binding) freshBindings.set(nodeId, binding);
+        // Force interactive PTY so each agent node owns a real terminal.
+        applyOperator({ type: 'set_node_property', nodeId, key: 'executionMode', value: 'interactive_pty' });
+        data.executionMode = 'interactive_pty';
+
+        // If a real terminal is already bound and still open, reuse it.
+        const currentTerminalId = typeof data.terminalId === 'string' ? data.terminalId : '';
+        if (currentTerminalId && openTerminals.some(t => t.id === currentTerminalId)) {
           continue;
         }
+
+        const selectedCli: WorkflowAgentCli = SELECTABLE_WORKFLOW_CLIS.includes(data.cli as WorkflowAgentCli)
+          ? (data.cli as WorkflowAgentCli)
+          : 'claude';
+        const role = String(data.roleId ?? 'agent');
 
         // Re-attach persisted binding if the terminal pane is still open
         const persistedId = storedBindings[nodeId];
@@ -742,9 +782,35 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
           }
         }
 
-        // Spawn a new terminal for this node
-        const binding = createAndBindRuntime(nodeId);
-        if (binding) freshBindings.set(nodeId, binding);
+        // Spawn a real terminal pane for this node (inline so it doesn't depend
+        // on stale component state via createAndBindRuntime).
+        const beforeIds = new Set(openTerminals.map(t => t.id));
+        const paneTitle = `Runtime ${role}`;
+        addPane('terminal', paneTitle, {
+          roleId: role,
+          cli: selectedCli,
+          cliSource: 'heuristic',
+          executionMode: 'interactive_pty',
+        });
+        const nextTabs = useWorkspaceStore.getState().tabs;
+        let created: { id: string; paneId: string; title: string; cli: WorkflowAgentCli } | null = null;
+        outer: for (const tab of nextTabs) {
+          for (const pane of tab.panes) {
+            if (pane.type !== 'terminal' || !pane.data?.terminalId) continue;
+            if (beforeIds.has(pane.data.terminalId)) continue;
+            created = { id: pane.data.terminalId, paneId: pane.id, title: pane.title, cli: selectedCli };
+            break outer;
+          }
+        }
+        if (!created) {
+          throw new Error(`Failed to spawn terminal for agent node ${nodeId}.`);
+        }
+        applyOperator({ type: 'set_node_property', nodeId, key: 'terminalId', value: created.id });
+        applyOperator({ type: 'set_node_property', nodeId, key: 'terminalTitle', value: created.title });
+        applyOperator({ type: 'set_node_property', nodeId, key: 'paneId', value: created.paneId });
+        applyOperator({ type: 'set_node_property', nodeId, key: 'cli', value: selectedCli });
+        setNodeTerminalBinding(nodeId, created.id);
+        freshBindings.set(nodeId, created);
       }
 
       const hydratedNodes = flow.nodes.map(node => {
@@ -829,6 +895,7 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
       }
 
       setActiveMissionId(missionId);
+      activeMissionRef.current = mission;
 
       addPane('missioncontrol', 'Mission Control', {
         taskDescription: mission.task.prompt ?? '',
@@ -837,21 +904,74 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
         mission,
       });
 
-      await invoke('start_mission_graph', {
-        missionId,
-        graph: mission,
+      // Phase 1 runtime adapter: directly launch the CLI inside each start
+      // node's terminal and send the task prompt. We intentionally do NOT call
+      // `start_mission_graph` here — the Rust backend's activation path sets
+      // nodes to `activation_pending` and fails them after a timeout when no
+      // MCP session acks the activation, which overrode the adapter's
+      // `running` state. Phase 1 owns execution end-to-end in the frontend.
+      const launchResults = await launchMissionStartNodes({
+        mission,
+        onStatus: (nodeId, status) => {
+          applyOperator({ type: 'set_node_property', nodeId, key: 'status', value: status });
+        },
       });
 
-      setValidationTone('ok');
-      setValidationMessage(
-        `Launched mission ${missionId.substring(0, 8)}. Runtime flow: MCP server online -> runtime session registration -> NEW_TASK dispatch.`
-      );
+      const failed = launchResults.filter(result => result.status === 'failed');
+      if (failed.length > 0) {
+        setValidationTone('error');
+        setValidationMessage(
+          `Launched mission ${missionId.substring(0, 8)} but ${failed.length} start node(s) failed: ${failed.map(f => `${f.nodeId} (${f.error ?? 'unknown error'})`).join('; ')}`
+        );
+      } else {
+        setValidationTone('ok');
+        setValidationMessage(
+          `Mission ${missionId.substring(0, 8)} running. Launched ${launchResults.length} start node(s) directly into their terminals.`
+        );
+      }
     } catch (error) {
       setActiveMissionId(null);
       setValidationTone('error');
       setValidationMessage(error instanceof Error ? error.message : String(error));
     }
-  }, [registry, state.document, workspaceDir, graph.id, openTerminals, addPane, applyOperator, createAndBindRuntime]);
+  }, [registry, state.document, workspaceDir, graph.id, openTerminals, addPane, applyOperator, setNodeTerminalBinding]);
+
+  const markNodeComplete = useCallback(
+    async (nodeId: string, outcome: NodeOutcome) => {
+      const mission = activeMissionRef.current;
+      if (!mission) {
+        setValidationTone('error');
+        setValidationMessage('No active mission. Run the graph first.');
+        return;
+      }
+      try {
+        const onStatus = (targetNodeId: string, status: RuntimeStatus) => {
+          applyOperator({ type: 'set_node_property', nodeId: targetNodeId, key: 'status', value: status });
+        };
+        const result = await completeAgentNode({ mission, nodeId, outcome, onStatus });
+        applyOperator({
+          type: 'set_node_property',
+          nodeId,
+          key: 'lastOutputSummary',
+          value: stripAnsi(result.summary).slice(-2000),
+        });
+        applyOperator({
+          type: 'set_node_property',
+          nodeId,
+          key: 'lastOutcome',
+          value: outcome,
+        });
+        setValidationTone('ok');
+        setValidationMessage(
+          `Node ${nodeId.substring(0, 8)} marked ${outcome}. Handed off to ${result.launchedNext.length} downstream node(s).`
+        );
+      } catch (error) {
+        setValidationTone('error');
+        setValidationMessage(error instanceof Error ? error.message : String(error));
+      }
+    },
+    [applyOperator],
+  );
 
   const viewRuntimeMapping = useCallback(() => {
     try {
@@ -1803,12 +1923,76 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
                           <Plus size={11} />
                           New Runtime
                         </button>
+                        <button
+                          type="button"
+                          disabled={!activeMissionId}
+                          onClick={() => void markNodeComplete(materializedNode.node.id, 'success')}
+                          className="flex items-center justify-center gap-1 rounded border border-emerald-500/50 px-2 py-1.5 text-[10px] text-emerald-300 hover:bg-emerald-500/10 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                          title="Capture current terminal output as this node's result and activate downstream nodes"
+                        >
+                          ✓ Mark Complete
+                        </button>
+                        <button
+                          type="button"
+                          disabled={!activeMissionId}
+                          onClick={() => void markNodeComplete(materializedNode.node.id, 'failure')}
+                          className="flex items-center justify-center gap-1 rounded border border-red-500/50 px-2 py-1.5 text-[10px] text-red-300 hover:bg-red-500/10 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                          title="Mark as failed and route to on_failure edges"
+                        >
+                          ✕ Mark Failed
+                        </button>
                       </div>
+                      {typeof materializedNode.node.properties.lastOutputSummary === 'string' &&
+                        String(materializedNode.node.properties.lastOutputSummary).trim() && (
+                          <div className="rounded border border-border-panel bg-[#0b1118] px-2 py-1.5">
+                            <div className="text-[10px] uppercase tracking-wide text-text-muted mb-1 flex items-center justify-between">
+                              <span>Captured Output</span>
+                              <span className="text-[9px] text-emerald-300">
+                                {String(materializedNode.node.properties.lastOutcome ?? 'success')}
+                              </span>
+                            </div>
+                            <pre className="max-h-32 overflow-y-auto whitespace-pre-wrap break-words text-[10px] text-text-secondary custom-scrollbar">
+                              {String(materializedNode.node.properties.lastOutputSummary).slice(-800)}
+                            </pre>
+                          </div>
+                        )}
                     </div>
                   )}
 
                   {materializedNode.node.type === 'workflow.output' && (
                     <div className="space-y-3">
+                      {(() => {
+                        const agentResults = Object.values(activeTree.nodes)
+                          .filter(n => n.type === 'workflow.agent')
+                          .map(n => ({
+                            id: n.id,
+                            roleId: String(n.properties.roleId ?? 'agent'),
+                            summary: String(n.properties.lastOutputSummary ?? '').trim(),
+                            outcome: String(n.properties.lastOutcome ?? ''),
+                          }))
+                          .filter(entry => entry.summary);
+                        if (agentResults.length === 0) return null;
+                        return (
+                          <div className="space-y-1.5">
+                            <div className="text-[10px] uppercase tracking-wide text-text-muted font-semibold">
+                              Agent Results
+                            </div>
+                            {agentResults.map(entry => (
+                              <div key={entry.id} className="rounded border border-border-panel bg-[#0b1118] px-2 py-1.5">
+                                <div className="flex items-center justify-between mb-0.5">
+                                  <span className="text-[10px] font-semibold text-[#8bc3ff]">{entry.roleId}</span>
+                                  <span className={`text-[9px] ${entry.outcome === 'failure' ? 'text-red-300' : 'text-emerald-300'}`}>
+                                    {entry.outcome || 'completed'}
+                                  </span>
+                                </div>
+                                <pre className="max-h-24 overflow-y-auto whitespace-pre-wrap break-words text-[10px] text-text-secondary custom-scrollbar">
+                                  {entry.summary.slice(-500)}
+                                </pre>
+                              </div>
+                            ))}
+                          </div>
+                        );
+                      })()}
                       <div className="text-[10px] uppercase tracking-wide text-text-muted mb-1 font-semibold flex items-center gap-1.5">
                         <Workflow size={10} className="text-[#8bc3ff]" />
                         Live Artifact Stream
