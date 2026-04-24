@@ -184,6 +184,7 @@ export interface MissionAgent {
   lastError?: string | null;
   attemptHistory?: MissionAttemptRecord[];
   nodeId?: string;
+  cli?: WorkflowAgentCli; // Added to track intended CLI in MissionControl
   runtimeSessionId?: string | null;
   runtimeCli?: WorkflowAgentCli | null;
   executionMode?: WorkflowExecutionMode | null;
@@ -193,6 +194,7 @@ export interface MissionAgent {
   runtimeRegisteredAt?: number;
   runtimeLastHeartbeatAt?: number;
   artifacts?: MissionArtifact[];
+  runtimeLogs?: string[]; // Added for activation pipeline debugging
 }
 
 export interface NodeRuntimeBinding {

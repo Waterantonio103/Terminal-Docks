@@ -184,6 +184,13 @@ pub fn spawn_pty_with_command(
 
     let mut cmd = CommandBuilder::new(&command);
     cmd.env("TERM", "xterm-256color");
+
+    // Phase 1: Inject MCP auto-connection config
+    cmd.env("TD_SESSION_ID", &id);
+    let mcp_state = app.state::<crate::mcp::McpState>();
+    let mcp_url = crate::mcp::get_mcp_url(mcp_state);
+    cmd.env("TD_MCP_URL", mcp_url);
+
     for arg in &args {
         cmd.arg(arg);
     }
@@ -295,8 +302,10 @@ pub fn write_to_pty(state: State<'_, PtyState>, id: String, data: String) -> Res
             let _ = instance.writer.write_all(bytes);
             let _ = instance.writer.flush();
         }
+        Ok(())
+    } else {
+        Err(format!("Terminal ID {} not found in active PTY state.", id))
     }
-    Ok(())
 }
 
 #[tauri::command]

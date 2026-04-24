@@ -76,6 +76,25 @@ interface RuntimeActivationRecord {
 
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
+function logToAgent(paneId: string, nodeId: string, message: string) {
+  const state = useWorkspaceStore.getState();
+  const update = state.updatePaneData;
+  const tabs = state.tabs;
+  for (const tab of tabs) {
+    const pane = tab.panes.find(p => p.id === paneId);
+    if (pane) {
+      const agents = (pane.data?.agents as MissionAgent[] | undefined) ?? [];
+      const updated = agents.map(a => 
+        a.nodeId === nodeId 
+          ? { ...a, runtimeLogs: [...(a.runtimeLogs ?? []), `[${new Date().toLocaleTimeString()}] ${message}`] } 
+          : a
+      );
+      update(paneId, { agents: updated });
+      return;
+    }
+  }
+}
+
 async function waitForRuntimeActivationState(params: {
   sessionId: string;
   missionId: string;
@@ -84,10 +103,15 @@ async function waitForRuntimeActivationState(params: {
   eventType: McpServerEvent['type'];
   acceptedStatuses: Set<string>;
   timeoutMs: number;
+  paneId?: string; // Optional for logging
 }): Promise<void> {
   const deadline = Date.now() + params.timeoutMs;
   let settled = false;
   let unsubscribe: (() => void) | undefined;
+
+  if (params.paneId) {
+    logToAgent(params.paneId, params.nodeId, `Waiting for ${params.eventType}...`);
+  }
 
   const eventPromise = new Promise<void>(resolve => {
     unsubscribe = mcpBus.subscribe(params.sessionId, event => {
@@ -96,6 +120,9 @@ async function waitForRuntimeActivationState(params: {
       if (event.nodeId && event.nodeId !== params.nodeId) return;
       if (typeof event.attempt === 'number' && event.attempt !== params.attempt) return;
       settled = true;
+      if (params.paneId) {
+        logToAgent(params.paneId, params.nodeId, `Received ${params.eventType} via MCP event bus.`);
+      }
       resolve();
     });
   });
@@ -110,6 +137,9 @@ async function waitForRuntimeActivationState(params: {
         });
         if (record?.status && params.acceptedStatuses.has(record.status)) {
           settled = true;
+          if (params.paneId) {
+            logToAgent(params.paneId, params.nodeId, `Detected ${record.status} via backend polling.`);
+          }
           return;
         }
       } catch {
@@ -522,6 +552,23 @@ function NodeCard({
           </div>
         )}
 
+        {agent.runtimeLogs && agent.runtimeLogs.length > 0 && (
+          <div className="space-y-1.5">
+            <div className="text-[10px] font-semibold uppercase tracking-wide text-text-muted">
+              Activation Pipeline Logs
+            </div>
+            <div className="rounded border border-border-panel bg-bg-surface overflow-hidden">
+              <div className="max-h-[160px] overflow-y-auto px-2 py-1.5 space-y-0.5 font-mono text-[10px]">
+                {agent.runtimeLogs.map((log, i) => (
+                  <div key={i} className="text-text-secondary border-b border-border-panel/30 last:border-0 pb-0.5 mb-0.5">
+                    {log}
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        )}
+
         {agent.artifacts && agent.artifacts.length > 0 && (
           <div className="space-y-1.5">
             <div className="text-[10px] font-semibold uppercase tracking-wide text-text-muted">
@@ -743,6 +790,9 @@ export function MissionControlPane({ pane }: { pane: Pane }) {
       const spawnedId = event.payload.id;
       const liveAgents = readAgentsForPane(pane.id, agents);
       const spawnedAgent = liveAgents.find(agent => agent.terminalId === spawnedId);
+      if (spawnedAgent) {
+        logToAgent(pane.id, spawnedAgent.nodeId!, `Terminal ${spawnedId} spawned.`);
+      }
       const nextAgents = liveAgents.map(agent =>
         agent.terminalId === spawnedId
           ? {
@@ -779,6 +829,7 @@ export function MissionControlPane({ pane }: { pane: Pane }) {
       if (!target) return;
 
       const reason = 'Terminal process exited; runtime session disconnected.';
+      logToAgent(pane.id, target.nodeId!, `Terminal process ${exitedId} EXITED.`);
       const shouldForceFailed = RUNTIME_ACTIVE_STATES.has(target.status);
       const nextAgents = liveAgents.map(agent =>
         agent.terminalId === exitedId
@@ -966,6 +1017,8 @@ export function MissionControlPane({ pane }: { pane: Pane }) {
       const { mission_id: missionId, node_id: nodeId, attempt, payload } = event.payload;
       if (currentMissionId && currentMissionId !== missionId) return;
 
+      logToAgent(pane.id, nodeId, `Activation request BROADCAST received. Attempt: ${attempt}`);
+
       const activationKey = `${missionId}:${nodeId}:${attempt}`;
       if (inflightActivationsRef.current.has(activationKey)) return;
       inflightActivationsRef.current.add(activationKey);
@@ -1017,6 +1070,7 @@ export function MissionControlPane({ pane }: { pane: Pane }) {
 
       const failActivation = async (reason: string) => {
         console.error(`[Activation] Failed for ${nodeId}: ${reason}`);
+        logToAgent(pane.id, nodeId, `Activation FAILED: ${reason}`);
         const failedAgents = readAgentsForPane(pane.id, agents).map(agent =>
           agent.nodeId === nodeId
             ? {
@@ -1049,6 +1103,7 @@ export function MissionControlPane({ pane }: { pane: Pane }) {
 
       void (async () => {
         try {
+          logToAgent(pane.id, nodeId, `Activation request received. Session: ${payload.sessionId}`);
           console.log(`[Activation] Registering dispatch with backend: session=${payload.sessionId}`);
           setNodeRuntimeBinding(nodeId, {
             terminalId: payload.terminalId,
@@ -1073,6 +1128,7 @@ export function MissionControlPane({ pane }: { pane: Pane }) {
           }
 
           const baseUrl = await invoke<string>('get_mcp_base_url');
+          logToAgent(pane.id, nodeId, `MCP URL: ${baseUrl}. Verifying server health...`);
           console.log(`[Activation] MCP Connection: verifying health at ${baseUrl}`);
           await invoke('acknowledge_runtime_activation', {
             missionId,
@@ -1089,6 +1145,26 @@ export function MissionControlPane({ pane }: { pane: Pane }) {
             return;
           }
 
+          // If we are in an interactive PTY mode, proactively launch the intended CLI
+          // by writing its name to the PTY. This fulfills the mandate that the node "owns" 
+          // its runtime. We send a clear-line signal (\x15) first to ensure we start 
+          // from a fresh prompt if a shell was already running.
+          if (!isHeadlessExecutionMode(payload.executionMode)) {
+            logToAgent(pane.id, nodeId, `Interactive mode: launching ${payload.cliType} in PTY ${terminalId}...`);
+            // Brief delay to ensure PTY is ready
+            await new Promise(r => setTimeout(r, 2000));
+            try {
+              await invoke('write_to_pty', { 
+                id: terminalId, 
+                data: `\x15${payload.cliType}\r` 
+              });
+              logToAgent(pane.id, nodeId, `Sent launch command to PTY ${terminalId}.`);
+            } catch (e) {
+              await failActivation(`Failed to write to PTY ${terminalId}: ${e}`);
+              return;
+            }
+          }
+
           const readyEvent = waitForRuntimeActivationState({
             sessionId: payload.sessionId,
             missionId,
@@ -1097,9 +1173,10 @@ export function MissionControlPane({ pane }: { pane: Pane }) {
             eventType: contract.handshakeEvent,
             acceptedStatuses: new Set(['registered', 'ready', 'activation_pending', 'activation_acked', 'running', 'completed', 'done']),
             timeoutMs: BOOTSTRAP_EVENT_TIMEOUT_MS,
+            paneId: pane.id,
           });
           
-          console.log(`[Activation] Runtime Registration: calling mcp_register_runtime_session`);
+          logToAgent(pane.id, nodeId, `Registering session ${payload.sessionId} with MCP...`);
           let registration: { ok?: boolean; message?: string; error?: string };
           try {
             registration = await invoke<{ ok?: boolean; message?: string; error?: string }>('mcp_register_runtime_session', {
@@ -1115,6 +1192,7 @@ export function MissionControlPane({ pane }: { pane: Pane }) {
             await failActivation(reason);
             return;
           }
+          logToAgent(pane.id, nodeId, `Session registered. Waiting for agent readiness handshake...`);
           await invoke('acknowledge_runtime_activation', {
             missionId,
             nodeId,
@@ -1125,6 +1203,7 @@ export function MissionControlPane({ pane }: { pane: Pane }) {
 
           console.log(`[Activation] Waiting for agent:ready (timeout ${BOOTSTRAP_EVENT_TIMEOUT_MS}ms)`);
           await readyEvent;
+          logToAgent(pane.id, nodeId, `Agent is READY.`);
           console.log(`[Activation] Agent connected to MCP: ${payload.sessionId}`);
           await invoke('acknowledge_runtime_activation', {
             missionId,
@@ -1170,12 +1249,14 @@ export function MissionControlPane({ pane }: { pane: Pane }) {
               eventType: 'activation:acked',
               acceptedStatuses: new Set(['activation_acked', 'running', 'completed', 'done']),
               timeoutMs: TASK_ACK_TIMEOUT_MS,
+              paneId: pane.id,
             });
-            console.log(`[Activation] Starting headless run ${payload.runId}`);
+            logToAgent(pane.id, nodeId, `Starting headless run ${payload.runId}`);
             await invoke('start_agent_run', { payload: request });
 
             try {
               await ackEvent;
+              logToAgent(pane.id, nodeId, `Headless run ACK received.`);
               console.log(`[Activation] ACK received for ${nodeId}`);
               await invoke('acknowledge_runtime_activation', {
                 missionId,
@@ -1219,12 +1300,22 @@ export function MissionControlPane({ pane }: { pane: Pane }) {
             eventType: 'activation:acked',
             acceptedStatuses: new Set(['activation_acked', 'running', 'completed', 'done']),
             timeoutMs: TASK_ACK_TIMEOUT_MS,
+            paneId: pane.id,
           });
+          logToAgent(pane.id, nodeId, `Sending NEW_TASK signal to PTY ${terminalId}`);
           console.log(`[Activation] Sending NEW_TASK signal to PTY ${terminalId}`);
-          await invoke('write_to_pty', {
-            id: terminalId,
-            data: buildTerminalActivationInput(payload.cliType, signal),
-          });
+          // Delay to ensure CLI is ready for input
+          await new Promise(r => setTimeout(r, 2000));
+          try {
+            await invoke('write_to_pty', {
+              id: terminalId,
+              data: buildTerminalActivationInput(payload.cliType, signal),
+            });
+            logToAgent(pane.id, nodeId, `NEW_TASK signal injected.`);
+          } catch (e) {
+            await failActivation(`Failed to write NEW_TASK signal to PTY ${terminalId}: ${e}`);
+            return;
+          }
           await invoke('acknowledge_runtime_activation', {
             missionId,
             nodeId,
@@ -1233,9 +1324,11 @@ export function MissionControlPane({ pane }: { pane: Pane }) {
             reason: null,
           });
           
+          logToAgent(pane.id, nodeId, `Waiting for task ACK (get_task_details) from session ${payload.sessionId}`);
           console.log(`[Activation] Waiting for ACK (get_task_details) from session ${payload.sessionId}`);
           try {
             await ackEvent;
+            logToAgent(pane.id, nodeId, `Task ACK received. Node is RUNNING.`);
             console.log(`[Activation] ACK received for ${nodeId}`);
             await invoke('acknowledge_runtime_activation', {
               missionId,
@@ -1252,6 +1345,7 @@ export function MissionControlPane({ pane }: { pane: Pane }) {
               reason: null,
             });
           } catch {
+            logToAgent(pane.id, nodeId, `Task ACK TIMEOUT.`);
             const recentOutput = await invoke<string>('get_pty_recent_output', {
               id: terminalId,
               maxBytes: 4096,
@@ -1263,7 +1357,7 @@ export function MissionControlPane({ pane }: { pane: Pane }) {
                 ? 'Agent did not call get_task_details because the CLI reports its MCP server failed. Reconnect the terminal-docks MCP server in that CLI, then retry this node.'
                 : editorMode
                   ? 'Agent appears to have opened a text editor (editor mode detected in terminal output). Press Escape to exit, then retry this node.'
-                  : `Agent did not call get_task_details within ${Math.round(TASK_ACK_TIMEOUT_MS / 1000)}s of receiving NEW_TASK.`
+                  : `Agent did not call get_task_details within ${Math.round(TASK_ACK_TIMEOUT_MS / 1000)}s of receiving NEW_TASK. Check terminal for errors.`
             );
             return;
           }
@@ -1370,6 +1464,7 @@ export function MissionControlPane({ pane }: { pane: Pane }) {
     }>('workflow-node-update', (event) => {
       if (unmounted) return;
       const { id: nodeId, status, attempt, outcome, reason } = event.payload;
+      logToAgent(pane.id, nodeId, `Node status UPDATE: ${status}${outcome ? ` (${outcome})` : ''}${reason ? ` - ${reason}` : ''}`);
       const liveAgents = readAgentsForPane(pane.id, agents);
       const now = Date.now();
       const sessionsToDispose = new Set<string>();

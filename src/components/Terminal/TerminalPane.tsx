@@ -179,13 +179,39 @@ export function TerminalPane({ pane, dragEndSeq }: { pane: Pane; dragEndSeq?: nu
       });
 
       const workspaceDir = useWorkspaceStore.getState().workspaceDir;
+      const cli = pane.data?.cli;
+      const customCommand = pane.data?.customCliCommand;
 
-      await invoke<boolean>('spawn_pty', {
-        id: terminalId,
-        rows: term.rows || 24,
-        cols: term.cols || 80,
-        cwd: workspaceDir,
-      });
+      if (customCommand) {
+        await invoke<boolean>('spawn_pty_with_command', {
+          id: terminalId,
+          rows: term.rows || 24,
+          cols: term.cols || 80,
+          cwd: workspaceDir,
+          command: customCommand,
+          args: Array.isArray(pane.data?.customCliArgs) ? pane.data?.customCliArgs : [],
+          env: pane.data?.customCliEnv ?? null,
+        });
+      } else if (cli && cli !== 'custom') {
+        // Map common agent CLIs to their binary names. 
+        // In a real environment, these must be in the PATH.
+        const command = String(cli);
+        await invoke<boolean>('spawn_pty_with_command', {
+          id: terminalId,
+          rows: term.rows || 24,
+          cols: term.cols || 80,
+          cwd: workspaceDir,
+          command,
+          args: [],
+        });
+      } else {
+        await invoke<boolean>('spawn_pty', {
+          id: terminalId,
+          rows: term.rows || 24,
+          cols: term.cols || 80,
+          cwd: workspaceDir,
+        });
+      }
 
       const initialCommand = pane.data?.initialCommand;
       if (initialCommand) {
