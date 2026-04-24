@@ -1133,32 +1133,19 @@ export function MissionControlPane({ pane }: { pane: Pane }) {
         // its runtime. We send a clear-line signal (\x15) first to ensure we start 
         // from a fresh prompt if a shell was already running.
         if (!isHeadlessExecutionMode(payload.executionMode)) {
-          // Check if the target CLI is already running in the PTY before attempting launch.
-          // Sending ctrl-u + "claude" to an already-running Claude TUI sends "claude" as a
-          // chat message rather than re-launching, which corrupts the session.
-          const recentOutput = await invoke<string>('get_pty_recent_output', {
-            id: terminalId,
-            maxBytes: 512,
-          }).catch(() => '');
-          const cliAlreadyRunning = new RegExp(payload.cliType, 'i').test(recentOutput);
-
-          if (cliAlreadyRunning) {
-            logToAgent(pane.id, nodeId, `${payload.cliType} already running in PTY ${terminalId} — skipping launch.`);
-          } else {
-            logToAgent(pane.id, nodeId, `Interactive mode: launching ${payload.cliType} in PTY ${terminalId}...`);
-            await new Promise(r => setTimeout(r, 500));
-            try {
-              await invoke('write_to_pty', {
-                id: terminalId,
-                data: `\x15${payload.cliType}\r`
-              });
-              logToAgent(pane.id, nodeId, `Sent launch command to PTY ${terminalId}.`);
-              // Wait for CLI to start before proceeding to MCP registration
-              await new Promise(r => setTimeout(r, 2000));
-            } catch (e) {
-              await failActivation(`Failed to write to PTY ${terminalId}: ${e}`);
-              return;
-            }
+          logToAgent(pane.id, nodeId, `Interactive mode: launching ${payload.cliType} in PTY ${terminalId}...`);
+          await new Promise(r => setTimeout(r, 500));
+          try {
+            await invoke('write_to_pty', {
+              id: terminalId,
+              data: `\x15${payload.cliType}\r`
+            });
+            logToAgent(pane.id, nodeId, `Sent launch command to PTY ${terminalId}.`);
+            // Wait for CLI to start before proceeding to MCP registration
+            await new Promise(r => setTimeout(r, 2000));
+          } catch (e) {
+            await failActivation(`Failed to write to PTY ${terminalId}: ${e}`);
+            return;
           }
         }
 
@@ -1363,7 +1350,7 @@ export function MissionControlPane({ pane }: { pane: Pane }) {
       void (async () => {
         try {
           const pending = await invoke<RuntimeActivationPayload[]>('get_mission_activations', {
-            mission_id: currentMissionId
+            missionId: currentMissionId
           });
           for (const payload of pending) {
             if (unmounted) break;
@@ -1458,7 +1445,7 @@ export function MissionControlPane({ pane }: { pane: Pane }) {
         agent.nodeId === nodeId && agent.activeRunId === runId
       );
       if (!target || !RUNTIME_ACTIVE_STATES.has(target.status)) return;
-      if (status === 'completed' && (target.runtimeCli === 'ollama' || target.runtimeCli === 'lmstudio')) return;
+      if (status === 'completed' && (target.runtimeCli === 'ollama' || target.runtimeCli === 'lmstudio' || target.runtimeCli === 'claude')) return;
 
       const reason = status === 'completed'
         ? 'process_exited_without_handoff'

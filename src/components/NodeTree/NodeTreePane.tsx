@@ -213,6 +213,7 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
   const [inspectorCommand, setInspectorCommand] = useState('');
   const [inspectorError, setInspectorError] = useState<string | null>(null);
   const [runtimeOutputByTerminalId, setRuntimeOutputByTerminalId] = useState<Record<string, string>>({});
+  const [runtimeOutputByNodeId, setRuntimeOutputByNodeId] = useState<Record<string, string>>({});
   const [expandedTerminalNodeId, setExpandedTerminalNodeId] = useState<string | null>(null);
 
   const registry = useMemo(() => createWorkflowNodeRegistry(), []);
@@ -389,6 +390,7 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
     [...new Set(
       Object.values(activeTree.nodes)
         .filter(node => node.type === 'workflow.agent')
+        .filter(node => node.properties.executionMode === 'interactive_pty')
         .map(node => String(node.properties.terminalId ?? '').trim())
         .filter(Boolean)
     )].sort()
@@ -523,6 +525,19 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
         ? (node?.properties.executionMode as WorkflowExecutionMode)
         : 'streaming_headless';
       const title = `Runtime ${role}`;
+      if (executionMode !== 'interactive_pty') {
+        const runtimeId = `runtime-${nodeId}-${generateId()}`;
+        applyOperator({ type: 'set_node_property', nodeId, key: 'terminalId', value: runtimeId });
+        applyOperator({ type: 'set_node_property', nodeId, key: 'terminalTitle', value: title });
+        applyOperator({ type: 'set_node_property', nodeId, key: 'paneId', value: '' });
+        applyOperator({ type: 'set_node_property', nodeId, key: 'cli', value: cli });
+        applyOperator({ type: 'set_node_property', nodeId, key: 'executionMode', value: executionMode });
+        setNodeTerminalBinding(nodeId, runtimeId);
+        setValidationTone('ok');
+        setValidationMessage(`Node ${nodeId} bound to ${title}.`);
+        return { id: runtimeId, paneId: '', title, cli };
+      }
+
       addPane('terminal', title, { roleId: role, cli, cliSource: 'heuristic', executionMode });
       const nextTabs = useWorkspaceStore.getState().tabs;
       let created: { id: string; paneId: string; title: string; cli: WorkflowAgentCli } | null = null;
@@ -557,8 +572,15 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
     if (!inspectorNodeId) return;
     const node = activeTree.nodes[inspectorNodeId];
     const terminalId = String(node?.properties.terminalId ?? '');
+    const executionMode = SELECTABLE_EXECUTION_MODES.includes(node?.properties.executionMode as WorkflowExecutionMode)
+      ? node?.properties.executionMode as WorkflowExecutionMode
+      : 'streaming_headless';
     const command = inspectorCommand.trim();
     if (!terminalId || !command) return;
+    if (executionMode !== 'interactive_pty') {
+      setInspectorError('Commands can only be sent to interactive PTY runtimes.');
+      return;
+    }
     try {
       await invoke('write_to_pty', { id: terminalId, data: `${command}\r` });
       setInspectorCommand('');
@@ -574,6 +596,7 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
 
   useEffect(() => {
     let unlistenPtyOut: (() => void) | undefined;
+    let unlistenAgentRunOutput: (() => void) | undefined;
     let unmounted = false;
     listen<{ id: string; data: number[] }>('pty-out', event => {
       if (unmounted) return;
@@ -591,11 +614,35 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
       unlistenPtyOut = unlisten;
       if (unmounted) unlisten();
     });
+    listen<{
+      runId: string;
+      missionId: string;
+      nodeId: string;
+      stream: 'stdout' | 'stderr';
+      chunk: string;
+      at: number;
+    }>('agent-run-output', event => {
+      if (unmounted) return;
+      if (activeMissionId && event.payload.missionId !== activeMissionId) return;
+      const { nodeId, stream, chunk } = event.payload;
+      setRuntimeOutputByNodeId(previous => {
+        const prefix = stream === 'stderr' ? '[stderr] ' : '';
+        const merged = `${previous[nodeId] ?? ''}${prefix}${chunk}`;
+        const next = merged.length > MAX_RUNTIME_SNIPPET_BYTES
+          ? merged.slice(merged.length - MAX_RUNTIME_SNIPPET_BYTES)
+          : merged;
+        return { ...previous, [nodeId]: next };
+      });
+    }).then(unlisten => {
+      unlistenAgentRunOutput = unlisten;
+      if (unmounted) unlisten();
+    });
     return () => {
       unmounted = true;
       unlistenPtyOut?.();
+      unlistenAgentRunOutput?.();
     };
-  }, []);
+  }, [activeMissionId]);
 
   useEffect(() => {
     if (boundAgentTerminalIds.length === 0) return;
@@ -635,6 +682,10 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
     if (!inspectorNodeId) return;
     const node = activeTree.nodes[inspectorNodeId];
     if (!node || node.type !== 'workflow.agent') return;
+    const executionMode = SELECTABLE_EXECUTION_MODES.includes(node.properties.executionMode as WorkflowExecutionMode)
+      ? node.properties.executionMode as WorkflowExecutionMode
+      : 'streaming_headless';
+    if (executionMode !== 'interactive_pty') return;
     const terminalId = String(node.properties.terminalId ?? '').trim();
     if (!terminalId) return;
     void refreshTerminalOutput(terminalId);
@@ -664,7 +715,16 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
         if (node.type !== 'workflow.agent' && node.type !== 'agent') continue;
         const nodeId = String(node.id);
         const data = node.data as Record<string, unknown>;
-        if (data.terminalId) continue;
+        const executionMode = SELECTABLE_EXECUTION_MODES.includes(data.executionMode as WorkflowExecutionMode)
+          ? data.executionMode as WorkflowExecutionMode
+          : 'streaming_headless';
+        if (data.terminalId && executionMode === 'interactive_pty') continue;
+
+        if (executionMode !== 'interactive_pty') {
+          const binding = createAndBindRuntime(nodeId);
+          if (binding) freshBindings.set(nodeId, binding);
+          continue;
+        }
 
         // Re-attach persisted binding if the terminal pane is still open
         const persistedId = storedBindings[nodeId];
@@ -768,10 +828,6 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
         }
       }
 
-      await invoke('start_mission_graph', {
-        missionId,
-        graph: mission,
-      });
       setActiveMissionId(missionId);
 
       addPane('missioncontrol', 'Mission Control', {
@@ -779,6 +835,11 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
         agents,
         missionId,
         mission,
+      });
+
+      await invoke('start_mission_graph', {
+        missionId,
+        graph: mission,
       });
 
       setValidationTone('ok');
@@ -1330,8 +1391,12 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
   const inspectedRuntimeAgent = inspectorNodeId ? missionAgentByNodeId.get(inspectorNodeId) : undefined;
   const inspectedTerminalId = String(inspectedNode?.properties.terminalId ?? inspectedRuntimeAgent?.terminalId ?? '').trim();
   const inspectedTerminal = openTerminals.find(terminal => terminal.id === inspectedTerminalId);
-  const inspectorOutput = inspectedTerminalId
-    ? (runtimeOutputByTerminalId[inspectedTerminalId] ?? '')
+  const inspectedExecutionMode = SELECTABLE_EXECUTION_MODES.includes(inspectedNode?.properties.executionMode as WorkflowExecutionMode)
+    ? inspectedNode?.properties.executionMode as WorkflowExecutionMode
+    : 'streaming_headless';
+  const inspectedUsesPty = inspectedExecutionMode === 'interactive_pty';
+  const inspectorOutput = inspectorNodeId
+    ? (inspectedUsesPty ? (runtimeOutputByTerminalId[inspectedTerminalId] ?? '') : (runtimeOutputByNodeId[inspectorNodeId] ?? ''))
     : '';
 
   return (
@@ -1465,8 +1530,15 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
               'claude'
             ).trim();
             const runtimeSessionId = String(runtimeAgent?.runtimeSessionId ?? runtimeBinding?.runtimeSessionId ?? '').trim();
+            const executionMode = SELECTABLE_EXECUTION_MODES.includes(materializedNode.node.properties.executionMode as WorkflowExecutionMode)
+              ? materializedNode.node.properties.executionMode as WorkflowExecutionMode
+              : 'streaming_headless';
+            const usesPtyRuntime = executionMode === 'interactive_pty';
+            const runtimeOutput = usesPtyRuntime
+              ? (runtimeOutputByTerminalId[terminalId] ?? '')
+              : (runtimeOutputByNodeId[materializedNode.node.id] ?? '');
             const runtimeSummary = summarizeActivity(
-              runtimeOutputByTerminalId[terminalId] ??
+              runtimeOutput ||
               (runtimeAgent?.lastPayload ?? null)
             );
             const artifactHints = artifactHintsByNodeId.get(materializedNode.node.id) ?? [];
@@ -1589,7 +1661,7 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
                         <div className="rounded border border-border-panel bg-[#0b1118] px-2 py-1.5">
                           <div className="uppercase tracking-wide text-text-muted">Terminal</div>
                           <div className={`truncate font-medium ${terminalId ? 'text-emerald-300' : 'text-red-300'}`}>
-                            {terminalId ? 'bound' : 'unbound'}
+                            {terminalId ? (usesPtyRuntime ? 'bound' : 'virtual') : 'unbound'}
                           </div>
                         </div>
                         <div className="rounded border border-border-panel bg-[#0b1118] px-2 py-1.5">
@@ -1614,7 +1686,7 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
                         >
                           <div className="flex items-center gap-1.5 text-[10px] text-text-muted">
                             <TerminalSquare size={10} />
-                            Terminal Output
+                            {usesPtyRuntime ? 'Terminal Output' : 'Runtime Output'}
                             {terminalId && <span className="text-[8px] text-text-muted opacity-50">({terminalId.slice(0, 8)})</span>}
                           </div>
                           <ChevronDown size={10} className={`text-text-muted transition-transform ${expandedTerminalNodeId === materializedNode.node.id ? 'rotate-180' : ''}`} />
@@ -1622,7 +1694,7 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
                         {expandedTerminalNodeId === materializedNode.node.id ? (
                           <pre className="px-2 py-2 text-[10px] leading-relaxed text-[#c5d2e4] whitespace-pre-wrap overflow-x-hidden max-h-36 overflow-y-auto bg-[#080d12]">
                             {terminalId
-                              ? ((runtimeOutputByTerminalId[terminalId] || '').split('\n').slice(-25).join('\n') || 'Waiting for output…')
+                              ? ((runtimeOutput || '').split('\n').slice(-25).join('\n') || 'Waiting for output…')
                               : 'No terminal bound. Click Run to auto-create one.'}
                           </pre>
                         ) : (
@@ -1651,19 +1723,27 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
                           applyOperator({ type: 'set_node_property', nodeId: materializedNode.node.id, key: 'terminalId', value });
                           applyOperator({ type: 'set_node_property', nodeId: materializedNode.node.id, key: 'terminalTitle', value: term?.title ?? '' });
                           applyOperator({ type: 'set_node_property', nodeId: materializedNode.node.id, key: 'paneId', value: term?.paneId ?? '' });
+                          if (term) {
+                            applyOperator({ type: 'set_node_property', nodeId: materializedNode.node.id, key: 'executionMode', value: 'interactive_pty' });
+                          }
                           if (term?.cli && SUPPORTED_WORKFLOW_CLIS.has(term.cli)) {
                             applyOperator({ type: 'set_node_property', nodeId: materializedNode.node.id, key: 'cli', value: term.cli });
                           }
-                          if (value) {
-                            setNodeTerminalBinding(materializedNode.node.id, value);
-                          }
-                          if (value) {
+                            if (value) {
+                              setNodeTerminalBinding(materializedNode.node.id, value);
+                            }
+                          if (value && usesPtyRuntime) {
                             void refreshTerminalOutput(value);
                           }
                         }}
                         className="w-full bg-[#0b1118] border border-border-panel rounded-lg px-2 py-1.5 text-[11px]"
                       >
                         <option value="">Terminal binding id</option>
+                        {terminalId && !openTerminals.some(terminal => terminal.id === terminalId) && (
+                          <option value={terminalId}>
+                            {terminalId.startsWith('runtime-') ? 'Virtual runtime' : 'Current binding'} ({terminalId.substring(0, 8)})
+                          </option>
+                        )}
                         {openTerminals.map(terminal => (
                           <option key={terminal.id} value={terminal.id}>
                             {terminal.title} ({terminal.id.substring(0, 8)}){terminal.cli ? ` · ${terminal.cli}` : ''}
@@ -1693,7 +1773,7 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
                           onClick={() => {
                             setInspectorNodeId(current => (current === materializedNode.node.id ? null : materializedNode.node.id));
                             setInspectorError(null);
-                            if (terminalId) {
+                            if (terminalId && usesPtyRuntime) {
                               void refreshTerminalOutput(terminalId);
                             }
                           }}
@@ -1895,7 +1975,7 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
                 </div>
               </div>
               <div className="flex items-center gap-1">
-                {inspectedTerminalId && (
+                {inspectedTerminalId && inspectedUsesPty && (
                   <button
                     type="button"
                     onClick={() => openTerminalById(inspectedTerminalId)}
@@ -1941,15 +2021,17 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
                     {inspectedTerminal?.title ?? inspectedTerminalId}
                     {inspectedRuntimeAgent?.runtimeSessionId ? ` · ${shortId(inspectedRuntimeAgent.runtimeSessionId)}` : ''}
                   </span>
-                  <button
-                    type="button"
-                    onClick={() => void refreshTerminalOutput(inspectedTerminalId)}
-                    className="inline-flex items-center gap-1 px-2 py-1 rounded border border-border-panel hover:bg-[#111826] text-text-muted hover:text-text-primary"
-                    title="Refresh runtime output"
-                  >
-                    <RefreshCw size={11} />
-                    Refresh
-                  </button>
+                  {inspectedUsesPty && (
+                    <button
+                      type="button"
+                      onClick={() => void refreshTerminalOutput(inspectedTerminalId)}
+                      className="inline-flex items-center gap-1 px-2 py-1 rounded border border-border-panel hover:bg-[#111826] text-text-muted hover:text-text-primary"
+                      title="Refresh runtime output"
+                    >
+                      <RefreshCw size={11} />
+                      Refresh
+                    </button>
+                  )}
                 </div>
 
                 <pre className="flex-1 overflow-auto px-3 py-3 text-[11px] leading-relaxed text-[#c5d2e4] whitespace-pre-wrap bg-[#0a0f16]">
@@ -1962,27 +2044,29 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
                   </div>
                 )}
 
-                <form
-                  className="px-3 py-2 border-t border-border-panel bg-[#101826] flex gap-2"
-                  onSubmit={event => {
-                    event.preventDefault();
-                    void sendInspectorCommand();
-                  }}
-                >
-                  <input
-                    value={inspectorCommand}
-                    onChange={event => setInspectorCommand(event.target.value)}
-                    placeholder="Send command to runtime"
-                    className="flex-1 bg-[#0b1118] border border-border-panel rounded px-2 py-1.5 text-[11px] text-text-primary"
-                  />
-                  <button
-                    type="submit"
-                    disabled={!inspectorCommand.trim()}
-                    className="px-2.5 py-1.5 rounded border border-accent-primary text-accent-primary hover:bg-accent-primary/10 disabled:opacity-40 disabled:cursor-not-allowed text-[11px]"
+                {inspectedUsesPty && (
+                  <form
+                    className="px-3 py-2 border-t border-border-panel bg-[#101826] flex gap-2"
+                    onSubmit={event => {
+                      event.preventDefault();
+                      void sendInspectorCommand();
+                    }}
                   >
-                    Send
-                  </button>
-                </form>
+                    <input
+                      value={inspectorCommand}
+                      onChange={event => setInspectorCommand(event.target.value)}
+                      placeholder="Send command to runtime"
+                      className="flex-1 bg-[#0b1118] border border-border-panel rounded px-2 py-1.5 text-[11px] text-text-primary"
+                    />
+                    <button
+                      type="submit"
+                      disabled={!inspectorCommand.trim()}
+                      className="px-2.5 py-1.5 rounded border border-accent-primary text-accent-primary hover:bg-accent-primary/10 disabled:opacity-40 disabled:cursor-not-allowed text-[11px]"
+                    >
+                      Send
+                    </button>
+                  </form>
+                )}
               </>
             )}
           </div>

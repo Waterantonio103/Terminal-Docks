@@ -354,7 +354,6 @@ fn is_active_runtime_status(status: &str) -> bool {
         "launching"
             | "connecting"
             | "spawning"
-            | "terminal_started"
             | "adapter_starting"
             | "mcp_connecting"
             | "registered"

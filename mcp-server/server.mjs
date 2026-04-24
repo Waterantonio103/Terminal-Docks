@@ -2116,22 +2116,23 @@ function createMcpServer(getSessionId) {
     
     const sid = getSessionId();
     if (sid) {
-      // Find the graph-mode session ID (TD_SESSION_ID) to ack back to Mission Control
-      const runtimeSession = db.prepare(
-        `SELECT session_id
-           FROM agent_runtime_sessions
-          WHERE mission_id = ? AND node_id = ?
-          ORDER BY created_at DESC
-          LIMIT 1`
-      ).get(missionId, nodeId);
-
-      const targetSid = runtimeSession ? runtimeSession.session_id : sid;
+      const targetSid = details.runtimeSession?.sessionId ?? sid;
+      const currentAttempt = Number(details.node?.attempt ?? 0);
+      if (details.runtimeSession?.sessionId && Number.isInteger(currentAttempt) && currentAttempt > 0) {
+        ackTaskPush({
+          sessionId: details.runtimeSession.sessionId,
+          missionId,
+          nodeId,
+          taskSeq: currentAttempt,
+        });
+      }
       emitAgentEvent({ 
         type: 'activation:acked', 
         sessionId: targetSid, 
         missionId, 
         nodeId, 
-        attempt: details.attempt 
+        attempt: currentAttempt,
+        taskSeq: currentAttempt,
       });
       
       // Also emit for the SSE session itself just in case
@@ -2141,7 +2142,8 @@ function createMcpServer(getSessionId) {
           sessionId: sid, 
           missionId, 
           nodeId, 
-          attempt: details.attempt 
+          attempt: currentAttempt,
+          taskSeq: currentAttempt,
         });
       }
     }
@@ -3136,9 +3138,13 @@ const internalPushToken = process.env.MCP_INTERNAL_PUSH_TOKEN;
 
 app.use((req, res, next) => {
   if (req.path === '/health') return next();
+  if (req.path === '/events/session') return next();
   // /internal/push uses its own token scheme — skip the general auth layer
   // so a missing MCP_AUTH_TOKEN doesn't accidentally gate local pushes.
   if (req.path.startsWith('/internal/')) return next();
+  // Streamable HTTP MCP clients pass the token on the initial POST URL, then
+  // use mcp-session-id for subsequent GET/POST/DELETE requests.
+  if (req.path === '/mcp' && req.headers['mcp-session-id']) return next();
   const token = req.query.token || req.headers.authorization?.replace('Bearer ', '');
   if (authToken && token !== authToken) {
     return res.status(401).send('Unauthorized');
@@ -3361,25 +3367,33 @@ app.post('/mcp', async (req, res) => {
       transport = sessions[sid].transport;
     } else {
       // New session
-      transport = new StreamableHTTPServerTransport({ sessionIdGenerator: () => randomUUID() });
-      sid = transport.sessionId;
+      let initializedSessionId = null;
+      transport = new StreamableHTTPServerTransport({
+        sessionIdGenerator: () => randomUUID(),
+        onsessioninitialized: (sessionId) => {
+          initializedSessionId = sessionId;
+          sid = sessionId;
+          sessions[sessionId] = sessions[sessionId] || {};
+          sessions[sessionId].transport = transport;
+          sessions[sessionId].mcpServer = mcpServer;
+          console.log(`[mcp] Registered session ${sessionId}`);
+          broadcast('Bridge', 'session_update', 'session_update');
+        },
+      });
 
-      sessions[sid] = sessions[sid] || {};
-      sessions[sid].transport = transport;
-
-      const mcpServer = createMcpServer(() => sid);
-      sessions[sid].mcpServer = mcpServer;
+      const mcpServer = createMcpServer(() => sid ?? initializedSessionId);
 
       transport.onclose = () => {
-        console.log(`[mcp] Transport closed for session ${sid}`);
-        logSession(sid, 'disconnect', null);
-        delete sessions[sid];
+        const closedSessionId = sid ?? initializedSessionId;
+        console.log(`[mcp] Transport closed for session ${closedSessionId}`);
+        if (closedSessionId) {
+          logSession(closedSessionId, 'disconnect', null);
+          delete sessions[closedSessionId];
+        }
         broadcast('Bridge', 'session_update', 'session_update');
       };
 
       await mcpServer.connect(transport);
-      console.log(`[mcp] Registered session ${sid}`);
-      broadcast('Bridge', 'session_update', 'session_update');
     }
 
     await transport.handleRequest(req, res, req.body);

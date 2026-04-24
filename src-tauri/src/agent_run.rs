@@ -363,6 +363,75 @@ fn extract_openai_compatible_text(value: &serde_json::Value) -> String {
         .to_string()
 }
 
+fn summarize_completion_output(content: &str, fallback: &str) -> String {
+    if content.trim().is_empty() {
+        fallback.to_string()
+    } else {
+        content.trim().lines().take(8).collect::<Vec<_>>().join("\n")
+    }
+}
+
+fn acknowledge_headless_runtime(app: &AppHandle, payload: &StartAgentRunRequest) {
+    let _ = mcp_internal_push(app, serde_json::json!({
+        "type": "runtime_task_acked",
+        "sessionId": payload.session_id,
+        "missionId": payload.mission_id,
+        "nodeId": payload.node_id,
+        "attempt": payload.attempt,
+        "taskSeq": payload.attempt,
+    }));
+    let _ = crate::workflow_engine::acknowledge_runtime_activation(
+        app.clone(),
+        payload.mission_id.clone(),
+        payload.node_id.clone(),
+        payload.attempt,
+        "activation_acked".to_string(),
+        None,
+    );
+    let _ = crate::workflow_engine::acknowledge_runtime_activation(
+        app.clone(),
+        payload.mission_id.clone(),
+        payload.node_id.clone(),
+        payload.attempt,
+        "running".to_string(),
+        None,
+    );
+}
+
+fn publish_cli_stdout_completion(
+    app: &AppHandle,
+    session_id: &str,
+    mission_id: &str,
+    node_id: &str,
+    attempt: u32,
+    run_id: &str,
+    stdout_path: &PathBuf,
+) -> Result<(), String> {
+    let content = fs::read_to_string(stdout_path).unwrap_or_default();
+    let summary = summarize_completion_output(&content, "CLI runtime completed without text output.");
+    mcp_internal_push(app, serde_json::json!({
+        "type": "runtime_task_completed",
+        "sessionId": session_id,
+        "missionId": mission_id,
+        "nodeId": node_id,
+        "attempt": attempt,
+        "outcome": "success",
+        "title": "CLI runtime completed",
+        "summary": summary,
+        "rawOutput": content,
+        "logRef": run_id,
+        "filesChanged": [],
+        "artifactReferences": [],
+        "downstreamPayload": {
+            "status": "success",
+            "summary": summary,
+            "rawOutput": content,
+            "logRef": run_id,
+        },
+    }))?;
+    Ok(())
+}
+
 fn start_local_http_run(
     app: AppHandle,
     payload: StartAgentRunRequest,
@@ -432,11 +501,7 @@ fn start_local_http_run(
                 let raw = response.into_string().unwrap_or_default();
                 let parsed = serde_json::from_str::<serde_json::Value>(&raw).unwrap_or(serde_json::Value::String(raw.clone()));
                 let content = extract_openai_compatible_text(&parsed);
-                let summary = if content.trim().is_empty() {
-                    "Local HTTP runtime completed without text output.".to_string()
-                } else {
-                    content.trim().lines().take(8).collect::<Vec<_>>().join("\n")
-                };
+                let summary = summarize_completion_output(&content, "Local HTTP runtime completed without text output.");
                 let _ = fs::write(&stdout_path, &content);
                 emit_output(&app, &payload.run_id, &payload.mission_id, &payload.node_id, "stdout", content.clone());
                 let completion = mcp_internal_push(&app, serde_json::json!({
@@ -676,10 +741,18 @@ pub fn start_agent_run(
 
     update_run_status(&app, &payload.run_id, "running", None, None, true, false)?;
     emit_status(&app, &payload.run_id, &payload.mission_id, &payload.node_id, "running", None);
+    if payload.execution_mode == "headless" || payload.execution_mode == "streaming_headless" {
+        acknowledge_headless_runtime(&app, &payload);
+    }
 
     let run_id = payload.run_id.clone();
     let mission_id = payload.mission_id.clone();
     let node_id = payload.node_id.clone();
+    let session_id = payload.session_id.clone();
+    let attempt = payload.attempt;
+    let cli = payload.cli.clone();
+    let execution_mode = payload.execution_mode.clone();
+    let stdout_path_for_completion = stdout_path.clone();
     let timeout_ms = payload.timeout_ms;
     let children = state.children.clone();
     thread::spawn(move || {
@@ -734,6 +807,20 @@ pub fn start_agent_run(
                     } else {
                         Some(format!("Process exited with status {status}."))
                     };
+                    if status.success()
+                        && cli == "claude"
+                        && (execution_mode == "headless" || execution_mode == "streaming_headless")
+                    {
+                        let _ = publish_cli_stdout_completion(
+                            &app,
+                            &session_id,
+                            &mission_id,
+                            &node_id,
+                            attempt,
+                            &run_id,
+                            &stdout_path_for_completion,
+                        );
+                    }
                     update_run_status(&app, &run_id, final_status, exit_code, error.as_deref(), false, true).ok();
                     let _ = app.emit(
                         "agent-run-exit",
