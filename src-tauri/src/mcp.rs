@@ -438,10 +438,6 @@ pub fn init_mcp_server(app: &AppHandle) -> Result<(), String> {
                                 .get("fromNodeId")
                                 .and_then(|v| v.as_str())
                                 .map(str::to_string);
-                            let target_node_id = value
-                                .get("targetNodeId")
-                                .and_then(|v| v.as_str())
-                                .map(str::to_string);
                             let from_attempt = value.get("fromAttempt").and_then(|v| v.as_u64());
 
                             let mission_for_diag = mission_id
@@ -457,9 +453,6 @@ pub fn init_mcp_server(app: &AppHandle) -> Result<(), String> {
                             }
                             if from_node_id.is_none() {
                                 invalid_reasons.push("missing fromNodeId");
-                            }
-                            if target_node_id.is_none() {
-                                invalid_reasons.push("missing targetNodeId");
                             }
                             if from_attempt.is_none() {
                                 invalid_reasons.push("missing fromAttempt");

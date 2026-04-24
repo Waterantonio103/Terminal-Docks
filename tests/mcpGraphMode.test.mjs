@@ -11,6 +11,7 @@ const {
   buildTaskDetails,
   validateGraphHandoff,
   executeHandoffTask,
+  executeCompleteTask,
   executeReceiveMessages,
   executeRegisterWorkerCapabilities,
   executeAssignTaskByRequirements,
@@ -285,6 +286,60 @@ try {
     const broadcasts = getBroadcastHistory();
     assert.ok(broadcasts.some(message => message.type === 'handoff'));
     assert.ok(broadcasts.some(message => message.type === 'task_update'));
+  });
+
+  await run('complete_task resolves all legal downstream graph targets', async () => {
+    resetBridgeState();
+    seedCompiledMission(demoMission());
+    seedMissionNodeRuntime({
+      missionId: 'mission-graph',
+      nodeId: 'builder',
+      roleId: 'builder',
+      status: 'running',
+      attempt: 1,
+      currentWaveId: 'root:mission-graph',
+    });
+    seedAgentRuntimeSession({
+      sessionId: 'session:mission-graph:builder:1',
+      agentId: 'agent:mission-graph:builder:term-builder',
+      missionId: 'mission-graph',
+      nodeId: 'builder',
+      attempt: 1,
+      terminalId: 'term-builder',
+      status: 'running',
+    });
+
+    const result = executeCompleteTask({
+      missionId: 'mission-graph',
+      nodeId: 'builder',
+      attempt: 1,
+      outcome: 'success',
+      title: 'Builder completed all work',
+      summary: 'Implementation is ready for both reviewers.',
+      filesChanged: ['src/lib/missionRuntime.ts'],
+      downstreamPayload: { verdict: 'ready' },
+    }, 'session:mission-graph:builder:1');
+
+    assert.equal(result.isError, undefined);
+    const payload = JSON.parse(result.content[0].text);
+    assert.equal(payload.status, 'completed');
+    assert.deepEqual(
+      payload.routed.map(entry => entry.targetNodeId).sort(),
+      ['reviewer-a', 'reviewer-b'],
+    );
+
+    const reviewerA = buildTaskDetails('mission-graph', 'reviewer-a');
+    const reviewerB = buildTaskDetails('mission-graph', 'reviewer-b');
+    assert.ok(reviewerA.latestTask);
+    assert.ok(reviewerB.latestTask);
+    assert.match(reviewerA.latestTask.payload, /Implementation is ready/);
+    assert.match(reviewerB.latestTask.payload, /src\/lib\/missionRuntime\.ts/);
+
+    const broadcasts = getBroadcastHistory();
+    assert.equal(
+      broadcasts.filter(message => message.type === 'handoff').length,
+      2,
+    );
   });
 
   await run('assign_task_by_requirements picks the best available worker', async () => {

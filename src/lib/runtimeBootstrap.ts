@@ -1,6 +1,6 @@
 import type { RuntimeActivationPayload } from './missionRuntime';
 
-export type SupportedRuntimeCli = 'claude' | 'gemini' | 'opencode' | 'codex' | 'custom';
+export type SupportedRuntimeCli = 'claude' | 'gemini' | 'opencode' | 'codex' | 'custom' | 'ollama' | 'lmstudio';
 export type RuntimeExecutionMode = 'headless' | 'streaming_headless' | 'interactive_pty';
 
 export interface RuntimeBootstrapContract {
@@ -68,12 +68,26 @@ const CONTRACTS: Record<SupportedRuntimeCli, RuntimeBootstrapContract> = {
     handshakeEvent: 'agent:ready',
     notes: 'Custom headless commands receive Terminal Docks runtime identifiers in the environment.',
   },
+  ollama: {
+    cli: 'ollama',
+    endpoint: '/internal/push',
+    registrationType: 'runtime_bootstrap',
+    handshakeEvent: 'agent:ready',
+    notes: 'Local HTTP runtime registered by Terminal Docks; task ACK and completion are reported by the adapter.',
+  },
+  lmstudio: {
+    cli: 'lmstudio',
+    endpoint: '/internal/push',
+    registrationType: 'runtime_bootstrap',
+    handshakeEvent: 'agent:ready',
+    notes: 'OpenAI-compatible local HTTP runtime registered by Terminal Docks; task ACK and completion are reported by the adapter.',
+  },
 };
 
 export function normalizeRuntimeCli(value: unknown): SupportedRuntimeCli | null {
   if (typeof value !== 'string') return null;
   const cli = value.trim().toLowerCase();
-  if (cli === 'claude' || cli === 'gemini' || cli === 'opencode' || cli === 'codex' || cli === 'custom') {
+  if (cli === 'claude' || cli === 'gemini' || cli === 'opencode' || cli === 'codex' || cli === 'custom' || cli === 'ollama' || cli === 'lmstudio') {
     return cli;
   }
   return null;

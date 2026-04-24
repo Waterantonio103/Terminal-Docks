@@ -18,7 +18,7 @@ import { getActiveTreeId, getViewState } from '../../lib/node-system/editor';
 import { applyNodeEditorOperator } from '../../lib/node-system/operators';
 import type { MaterializedNode, NodeInstance, Point2D } from '../../lib/node-system/types';
 import { detectRoleForPane } from '../../lib/cliDetection';
-import { useWorkspaceStore, type MissionAgent, type ResultEntry, type WorkflowAgentCli, type WorkflowGraph } from '../../store/workspace';
+import { useWorkspaceStore, type MissionAgent, type ResultEntry, type WorkflowAgentCli, type WorkflowExecutionMode, type WorkflowGraph } from '../../store/workspace';
 
 type ValidationTone = 'idle' | 'ok' | 'error';
 type ResizeEdge = 'n' | 's' | 'e' | 'w' | 'ne' | 'nw' | 'se' | 'sw';
@@ -53,7 +53,9 @@ const LINK_CANVAS_SIZE = 16384;
 const LINK_CANVAS_HALF = LINK_CANVAS_SIZE / 2;
 const FRAME_MIN_WIDTH = 160;
 const FRAME_MIN_HEIGHT = 100;
-const SUPPORTED_WORKFLOW_CLIS = new Set(['claude', 'gemini', 'opencode', 'codex']);
+const SUPPORTED_WORKFLOW_CLIS = new Set(['claude', 'gemini', 'opencode', 'codex', 'custom', 'ollama', 'lmstudio']);
+const SELECTABLE_WORKFLOW_CLIS: WorkflowAgentCli[] = ['claude', 'codex', 'gemini', 'opencode', 'custom', 'ollama', 'lmstudio'];
+const SELECTABLE_EXECUTION_MODES: WorkflowExecutionMode[] = ['streaming_headless', 'headless', 'interactive_pty'];
 const MAX_RUNTIME_SNIPPET_BYTES = 3072;
 const MAX_ACTIVITY_SUMMARY_LENGTH = 180;
 const ARTIFACT_PATH_REGEX = /\b(?:\.{0,2}\/)?[a-zA-Z0-9_\-./]+\.(?:ts|tsx|js|jsx|mjs|cjs|rs|md|json|yaml|yml|toml|css|scss|html|sh|py|go|java|kt|swift|sql)\b/g;
@@ -195,6 +197,7 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
   const results = useWorkspaceStore(state => state.results);
   const addPane = useWorkspaceStore(state => state.addPane);
   const setNodeTerminalBinding = useWorkspaceStore(state => state.setNodeTerminalBinding);
+  const nodeRuntimeBindings = useWorkspaceStore(state => state.nodeRuntimeBindings);
   const openTerminals = useMemo(() => {
     const terminals: Array<{ id: string; title: string; cli: string | null; paneId: string }> = [];
     for (const tab of tabs) {
@@ -509,19 +512,25 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
   }, []);
 
   const createAndBindRuntime = useCallback(
-    (nodeId: string): { id: string; paneId: string; title: string } | null => {
+    (nodeId: string): { id: string; paneId: string; title: string; cli: WorkflowAgentCli } | null => {
       const before = new Set(openTerminals.map(terminal => terminal.id));
       const node = activeTree.nodes[nodeId];
       const role = String(node?.properties.roleId ?? 'agent');
+      const cli = SELECTABLE_WORKFLOW_CLIS.includes(node?.properties.cli as WorkflowAgentCli)
+        ? (node?.properties.cli as WorkflowAgentCli)
+        : 'claude';
+      const executionMode = SELECTABLE_EXECUTION_MODES.includes(node?.properties.executionMode as WorkflowExecutionMode)
+        ? (node?.properties.executionMode as WorkflowExecutionMode)
+        : 'streaming_headless';
       const title = `Runtime ${role}`;
-      addPane('terminal', title, {});
+      addPane('terminal', title, { roleId: role, cli, cliSource: 'heuristic', executionMode });
       const nextTabs = useWorkspaceStore.getState().tabs;
-      let created: { id: string; paneId: string; title: string } | null = null;
+      let created: { id: string; paneId: string; title: string; cli: WorkflowAgentCli } | null = null;
       for (const tab of nextTabs) {
         for (const pane of tab.panes) {
           if (pane.type !== 'terminal' || !pane.data?.terminalId) continue;
           if (before.has(pane.data.terminalId)) continue;
-          created = { id: pane.data.terminalId, paneId: pane.id, title: pane.title };
+          created = { id: pane.data.terminalId, paneId: pane.id, title: pane.title, cli };
           break;
         }
         if (created) break;
@@ -534,6 +543,8 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
       applyOperator({ type: 'set_node_property', nodeId, key: 'terminalId', value: created.id });
       applyOperator({ type: 'set_node_property', nodeId, key: 'terminalTitle', value: created.title });
       applyOperator({ type: 'set_node_property', nodeId, key: 'paneId', value: created.paneId });
+      applyOperator({ type: 'set_node_property', nodeId, key: 'cli', value: cli });
+      applyOperator({ type: 'set_node_property', nodeId, key: 'executionMode', value: executionMode });
       setNodeTerminalBinding(nodeId, created.id);
       setValidationTone('ok');
       setValidationMessage(`Node ${nodeId} bound to ${created.title}.`);
@@ -647,7 +658,7 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
       validateGraph(flow.nodes as never[], flow.edges as never[]);
 
       // Auto-bind any unbound agent nodes — node owns its terminal
-      const freshBindings = new Map<string, { id: string; title: string; paneId: string }>();
+      const freshBindings = new Map<string, { id: string; title: string; paneId: string; cli: WorkflowAgentCli }>();
       const storedBindings = useWorkspaceStore.getState().nodeTerminalBindings;
       for (const node of flow.nodes) {
         if (node.type !== 'workflow.agent' && node.type !== 'agent') continue;
@@ -663,7 +674,10 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
             applyOperator({ type: 'set_node_property', nodeId, key: 'terminalId', value: persistedId });
             applyOperator({ type: 'set_node_property', nodeId, key: 'terminalTitle', value: existing.title });
             applyOperator({ type: 'set_node_property', nodeId, key: 'paneId', value: existing.paneId });
-            freshBindings.set(nodeId, { id: persistedId, title: existing.title, paneId: existing.paneId });
+            const cli = SELECTABLE_WORKFLOW_CLIS.includes(data.cli as WorkflowAgentCli)
+              ? data.cli as WorkflowAgentCli
+              : (SUPPORTED_WORKFLOW_CLIS.has(String(existing.cli)) ? existing.cli as WorkflowAgentCli : 'claude');
+            freshBindings.set(nodeId, { id: persistedId, title: existing.title, paneId: existing.paneId, cli });
             continue;
           }
         }
@@ -682,6 +696,7 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
           data.terminalId = fresh.id;
           data.terminalTitle = fresh.title;
           data.paneId = fresh.paneId;
+          data.cli = fresh.cli;
         }
         if (!data.terminalId) throw new Error(`Agent node ${nodeId}: failed to create or find terminal binding.`);
         if (!data.terminalTitle) data.terminalTitle = `Terminal ${data.roleId ?? nodeId}`;
@@ -694,9 +709,9 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
           .filter(terminal => terminal.cli && SUPPORTED_WORKFLOW_CLIS.has(terminal.cli))
           .map(terminal => [terminal.id, terminal.cli as WorkflowAgentCli])
       );
-      // Default freshly spawned terminals to claude since CLI detection hasn't run yet
+      // Freshly spawned terminals carry the node-selected CLI before stdout detection has output.
       for (const [, binding] of freshBindings) {
-        if (!terminalClis[binding.id]) terminalClis[binding.id] = 'claude';
+        if (!terminalClis[binding.id]) terminalClis[binding.id] = binding.cli;
       }
       const mission = compileMission({
         missionId,
@@ -1423,8 +1438,10 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
             const isSelected = selectedNodeIds.has(materializedNode.node.id);
             const isFrame = materializedNode.node.type === 'workflow.frame';
             const runtimeAgent = missionAgentByNodeId.get(materializedNode.node.id);
+            const runtimeBinding = nodeRuntimeBindings[materializedNode.node.id];
             const runtimeStatus = String(
               runtimeAgent?.status ??
+              runtimeBinding?.adapterStatus ??
               materializedNode.node.properties.status ??
               'idle'
             );
@@ -1434,18 +1451,20 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
               ''
             ).trim();
             const terminalId = String(
-              materializedNode.node.properties.terminalId ??
               runtimeAgent?.terminalId ??
+              materializedNode.node.properties.terminalId ??
+              runtimeBinding?.terminalId ??
               ''
             ).trim();
             const terminal = openTerminals.find(entry => entry.id === terminalId);
             const runtimeCli = String(
               runtimeAgent?.runtimeCli ??
+              materializedNode.node.properties.cli ??
               terminal?.cli ??
               materializedNode.node.properties.runtimeCli ??
-              ''
+              'claude'
             ).trim();
-            const runtimeSessionId = String(runtimeAgent?.runtimeSessionId ?? '').trim();
+            const runtimeSessionId = String(runtimeAgent?.runtimeSessionId ?? runtimeBinding?.runtimeSessionId ?? '').trim();
             const runtimeSummary = summarizeActivity(
               runtimeOutputByTerminalId[terminalId] ??
               (runtimeAgent?.lastPayload ?? null)
@@ -1548,9 +1567,23 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
                             </option>
                           ))}
                         </select>
-                        <div className="bg-[#0b1118] border border-border-panel rounded-lg px-2 py-1.5 text-[11px] text-text-muted flex items-center shrink-0">
-                          CLI: {runtimeCli ? runtimeCli.toUpperCase() : 'Unknown'}
-                        </div>
+                        <select
+                          value={SELECTABLE_WORKFLOW_CLIS.includes(String(materializedNode.node.properties.cli ?? runtimeCli) as WorkflowAgentCli)
+                            ? String(materializedNode.node.properties.cli ?? runtimeCli)
+                            : 'claude'}
+                          onChange={event => applyOperator({
+                            type: 'set_node_property',
+                            nodeId: materializedNode.node.id,
+                            key: 'cli',
+                            value: event.target.value,
+                          })}
+                          className="flex-1 bg-[#0b1118] border border-border-panel rounded-lg px-2 py-1.5 text-[11px]"
+                          title="Runtime CLI"
+                        >
+                          {SELECTABLE_WORKFLOW_CLIS.map(cli => (
+                            <option key={cli} value={cli}>{cli.toUpperCase()}</option>
+                          ))}
+                        </select>
                       </div>
                       <div className="grid grid-cols-2 gap-2 text-[10px]">
                         <div className="rounded border border-border-panel bg-[#0b1118] px-2 py-1.5">
@@ -1618,6 +1651,12 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
                           applyOperator({ type: 'set_node_property', nodeId: materializedNode.node.id, key: 'terminalId', value });
                           applyOperator({ type: 'set_node_property', nodeId: materializedNode.node.id, key: 'terminalTitle', value: term?.title ?? '' });
                           applyOperator({ type: 'set_node_property', nodeId: materializedNode.node.id, key: 'paneId', value: term?.paneId ?? '' });
+                          if (term?.cli && SUPPORTED_WORKFLOW_CLIS.has(term.cli)) {
+                            applyOperator({ type: 'set_node_property', nodeId: materializedNode.node.id, key: 'cli', value: term.cli });
+                          }
+                          if (value) {
+                            setNodeTerminalBinding(materializedNode.node.id, value);
+                          }
                           if (value) {
                             void refreshTerminalOutput(value);
                           }
@@ -1632,6 +1671,23 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
                         ))}
                       </select>
                       <div className="grid grid-cols-3 gap-2">
+                        <select
+                          value={SELECTABLE_EXECUTION_MODES.includes(materializedNode.node.properties.executionMode as WorkflowExecutionMode)
+                            ? String(materializedNode.node.properties.executionMode)
+                            : 'streaming_headless'}
+                          onChange={event => applyOperator({
+                            type: 'set_node_property',
+                            nodeId: materializedNode.node.id,
+                            key: 'executionMode',
+                            value: event.target.value,
+                          })}
+                          className="bg-[#0b1118] border border-border-panel rounded px-2 py-1.5 text-[10px] text-text-secondary"
+                          title="Runtime execution mode"
+                        >
+                          <option value="streaming_headless">Stream</option>
+                          <option value="headless">Headless</option>
+                          <option value="interactive_pty">PTY</option>
+                        </select>
                         <button
                           type="button"
                           onClick={() => {

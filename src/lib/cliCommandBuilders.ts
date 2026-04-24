@@ -15,6 +15,9 @@ export interface CliCommandBuilderOptions {
   customArgs?: string[] | null;
   customEnv?: Record<string, string> | null;
   mcpUrl?: string | null;
+  localHttpUrl?: string | null;
+  localHttpModel?: string | null;
+  localHttpApiKey?: string | null;
 }
 
 function normalizeCli(value: unknown): string {
@@ -63,6 +66,41 @@ export function buildCliRunCommand(
       args: options.customArgs ?? ['{promptPath}'],
       env,
       promptDelivery: 'arg_file',
+    };
+  }
+
+  if (cli === 'ollama' || cli === 'lmstudio') {
+    const defaultUrl = cli === 'ollama'
+      ? 'http://localhost:11434/v1/chat/completions'
+      : 'http://localhost:1234/v1/chat/completions';
+    const defaultModel = cli === 'ollama' ? 'llama3.1' : 'local-model';
+    return {
+      command: '__terminal_docks_local_http__',
+      args: [],
+      env: {
+        ...env,
+        TD_LOCAL_HTTP_PROVIDER: cli,
+        TD_LOCAL_HTTP_URL:
+          options.localHttpUrl ??
+          options.customEnv?.TD_LOCAL_HTTP_URL ??
+          options.customEnv?.LOCAL_HTTP_URL ??
+          defaultUrl,
+        TD_LOCAL_HTTP_MODEL:
+          options.localHttpModel ??
+          options.customEnv?.TD_LOCAL_HTTP_MODEL ??
+          options.customEnv?.LOCAL_HTTP_MODEL ??
+          defaultModel,
+        ...(options.localHttpApiKey ?? options.customEnv?.TD_LOCAL_HTTP_API_KEY ?? options.customEnv?.LOCAL_HTTP_API_KEY
+          ? {
+              TD_LOCAL_HTTP_API_KEY:
+                options.localHttpApiKey ??
+                options.customEnv?.TD_LOCAL_HTTP_API_KEY ??
+                options.customEnv?.LOCAL_HTTP_API_KEY ??
+                '',
+            }
+          : {}),
+      },
+      promptDelivery: 'stdin',
     };
   }
 

@@ -1,6 +1,63 @@
-export type WorkerKind = 'claude' | 'gemini' | 'codex' | 'opencode' | 'generic' | 'custom';
+export type WorkerKind = 'claude' | 'gemini' | 'codex' | 'opencode' | 'generic' | 'custom' | 'ollama' | 'lmstudio';
 
 export type ReadyState = 'spawning' | 'booting' | 'ready' | 'busy' | 'stale' | 'dead';
+
+// Adapter lifecycle — owned by Terminal Docks, not by the AI CLI.
+// The adapter progresses through these states independently of the CLI.
+export type AdapterLifecycle =
+  | 'created'
+  | 'unbound'
+  | 'spawning'
+  | 'terminal_started'
+  | 'starting'
+  | 'adapter_starting'
+  | 'mcp_connecting'
+  | 'registered'
+  | 'ready'
+  | 'activation_pending'
+  | 'activation_acked'
+  | 'task_acked'
+  | 'running'
+  | 'completed'
+  | 'failed'
+  | 'disconnected';
+
+export interface AdapterRegistration {
+  sessionId: string;
+  terminalId: string;
+  nodeId: string;
+  missionId: string;
+  role: string;
+  cli: WorkerKind;
+  cwd: string | null;
+}
+
+// The full adapter contract Terminal Docks exposes to implementations.
+// The CLI is a child the adapter drives — it is NOT the adapter.
+export interface RuntimeAdapterContract {
+  startRuntime(args: {
+    sessionId: string;
+    missionId: string;
+    nodeId: string;
+    role: string;
+    cli: WorkerKind;
+    command: string;
+    cwd: string | null;
+    mcpBaseUrl: string;
+  }): Promise<void>;
+  sendTask(args: {
+    sessionId: string;
+    missionId: string;
+    nodeId: string;
+    taskSeq: number;
+    prompt: string;
+  }): Promise<void>;
+  stopRuntime(args: { sessionId: string }): Promise<void>;
+  onOutput(text: string): void;
+  onAck(taskSeq: number): void;
+  onComplete(result: StructuredResult): void;
+  onError(error: Error): void;
+}
 
 export interface WorkerSession {
   readonly sessionId: string;
@@ -92,6 +149,11 @@ export interface McpServerEvent {
   taskSeq?: number;
   attempt?: number | null;
   outcome?: 'success' | 'failure';
+  summary?: string;
+  filesChanged?: string[];
+  artifactReferences?: string[];
+  logRef?: string | null;
+  targetNodeId?: string | null;
   agentId?: string | null;
   profileId?: string | null;
   role?: string | null;

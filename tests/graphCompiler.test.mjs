@@ -17,7 +17,7 @@ function taskNode(id = 'task-1') {
   };
 }
 
-function agentNode(id, roleId) {
+function agentNode(id, roleId, overrides = {}) {
   return {
     id,
     type: 'agent',
@@ -26,10 +26,10 @@ function agentNode(id, roleId) {
       nodeId: id,
       roleId,
       status: 'idle',
-      cli: 'claude',
+      cli: overrides.cli ?? 'claude',
       instructionOverride: '',
-      terminalId: `term-${id}`,
-      terminalTitle: `Terminal ${id}`,
+      terminalId: overrides.terminalId ?? `term-${id}`,
+      terminalTitle: overrides.terminalTitle ?? `Terminal ${id}`,
       autoLinked: false,
     },
   };
@@ -193,6 +193,15 @@ run('cycles are rejected before runtime terminals are prepared', () => {
     ),
     /cycle/i
   );
+});
+
+run('agent nodes carry selected CLI into compiled runtime binding', () => {
+  const mission = compileCase(
+    [taskNode(), agentNode('builder', 'builder', { cli: 'codex' })],
+    [edge('task-1', 'builder')]
+  );
+
+  assert.equal(mission.nodes[0].terminal.cli, 'codex');
 });
 
 run('preset-expanded graphs compile to explicit workflow layers', () => {

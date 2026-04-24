@@ -110,6 +110,19 @@ db.exec(`
     acked_at DATETIME,
     PRIMARY KEY (session_id, mission_id, node_id, task_seq)
   );
+  CREATE TABLE IF NOT EXISTS adapter_registrations (
+    adapter_id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL,
+    terminal_id TEXT NOT NULL,
+    node_id TEXT NOT NULL,
+    mission_id TEXT NOT NULL,
+    role TEXT NOT NULL,
+    cli TEXT NOT NULL,
+    cwd TEXT,
+    lifecycle TEXT NOT NULL DEFAULT 'registered',
+    registered_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
 `);
 
 // Migrate existing DBs created before Phase 1 (handoff columns).
@@ -123,6 +136,10 @@ for (const col of ['mission_id TEXT', 'node_id TEXT', 'recipient_node_id TEXT', 
   try { db.exec(`ALTER TABLE session_log ADD COLUMN ${col}`); }
   catch (e) { if (!String(e).includes('duplicate column')) throw e; }
 }
+
+// agent_runtime_sessions: Rust adds run_id but MCP schema predates it.
+try { db.exec(`ALTER TABLE agent_runtime_sessions ADD COLUMN run_id TEXT`); }
+catch (e) { if (!String(e).includes('duplicate column')) throw e; }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 function loadAgentRoster() {
@@ -779,6 +796,8 @@ export function resetBridgeState() {
     DELETE FROM mission_node_runtime;
     DELETE FROM agent_runtime_sessions;
     DELETE FROM mission_timeline;
+    DELETE FROM task_pushes;
+    DELETE FROM adapter_registrations;
   `);
   resetInMemoryRuntime();
 }
@@ -1238,6 +1257,108 @@ function buildStructuredCompletionPayload({
   };
 }
 
+function nodeRuntimeIsRunning(missionId, nodeId, attempt) {
+  const runtime = getMissionNodeRuntime(missionId, nodeId);
+  if (!runtime || runtime.status !== 'running') {
+    return { error: `Node ${nodeId} is not currently running in mission ${missionId}. Query get_task_details first.` };
+  }
+  if (runtime.attempt !== attempt) {
+    return {
+      error: `Stale completion attempt for ${nodeId}. attempt=${attempt}, currentAttempt=${runtime.attempt}.`,
+    };
+  }
+  const sessionValidation = requireRuntimeSessionForAttempt(missionId, nodeId, attempt);
+  if (sessionValidation.error) {
+    return { error: `${sessionValidation.error} Activation drift detected; refresh with get_task_details.` };
+  }
+  return { runtime, runtimeSession: sessionValidation.row };
+}
+
+function matchingOutgoingTargets(mission, fromNodeId, outcome) {
+  const nodeById = new Map((mission?.nodes ?? []).map(node => [node.id, node]));
+  return (mission?.edges ?? [])
+    .filter(edge => edge.fromNodeId === fromNodeId)
+    .filter(edge => allowedOutcomesForCondition(edge.condition).includes(outcome))
+    .map(edge => ({
+      edge,
+      targetNode: nodeById.get(edge.toNodeId) ?? null,
+    }))
+    .filter(entry => entry.targetNode);
+}
+
+function persistGraphHandoff({
+  sid,
+  missionId,
+  fromNodeId,
+  targetNodeId,
+  fromRole,
+  targetRole,
+  title,
+  description,
+  parentTaskId,
+  outcome,
+  fromAttempt,
+  structuredCompletion,
+}) {
+  const payloadStr = JSON.stringify(structuredCompletion);
+  let taskId = null;
+
+  if (targetNodeId && targetRole !== 'done') {
+    const info = db.prepare(
+      'INSERT INTO tasks (title, description, agent_id, parent_id, status, from_role, target_role, payload, mission_id, node_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+    ).run(title, description ?? null, targetRole, parentTaskId ?? null, 'todo', fromRole, targetRole, payloadStr, missionId, targetNodeId);
+    taskId = info.lastInsertRowid;
+
+    const handoffMessage = JSON.stringify({
+      taskId,
+      title,
+      description: description ?? null,
+      missionId,
+      fromNodeId,
+      targetNodeId,
+      fromRole,
+      targetRole,
+      outcome,
+      fromAttempt,
+      payload: payloadStr,
+      completion: structuredCompletion,
+    });
+    db.prepare(
+      "INSERT INTO session_log (session_id, event_type, content, mission_id, node_id, recipient_node_id, is_read) VALUES (?, 'message', ?, ?, ?, ?, 0)"
+    ).run(sid, handoffMessage, missionId, fromNodeId, targetNodeId);
+  }
+
+  const eventBody = {
+    taskId,
+    fromRole,
+    targetRole,
+    title,
+    description: description ?? null,
+    payload: payloadStr,
+    completion: structuredCompletion,
+    missionId,
+    fromNodeId,
+    targetNodeId: targetNodeId ?? null,
+    outcome,
+    fromAttempt,
+  };
+  broadcast(fromRole ?? 'graph', JSON.stringify(eventBody), 'handoff');
+
+  if (taskId !== null) {
+    broadcast('Bridge', JSON.stringify({
+      id: taskId,
+      title,
+      agentId: targetRole,
+      parentTaskId: parentTaskId ?? null,
+      status: 'todo',
+      missionId,
+      targetNodeId,
+    }), 'task_update');
+  }
+
+  return { taskId, eventBody };
+}
+
 export function executeHandoffTask(
   { fromRole: rawFrom, targetRole: rawTarget, title, description, payload, completion, parentTaskId, missionId, fromNodeId, targetNodeId, outcome, fromAttempt },
   sessionId = 'unknown',
@@ -1381,6 +1502,136 @@ export function executeHandoffTask(
     ? 'Workflow marked complete. Call publish_result with your final summary if you have not already.'
     : `Handoff queued as task ${taskId}. The ${targetRole} stage will pick this up.`;
   return makeToolText(resultText);
+}
+
+export function executeCompleteTask(
+  {
+    missionId,
+    nodeId,
+    attempt,
+    outcome,
+    title,
+    summary,
+    rawOutput,
+    logRef,
+    filesChanged,
+    artifactReferences,
+    downstreamPayload,
+    parentTaskId,
+  },
+  sessionId = 'unknown',
+) {
+  const sid = sessionId ?? 'unknown';
+  const normalizedOutcome = normalizeCompletionStatus(outcome);
+  if (!missionId || !nodeId || !Number.isInteger(attempt) || attempt < 1 || !normalizedOutcome) {
+    return makeToolText('complete_task requires missionId, nodeId, positive attempt, and outcome "success" or "failure".', true);
+  }
+
+  const record = loadCompiledMissionRecord(missionId);
+  if (!record || record.status !== 'active') {
+    return makeToolText(`Active compiled mission ${missionId} was not found.`, true);
+  }
+  const node = getMissionNode(record.mission, nodeId);
+  if (!node) {
+    return makeToolText(`Node ${nodeId} is not part of mission ${missionId}.`, true);
+  }
+  const runtimeCheck = nodeRuntimeIsRunning(missionId, nodeId, attempt);
+  if (runtimeCheck.error) {
+    return makeToolText(runtimeCheck.error, true);
+  }
+
+  const completion = {
+    status: normalizedOutcome,
+    summary: typeof summary === 'string' && summary.trim() ? summary.trim() : String(title ?? 'Task completed'),
+    artifactReferences: normalizeStringArray(artifactReferences),
+    filesChanged: normalizeStringArray(filesChanged),
+    downstreamPayload: downstreamPayload ?? null,
+    rawOutput: typeof rawOutput === 'string' ? rawOutput : null,
+    logRef: typeof logRef === 'string' ? logRef : null,
+    completedAt: new Date().toISOString(),
+  };
+  const structuredCompletion = buildStructuredCompletionPayload({
+    completion,
+    payload: downstreamPayload ?? null,
+    title: title ?? completion.summary,
+    description: completion.summary,
+    finalOutcome: normalizedOutcome,
+  });
+  structuredCompletion.rawOutput = completion.rawOutput;
+  structuredCompletion.logRef = completion.logRef;
+  structuredCompletion.completedAt = completion.completedAt;
+
+  const targets = matchingOutgoingTargets(record.mission, nodeId, normalizedOutcome);
+  const routed = [];
+  for (const { targetNode } of targets) {
+    const result = persistGraphHandoff({
+      sid,
+      missionId,
+      fromNodeId: nodeId,
+      targetNodeId: targetNode.id,
+      fromRole: String(node.roleId).trim().toLowerCase(),
+      targetRole: String(targetNode.roleId).trim().toLowerCase(),
+      title: title ?? completion.summary,
+      description: summary ?? null,
+      parentTaskId,
+      outcome: normalizedOutcome,
+      fromAttempt: attempt,
+      structuredCompletion,
+    });
+    routed.push({ targetNodeId: targetNode.id, taskId: result.taskId });
+  }
+
+  if (routed.length === 0) {
+    persistGraphHandoff({
+      sid,
+      missionId,
+      fromNodeId: nodeId,
+      targetNodeId: null,
+      fromRole: String(node.roleId).trim().toLowerCase(),
+      targetRole: 'done',
+      title: title ?? completion.summary,
+      description: summary ?? null,
+      parentTaskId,
+      outcome: normalizedOutcome,
+      fromAttempt: attempt,
+      structuredCompletion,
+    });
+  }
+
+  logSession(sid, 'complete_task', JSON.stringify({
+    missionId,
+    nodeId,
+    attempt,
+    outcome: normalizedOutcome,
+    summary: completion.summary,
+    filesChanged: structuredCompletion.filesChanged,
+    artifactReferences: structuredCompletion.artifactReferences,
+    routed,
+  }));
+
+  emitAgentEvent({
+    type: 'task:completed',
+    sessionId: sid,
+    missionId,
+    nodeId,
+    attempt,
+    outcome: normalizedOutcome,
+    summary: completion.summary,
+    filesChanged: structuredCompletion.filesChanged,
+    artifactReferences: structuredCompletion.artifactReferences,
+    logRef: completion.logRef,
+    at: Date.now(),
+  });
+
+  return makeToolText(JSON.stringify({
+    status: 'completed',
+    missionId,
+    nodeId,
+    attempt,
+    outcome: normalizedOutcome,
+    routed,
+    terminal: routed.length === 0,
+  }, null, 2));
 }
 
 const PORT = parseInt(process.env.MCP_PORT || '3741');
@@ -1898,6 +2149,94 @@ function createMcpServer(getSessionId) {
     return { content: [{ type: 'text', text: JSON.stringify(details, null, 2) }] };
   });
 
+  // ── Activation inspection ──────────────────────────────────────────────────
+  // list_task_activations provides a unified view of all activation records for
+  // a mission. It combines mission_node_runtime, agent_runtime_sessions, and
+  // task_pushes so an adapter or coordinator can see exactly which nodes are
+  // pending, acked, running, or complete without querying multiple tools.
+  server.registerTool('list_task_activations', {
+    title: 'List Task Activations',
+    description: 'List all task activation records for a mission. Shows which nodes are pending (launched but not yet acked), acked, running, or completed. Use this to inspect the current execution state without calling get_task_details per node.',
+    inputSchema: {
+      missionId: z.string().describe('The mission ID to query'),
+    }
+  }, async ({ missionId }) => {
+    const record = loadCompiledMissionRecord(missionId);
+    if (!record) {
+      return { isError: true, content: [{ type: 'text', text: `Mission ${missionId} not found.` }] };
+    }
+
+    const nodeRuntimes = db.prepare(
+      `SELECT node_id, role_id, status, attempt, current_wave_id, last_outcome,
+              datetime(updated_at, 'localtime') AS updated_at
+         FROM mission_node_runtime WHERE mission_id = ?
+        ORDER BY updated_at DESC`
+    ).all(missionId);
+
+    const activations = nodeRuntimes.map(runtime => {
+      const session = runtime.attempt > 0
+        ? getRuntimeSessionByAttempt(missionId, runtime.node_id, runtime.attempt)
+        : null;
+
+      const pushes = session
+        ? db.prepare(
+            `SELECT task_seq, attempt,
+                    datetime(pushed_at, 'localtime') AS pushed_at,
+                    datetime(acked_at, 'localtime') AS acked_at
+               FROM task_pushes
+              WHERE session_id = ? AND mission_id = ? AND node_id = ?
+              ORDER BY task_seq ASC`
+          ).all(session.session_id, missionId, runtime.node_id)
+        : [];
+
+      const hasPendingPush = pushes.some(p => p.acked_at === null);
+
+      return {
+        nodeId: runtime.node_id,
+        roleId: runtime.role_id,
+        status: runtime.status,
+        attempt: runtime.attempt,
+        waveId: runtime.current_wave_id ?? null,
+        lastOutcome: runtime.last_outcome ?? null,
+        updatedAt: runtime.updated_at,
+        mcpVisible: runtime.status !== 'idle' && runtime.status !== 'unbound',
+        pendingAck: hasPendingPush,
+        session: session
+          ? {
+              sessionId: session.session_id,
+              agentId: session.agent_id,
+              terminalId: session.terminal_id,
+              status: session.status,
+            }
+          : null,
+        taskPushes: pushes,
+      };
+    });
+
+    const summary = {
+      pending: activations.filter(a => a.status === 'launching' || a.status === 'connecting').length,
+      ready: activations.filter(a => a.status === 'ready' || a.status === 'activated').length,
+      running: activations.filter(a => a.status === 'running').length,
+      completed: activations.filter(a => a.status === 'done' || a.status === 'completed').length,
+      failed: activations.filter(a => a.status === 'failed').length,
+      unbound: activations.filter(a => a.status === 'unbound').length,
+    };
+
+    return {
+      content: [{
+        type: 'text',
+        text: JSON.stringify({
+          missionId,
+          missionStatus: record.status,
+          objective: record.mission?.task?.prompt ?? '',
+          runVersion: record.mission?.metadata?.runVersion ?? 1,
+          summary,
+          activations,
+        }, null, 2),
+      }],
+    };
+  });
+
   // ── Handoff / supervisor routing ───────────────────────────────────────────
   // Phase 1: Replaces string-signal broadcasts ("INTELLIGENCE REPORT" etc.) with
   // explicit, payload-driven stage transitions. Mission Control listens for the
@@ -1926,6 +2265,25 @@ function createMcpServer(getSessionId) {
       outcome: z.enum(['success', 'failure']).optional().describe('Explicit result of the current node attempt. Required in graph mode.'),
     }
   }, async (args) => executeHandoffTask(args, getSessionId() ?? 'unknown'));
+
+  server.registerTool('complete_task', {
+    title: 'Complete Task',
+    description: 'Record this node completion, store structured result metadata, and activate every legal downstream node for the reported outcome. Use this when the graph should choose all matching next nodes instead of handoff_task selecting one target.',
+    inputSchema: {
+      missionId: z.string().describe('The active mission graph ID'),
+      nodeId: z.string().describe('Your specific node ID in the graph'),
+      attempt: z.number().int().positive().describe('Current running attempt for nodeId'),
+      outcome: z.enum(['success', 'failure']).describe('The completed outcome for this attempt'),
+      title: z.string().optional().describe('Short completion title'),
+      summary: z.string().optional().describe('Result summary for Mission Control and downstream nodes'),
+      rawOutput: z.string().optional().describe('Optional raw output or transcript excerpt'),
+      logRef: z.string().optional().describe('Optional session log path, URL, or run id'),
+      filesChanged: z.array(z.string()).optional().describe('Files touched during this node execution'),
+      artifactReferences: z.array(z.string()).optional().describe('Artifact references such as URLs, ids, or generated outputs'),
+      downstreamPayload: z.any().optional().describe('Payload delivered to all legal downstream nodes'),
+      parentTaskId: z.number().int().optional().describe('Parent task id if this completion belongs to a delegated task'),
+    }
+  }, async (args) => executeCompleteTask(args, getSessionId() ?? 'unknown'));
 
   server.registerTool('submit_adaptive_patch', {
     title: 'Submit Adaptive Patch',
@@ -2344,6 +2702,134 @@ function createMcpServer(getSessionId) {
     }
   }, async (args) => executeRegisterWorkerCapabilities(args, getSessionId() ?? 'unknown'));
 
+  // ── Adapter lifecycle ──────────────────────────────────────────────────────
+  // These two tools are called by the Terminal Docks-owned runtime adapter,
+  // NOT by the AI CLI. The adapter is the reliable worker; the CLI is just the
+  // tool the adapter drives.
+
+  server.registerTool('register_adapter', {
+    title: 'Register Adapter',
+    description: 'Called by the Terminal Docks runtime adapter to register itself with MCP. Must be called before ack_task_activation. The adapter (not the AI CLI) is the reliable worker from Mission Control\'s perspective.',
+    inputSchema: {
+      sessionId: z.string().min(1).describe('The adapter session ID (matches agent_runtime_sessions.session_id written by Mission Control)'),
+      terminalId: z.string().min(1).describe('Terminal/pane ID the adapter is attached to'),
+      nodeId: z.string().min(1).describe('Graph node ID this adapter is responsible for'),
+      missionId: z.string().min(1).describe('Active mission ID'),
+      role: z.string().min(1).describe('Role this adapter is fulfilling (e.g. builder, reviewer)'),
+      cli: z.enum(['claude', 'gemini', 'opencode', 'codex', 'custom', 'generic']).describe('CLI type the adapter will drive'),
+      cwd: z.string().optional().describe('Working directory for the CLI process'),
+    }
+  }, async ({ sessionId, terminalId, nodeId, missionId, role, cli, cwd }) => {
+    const adapterId = `adapter:${missionId}:${nodeId}:${sessionId}`;
+
+    db.prepare(
+      `INSERT INTO adapter_registrations
+         (adapter_id, session_id, terminal_id, node_id, mission_id, role, cli, cwd, lifecycle, registered_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'registered', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+       ON CONFLICT(adapter_id) DO UPDATE SET
+         terminal_id = excluded.terminal_id,
+         role = excluded.role,
+         cli = excluded.cli,
+         cwd = excluded.cwd,
+         lifecycle = 'registered',
+         updated_at = CURRENT_TIMESTAMP`
+    ).run(adapterId, sessionId, terminalId, nodeId, missionId, role, cli, cwd ?? null);
+
+    // Update the runtime session status so Mission Control sees the adapter is live.
+    db.prepare(
+      `UPDATE agent_runtime_sessions
+          SET status = 'registered', updated_at = CURRENT_TIMESTAMP
+        WHERE session_id = ?`
+    ).run(sessionId);
+
+    emitAgentEvent({
+      type: 'agent:ready',
+      sessionId,
+      at: Date.now(),
+      missionId,
+      nodeId,
+      role,
+    });
+
+    return {
+      content: [{
+        type: 'text',
+        text: JSON.stringify({
+          adapterId,
+          sessionId,
+          missionId,
+          nodeId,
+          role,
+          cli,
+          lifecycle: 'registered',
+          message: 'Adapter registered. Call ack_task_activation once the CLI is ready to receive the task.',
+        }, null, 2),
+      }],
+    };
+  });
+
+  server.registerTool('ack_task_activation', {
+    title: 'Acknowledge Task Activation',
+    description: 'Called by the Terminal Docks runtime adapter to acknowledge receipt of a task activation before sending work to the CLI. This ACK is Terminal Docks-owned — it does NOT mean the AI model finished the task. It means the adapter received the activation and is about to drive the CLI.',
+    inputSchema: {
+      sessionId: z.string().min(1).describe('The adapter session ID'),
+      missionId: z.string().min(1).describe('Active mission ID'),
+      nodeId: z.string().min(1).describe('Graph node ID being acknowledged'),
+      attempt: z.number().int().positive().describe('Current attempt number for this node'),
+      taskSeq: z.number().int().positive().describe('Task sequence number from the activation push record'),
+    }
+  }, async ({ sessionId, missionId, nodeId, attempt, taskSeq }) => {
+    const now = new Date().toISOString().replace('T', ' ').slice(0, 19);
+
+    const pushResult = db.prepare(
+      `UPDATE task_pushes
+          SET acked_at = CURRENT_TIMESTAMP
+        WHERE session_id = ? AND mission_id = ? AND node_id = ? AND task_seq = ? AND acked_at IS NULL`
+    ).run(sessionId, missionId, nodeId, taskSeq);
+
+    const adapterId = `adapter:${missionId}:${nodeId}:${sessionId}`;
+    db.prepare(
+      `UPDATE adapter_registrations
+          SET lifecycle = 'task_acked', updated_at = CURRENT_TIMESTAMP
+        WHERE adapter_id = ?`
+    ).run(adapterId);
+
+    db.prepare(
+      `UPDATE agent_runtime_sessions
+          SET status = 'activated', updated_at = CURRENT_TIMESTAMP
+        WHERE session_id = ? AND mission_id = ? AND node_id = ? AND attempt = ?`
+    ).run(sessionId, missionId, nodeId, attempt);
+
+    emitAgentEvent({
+      type: 'activation:acked',
+      sessionId,
+      missionId,
+      nodeId,
+      attempt,
+      taskSeq,
+      at: Date.now(),
+    });
+
+    const acked = pushResult.changes > 0;
+    return {
+      content: [{
+        type: 'text',
+        text: JSON.stringify({
+          acked,
+          sessionId,
+          missionId,
+          nodeId,
+          attempt,
+          taskSeq,
+          lifecycle: 'task_acked',
+          message: acked
+            ? 'Task activation acknowledged. The adapter may now send the task prompt to the CLI.'
+            : 'Task push record was already acknowledged or not found. Proceeding.',
+        }, null, 2),
+      }],
+    };
+  });
+
   server.registerTool('get_collaboration_protocol', {
     title: 'Get Collaboration Protocol',
     description: 'Returns SOP guidance. In graph mode this is optional informational guidance, not a runtime prerequisite.',
@@ -2376,7 +2862,8 @@ You are part of a multi-agent team (Claude, Gemini, OpenCode, or other CLIs) wor
 
 ## Stage Handoffs (every role)
 - In graph mode, treat \`get_task_details({ missionId, nodeId })\` as the canonical source of your current node context. It tells you your attempt number, inbox payloads, and the exact legal next targets for this node.
-- In graph mode, when your stage is done, call \`handoff_task({ missionId, fromNodeId, fromAttempt, targetNodeId, outcome, title, description?, payload?, parentTaskId? })\` with an explicit \`outcome\` of \`"success"\` or \`"failure"\`. Use the exact \`targetNodeId\` returned by \`get_task_details\`; do not guess from role names.
+- In graph mode, when your stage is done, prefer \`complete_task({ missionId, nodeId, attempt, outcome, summary, filesChanged?, artifactReferences?, downstreamPayload? })\`. MCP records your completion and activates every legal downstream node for that outcome.
+- Use \`handoff_task({ missionId, fromNodeId, fromAttempt, targetNodeId, outcome, title, description?, payload?, parentTaskId? })\` only when you intentionally need to route to one exact target node.
 - In legacy role-mode, call \`handoff_task({ fromRole, targetRole, title, description?, payload?, parentTaskId? })\`.
 - Do NOT announce literal phrases like "INTELLIGENCE REPORT" — Mission Control routes strictly on handoff_task events now.
 - The payload field is free-form JSON: include whatever structured context the next stage needs (file paths, findings, decisions, error diffs, etc.). Keep it compact.
@@ -2707,7 +3194,7 @@ app.get('/events/session', (req, res) => {
 
 // Phase C: privileged loopback endpoint used by the Tauri process to record
 // task pushes with idempotency. Never called by agents; token passed via env.
-app.post('/internal/push', (req, res) => {
+app.post('/internal/push', async (req, res) => {
   const presented = req.headers['x-td-push-token'];
   if (!internalPushToken) {
     return res.status(503).json({ error: 'Internal push token not configured' });
@@ -2779,6 +3266,58 @@ app.post('/internal/push', (req, res) => {
       return res.status(409).json(result);
     }
     return res.json(result);
+  }
+
+  if (body.type === 'runtime_task_acked') {
+    const sessionId = String(body.sessionId ?? '');
+    const missionId = String(body.missionId ?? '');
+    const nodeId = String(body.nodeId ?? '');
+    const attempt = Number(body.attempt);
+    const taskSeq = Number(body.taskSeq ?? body.attempt);
+    if (!sessionId || !missionId || !nodeId || !Number.isInteger(attempt) || attempt < 1 || !Number.isInteger(taskSeq) || taskSeq < 1) {
+      return res.status(400).json({ error: 'runtime_task_acked requires sessionId, missionId, nodeId, positive attempt, and positive taskSeq' });
+    }
+    db.prepare(
+      `UPDATE task_pushes
+          SET acked_at = CURRENT_TIMESTAMP
+        WHERE session_id = ? AND mission_id = ? AND node_id = ? AND task_seq = ? AND acked_at IS NULL`
+    ).run(sessionId, missionId, nodeId, taskSeq);
+    db.prepare(
+      `UPDATE agent_runtime_sessions
+          SET status = 'activated', updated_at = CURRENT_TIMESTAMP
+        WHERE session_id = ? AND mission_id = ? AND node_id = ? AND attempt = ?`
+    ).run(sessionId, missionId, nodeId, attempt);
+    emitAgentEvent({
+      type: 'activation:acked',
+      sessionId,
+      missionId,
+      nodeId,
+      attempt,
+      taskSeq,
+      at: Date.now(),
+    });
+    return res.json({ ok: true, sessionId, missionId, nodeId, attempt, taskSeq });
+  }
+
+  if (body.type === 'runtime_task_completed') {
+    const result = await executeCompleteTask({
+      missionId: body.missionId,
+      nodeId: body.nodeId,
+      attempt: Number(body.attempt),
+      outcome: body.outcome,
+      title: body.title,
+      summary: body.summary,
+      rawOutput: body.rawOutput,
+      logRef: body.logRef,
+      filesChanged: Array.isArray(body.filesChanged) ? body.filesChanged : [],
+      artifactReferences: Array.isArray(body.artifactReferences) ? body.artifactReferences : [],
+      downstreamPayload: body.downstreamPayload ?? null,
+    }, body.sessionId ?? 'local-http-runtime');
+    const text = result?.content?.[0]?.text ?? '';
+    if (text && /requires|not found|not part|not running/i.test(text)) {
+      return res.status(400).json({ error: text });
+    }
+    return res.json({ ok: true, result });
   }
 
   if (body.type === 'runtime_disconnected') {

@@ -16,17 +16,25 @@ export type WorkflowNodeStatus =
   | 'bound'
   | 'launching'
   | 'connecting'
+  | 'spawning'
+  | 'terminal_started'
+  | 'adapter_starting'
+  | 'mcp_connecting'
+  | 'registered'
   | 'ready'
+  | 'activation_pending'
+  | 'activation_acked'
   | 'activated'
   | 'running'
   | 'handoff_pending'
   | 'waiting'
   | 'done'
   | 'completed'
-  | 'failed';
+  | 'failed'
+  | 'disconnected';
 export type WorkflowMode = 'build' | 'edit';
 export type WorkflowEdgeCondition = 'always' | 'on_success' | 'on_failure';
-export type WorkflowAgentCli = 'claude' | 'gemini' | 'opencode' | 'codex' | 'custom';
+export type WorkflowAgentCli = 'claude' | 'gemini' | 'opencode' | 'codex' | 'custom' | 'ollama' | 'lmstudio';
 export type WorkflowExecutionMode = 'headless' | 'streaming_headless' | 'interactive_pty';
 export type WorkflowAuthoringMode = 'preset' | 'graph' | 'adaptive';
 export type WorkerCapabilityId = 'planning' | 'coding' | 'testing' | 'review' | 'security' | 'repo_analysis' | 'shell_execution';
@@ -59,6 +67,7 @@ export interface WorkflowNode {
     terminalId?: string;
     terminalTitle?: string;
     paneId?: string;
+    cli?: WorkflowAgentCli;
     executionMode?: WorkflowExecutionMode;
     autoLinked?: boolean;
     authoringMode?: WorkflowAuthoringMode;
@@ -179,11 +188,18 @@ export interface MissionAgent {
   runtimeCli?: WorkflowAgentCli | null;
   executionMode?: WorkflowExecutionMode | null;
   activeRunId?: string | null;
-  runtimeBootstrapState?: 'NOT_CONNECTED' | 'CONNECTING' | 'CONNECTED' | 'registered' | 'failed';
+  runtimeBootstrapState?: 'NOT_CONNECTED' | 'CONNECTING' | 'CONNECTED' | 'registered' | 'failed' | WorkflowNodeStatus;
   runtimeBootstrapReason?: string | null;
   runtimeRegisteredAt?: number;
   runtimeLastHeartbeatAt?: number;
   artifacts?: MissionArtifact[];
+}
+
+export interface NodeRuntimeBinding {
+  terminalId?: string;
+  runtimeSessionId?: string | null;
+  adapterStatus?: WorkflowNodeStatus | null;
+  updatedAt?: number;
 }
 
 export type ThemeType =
@@ -210,7 +226,7 @@ export interface Pane {
   gridPos: GridPos;
   data?: {
     terminalId?: string;
-    cli?: 'claude' | 'gemini' | 'opencode' | 'codex' | 'custom';
+    cli?: WorkflowAgentCli;
     cliSource?: 'connect_agent' | 'stdout' | 'heuristic';
     cliConfidence?: 'low' | 'medium' | 'high';
     cliUpdatedAt?: number;
@@ -345,6 +361,7 @@ interface WorkspaceState {
   agentInstructions: Record<string, string>;
   globalGraph: WorkflowGraph;
   nodeTerminalBindings: Record<string, string>;
+  nodeRuntimeBindings: Record<string, NodeRuntimeBinding>;
   toggleSidebar: () => void;
   setActiveSidebarTab: (tab: SidebarTabType) => void;
   setGlobalGraph: (graph: WorkflowGraph) => void;
@@ -373,6 +390,7 @@ interface WorkspaceState {
   setTasks: (tasks: DbTask[]) => void;
   setAgentInstruction: (id: string, value: string) => void;
   setNodeTerminalBinding: (nodeId: string, terminalId: string) => void;
+  setNodeRuntimeBinding: (nodeId: string, binding: NodeRuntimeBinding) => void;
   removeNodeTerminalBinding: (nodeId: string) => void;
   addMissionArtifact: (missionId: string, nodeId: string, artifact: MissionArtifact) => void;
 }
@@ -403,6 +421,7 @@ export const useWorkspaceStore = create<WorkspaceState>()(
       agentInstructions: {},
       globalGraph: { id: 'global-editor', nodes: [], edges: [] },
       nodeTerminalBindings: {},
+      nodeRuntimeBindings: {},
 
       setActiveSidebarTab: (tab) => set({ activeSidebarTab: tab }),
       setGlobalGraph: (graph) => set({ globalGraph: graph }),
@@ -413,11 +432,34 @@ export const useWorkspaceStore = create<WorkspaceState>()(
       setAgentInstruction: (id, value) => set((s) => ({ agentInstructions: { ...s.agentInstructions, [id]: value } })),
       setNodeTerminalBinding: (nodeId, terminalId) => set((s) => ({
         nodeTerminalBindings: { ...s.nodeTerminalBindings, [nodeId]: terminalId },
+        nodeRuntimeBindings: {
+          ...s.nodeRuntimeBindings,
+          [nodeId]: {
+            ...(s.nodeRuntimeBindings[nodeId] ?? {}),
+            terminalId,
+            updatedAt: Date.now(),
+          },
+        },
+      })),
+      setNodeRuntimeBinding: (nodeId, binding) => set((s) => ({
+        nodeRuntimeBindings: {
+          ...s.nodeRuntimeBindings,
+          [nodeId]: {
+            ...(s.nodeRuntimeBindings[nodeId] ?? {}),
+            ...binding,
+            updatedAt: Date.now(),
+          },
+        },
+        nodeTerminalBindings: binding.terminalId
+          ? { ...s.nodeTerminalBindings, [nodeId]: binding.terminalId }
+          : s.nodeTerminalBindings,
       })),
       removeNodeTerminalBinding: (nodeId) => set((s) => {
         const bindings = { ...s.nodeTerminalBindings };
+        const runtimeBindings = { ...s.nodeRuntimeBindings };
         delete bindings[nodeId];
-        return { nodeTerminalBindings: bindings };
+        delete runtimeBindings[nodeId];
+        return { nodeTerminalBindings: bindings, nodeRuntimeBindings: runtimeBindings };
       }),
       addMissionArtifact: (_missionId, nodeId, artifact) => set((state) => ({
         tabs: state.tabs.map(tab => ({
@@ -676,7 +718,7 @@ export const useWorkspaceStore = create<WorkspaceState>()(
     }),
     {
       name: 'workspace-storage',
-      version: 7,
+      version: 8,
       migrate: (persistedState: any, version: number) => {
         if (version <= 2) {
           const tabs = (persistedState as any).tabs || [];
@@ -692,16 +734,24 @@ export const useWorkspaceStore = create<WorkspaceState>()(
         if (version < 5) {
           return {
             ...persistedState,
-            globalGraph: { id: 'global-editor', nodes: [], edges: [] }
+            globalGraph: { id: 'global-editor', nodes: [], edges: [] },
+            nodeTerminalBindings: {},
+            nodeRuntimeBindings: {},
           };
         }
         if (version < 6) {
-          return { ...persistedState, nodeTerminalBindings: {} };
+          return { ...persistedState, nodeTerminalBindings: {}, nodeRuntimeBindings: {} };
         }
         if (version < 7) {
           const tabs = persistedState?.tabs ?? [];
           return {
             ...persistedState,
+            nodeRuntimeBindings: Object.fromEntries(
+              Object.entries(persistedState?.nodeTerminalBindings ?? {}).map(([nodeId, terminalId]) => [
+                nodeId,
+                { terminalId: String(terminalId), runtimeSessionId: null, adapterStatus: null },
+              ])
+            ),
             tabs: tabs.map((tab: any) => ({
               ...tab,
               panes: (tab.panes ?? []).map((pane: any) => ({
@@ -719,6 +769,17 @@ export const useWorkspaceStore = create<WorkspaceState>()(
             })),
           };
         }
+        if (version < 8) {
+          return {
+            ...persistedState,
+            nodeRuntimeBindings: Object.fromEntries(
+              Object.entries(persistedState?.nodeTerminalBindings ?? {}).map(([nodeId, terminalId]) => [
+                nodeId,
+                { terminalId: String(terminalId), runtimeSessionId: null, adapterStatus: null },
+              ])
+            ),
+          };
+        }
         return persistedState;
       },
       partialize: (state) => ({
@@ -732,6 +793,7 @@ export const useWorkspaceStore = create<WorkspaceState>()(
         agentInstructions: state.agentInstructions,
         globalGraph: state.globalGraph,
         nodeTerminalBindings: state.nodeTerminalBindings,
+        nodeRuntimeBindings: state.nodeRuntimeBindings,
       }),
     }
   )

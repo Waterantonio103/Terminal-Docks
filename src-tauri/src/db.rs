@@ -261,6 +261,25 @@ pub fn init_db(app: &AppHandle) -> Result<(), String> {
     )
     .map_err(|e| e.to_string())?;
 
+    // task_pushes: idempotent activation records written by the workflow engine
+    // when a node activation is dispatched. The MCP server reads these as pending
+    // activations via buildTaskDetails / list_task_activations. task_seq maps to
+    // the attempt number so the PK is naturally unique per activation attempt.
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS task_pushes (
+            session_id TEXT NOT NULL,
+            mission_id TEXT NOT NULL,
+            node_id TEXT NOT NULL,
+            task_seq INTEGER NOT NULL,
+            attempt INTEGER,
+            pushed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            acked_at DATETIME,
+            PRIMARY KEY (session_id, mission_id, node_id, task_seq)
+        )",
+        (),
+    )
+    .map_err(|e| e.to_string())?;
+
     app.manage(DbState {
         db: Mutex::new(Some(conn)),
         db_path: db_path_str,

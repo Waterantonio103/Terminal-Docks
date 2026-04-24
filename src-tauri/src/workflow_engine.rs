@@ -343,9 +343,33 @@ const ACTIVATION_TIMEOUT_MS: u64 = 60_000;
 
 fn outcome_to_status(outcome: &NodeOutcome) -> &'static str {
     match outcome {
-        NodeOutcome::Success => "done",
+        NodeOutcome::Success => "completed",
         NodeOutcome::Failure => "failed",
     }
+}
+
+fn is_active_runtime_status(status: &str) -> bool {
+    matches!(
+        status,
+        "launching"
+            | "connecting"
+            | "spawning"
+            | "terminal_started"
+            | "adapter_starting"
+            | "mcp_connecting"
+            | "registered"
+            | "ready"
+            | "activation_pending"
+            | "activation_acked"
+            | "activated"
+            | "running"
+            | "handoff_pending"
+            | "waiting"
+    )
+}
+
+fn is_terminal_runtime_status(status: &str) -> bool {
+    matches!(status, "completed" | "done" | "failed" | "unbound" | "disconnected")
 }
 
 fn cli_type_label(cli: &crate::workflow::WorkflowAgentCli) -> &'static str {
@@ -355,6 +379,8 @@ fn cli_type_label(cli: &crate::workflow::WorkflowAgentCli) -> &'static str {
         crate::workflow::WorkflowAgentCli::OpenCode => "opencode",
         crate::workflow::WorkflowAgentCli::Codex => "codex",
         crate::workflow::WorkflowAgentCli::Custom => "custom",
+        crate::workflow::WorkflowAgentCli::Ollama => "ollama",
+        crate::workflow::WorkflowAgentCli::Lmstudio => "lmstudio",
     }
 }
 
@@ -771,6 +797,45 @@ fn clear_runtime_sessions_for_mission(app: &AppHandle, mission_id: &str) {
         "DELETE FROM agent_runs WHERE mission_id = ?1",
         params![mission_id],
     );
+    let _ = conn.execute(
+        "DELETE FROM task_pushes WHERE mission_id = ?1",
+        params![mission_id],
+    );
+}
+
+// Records a pending task activation in task_pushes so MCP tools can surface it
+// as a pending activation before the runtime adapter acknowledges.
+fn persist_task_push(app: &AppHandle, session_id: &str, mission_id: &str, node_id: &str, attempt: u32) {
+    let state = app.state::<DbState>();
+    let db_lock = match state.db.lock() {
+        Ok(lock) => lock,
+        Err(_) => return,
+    };
+    let Some(conn) = db_lock.as_ref() else {
+        return;
+    };
+    let _ = conn.execute(
+        "INSERT OR IGNORE INTO task_pushes (session_id, mission_id, node_id, task_seq, attempt, pushed_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, CURRENT_TIMESTAMP)",
+        params![session_id, mission_id, node_id, attempt as i64, attempt as i64],
+    );
+}
+
+// Marks a task push as acknowledged when the runtime adapter confirms receipt.
+fn ack_task_push_db(app: &AppHandle, session_id: &str, mission_id: &str, node_id: &str, attempt: u32) {
+    let state = app.state::<DbState>();
+    let db_lock = match state.db.lock() {
+        Ok(lock) => lock,
+        Err(_) => return,
+    };
+    let Some(conn) = db_lock.as_ref() else {
+        return;
+    };
+    let _ = conn.execute(
+        "UPDATE task_pushes SET acked_at = CURRENT_TIMESTAMP
+         WHERE session_id = ?1 AND mission_id = ?2 AND node_id = ?3 AND task_seq = ?4 AND acked_at IS NULL",
+        params![session_id, mission_id, node_id, attempt as i64],
+    );
 }
 
 fn persist_mission_timeline_event(
@@ -822,7 +887,7 @@ fn relevant_parent_ids_for_wave(
                 return None;
             }
 
-            if status == "done" || status == "failed" {
+            if is_terminal_runtime_status(status) {
                 let outcome = active_mission.node_last_outcomes.get(&edge.from_node_id)?;
                 if !edge_matches_outcome(&edge.condition, outcome) {
                     return None;
@@ -893,13 +958,17 @@ fn timeout_runtime_activation(app: &AppHandle, mission_id: String, node_id: Stri
             .get(&node_id)
             .cloned()
             .unwrap_or_else(|| "idle".to_string());
-        if current_status == "running" || current_status == "done" || current_status == "failed" {
+        if current_status == "running" || is_terminal_runtime_status(&current_status) {
             return false;
         }
 
-        let reason = pending
-            .reason
-            .unwrap_or_else(|| "Runtime never acknowledged activation before timeout.".to_string());
+        let failed_stage = pending.status.clone();
+        let reason = pending.reason.unwrap_or_else(|| {
+            format!(
+                "Runtime timed out while stage \"{}\" was active; activation was not acknowledged before timeout.",
+                failed_stage
+            )
+        });
         active_mission
             .node_statuses
             .insert(node_id.clone(), "failed".to_string());
@@ -939,6 +1008,11 @@ fn timeout_runtime_activation(app: &AppHandle, mission_id: String, node_id: Stri
     );
     emit_runtime_warning(app, &mission_id, &node_id, reason.clone());
 
+    println!(
+        "[Mission {}] Activation TIMEOUT: node={} attempt={} — {}",
+        mission_id, node_id, attempt, reason
+    );
+
     let timeline_payload = serde_json::json!({
         "nodeId": node_id,
         "attempt": attempt,
@@ -969,12 +1043,7 @@ fn request_node_activation_locked(
         .get(node_id)
         .cloned()
         .unwrap_or_else(|| "idle".to_string());
-    if current_status == "launching"
-        || current_status == "connecting"
-        || current_status == "ready"
-        || current_status == "activated"
-        || current_status == "running"
-    {
+    if is_active_runtime_status(&current_status) {
         return;
     }
 
@@ -995,6 +1064,10 @@ fn request_node_activation_locked(
             .node_failure_reasons
             .insert(node_id.to_string(), reason.clone());
         let attempt = active_mission.node_attempts.get(node_id).copied().unwrap_or(0);
+        println!(
+            "[Mission {}] Activation SKIPPED (unbound): node={} role={} — no terminal bound; attach a terminal to run this node",
+            mission_id, node_id, role_id
+        );
         persist_node_runtime(
             app,
             mission_id,
@@ -1048,7 +1121,7 @@ fn request_node_activation_locked(
         role: role_id.clone(),
         profile_id: node.profile_id.clone(),
         capabilities: node.capabilities.clone(),
-        cli_type: terminal_cli,
+        cli_type: terminal_cli.clone(),
         execution_mode,
         terminal_id: terminal_id.clone(),
         pane_id: node.terminal.pane_id.clone(),
@@ -1084,7 +1157,7 @@ fn request_node_activation_locked(
         .insert(
             (node_id.to_string(), attempt),
             PendingRuntimeActivation {
-                status: "launching".to_string(),
+                status: "activation_pending".to_string(),
                 reason: None,
                 deadline_at: activated_at.saturating_add(ACTIVATION_TIMEOUT_MS),
                 payload: payload.clone(),
@@ -1092,15 +1165,15 @@ fn request_node_activation_locked(
         );
     active_mission
         .node_statuses
-        .insert(node_id.to_string(), "launching".to_string());
+        .insert(node_id.to_string(), "activation_pending".to_string());
     active_mission
         .node_waves
         .insert(node_id.to_string(), wave_id.clone());
     active_mission.node_failure_reasons.remove(node_id);
 
     println!(
-        "[Mission {}] Requested activation for {} (attempt {}, session {})",
-        mission_id, node_id, attempt, session_id
+        "[Mission {}] Activation PENDING: node={} role={} cli={} attempt={} session={}",
+        mission_id, node_id, role_id, terminal_cli, attempt, session_id
     );
 
     persist_node_runtime(
@@ -1108,7 +1181,7 @@ fn request_node_activation_locked(
         mission_id,
         node_id,
         &role_id,
-        "launching",
+        "activation_pending",
         attempt,
         Some(&wave_id),
         None,
@@ -1123,10 +1196,14 @@ fn request_node_activation_locked(
         attempt,
         &terminal_id,
         &payload.run_id,
-        "launching",
+        "activation_pending",
     );
+    // Record activation in task_pushes so MCP tools surface it as a pending
+    // activation before the adapter ACKs. This is the canonical MCP-visible
+    // activation record — not the Tauri event, not the PTY prompt injection.
+    persist_task_push(app, &session_id, mission_id, node_id, attempt);
     persist_initial_agent_run(app, &payload);
-    emit_node_status(app, node_id, "launching", Some(attempt), None, None);
+    emit_node_status(app, node_id, "activation_pending", Some(attempt), None, None);
 
     let _ = app.emit(
         "workflow-runtime-activation-requested",
@@ -1134,7 +1211,7 @@ fn request_node_activation_locked(
             mission_id: mission_id.to_string(),
             node_id: node_id.to_string(),
             attempt,
-            status: "launching".to_string(),
+            status: "activation_pending".to_string(),
             payload: payload.clone(),
         },
     );
@@ -1223,7 +1300,7 @@ fn apply_append_patch(active_mission: &mut ActiveMission, run_version: u32, patc
         let initial = if node.terminal.terminal_id.trim().is_empty() {
             "unbound"
         } else {
-            "bound"
+            "terminal_started"
         };
         active_mission
             .node_statuses
@@ -1260,7 +1337,7 @@ pub fn start_mission(app: &AppHandle, mut mission: CompiledMission) {
         let initial_status = if node.terminal.terminal_id.trim().is_empty() {
             "unbound"
         } else {
-            "bound"
+            "terminal_started"
         }.to_string();
         if initial_status == "unbound" {
             node_failure_reasons.insert(
@@ -1291,10 +1368,14 @@ pub fn start_mission(app: &AppHandle, mut mission: CompiledMission) {
         );
     }
 
+    let unbound_count = mission.nodes.iter().filter(|n| n.terminal.terminal_id.trim().is_empty()).count();
     println!(
-        "[Mission {}] Starting mission with {} start node(s)",
+        "[Mission {}] Started: total_nodes={} start_nodes={} unbound={} run_version={}",
         mission_id,
-        start_node_ids.len()
+        mission.nodes.len(),
+        start_node_ids.len(),
+        unbound_count,
+        mission.metadata.run_version.unwrap_or(1),
     );
 
     let active_mission = ActiveMission {
@@ -1615,7 +1696,7 @@ pub fn append_mission_patch(
         let initial_status = if node.terminal.terminal_id.trim().is_empty() {
             "unbound"
         } else {
-            "bound"
+            "terminal_started"
         };
         persist_node_runtime(
             &app,
@@ -1686,12 +1767,7 @@ pub fn retry_mission_node(
         .cloned()
         .unwrap_or_else(|| "idle".to_string());
 
-    if current_status == "launching"
-        || current_status == "connecting"
-        || current_status == "ready"
-        || current_status == "activated"
-        || current_status == "running"
-    {
+    if is_active_runtime_status(&current_status) {
         return Err(format!(
             "Node {} is already in an active state ({}). Stop it first or wait for completion.",
             node_id, current_status
@@ -1732,8 +1808,12 @@ pub fn acknowledge_runtime_activation(
     reason: Option<String>,
 ) -> Result<(), String> {
     println!(
-        "[Mission {}] Acknowledge activation: node={}, attempt={}, status={}, reason={:?}",
-        mission_id, node_id, attempt, status, reason
+        "[Mission {}] Activation {}: node={} attempt={} reason={:?}",
+        mission_id,
+        status.to_uppercase(),
+        node_id,
+        attempt,
+        reason
     );
     let (role_id, current_wave_id, last_payload, next_status, next_reason, run_version) = {
         let state = app.state::<WorkflowState>();
@@ -1760,8 +1840,14 @@ pub fn acknowledge_runtime_activation(
         let mut next_reason = reason;
         let mut last_payload = None;
 
-        match status.as_str() {
-            "connecting" => {
+        let normalized_status = match status.as_str() {
+            "connecting" => "adapter_starting",
+            "activated" => "activation_acked",
+            other => other,
+        };
+
+        match normalized_status {
+            "adapter_starting" | "mcp_connecting" | "registered" | "ready" | "activation_pending" => {
                 let pending = active_mission
                     .pending_runtime_activations
                     .get_mut(&key)
@@ -1771,17 +1857,17 @@ pub fn acknowledge_runtime_activation(
                             mission_id, node_id, attempt
                         )
                     })?;
-                pending.status = "connecting".to_string();
+                pending.status = normalized_status.to_string();
                 if next_reason.is_some() {
                     pending.reason = next_reason.clone();
                 }
                 last_payload = pending.payload.input_payload.clone();
                 active_mission
                     .node_statuses
-                    .insert(node_id.clone(), "connecting".to_string());
+                    .insert(node_id.clone(), normalized_status.to_string());
                 active_mission.node_failure_reasons.remove(&node_id);
             }
-            "ready" => {
+            "activation_acked" => {
                 let pending = active_mission
                     .pending_runtime_activations
                     .get_mut(&key)
@@ -1791,52 +1877,34 @@ pub fn acknowledge_runtime_activation(
                             mission_id, node_id, attempt
                         )
                     })?;
-                pending.status = "ready".to_string();
+                pending.status = "activation_acked".to_string();
                 if next_reason.is_some() {
                     pending.reason = next_reason.clone();
                 }
                 last_payload = pending.payload.input_payload.clone();
                 active_mission
                     .node_statuses
-                    .insert(node_id.clone(), "ready".to_string());
+                    .insert(node_id.clone(), "activation_acked".to_string());
                 active_mission.node_failure_reasons.remove(&node_id);
-            }
-            "activated" => {
-                let pending = active_mission
-                    .pending_runtime_activations
-                    .get_mut(&key)
-                    .ok_or_else(|| {
-                        format!(
-                            "No pending activation request found for {}/{} attempt {}.",
-                            mission_id, node_id, attempt
-                        )
-                    })?;
-                pending.status = "activated".to_string();
-                if next_reason.is_some() {
-                    pending.reason = next_reason.clone();
-                }
-                last_payload = pending.payload.input_payload.clone();
-                active_mission
-                    .node_statuses
-                    .insert(node_id.clone(), "activated".to_string());
-                active_mission.node_failure_reasons.remove(&node_id);
+                // Mark the MCP task_push row as acknowledged so list_task_activations
+                // and buildTaskDetails no longer show it as pending.
+                let ack_sid = runtime_session_id(&mission_id, &node_id, attempt);
+                ack_task_push_db(&app, &ack_sid, &mission_id, &node_id, attempt);
             }
             "running" => {
-                if let Some(pending) = active_mission.pending_runtime_activations.remove(&key) {
-                    last_payload = pending.payload.input_payload;
-                }
-                // Enforce: READY → RUNNING must go through ACTIVATED first.
-                // If the node skipped activated, auto-emit activated before running.
                 let prev_status = active_mission
                     .node_statuses
                     .get(&node_id)
                     .cloned()
                     .unwrap_or_default();
-                if prev_status == "ready" {
-                    active_mission
-                        .node_statuses
-                        .insert(node_id.clone(), "activated".to_string());
-                    emit_node_status(&app, &node_id, "activated", Some(attempt), None, None);
+                if prev_status != "activation_acked" {
+                    return Err(format!(
+                        "Cannot mark {}/{} attempt {} running from stage \"{}\"; activation ACK is required first.",
+                        mission_id, node_id, attempt, prev_status
+                    ));
+                }
+                if let Some(pending) = active_mission.pending_runtime_activations.remove(&key) {
+                    last_payload = pending.payload.input_payload;
                 }
                 active_mission
                     .node_statuses
@@ -1859,9 +1927,24 @@ pub fn acknowledge_runtime_activation(
                     .node_failure_reasons
                     .insert(node_id.clone(), resolved_reason);
             }
+            "disconnected" => {
+                let pending = active_mission.pending_runtime_activations.remove(&key);
+                if let Some(pending) = pending {
+                    last_payload = pending.payload.input_payload;
+                }
+                let resolved_reason =
+                    next_reason.unwrap_or_else(|| "Runtime disconnected before completing activation.".to_string());
+                next_reason = Some(resolved_reason.clone());
+                active_mission
+                    .node_statuses
+                    .insert(node_id.clone(), "disconnected".to_string());
+                active_mission
+                    .node_failure_reasons
+                    .insert(node_id.clone(), resolved_reason);
+            }
             other => {
                 return Err(format!(
-                    "Unsupported activation status \"{}\". Expected connecting|activated|ready|running|failed.",
+                    "Unsupported activation status \"{}\". Expected adapter_starting|mcp_connecting|registered|ready|activation_pending|activation_acked|running|failed|disconnected.",
                     other
                 ));
             }
@@ -1871,7 +1954,7 @@ pub fn acknowledge_runtime_activation(
             role_id,
             active_mission.node_waves.get(&node_id).cloned(),
             last_payload,
-            status,
+            normalized_status.to_string(),
             next_reason,
             active_mission.mission.metadata.run_version,
         )
@@ -1898,7 +1981,7 @@ pub fn acknowledge_runtime_activation(
         next_reason.clone(),
     );
 
-    if next_status == "failed" {
+    if next_status == "failed" || next_status == "disconnected" {
         if let Some(message) = next_reason.clone() {
             emit_runtime_warning(&app, &mission_id, &node_id, message);
         }
@@ -1942,7 +2025,7 @@ pub fn register_runtime_activation_dispatch(
         mission_id,
         node_id,
         attempt,
-        "connecting".to_string(),
+        "adapter_starting".to_string(),
         None,
     )
 }
@@ -2257,7 +2340,7 @@ mod tests {
 
     #[test]
     fn status_follows_outcome() {
-        assert_eq!(outcome_to_status(&NodeOutcome::Success), "done");
+        assert_eq!(outcome_to_status(&NodeOutcome::Success), "completed");
         assert_eq!(outcome_to_status(&NodeOutcome::Failure), "failed");
     }
 

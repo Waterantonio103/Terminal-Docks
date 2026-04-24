@@ -8,6 +8,8 @@ pub enum WorkflowAgentCli {
     OpenCode,
     Codex,
     Custom,
+    Ollama,
+    Lmstudio,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]

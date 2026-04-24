@@ -104,6 +104,8 @@ struct AgentRunExitEvent {
     at: u64,
 }
 
+const LOCAL_HTTP_COMMAND: &str = "__terminal_docks_local_http__";
+
 fn unix_millis_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -312,6 +314,195 @@ fn emit_status(app: &AppHandle, run_id: &str, mission_id: &str, node_id: &str, s
     );
 }
 
+fn emit_output(app: &AppHandle, run_id: &str, mission_id: &str, node_id: &str, stream: &str, chunk: String) {
+    let _ = app.emit(
+        "agent-run-output",
+        AgentRunOutputEvent {
+            run_id: run_id.to_string(),
+            mission_id: mission_id.to_string(),
+            node_id: node_id.to_string(),
+            stream: stream.to_string(),
+            chunk,
+            at: unix_millis_now(),
+        },
+    );
+}
+
+fn mcp_internal_push(app: &AppHandle, body: serde_json::Value) -> Result<serde_json::Value, String> {
+    let state = app.state::<crate::mcp::McpState>();
+    let token = state.internal_push_token.lock().unwrap().clone();
+    if token.is_empty() {
+        return Err("MCP push token not initialized".to_string());
+    }
+    let response = ureq::post("http://localhost:3741/internal/push")
+        .set("x-td-push-token", &token)
+        .set("Content-Type", "application/json")
+        .send_string(&body.to_string())
+        .map_err(|error| format!("MCP internal push failed: {error}"))?;
+    let status = response.status();
+    let text = response.into_string().unwrap_or_default();
+    if !(200..300).contains(&status) {
+        return Err(format!("MCP internal push returned {status}: {text}"));
+    }
+    Ok(serde_json::from_str(&text).unwrap_or_else(|_| serde_json::json!({ "raw": text })))
+}
+
+fn extract_openai_compatible_text(value: &serde_json::Value) -> String {
+    value
+        .get("choices")
+        .and_then(|choices| choices.as_array())
+        .and_then(|choices| choices.first())
+        .and_then(|choice| {
+            choice
+                .get("message")
+                .and_then(|message| message.get("content"))
+                .and_then(|content| content.as_str())
+                .or_else(|| choice.get("text").and_then(|text| text.as_str()))
+        })
+        .unwrap_or("")
+        .to_string()
+}
+
+fn start_local_http_run(
+    app: AppHandle,
+    payload: StartAgentRunRequest,
+    mut record: AgentRunRecord,
+    stdout_path: PathBuf,
+    stderr_path: PathBuf,
+) -> Result<AgentRunRecord, String> {
+    update_run_status(&app, &payload.run_id, "running", None, None, true, false)?;
+    emit_status(&app, &payload.run_id, &payload.mission_id, &payload.node_id, "running", None);
+
+    thread::spawn(move || {
+        let _ = mcp_internal_push(&app, serde_json::json!({
+            "type": "runtime_task_acked",
+            "sessionId": payload.session_id,
+            "missionId": payload.mission_id,
+            "nodeId": payload.node_id,
+            "attempt": payload.attempt,
+            "taskSeq": payload.attempt,
+        }));
+        let _ = crate::workflow_engine::acknowledge_runtime_activation(
+            app.clone(),
+            payload.mission_id.clone(),
+            payload.node_id.clone(),
+            payload.attempt,
+            "activation_acked".to_string(),
+            None,
+        );
+        let _ = crate::workflow_engine::acknowledge_runtime_activation(
+            app.clone(),
+            payload.mission_id.clone(),
+            payload.node_id.clone(),
+            payload.attempt,
+            "running".to_string(),
+            None,
+        );
+
+        let url = payload
+            .env
+            .get("TD_LOCAL_HTTP_URL")
+            .cloned()
+            .unwrap_or_else(|| "http://localhost:11434/v1/chat/completions".to_string());
+        let model = payload
+            .env
+            .get("TD_LOCAL_HTTP_MODEL")
+            .cloned()
+            .unwrap_or_else(|| "llama3.1".to_string());
+        let api_key = payload.env.get("TD_LOCAL_HTTP_API_KEY").cloned();
+        let request_body = serde_json::json!({
+            "model": model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "You are a Terminal Docks local runtime. Complete the assigned graph node and summarize the result."
+                },
+                { "role": "user", "content": payload.prompt }
+            ],
+            "stream": false
+        });
+
+        let mut request = ureq::post(&url).set("Content-Type", "application/json");
+        if let Some(key) = api_key.as_ref().filter(|value| !value.trim().is_empty()) {
+            request = request.set("Authorization", &format!("Bearer {key}"));
+        }
+
+        match request.send_string(&request_body.to_string()) {
+            Ok(response) => {
+                let raw = response.into_string().unwrap_or_default();
+                let parsed = serde_json::from_str::<serde_json::Value>(&raw).unwrap_or(serde_json::Value::String(raw.clone()));
+                let content = extract_openai_compatible_text(&parsed);
+                let summary = if content.trim().is_empty() {
+                    "Local HTTP runtime completed without text output.".to_string()
+                } else {
+                    content.trim().lines().take(8).collect::<Vec<_>>().join("\n")
+                };
+                let _ = fs::write(&stdout_path, &content);
+                emit_output(&app, &payload.run_id, &payload.mission_id, &payload.node_id, "stdout", content.clone());
+                let completion = mcp_internal_push(&app, serde_json::json!({
+                    "type": "runtime_task_completed",
+                    "sessionId": payload.session_id,
+                    "missionId": payload.mission_id,
+                    "nodeId": payload.node_id,
+                    "attempt": payload.attempt,
+                    "outcome": "success",
+                    "title": "Local HTTP runtime completed",
+                    "summary": summary,
+                    "rawOutput": content,
+                    "logRef": payload.run_id,
+                    "filesChanged": [],
+                    "artifactReferences": [],
+                    "downstreamPayload": parsed,
+                }));
+                match completion {
+                    Ok(_) => {
+                        update_run_status(&app, &payload.run_id, "completed", Some(0), None, false, true).ok();
+                        let _ = app.emit(
+                            "agent-run-exit",
+                            AgentRunExitEvent {
+                                run_id: payload.run_id,
+                                mission_id: payload.mission_id,
+                                node_id: payload.node_id,
+                                status: "completed".to_string(),
+                                exit_code: Some(0),
+                                error: None,
+                                at: unix_millis_now(),
+                            },
+                        );
+                    }
+                    Err(error) => {
+                        let _ = fs::write(&stderr_path, &error);
+                        update_run_status(&app, &payload.run_id, "failed", None, Some(&error), false, true).ok();
+                        emit_status(&app, &payload.run_id, &payload.mission_id, &payload.node_id, "failed", Some(error));
+                    }
+                }
+            }
+            Err(error) => {
+                let message = format!("Local HTTP runtime failed: {error}");
+                let _ = fs::write(&stderr_path, &message);
+                emit_output(&app, &payload.run_id, &payload.mission_id, &payload.node_id, "stderr", message.clone());
+                update_run_status(&app, &payload.run_id, "failed", None, Some(&message), false, true).ok();
+                emit_status(&app, &payload.run_id, &payload.mission_id, &payload.node_id, "failed", Some(message.clone()));
+                let _ = app.emit(
+                    "agent-run-exit",
+                    AgentRunExitEvent {
+                        run_id: payload.run_id,
+                        mission_id: payload.mission_id,
+                        node_id: payload.node_id,
+                        status: "failed".to_string(),
+                        exit_code: None,
+                        error: Some(message),
+                        at: unix_millis_now(),
+                    },
+                );
+            }
+        }
+    });
+
+    record.status = "running".to_string();
+    Ok(record)
+}
+
 fn stream_reader(
     app: AppHandle,
     run_id: String,
@@ -427,6 +618,10 @@ pub fn start_agent_run(
     };
     persist_agent_run(&app, &record)?;
     emit_status(&app, &payload.run_id, &payload.mission_id, &payload.node_id, "starting", None);
+
+    if command == LOCAL_HTTP_COMMAND {
+        return start_local_http_run(app, payload, record, stdout_path, stderr_path);
+    }
 
     let mut command_builder = Command::new(&command);
     command_builder.args(&args);

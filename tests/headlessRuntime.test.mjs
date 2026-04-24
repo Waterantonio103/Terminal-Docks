@@ -79,3 +79,17 @@ run('unsupported CLI returns an actionable reason', () => {
   assert.match(command.unsupportedReason ?? '', /interactive PTY|custom command/i);
 });
 
+run('local HTTP runtimes share the headless adapter request path', () => {
+  const { request, error } = buildStartAgentRunRequest(payload({ cliType: 'ollama' }), 'hello', {
+    customEnv: { TD_LOCAL_HTTP_MODEL: 'qwen2.5-coder' },
+    mcpUrl: 'http://localhost:3741',
+  });
+
+  assert.equal(error, null);
+  assert.ok(request);
+  assert.equal(request.command, '__terminal_docks_local_http__');
+  assert.equal(request.cli, 'ollama');
+  assert.equal(request.env.TD_LOCAL_HTTP_URL, 'http://localhost:11434/v1/chat/completions');
+  assert.equal(request.env.TD_LOCAL_HTTP_MODEL, 'qwen2.5-coder');
+  assert.equal(request.prompt, 'hello');
+});

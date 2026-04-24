@@ -75,6 +75,8 @@ function legacyNodeToDocumentNode(node: WorkflowNode, index: number): NodeInstan
       terminalId: node.config?.terminalId ?? '',
       terminalTitle: node.config?.terminalTitle ?? '',
       paneId: node.config?.paneId ?? '',
+      cli: node.config?.cli ?? 'claude',
+      executionMode: node.config?.executionMode ?? 'streaming_headless',
       autoLinked: Boolean(node.config?.autoLinked),
       authoringMode: node.config?.authoringMode ?? 'graph',
       presetId: node.config?.presetId ?? '',
@@ -209,6 +211,18 @@ export function nodeDocumentToWorkflowGraph(
         terminalId: String(node.properties.terminalId ?? ''),
         terminalTitle: String(node.properties.terminalTitle ?? ''),
         paneId: String(node.properties.paneId ?? ''),
+        cli:
+          node.properties.cli === 'gemini' ||
+          node.properties.cli === 'opencode' ||
+          node.properties.cli === 'codex' ||
+          node.properties.cli === 'custom'
+            ? node.properties.cli
+            : 'claude',
+        executionMode:
+          node.properties.executionMode === 'headless' ||
+          node.properties.executionMode === 'interactive_pty'
+            ? node.properties.executionMode
+            : 'streaming_headless',
         autoLinked: Boolean(node.properties.autoLinked),
         authoringMode:
           node.properties.authoringMode === 'preset' || node.properties.authoringMode === 'adaptive'
@@ -237,6 +251,8 @@ export function nodeDocumentToWorkflowGraph(
       delete workflowNode.config?.terminalId;
       delete workflowNode.config?.terminalTitle;
       delete workflowNode.config?.paneId;
+      delete workflowNode.config?.cli;
+      delete workflowNode.config?.executionMode;
       delete workflowNode.config?.autoLinked;
     }
     return workflowNode;
@@ -287,6 +303,8 @@ export function nodeDocumentToFlowGraph(
         terminalId: node.config?.terminalId,
         terminalTitle: node.config?.terminalTitle,
         paneId: node.config?.paneId,
+        cli: node.config?.cli ?? 'claude',
+        executionMode: node.config?.executionMode ?? 'streaming_headless',
         autoLinked: node.config?.autoLinked,
         authoringMode: node.config?.authoringMode ?? 'graph',
         presetId: node.config?.presetId ?? '',

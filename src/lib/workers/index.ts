@@ -10,6 +10,8 @@ const ADAPTERS: Record<WorkerKind, WorkerAdapter> = {
   opencode: genericAdapter,
   generic: genericAdapter,
   custom: customAdapter,
+  ollama: customAdapter,
+  lmstudio: customAdapter,
 };
 
 export function getAdapter(kind: WorkerKind | null | undefined): WorkerAdapter {

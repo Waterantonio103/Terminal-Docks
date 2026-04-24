@@ -32,7 +32,7 @@ import {
   type RuntimeActivationPayload,
 } from '../../lib/missionRuntime';
 import { workflowStatusLabel, workflowStatusTone } from '../../lib/workflowStatus';
-import { mcpBus, waitForMcpEvent } from '../../lib/workers';
+import { mcpBus, type McpServerEvent } from '../../lib/workers';
 import {
   buildRuntimeBootstrapRegistrationRequest,
   getRuntimeBootstrapContract,
@@ -46,12 +46,89 @@ const TASK_ACK_TIMEOUT_MS = 30_000;
 const RUNTIME_ACTIVE_STATES = new Set<MissionAgent['status']>([
   'launching',
   'connecting',
+  'spawning',
+  'terminal_started',
+  'adapter_starting',
+  'mcp_connecting',
+  'registered',
   'ready',
+  'activation_pending',
+  'activation_acked',
   'activated',
   'running',
   'handoff_pending',
   'waiting',
 ]);
+
+interface RuntimeActivationRecord {
+  sessionId: string;
+  agentId: string;
+  missionId: string;
+  nodeId: string;
+  attempt: number;
+  terminalId: string;
+  status: string;
+  activationId?: string | null;
+  runId?: string | null;
+  statusReason?: string | null;
+  activationPayload?: string | null;
+}
+
+const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
+async function waitForRuntimeActivationState(params: {
+  sessionId: string;
+  missionId: string;
+  nodeId: string;
+  attempt: number;
+  eventType: McpServerEvent['type'];
+  acceptedStatuses: Set<string>;
+  timeoutMs: number;
+}): Promise<void> {
+  const deadline = Date.now() + params.timeoutMs;
+  let settled = false;
+  let unsubscribe: (() => void) | undefined;
+
+  const eventPromise = new Promise<void>(resolve => {
+    unsubscribe = mcpBus.subscribe(params.sessionId, event => {
+      if (event.type !== params.eventType) return;
+      if (event.missionId && event.missionId !== params.missionId) return;
+      if (event.nodeId && event.nodeId !== params.nodeId) return;
+      if (typeof event.attempt === 'number' && event.attempt !== params.attempt) return;
+      settled = true;
+      resolve();
+    });
+  });
+
+  const pollPromise = (async () => {
+    while (!settled && Date.now() < deadline) {
+      try {
+        const record = await invoke<RuntimeActivationRecord | null>('get_runtime_activation', {
+          missionId: params.missionId,
+          nodeId: params.nodeId,
+          attempt: params.attempt,
+        });
+        if (record?.status && params.acceptedStatuses.has(record.status)) {
+          settled = true;
+          return;
+        }
+      } catch {
+        // Keep waiting; the SSE path may still resolve and transient backend
+        // misses should not fail an activation handshake.
+      }
+      await sleep(250);
+    }
+    if (settled) return;
+    throw new Error(`Timed out waiting for ${params.eventType} on ${params.sessionId}`);
+  })();
+
+  try {
+    await Promise.race([eventPromise, pollPromise]);
+  } finally {
+    settled = true;
+    if (unsubscribe) unsubscribe();
+  }
+}
 
 function formatTime(timestamp?: number): string {
   if (!timestamp) return '—';
@@ -273,12 +350,20 @@ function runtimeBootstrapLabel(state?: MissionAgent['runtimeBootstrapState']): s
 }
 
 function StatusIcon({ status }: { status?: MissionAgent['status'] }) {
-  if (status === 'launching' || status === 'connecting' || status === 'running') {
+  if (
+    status === 'launching' ||
+    status === 'connecting' ||
+    status === 'spawning' ||
+    status === 'adapter_starting' ||
+    status === 'mcp_connecting' ||
+    status === 'activation_pending' ||
+    status === 'running'
+  ) {
     return <Loader2 size={10} className="animate-spin text-accent-primary" />;
   }
-  if (status === 'ready') return <CheckCircle2 size={10} className="text-emerald-300" />;
+  if (status === 'terminal_started' || status === 'registered' || status === 'ready' || status === 'activation_acked') return <CheckCircle2 size={10} className="text-emerald-300" />;
   if (status === 'done' || status === 'completed') return <CheckCircle2 size={10} className="text-green-400" />;
-  if (status === 'unbound') return <AlertCircle size={10} className="text-red-400" />;
+  if (status === 'unbound' || status === 'disconnected') return <AlertCircle size={10} className="text-red-400" />;
   if (status === 'failed') return <AlertCircle size={10} className="text-red-400" />;
   if (status === 'handoff_pending' || status === 'waiting') return <Clock size={10} className="text-amber-300" />;
   return <Clock size={10} className="text-text-muted" />;
@@ -579,6 +664,7 @@ export function MissionControlPane({ pane }: { pane: Pane }) {
   const messages = useWorkspaceStore(s => s.messages);
   const allTasks = useWorkspaceStore(s => s.tasks);
   const updatePaneData = useWorkspaceStore(s => s.updatePaneData);
+  const setNodeRuntimeBinding = useWorkspaceStore(s => s.setNodeRuntimeBinding);
 
   const [tab, setTab] = useState<MissionTab>('nodes');
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
@@ -656,11 +742,12 @@ export function MissionControlPane({ pane }: { pane: Pane }) {
       if (unmounted) return;
       const spawnedId = event.payload.id;
       const liveAgents = readAgentsForPane(pane.id, agents);
+      const spawnedAgent = liveAgents.find(agent => agent.terminalId === spawnedId);
       const nextAgents = liveAgents.map(agent =>
         agent.terminalId === spawnedId
           ? {
               ...agent,
-              status: 'idle',
+              status: 'terminal_started',
               triggered: false,
               lastError: null,
               runtimeBootstrapState: 'NOT_CONNECTED',
@@ -672,6 +759,13 @@ export function MissionControlPane({ pane }: { pane: Pane }) {
           : agent
       );
       updatePaneData(pane.id, { agents: nextAgents });
+      if (spawnedAgent?.nodeId) {
+        setNodeRuntimeBinding(spawnedAgent.nodeId, {
+          terminalId: spawnedId,
+          runtimeSessionId: null,
+          adapterStatus: 'terminal_started',
+        });
+      }
     }).then(fn => {
       unlistenSpawnFn = fn;
       if (unmounted) fn();
@@ -690,7 +784,7 @@ export function MissionControlPane({ pane }: { pane: Pane }) {
         agent.terminalId === exitedId
           ? {
               ...agent,
-              status: shouldForceFailed ? 'failed' : agent.status,
+              status: shouldForceFailed ? 'disconnected' : agent.status,
               lastError: reason,
               runtimeBootstrapState: 'NOT_CONNECTED',
               runtimeBootstrapReason: reason,
@@ -698,6 +792,13 @@ export function MissionControlPane({ pane }: { pane: Pane }) {
           : agent
       );
       updatePaneData(pane.id, { agents: nextAgents });
+      if (target.nodeId) {
+        setNodeRuntimeBinding(target.nodeId, {
+          terminalId: exitedId,
+          runtimeSessionId: target.runtimeSessionId ?? null,
+          adapterStatus: shouldForceFailed ? 'disconnected' : target.status ?? null,
+        });
+      }
 
       const attempt = typeof target.attempt === 'number' ? target.attempt : null;
       const missionId = currentMissionId ?? null;
@@ -709,7 +810,7 @@ export function MissionControlPane({ pane }: { pane: Pane }) {
           missionId,
           nodeId,
           attempt,
-          status: 'failed',
+          status: 'disconnected',
           reason,
         }).catch(() => {});
       }
@@ -733,7 +834,7 @@ export function MissionControlPane({ pane }: { pane: Pane }) {
       unlistenSpawnFn?.();
       unlistenExitFn?.();
     };
-  }, [agents, currentMissionId, pane.id, updatePaneData]);
+  }, [agents, currentMissionId, pane.id, setNodeRuntimeBinding, updatePaneData]);
 
   // Mission Control drives the explicit runtime lifecycle:
   // 1) MCP server health check, 2) runtime session registration, 3) NEW_TASK dispatch.
@@ -770,6 +871,12 @@ export function MissionControlPane({ pane }: { pane: Pane }) {
               : agent
           );
           updatePaneData(pane.id, { agents: nextAgents });
+          const readyAgent = liveAgents.find(agent => agent.runtimeSessionId === sessionId);
+          setNodeRuntimeBinding(nodeId, {
+            terminalId: readyAgent?.terminalId,
+            runtimeSessionId: sessionId,
+            adapterStatus: 'registered',
+          });
           return;
         }
 
@@ -820,7 +927,7 @@ export function MissionControlPane({ pane }: { pane: Pane }) {
             agent.runtimeSessionId === sessionId
               ? {
                   ...agent,
-                  status: RUNTIME_ACTIVE_STATES.has(agent.status) ? 'failed' : agent.status,
+                  status: RUNTIME_ACTIVE_STATES.has(agent.status) ? 'disconnected' : agent.status,
                   lastError: reason,
                   runtimeBootstrapState: 'NOT_CONNECTED',
                   runtimeBootstrapReason: reason,
@@ -828,12 +935,18 @@ export function MissionControlPane({ pane }: { pane: Pane }) {
               : agent
           );
           updatePaneData(pane.id, { agents: nextAgents });
+          const disconnectedAgent = liveAgents.find(agent => agent.runtimeSessionId === sessionId);
+          setNodeRuntimeBinding(nodeId, {
+            terminalId: disconnectedAgent?.terminalId,
+            runtimeSessionId: sessionId,
+            adapterStatus: 'failed',
+          });
 
           invoke('acknowledge_runtime_activation', {
             missionId,
             nodeId,
             attempt,
-            status: 'failed',
+            status: 'disconnected',
             reason,
           }).catch(() => {});
         }
@@ -866,7 +979,7 @@ export function MissionControlPane({ pane }: { pane: Pane }) {
         const cli = normalizeRuntimeCli(payload.cliType);
         return {
           ...agent,
-          status: 'launching',
+          status: 'activation_pending',
           attempt,
           startedAt: now,
           completedAt: undefined,
@@ -877,12 +990,12 @@ export function MissionControlPane({ pane }: { pane: Pane }) {
           runtimeCli: cli,
           executionMode: payload.executionMode,
           activeRunId: payload.runId,
-          runtimeBootstrapState: 'CONNECTING',
+          runtimeBootstrapState: 'activation_pending',
           runtimeBootstrapReason: null,
           runtimeRegisteredAt: undefined,
           attemptHistory: upsertAttemptHistory(agent.attemptHistory, attempt, {
             attempt,
-            status: 'launching',
+            status: 'activation_pending',
             startedAt: now,
             completedAt: undefined,
             outcome: undefined,
@@ -891,6 +1004,11 @@ export function MissionControlPane({ pane }: { pane: Pane }) {
         };
       });
       updatePaneData(pane.id, { agents: nextAgents });
+      setNodeRuntimeBinding(nodeId, {
+        terminalId: payload.terminalId,
+        runtimeSessionId: payload.sessionId,
+        adapterStatus: 'activation_pending',
+      });
 
       const terminalId = payload.terminalId;
       const contract = getRuntimeBootstrapContract(payload.cliType);
@@ -910,6 +1028,11 @@ export function MissionControlPane({ pane }: { pane: Pane }) {
             : agent
         );
         updatePaneData(pane.id, { agents: failedAgents });
+        setNodeRuntimeBinding(nodeId, {
+          terminalId: payload.terminalId,
+          runtimeSessionId: payload.sessionId,
+          adapterStatus: 'failed',
+        });
 
         try {
           await invoke('acknowledge_runtime_activation', {
@@ -927,6 +1050,11 @@ export function MissionControlPane({ pane }: { pane: Pane }) {
       void (async () => {
         try {
           console.log(`[Activation] Registering dispatch with backend: session=${payload.sessionId}`);
+          setNodeRuntimeBinding(nodeId, {
+            terminalId: payload.terminalId,
+            runtimeSessionId: payload.sessionId,
+            adapterStatus: 'adapter_starting',
+          });
           await invoke('register_runtime_activation_dispatch', {
             missionId,
             nodeId,
@@ -946,6 +1074,13 @@ export function MissionControlPane({ pane }: { pane: Pane }) {
 
           const baseUrl = await invoke<string>('get_mcp_base_url');
           console.log(`[Activation] MCP Connection: verifying health at ${baseUrl}`);
+          await invoke('acknowledge_runtime_activation', {
+            missionId,
+            nodeId,
+            attempt,
+            status: 'mcp_connecting',
+            reason: null,
+          });
           const mcpHealth = await fetch(`${baseUrl}/health`, { method: 'GET' })
             .then(response => response.ok)
             .catch(() => false);
@@ -954,7 +1089,15 @@ export function MissionControlPane({ pane }: { pane: Pane }) {
             return;
           }
 
-          const readyEvent = waitForMcpEvent(contract.handshakeEvent, payload.sessionId, BOOTSTRAP_EVENT_TIMEOUT_MS);
+          const readyEvent = waitForRuntimeActivationState({
+            sessionId: payload.sessionId,
+            missionId,
+            nodeId,
+            attempt,
+            eventType: contract.handshakeEvent,
+            acceptedStatuses: new Set(['registered', 'ready', 'activation_pending', 'activation_acked', 'running', 'completed', 'done']),
+            timeoutMs: BOOTSTRAP_EVENT_TIMEOUT_MS,
+          });
           
           console.log(`[Activation] Runtime Registration: calling mcp_register_runtime_session`);
           let registration: { ok?: boolean; message?: string; error?: string };
@@ -972,6 +1115,13 @@ export function MissionControlPane({ pane }: { pane: Pane }) {
             await failActivation(reason);
             return;
           }
+          await invoke('acknowledge_runtime_activation', {
+            missionId,
+            nodeId,
+            attempt,
+            status: 'registered',
+            reason: null,
+          });
 
           console.log(`[Activation] Waiting for agent:ready (timeout ${BOOTSTRAP_EVENT_TIMEOUT_MS}ms)`);
           await readyEvent;
@@ -1012,27 +1162,35 @@ export function MissionControlPane({ pane }: { pane: Pane }) {
               return;
             }
 
-            const ackEvent = waitForMcpEvent('activation:acked', payload.sessionId, TASK_ACK_TIMEOUT_MS);
+            const ackEvent = waitForRuntimeActivationState({
+              sessionId: payload.sessionId,
+              missionId,
+              nodeId,
+              attempt,
+              eventType: 'activation:acked',
+              acceptedStatuses: new Set(['activation_acked', 'running', 'completed', 'done']),
+              timeoutMs: TASK_ACK_TIMEOUT_MS,
+            });
             console.log(`[Activation] Starting headless run ${payload.runId}`);
             await invoke('start_agent_run', { payload: request });
-            await invoke('acknowledge_runtime_activation', {
-              missionId,
-              nodeId,
-              attempt,
-              status: 'activated',
-              reason: null,
-            });
-            await invoke('acknowledge_runtime_activation', {
-              missionId,
-              nodeId,
-              attempt,
-              status: 'running',
-              reason: null,
-            });
 
             try {
               await ackEvent;
               console.log(`[Activation] ACK received for ${nodeId}`);
+              await invoke('acknowledge_runtime_activation', {
+                missionId,
+                nodeId,
+                attempt,
+                status: 'activation_acked',
+                reason: null,
+              });
+              await invoke('acknowledge_runtime_activation', {
+                missionId,
+                nodeId,
+                attempt,
+                status: 'running',
+                reason: null,
+              });
             } catch {
               await failActivation(
                 `Agent did not call get_task_details within ${Math.round(TASK_ACK_TIMEOUT_MS / 1000)}s of the headless run starting.`
@@ -1053,7 +1211,15 @@ export function MissionControlPane({ pane }: { pane: Pane }) {
             return;
           }
 
-          const ackEvent = waitForMcpEvent('activation:acked', payload.sessionId, TASK_ACK_TIMEOUT_MS);
+          const ackEvent = waitForRuntimeActivationState({
+            sessionId: payload.sessionId,
+            missionId,
+            nodeId,
+            attempt,
+            eventType: 'activation:acked',
+            acceptedStatuses: new Set(['activation_acked', 'running', 'completed', 'done']),
+            timeoutMs: TASK_ACK_TIMEOUT_MS,
+          });
           console.log(`[Activation] Sending NEW_TASK signal to PTY ${terminalId}`);
           await invoke('write_to_pty', {
             id: terminalId,
@@ -1063,7 +1229,7 @@ export function MissionControlPane({ pane }: { pane: Pane }) {
             missionId,
             nodeId,
             attempt,
-            status: 'activated',
+            status: 'activation_pending',
             reason: null,
           });
           
@@ -1071,16 +1237,33 @@ export function MissionControlPane({ pane }: { pane: Pane }) {
           try {
             await ackEvent;
             console.log(`[Activation] ACK received for ${nodeId}`);
+            await invoke('acknowledge_runtime_activation', {
+              missionId,
+              nodeId,
+              attempt,
+              status: 'activation_acked',
+              reason: null,
+            });
+            await invoke('acknowledge_runtime_activation', {
+              missionId,
+              nodeId,
+              attempt,
+              status: 'running',
+              reason: null,
+            });
           } catch {
             const recentOutput = await invoke<string>('get_pty_recent_output', {
               id: terminalId,
               maxBytes: 4096,
             }).catch(() => '');
             const mcpFailed = /\bMCP server failed\b|1 MCP server failed|\/mcp/i.test(recentOutput);
+            const editorMode = /--\s*INSERT\s*--|--\s*VISUAL\s*--|--\s*REPLACE\s*--/.test(recentOutput);
             await failActivation(
               mcpFailed
                 ? 'Agent did not call get_task_details because the CLI reports its MCP server failed. Reconnect the terminal-docks MCP server in that CLI, then retry this node.'
-                : `Agent did not call get_task_details within ${Math.round(TASK_ACK_TIMEOUT_MS / 1000)}s of receiving NEW_TASK.`
+                : editorMode
+                  ? 'Agent appears to have opened a text editor (editor mode detected in terminal output). Press Escape to exit, then retry this node.'
+                  : `Agent did not call get_task_details within ${Math.round(TASK_ACK_TIMEOUT_MS / 1000)}s of receiving NEW_TASK.`
             );
             return;
           }
@@ -1161,6 +1344,7 @@ export function MissionControlPane({ pane }: { pane: Pane }) {
         agent.nodeId === nodeId && agent.activeRunId === runId
       );
       if (!target || !RUNTIME_ACTIVE_STATES.has(target.status)) return;
+      if (status === 'completed' && (target.runtimeCli === 'ollama' || target.runtimeCli === 'lmstudio')) return;
 
       const reason = status === 'completed'
         ? 'process_exited_without_handoff'
@@ -1199,7 +1383,8 @@ export function MissionControlPane({ pane }: { pane: Pane }) {
           nextStatus === 'done' ||
           nextStatus === 'completed' ||
           nextStatus === 'failed' ||
-          nextStatus === 'unbound';
+          nextStatus === 'unbound' ||
+          nextStatus === 'disconnected';
         if (isTerminalState && agent.runtimeSessionId) {
           sessionsToDispose.add(agent.runtimeSessionId);
         }
@@ -1209,15 +1394,21 @@ export function MissionControlPane({ pane }: { pane: Pane }) {
           status: nextStatus,
           attempt: nextAttempt,
           runtimeBootstrapState:
-            nextStatus === 'failed' || nextStatus === 'unbound'
+            nextStatus === 'failed' || nextStatus === 'unbound' || nextStatus === 'disconnected'
               ? 'NOT_CONNECTED'
-              : nextStatus === 'ready' || nextStatus === 'running'
+              : nextStatus === 'ready' || nextStatus === 'running' || nextStatus === 'activation_acked'
                 ? (agent.runtimeBootstrapState === 'NOT_CONNECTED' ? 'NOT_CONNECTED' : 'CONNECTED')
-                : nextStatus === 'launching' || nextStatus === 'connecting'
-                  ? 'CONNECTING'
+                : nextStatus === 'launching' ||
+                    nextStatus === 'connecting' ||
+                    nextStatus === 'spawning' ||
+                    nextStatus === 'adapter_starting' ||
+                    nextStatus === 'mcp_connecting' ||
+                    nextStatus === 'registered' ||
+                    nextStatus === 'activation_pending'
+                  ? nextStatus
                   : agent.runtimeBootstrapState,
           runtimeBootstrapReason:
-            nextStatus === 'failed' || nextStatus === 'unbound'
+            nextStatus === 'failed' || nextStatus === 'unbound' || nextStatus === 'disconnected'
               ? (reason ?? agent.runtimeBootstrapReason ?? agent.lastError ?? 'Runtime activation failed.')
               : agent.runtimeBootstrapReason,
           startedAt:
@@ -1227,7 +1418,7 @@ export function MissionControlPane({ pane }: { pane: Pane }) {
           completedAt: isTerminalState ? now : agent.completedAt,
           lastOutcome: outcome ?? agent.lastOutcome,
           lastError:
-            nextStatus === 'failed' || nextStatus === 'unbound'
+            nextStatus === 'failed' || nextStatus === 'unbound' || nextStatus === 'disconnected'
               ? (reason ?? agent.lastError ?? 'Runtime activation failed.')
               : reason ?? null,
           attemptHistory: nextAttempt > 0
@@ -1246,6 +1437,12 @@ export function MissionControlPane({ pane }: { pane: Pane }) {
       });
 
       updatePaneData(pane.id, { agents: nextAgents });
+      const updatedAgent = nextAgents.find(agent => agent.nodeId === nodeId);
+      setNodeRuntimeBinding(nodeId, {
+        terminalId: updatedAgent?.terminalId,
+        runtimeSessionId: updatedAgent?.runtimeSessionId ?? null,
+        adapterStatus: status as MissionAgent['status'],
+      });
       for (const sessionId of sessionsToDispose) {
         const unsubscribe = sessionUnsubscribersRef.current.get(sessionId);
         if (unsubscribe) {
@@ -1266,7 +1463,7 @@ export function MissionControlPane({ pane }: { pane: Pane }) {
       unlistenRunOutputFn?.();
       unlistenRunExitFn?.();
     };
-  }, [agents, currentMissionId, pane.id, updatePaneData]);
+  }, [agents, currentMissionId, pane.id, setNodeRuntimeBinding, updatePaneData]);
 
   useEffect(() => {
     const latestUrl = results.filter(result => result.type === 'url').pop();

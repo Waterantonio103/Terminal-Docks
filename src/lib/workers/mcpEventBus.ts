@@ -110,7 +110,7 @@ function applyToRegistry(ev: McpServerEvent): void {
           missionId: ev.missionId,
           nodeId: ev.nodeId,
           attempt: ev.attempt || 1,
-          status: 'running'
+          status: 'activation_acked'
         }).catch(err => console.warn('Failed to ack activation from mcp', err));
       }
       break;

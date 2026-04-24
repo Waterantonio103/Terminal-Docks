@@ -137,13 +137,22 @@ function getNodeStatus(node: FlowNodeLike): WorkflowNodeStatus {
     status === 'unbound' ||
     status === 'launching' ||
     status === 'connecting' ||
+    status === 'spawning' ||
+    status === 'terminal_started' ||
+    status === 'adapter_starting' ||
+    status === 'mcp_connecting' ||
+    status === 'registered' ||
     status === 'ready' ||
+    status === 'activation_pending' ||
+    status === 'activation_acked' ||
+    status === 'activated' ||
     status === 'handoff_pending' ||
     status === 'waiting' ||
     status === 'running' ||
     status === 'done' ||
     status === 'completed' ||
-    status === 'failed'
+    status === 'failed' ||
+    status === 'disconnected'
   ) {
     return status;
   }
@@ -160,6 +169,13 @@ function normalizeExecutionMode(value: unknown): WorkflowExecutionMode {
     return value;
   }
   return EXECUTION_MODE_FALLBACK;
+}
+
+function normalizeAgentCli(value: unknown): WorkflowAgentCli {
+  if (value === 'claude' || value === 'gemini' || value === 'opencode' || value === 'codex' || value === 'custom' || value === 'ollama' || value === 'lmstudio') {
+    return value;
+  }
+  return AGENT_CLI_FALLBACK;
 }
 
 function getAuthoringMode(value: unknown): WorkflowAuthoringMode | undefined {
@@ -522,6 +538,7 @@ export function serializeWorkflowGraph(
           terminalId: trimToUndefined(node.data?.terminalId),
           terminalTitle: trimToUndefined(node.data?.terminalTitle),
           paneId: trimToUndefined(node.data?.paneId),
+          cli: normalizeAgentCli(node.data?.cli),
           executionMode: normalizeExecutionMode(node.data?.executionMode),
           autoLinked: Boolean(node.data?.autoLinked),
           authoringMode: getAuthoringMode(node.data?.authoringMode),
@@ -610,7 +627,7 @@ export function compileMission({
       terminal: {
         terminalId,
         terminalTitle,
-        cli: terminalClis[terminalId] ?? AGENT_CLI_FALLBACK,
+        cli: terminalClis[terminalId] ?? normalizeAgentCli(node.data?.cli),
         executionMode: normalizeExecutionMode(node.data?.executionMode),
         paneId: trimToUndefined(node.data?.paneId),
         reusedExisting: Boolean(node.data?.autoLinked),

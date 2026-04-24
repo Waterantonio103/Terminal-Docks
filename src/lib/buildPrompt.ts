@@ -107,7 +107,7 @@ export function buildLaunchPrompt(agentId: string, ctx: LaunchContext, instructi
       lines.push('This node currently has no legal outgoing targets. If your chosen outcome has no legal target in `get_task_details`, publish your result and stop instead of guessing a successor.');
     }
 
-    lines.push('Graph-mode minimal MCP contract: `get_task_details`, `receive_messages({ missionId, nodeId, afterSeq? })`, `handoff_task({ missionId, fromNodeId, targetNodeId, outcome, title, description?, payload?, fromAttempt })`, `publish_result`, `get_workspace_context`, `lock_file`, `unlock_file`.');
+    lines.push('Graph-mode minimal MCP contract: `get_task_details`, `receive_messages({ missionId, nodeId, afterSeq? })`, `complete_task({ missionId, nodeId, attempt, outcome, summary, filesChanged?, artifactReferences?, downstreamPayload? })`, `handoff_task({ missionId, fromNodeId, targetNodeId, outcome, title, description?, payload?, fromAttempt })`, `publish_result`, `get_workspace_context`, `lock_file`, `unlock_file`.');
   } else {
     lines.push('No mission/node context was provided. Treat this as manual execution and avoid speculative handoffs.');
   }
@@ -131,7 +131,7 @@ export function buildLaunchPrompt(agentId: string, ctx: LaunchContext, instructi
   if (hasNodeContext) {
     if (outgoingTargets.length > 0) {
       lines.push(`${step++}. Decide your explicit outcome: \`success\` or \`failure\`. Use \`get_task_details\` as the canonical list of which target nodes are legal for that outcome.`);
-      lines.push(`${step++}. If there is a legal next target for that outcome, call the \`handoff_task\` MCP tool with \`missionId="${ctx.missionId}"\`, \`fromNodeId="${ctx.nodeId}"\`, \`fromAttempt=${ctx.attempt ?? 1}\`, the exact \`targetNodeId\`, an explicit \`outcome\`, a short title, and a structured JSON payload. Do not guess the next hop from a role name.`);
+      lines.push(`${step++}. Prefer \`complete_task({ missionId: "${ctx.missionId}", nodeId: "${ctx.nodeId}", attempt: ${ctx.attempt ?? 1}, outcome, summary, filesChanged, artifactReferences, downstreamPayload })\` (missionId="${ctx.missionId}", nodeId="${ctx.nodeId}", fromNodeId="${ctx.nodeId}", fromAttempt=${ctx.attempt ?? 1}) so MCP records your result and activates every legal downstream node for that outcome. Use \`handoff_task\` only when you intentionally need to route to one exact targetNodeId.`);
     } else {
       lines.push(`${step++}. This is a terminal node unless \`get_task_details\` reports otherwise. Do not call \`handoff_task\` without an exact legal \`targetNodeId\`.`);
     }
