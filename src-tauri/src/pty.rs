@@ -502,9 +502,26 @@ pub fn spawn_pty(
                 Err(_) => break,
             }
         }
-        let pty_state = app.state::<PtyState>();
-        expire_terminal_permissions(&app, &pty_state, &id);
-        let _ = app.emit("pty-exit", PtyExitPayload { id });
+        // Reader EOF does not always mean the child has exited (ConPTY on Windows
+        // can close the master reader while the child process is still alive after
+        // exec).  Wait briefly and only emit pty-exit when the child has truly exited.
+        let child_exited = 'outer: loop {
+            thread::sleep(std::time::Duration::from_millis(250));
+            let pty_state = app.state::<PtyState>();
+            let mut ptys = pty_state.ptys.lock().unwrap();
+            match ptys.get_mut(&id) {
+                Some(instance) => match instance.child.try_wait() {
+                    Ok(None) => continue 'outer,
+                    _ => break 'outer true,
+                },
+                None => break 'outer true,
+            }
+        };
+        if child_exited {
+            let pty_state = app.state::<PtyState>();
+            expire_terminal_permissions(&app, &pty_state, &id);
+            let _ = app.emit("pty-exit", PtyExitPayload { id });
+        }
     });
 
     Ok(true)
@@ -610,9 +627,23 @@ pub fn spawn_pty_with_command(
                 Err(_) => break,
             }
         }
-        let pty_state = app.state::<PtyState>();
-        expire_terminal_permissions(&app, &pty_state, &id);
-        let _ = app.emit("pty-exit", PtyExitPayload { id });
+        let child_exited = 'outer: loop {
+            thread::sleep(std::time::Duration::from_millis(250));
+            let pty_state = app.state::<PtyState>();
+            let mut ptys = pty_state.ptys.lock().unwrap();
+            match ptys.get_mut(&id) {
+                Some(instance) => match instance.child.try_wait() {
+                    Ok(None) => continue 'outer,
+                    _ => break 'outer true,
+                },
+                None => break 'outer true,
+            }
+        };
+        if child_exited {
+            let pty_state = app.state::<PtyState>();
+            expire_terminal_permissions(&app, &pty_state, &id);
+            let _ = app.emit("pty-exit", PtyExitPayload { id });
+        }
     });
 
     Ok(true)

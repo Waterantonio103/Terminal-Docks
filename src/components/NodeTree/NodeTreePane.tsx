@@ -18,7 +18,8 @@ import { getActiveTreeId, getViewState } from '../../lib/node-system/editor';
 import { applyNodeEditorOperator } from '../../lib/node-system/operators';
 import type { MaterializedNode, NodeInstance, Point2D } from '../../lib/node-system/types';
 import { detectRoleForPane } from '../../lib/cliDetection';
-import { completeAgentNode, launchMissionStartNodes, type NodeOutcome, type RuntimeStatus } from '../../lib/workflowRuntimeAdapter';
+import { stageMissionPrompts } from '../../lib/missionLauncher';
+type NodeOutcome = 'success' | 'failure';
 import { useWorkspaceStore, type MissionAgent, type Pane, type ResultEntry, type WorkflowAgentCli, type WorkflowExecutionMode, type WorkflowGraph } from '../../store/workspace';
 import { detectRuntimeAction } from '../../lib/runtimeActivity';
 
@@ -984,6 +985,9 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
       setActiveMissionId(missionId);
       activeMissionRef.current = mission;
 
+      const allPanes = tabs.flatMap(t => t.panes);
+      await stageMissionPrompts(mission, workspaceDir, allPanes);
+
       addPane('missioncontrol', 'Mission Control', {
         taskDescription: mission.task.prompt ?? '',
         agents,
@@ -991,67 +995,40 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
         mission,
       });
 
-      // Phase 1 runtime adapter: directly launch the CLI inside each start
-      // node's terminal and send the task prompt. We intentionally do NOT call
-      // `start_mission_graph` here — the Rust backend's activation path sets
-      // nodes to `activation_pending` and fails them after a timeout when no
-      // MCP session acks the activation, which overrode the adapter's
-      // `running` state. Phase 1 owns execution end-to-end in the frontend.
-      const launchResults = await launchMissionStartNodes({
-        mission,
-        onStatus: (nodeId, status) => {
-          applyOperator({ type: 'set_node_property', nodeId, key: 'status', value: status });
-        },
-      });
+      await invoke('start_mission_graph', { missionId, graph: mission });
 
-      const failed = launchResults.filter(result => result.status === 'failed');
-      if (failed.length > 0) {
-        setValidationTone('error');
-        setValidationMessage(
-          `Launched mission ${missionId.substring(0, 8)} but ${failed.length} start node(s) failed: ${failed.map(f => `${f.nodeId} (${f.error ?? 'unknown error'})`).join('; ')}`
-        );
-      } else {
-        setValidationTone('ok');
-        setValidationMessage(
-          `Mission ${missionId.substring(0, 8)} running. Launched ${launchResults.length} start node(s) directly into their terminals.`
-        );
-      }
+      setValidationTone('ok');
+      setValidationMessage(
+        `Mission ${missionId.substring(0, 8)} registered. Mission Control will activate nodes automatically.`
+      );
     } catch (error) {
       setActiveMissionId(null);
       setValidationTone('error');
       setValidationMessage(error instanceof Error ? error.message : String(error));
     }
-  }, [registry, state.document, workspaceDir, graph.id, openTerminals, addPane, applyOperator, setNodeTerminalBinding]);
+  }, [registry, state.document, workspaceDir, graph.id, openTerminals, tabs, addPane, applyOperator, setNodeTerminalBinding]);
 
   const markNodeComplete = useCallback(
     async (nodeId: string, outcome: NodeOutcome) => {
-      const mission = activeMissionRef.current;
-      if (!mission) {
+      if (!activeMissionRef.current) {
         setValidationTone('error');
         setValidationMessage('No active mission. Run the graph first.');
         return;
       }
       try {
-        const onStatus = (targetNodeId: string, status: RuntimeStatus) => {
-          applyOperator({ type: 'set_node_property', nodeId: targetNodeId, key: 'status', value: status });
-        };
-        const result = await completeAgentNode({ mission, nodeId, outcome, onStatus });
-        applyOperator({
-          type: 'set_node_property',
-          nodeId,
-          key: 'lastOutputSummary',
-          value: stripAnsi(result.summary).slice(-2000),
-        });
-        applyOperator({
-          type: 'set_node_property',
-          nodeId,
-          key: 'lastOutcome',
-          value: outcome,
-        });
+        const node = activeMissionRef.current.nodes.find(n => n.id === nodeId);
+        let summary = '';
+        if (node?.terminal.terminalId) {
+          try {
+            const raw = await invoke<string>('get_pty_recent_output', { id: node.terminal.terminalId, maxBytes: 16384 });
+            summary = stripAnsi(raw).slice(-2000);
+          } catch { /* ignore read errors */ }
+        }
+        applyOperator({ type: 'set_node_property', nodeId, key: 'lastOutputSummary', value: summary });
+        applyOperator({ type: 'set_node_property', nodeId, key: 'lastOutcome', value: outcome });
+        applyOperator({ type: 'set_node_property', nodeId, key: 'status', value: outcome === 'success' ? 'completed' : 'failed' });
         setValidationTone('ok');
-        setValidationMessage(
-          `Node ${nodeId.substring(0, 8)} marked ${outcome}. Handed off to ${result.launchedNext.length} downstream node(s).`
-        );
+        setValidationMessage(`Node ${nodeId.substring(0, 8)} marked ${outcome}. Graph routing is handled by the agent via MCP complete_task.`);
       } catch (error) {
         setValidationTone('error');
         setValidationMessage(error instanceof Error ? error.message : String(error));

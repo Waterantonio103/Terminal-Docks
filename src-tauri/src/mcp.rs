@@ -451,14 +451,28 @@ pub fn init_mcp_server(app: &AppHandle) -> Result<(), String> {
         };
         register_with_ai_clis(&app_handle, &format!("{}/mcp?token={}", base, token));
 
-        // Subscribe to SSE activity feed
+        // Subscribe to SSE activity feed with reconnection loop so missed
+        // handoff events do not permanently stall workflow graph advancement.
+        let mut sse_backoff_ms: u64 = 1_000;
+        'sse_reconnect: loop {
         let response = match ureq::get(&format!("{}/events?token={}", base, token)).call() {
             Ok(r) => r,
             Err(e) => {
-                eprintln!("Failed to connect to MCP events: {}", e);
-                return;
+                eprintln!("[mcp] SSE connection failed: {}. Retrying in {}ms…", e, sse_backoff_ms);
+                let _ = app_handle.emit(
+                    "workflow-runtime-warning",
+                    serde_json::json!({
+                        "missionId": "system",
+                        "nodeId": "bridge",
+                        "message": format!("SSE bridge disconnected: {}. Reconnecting…", e),
+                    }),
+                );
+                thread::sleep(Duration::from_millis(sse_backoff_ms));
+                sse_backoff_ms = (sse_backoff_ms * 2).min(30_000);
+                continue 'sse_reconnect;
             }
         };
+        sse_backoff_ms = 1_000;
 
         let reader = BufReader::new(response.into_reader());
         for line in reader.lines().flatten() {
@@ -606,6 +620,19 @@ pub fn init_mcp_server(app: &AppHandle) -> Result<(), String> {
                 }
             }
         }
+        // Event loop ended — SSE stream was closed or dropped. Reconnect.
+        eprintln!("[mcp] SSE stream ended. Reconnecting in {}ms…", sse_backoff_ms);
+        let _ = app_handle.emit(
+            "workflow-runtime-warning",
+            serde_json::json!({
+                "missionId": "system",
+                "nodeId": "bridge",
+                "message": "SSE bridge stream ended unexpectedly. Reconnecting…",
+            }),
+        );
+        thread::sleep(Duration::from_millis(sse_backoff_ms));
+        sse_backoff_ms = (sse_backoff_ms * 2).min(30_000);
+        } // end 'sse_reconnect loop
     });
 
     Ok(())

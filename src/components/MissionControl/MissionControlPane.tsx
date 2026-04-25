@@ -821,9 +821,22 @@ export function MissionControlPane({ pane }: { pane: Pane }) {
       if (unmounted) fn();
     });
 
-    listen<{ id: string }>('pty-exit', (event) => {
+    listen<{ id: string }>('pty-exit', async (event) => {
       if (unmounted) return;
       const exitedId = event.payload.id;
+
+      // Frontend guard: the Rust backend can emit pty-exit prematurely on
+      // Windows ConPTY when the reader EOFs but the child process is still
+      // alive (e.g. after exec).  Verify with is_pty_active before marking
+      // the agent as disconnected.
+      try {
+        const stillAlive = await invoke<boolean>('is_pty_active', { id: exitedId });
+        if (stillAlive) {
+          logToAgent(pane.id, agents.find(a => a.terminalId === exitedId)?.nodeId ?? '', `pty-exit received for ${exitedId} but child is still alive — ignoring.`);
+          return;
+        }
+      } catch { /* is_pty_active can fail if PTY was destroyed — proceed */ }
+
       const liveAgents = readAgentsForPane(pane.id, agents);
       const target = liveAgents.find(agent => agent.terminalId === exitedId);
       if (!target) return;

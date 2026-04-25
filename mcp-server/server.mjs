@@ -341,6 +341,50 @@ function getLegalOutgoingTargets(mission, fromNodeId) {
     });
 }
 
+function extractUpstreamContext(inboxMessages) {
+  const findings = [];
+  const summaries = [];
+  const filesChanged = [];
+  const artifactReferences = [];
+
+  for (const msg of inboxMessages) {
+    const parsed = msg.content_json ?? {};
+    const completionStr = parsed.payload ?? parsed.completion;
+    let completion = null;
+    if (typeof completionStr === 'string') {
+      try { completion = JSON.parse(completionStr); } catch { /* ignore */ }
+    } else if (completionStr && typeof completionStr === 'object') {
+      completion = completionStr;
+    }
+    if (!completion) continue;
+
+    if (typeof completion.summary === 'string' && completion.summary.trim()) {
+      summaries.push({ fromNodeId: parsed.fromNodeId ?? null, summary: completion.summary.trim() });
+    }
+    if (Array.isArray(completion.keyFindings)) {
+      for (const f of completion.keyFindings) {
+        if (typeof f === 'string' && f.trim()) findings.push(f.trim());
+      }
+    }
+    if (Array.isArray(completion.filesChanged)) {
+      for (const f of completion.filesChanged) {
+        if (typeof f === 'string' && f.trim() && !filesChanged.includes(f.trim())) {
+          filesChanged.push(f.trim());
+        }
+      }
+    }
+    if (Array.isArray(completion.artifactReferences)) {
+      for (const a of completion.artifactReferences) {
+        if (typeof a === 'string' && a.trim() && !artifactReferences.includes(a.trim())) {
+          artifactReferences.push(a.trim());
+        }
+      }
+    }
+  }
+
+  return { keyFindings: findings, summaries, filesChanged, artifactReferences };
+}
+
 export function buildTaskDetails(missionId, nodeId) {
   const record = loadCompiledMissionRecord(missionId);
   if (!record) return null;
@@ -375,6 +419,8 @@ export function buildTaskDetails(missionId, nodeId) {
           ORDER BY task_seq ASC`
       ).all(runtimeSession.session_id, missionId, nodeId)
     : [];
+
+  const upstreamContext = extractUpstreamContext(inbox);
 
   return {
     missionId,
@@ -411,6 +457,7 @@ export function buildTaskDetails(missionId, nodeId) {
     recentTasks,
     inbox,
     pendingPushes,
+    upstreamContext,
   };
 }
 
@@ -1239,6 +1286,7 @@ function buildStructuredCompletionPayload({
   title,
   description,
   finalOutcome,
+  keyFindings,
 }) {
   const completionObj = completion && typeof completion === 'object' ? completion : {};
   const status = finalOutcome
@@ -1248,11 +1296,16 @@ function buildStructuredCompletionPayload({
     ? completionObj.summary.trim()
     : (typeof description === 'string' && description.trim() ? description.trim() : String(title ?? 'Handoff completed'));
 
+  const resolvedFindings = normalizeStringArray(
+    keyFindings ?? completionObj.keyFindings
+  );
+
   return {
     status,
     summary,
     artifactReferences: normalizeStringArray(completionObj.artifactReferences),
     filesChanged: normalizeStringArray(completionObj.filesChanged),
+    keyFindings: resolvedFindings,
     downstreamPayload: completionObj.downstreamPayload !== undefined ? completionObj.downstreamPayload : (payload ?? null),
   };
 }
@@ -1516,6 +1569,7 @@ export function executeCompleteTask(
     logRef,
     filesChanged,
     artifactReferences,
+    keyFindings,
     downstreamPayload,
     parentTaskId,
   },
@@ -1545,6 +1599,7 @@ export function executeCompleteTask(
     summary: typeof summary === 'string' && summary.trim() ? summary.trim() : String(title ?? 'Task completed'),
     artifactReferences: normalizeStringArray(artifactReferences),
     filesChanged: normalizeStringArray(filesChanged),
+    keyFindings: normalizeStringArray(keyFindings),
     downstreamPayload: downstreamPayload ?? null,
     rawOutput: typeof rawOutput === 'string' ? rawOutput : null,
     logRef: typeof logRef === 'string' ? logRef : null,
@@ -1556,6 +1611,7 @@ export function executeCompleteTask(
     title: title ?? completion.summary,
     description: completion.summary,
     finalOutcome: normalizedOutcome,
+    keyFindings: normalizeStringArray(keyFindings),
   });
   structuredCompletion.rawOutput = completion.rawOutput;
   structuredCompletion.logRef = completion.logRef;
@@ -2257,6 +2313,7 @@ function createMcpServer(getSessionId) {
         summary: z.string().optional().describe('Execution summary of this node outcome.'),
         artifactReferences: z.array(z.string()).optional().describe('Artifact references (URLs, ids, or generated outputs).'),
         filesChanged: z.array(z.string()).optional().describe('Files touched during this node execution.'),
+        keyFindings: z.array(z.string()).optional().describe('Key discoveries, decisions, or facts that downstream agents should know — surfaces in upstreamContext of get_task_details.'),
         downstreamPayload: z.any().optional().describe('Explicit payload delivered to the downstream node.'),
       }).optional(),
       parentTaskId: z.number().int().optional().describe('Parent task id if this is a subtask of an existing task'),
@@ -2282,6 +2339,7 @@ function createMcpServer(getSessionId) {
       logRef: z.string().optional().describe('Optional session log path, URL, or run id'),
       filesChanged: z.array(z.string()).optional().describe('Files touched during this node execution'),
       artifactReferences: z.array(z.string()).optional().describe('Artifact references such as URLs, ids, or generated outputs'),
+      keyFindings: z.array(z.string()).optional().describe('Key discoveries, decisions, or facts from this node that downstream agents should know — surfaces in upstreamContext of get_task_details'),
       downstreamPayload: z.any().optional().describe('Payload delivered to all legal downstream nodes'),
       parentTaskId: z.number().int().optional().describe('Parent task id if this completion belongs to a delegated task'),
     }

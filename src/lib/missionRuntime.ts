@@ -1,6 +1,14 @@
+import { invoke } from '@tauri-apps/api/core';
 import { notifyTaskCompleted } from './workers/bootstrap';
 import type { WorkerAdapter, WorkerSession } from './workers/types';
-import { captureTerminalOutput } from './workflowRuntimeAdapter';
+
+async function captureTerminalOutput(terminalId: string): Promise<string> {
+  try {
+    return await invoke<string>('get_pty_recent_output', { id: terminalId, maxBytes: 16384 });
+  } catch {
+    return '';
+  }
+}
 
 export interface WorkflowNodeTriggeredPayload {
   missionId: string;

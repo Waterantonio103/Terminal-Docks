@@ -13,12 +13,8 @@ import {
   useWorkspaceStore,
 } from '../../store/workspace';
 import agentsConfig from '../../config/agents';
-import {
-  buildLaunchPrompt,
-  type LaunchContext,
-  type LaunchMode,
-  type LaunchOutgoingTarget,
-} from '../../lib/buildPrompt';
+import { type LaunchMode } from '../../lib/buildPrompt';
+import { stageMissionPrompts } from '../../lib/missionLauncher';
 import { compileMission } from '../../lib/graphCompiler';
 import { generateId } from '../../lib/graphUtils';
 import { buildPresetFlowGraph, getWorkflowPreset, listWorkflowPresets } from '../../lib/workflowPresets';
@@ -40,10 +36,6 @@ type GraphFlowEdge = {
   data: { condition: WorkflowEdgeCondition };
 };
 
-async function writeToTerminal(pane: Pane, text: string) {
-  const terminalId = pane.data?.terminalId ?? `term-${pane.id}`;
-  await invoke('write_to_pty', { id: terminalId, data: text });
-}
 
 interface TerminalRow {
   pane: Pane;
@@ -58,23 +50,6 @@ interface PendingLaunchState {
   startTerminalIds: string[];
 }
 
-function getAllowedOutgoingTargets(mission: CompiledMission, nodeId: string): LaunchOutgoingTarget[] {
-  const nodeById = new Map(mission.nodes.map(node => [node.id, node]));
-
-  return mission.edges
-    .filter(edge => edge.fromNodeId === nodeId)
-    .map(edge => {
-      const targetNode = nodeById.get(edge.toNodeId);
-      const targetRoleId = targetNode?.roleId ?? 'unknown';
-      const targetRoleName = agentsConfig.agents.find(agent => agent.id === targetRoleId)?.name ?? targetRoleId;
-      return {
-        targetNodeId: edge.toNodeId,
-        targetRoleId,
-        targetRoleName,
-        condition: edge.condition,
-      } satisfies LaunchOutgoingTarget;
-    });
-}
 
 function buildRoleBindingPools(rows: TerminalRow[]) {
   const byRole = new Map<string, TerminalRow[]>();
@@ -332,7 +307,8 @@ export function LauncherPane() {
             `Session bootstrap: call connect_agent with role="${roleParam}", agentId="${row.pane.title}", terminalId="${terminalId}", cli="${cli}", profileId="${profileId}", capabilities=${capabilityJson}${workspaceDir ? `, workingDir="${escapedWorkingDir}"` : ''}. ` +
             `Then keep worker metadata current with register_worker_capabilities when your availability changes.`;
 
-          await writeToTerminal(row.pane, `${prompt}\r`);
+          const termId = row.pane.data?.terminalId ?? `term-${row.pane.id}`;
+          await invoke('write_to_pty', { id: termId, data: `${prompt}\r` });
         })
       );
 
@@ -453,47 +429,7 @@ export function LauncherPane() {
   }
 
   async function stagePrompts(mission: CompiledMission) {
-    const panesByTerminalId = new Map(
-      terminals
-        .filter(p => Boolean(p.data?.terminalId))
-        .map(p => [p.data?.terminalId as string, p])
-    );
-
-    const countByRole = new Map<string, number>();
-    for (const node of mission.nodes) {
-      countByRole.set(node.roleId, (countByRole.get(node.roleId) ?? 0) + 1);
-    }
-
-    const usedByRole = new Map<string, number>();
-    for (const node of mission.nodes) {
-      const pane = panesByTerminalId.get(node.terminal.terminalId);
-      if (!pane) {
-        throw new Error(`Terminal ${node.terminal.terminalTitle} (${node.terminal.terminalId}) is not open.`);
-      }
-
-      const currentRoleIndex = (usedByRole.get(node.roleId) ?? 0) + 1;
-      usedByRole.set(node.roleId, currentRoleIndex);
-
-      const ctx: LaunchContext = {
-        workspaceDir,
-        missionId: mission.missionId,
-        nodeId: node.id,
-        attempt: 1,
-        allowedOutgoingTargets: getAllowedOutgoingTargets(mission, node.id),
-        authoringMode: mission.metadata.authoringMode,
-        presetId: mission.metadata.presetId,
-        runVersion: mission.metadata.runVersion,
-        instanceNum: currentRoleIndex,
-        totalInstances: countByRole.get(node.roleId) ?? 1,
-        task: mission.task.prompt,
-        mode: mission.task.mode,
-      };
-
-      const prompt = buildLaunchPrompt(node.roleId, ctx, node.instructionOverride || undefined);
-      if (prompt) {
-        await writeToTerminal(pane, prompt);
-      }
-    }
+    await stageMissionPrompts(mission, workspaceDir, terminals);
   }
 
   async function handleLaunch() {
