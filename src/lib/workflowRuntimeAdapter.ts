@@ -4,6 +4,7 @@ import type {
   CompiledMissionNode,
   WorkflowAgentCli,
 } from '../store/workspace';
+import { useWorkspaceStore, selectActivePanes } from '../store/workspace';
 import { getCliAdapter } from './cliAdapters';
 import { resolveNextNodes, type NodeOutcome } from './workflowRuntimePlanning';
 
@@ -111,7 +112,19 @@ export async function launchAgentNode(
 
   try {
     onStatus?.(node.id, 'terminal_ready');
-    onStatus?.(node.id, 'cli_launching', `Waiting for ${adapter.displayName}`);
+
+    const state = useWorkspaceStore.getState();
+    const pane = state.tabs.flatMap(t => t.panes).find(p => p.id === terminalId);
+    const isCliRunning = pane?.data?.cli === cli;
+
+    if (!isCliRunning) {
+      onStatus?.(node.id, 'cli_launching', `Launching ${adapter.displayName}`);
+      await writePty(terminalId, adapter.launchCommand() + '\r');
+      // Give it a brief moment to start outputting
+      await delay(500);
+    } else {
+      onStatus?.(node.id, 'cli_launching', `Waiting for ${adapter.displayName}`);
+    }
 
     const readyByHint = await waitForCliReadiness(
       terminalId,
