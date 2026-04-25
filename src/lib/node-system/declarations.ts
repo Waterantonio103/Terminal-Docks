@@ -158,7 +158,7 @@ export function createWorkflowNodeRegistry() {
       terminalTitle: '',
       paneId: '',
       cli: 'claude',
-      executionMode: 'streaming_headless',
+      executionMode: 'interactive_pty',
       autoLinked: false,
       authoringMode: 'graph',
       presetId: '',

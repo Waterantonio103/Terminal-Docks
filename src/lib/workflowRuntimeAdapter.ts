@@ -4,7 +4,7 @@ import type {
   CompiledMissionNode,
   WorkflowAgentCli,
 } from '../store/workspace';
-import { useWorkspaceStore, selectActivePanes } from '../store/workspace';
+import { useWorkspaceStore } from '../store/workspace';
 import { getCliAdapter } from './cliAdapters';
 import { resolveNextNodes, type NodeOutcome } from './workflowRuntimePlanning';
 

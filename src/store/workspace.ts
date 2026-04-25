@@ -10,6 +10,7 @@ export function arrayMove<T>(array: T[], fromIndex: number, toIndex: number): T[
 }
 
 export type PaneType = 'terminal' | 'editor' | 'taskboard' | 'activityfeed' | 'launcher' | 'missioncontrol' | 'nodetree';
+export type AppMode = 'workflow' | 'runtime' | 'workspace';
 export type WorkflowNodeStatus =
   | 'idle'
   | 'unbound'
@@ -195,6 +196,7 @@ export interface MissionAgent {
   runtimeLastHeartbeatAt?: number;
   artifacts?: MissionArtifact[];
   runtimeLogs?: string[]; // Added for activation pipeline debugging
+  currentAction?: string | null;
 }
 
 export interface NodeRuntimeBinding {
@@ -354,6 +356,7 @@ interface WorkspaceState {
   activeTabId: string;
   sidebarOpen: boolean;
   activeSidebarTab: SidebarTabType;
+  appMode: AppMode;
   workspaceDir: string | null;
   theme: ThemeType;
   savedLayouts: SavedLayout[];
@@ -366,6 +369,7 @@ interface WorkspaceState {
   nodeRuntimeBindings: Record<string, NodeRuntimeBinding>;
   toggleSidebar: () => void;
   setActiveSidebarTab: (tab: SidebarTabType) => void;
+  setAppMode: (mode: AppMode) => void;
   setGlobalGraph: (graph: WorkflowGraph) => void;
   addPane: (type: PaneType, title: string, data?: any) => void;
   addPaneAt: (type: PaneType, title: string, index: number, data?: any) => void;
@@ -414,6 +418,7 @@ export const useWorkspaceStore = create<WorkspaceState>()(
       activeTabId: _initTabId,
       sidebarOpen: true,
       activeSidebarTab: 'files',
+      appMode: 'workflow',
       workspaceDir: null,
       theme: 'dark',
       savedLayouts: [],
@@ -426,7 +431,20 @@ export const useWorkspaceStore = create<WorkspaceState>()(
       nodeRuntimeBindings: {},
 
       setActiveSidebarTab: (tab) => set({ activeSidebarTab: tab }),
-      setGlobalGraph: (graph) => set({ globalGraph: graph }),
+      setAppMode: (mode) => set({ appMode: mode }),
+      setGlobalGraph: (graph) => set({
+        globalGraph: {
+          ...graph,
+          nodes: graph.nodes.map(node => ({
+            ...node,
+            config: node.config ? {
+              ...node.config,
+              workspaceDir: typeof node.config.workspaceDir === 'string' ? node.config.workspaceDir.replace(/\0/g, '').trim() : node.config.workspaceDir,
+              cli: typeof node.config.cli === 'string' ? node.config.cli.replace(/\0/g, '').trim() as WorkflowAgentCli : node.config.cli,
+            } : undefined
+          }))
+        }
+      }),
 
       addMessage: (msg) => set((s) => ({ messages: [...s.messages, msg].slice(-500) })),
       addResult: (result) => set((s) => ({ results: [...s.results, result].slice(-200) })),
@@ -643,7 +661,7 @@ export const useWorkspaceStore = create<WorkspaceState>()(
 
       clearPanes: () => set((state) => withActivePanes(state, () => [])),
 
-      setWorkspaceDir: (dir) => set({ workspaceDir: dir }),
+      setWorkspaceDir: (dir) => set({ workspaceDir: typeof dir === 'string' ? dir.replace(/\0/g, '').trim() : dir }),
       setTheme: (theme) => set({ theme }),
 
       saveLayout: (name) => set((state) => {
@@ -788,6 +806,7 @@ export const useWorkspaceStore = create<WorkspaceState>()(
         tabs: state.tabs,
         activeTabId: state.activeTabId,
         sidebarOpen: state.sidebarOpen,
+        appMode: state.appMode,
         workspaceDir: state.workspaceDir,
         theme: state.theme,
         savedLayouts: state.savedLayouts,

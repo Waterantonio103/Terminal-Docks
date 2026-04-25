@@ -2,12 +2,13 @@ import { Sidebar } from './components/Sidebar/Sidebar';
 import { WorkspaceGrid } from './components/Layout/WorkspaceGrid';
 import { QuickOpen } from './components/QuickOpen/QuickOpen';
 import { NodeTreePane } from './components/NodeTree/NodeTreePane';
-import { useWorkspaceStore, PaneType, McpMessage, DbTask } from './store/workspace';
+import { RuntimeView } from './components/Runtime/RuntimeView';
+import { useWorkspaceStore, PaneType, McpMessage, DbTask, type AppMode } from './store/workspace';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { homeDir } from '@tauri-apps/api/path';
 import { Window } from '@tauri-apps/api/window';
-import { PanelLeft, TerminalSquare, FileCode2, KanbanSquare, Activity, Palette, Plus, Rocket, Monitor, Minus, Square, X, Network } from 'lucide-react';
+import { PanelLeft, TerminalSquare, FileCode2, KanbanSquare, Activity, Palette, Plus, Rocket, Monitor, Minus, Square, X, Network, FolderTree } from 'lucide-react';
 import { useState, useEffect, useRef } from 'react';
 import { detectRoleFromText, normalizeCli } from './lib/cliDetection';
 import { refreshCliDetectionForTerminals } from './lib/terminalCliRuntime';
@@ -91,7 +92,7 @@ function DraggableOption({ type, label, icon, onClick, onDragStart }: DraggableO
 function App() {
   const toggleSidebar = useWorkspaceStore((s) => s.toggleSidebar);
   const sidebarOpen   = useWorkspaceStore((s) => s.sidebarOpen);
-  const activeSidebarTab = useWorkspaceStore((s) => s.activeSidebarTab);
+  const appMode       = useWorkspaceStore((s) => s.appMode);
   const addPane         = useWorkspaceStore((s) => s.addPane);
   const theme        = useWorkspaceStore((s) => s.theme);
   const setTheme     = useWorkspaceStore((s) => s.setTheme);
@@ -110,6 +111,8 @@ function App() {
   const setWorkspaceDir = useWorkspaceStore((s) => s.setWorkspaceDir);
   const globalGraph     = useWorkspaceStore((s) => s.globalGraph);
   const setGlobalGraph  = useWorkspaceStore((s) => s.setGlobalGraph);
+  const nodeRuntimeBindings = useWorkspaceStore((s) => s.nodeRuntimeBindings);
+  const modeLabel = MODE_OPTIONS.find(mode => mode.id === appMode)?.label ?? 'Workflow';
 
   // Default terminal working directory to home folder on first launch
   useEffect(() => {
@@ -117,6 +120,86 @@ function App() {
       homeDir().then(dir => setWorkspaceDir(dir)).catch(() => {});
     }
   }, []);
+
+  const hasCleanedRef = useRef(false);
+  // Startup cleanup: Reset stale 'running' or 'launching' statuses to 'idle'
+  useEffect(() => {
+    if (hasCleanedRef.current) return;
+    
+    // 1. Clean graph nodes
+    let changedNodes = false;
+    let nextNodes = globalGraph.nodes;
+    if (globalGraph.nodes.length) {
+      const hasStaleNodes = globalGraph.nodes.some(node => 
+        node.status === 'running' || 
+        node.status === 'launching' || 
+        node.status === 'connecting' ||
+        node.status === 'spawning'
+      );
+      if (hasStaleNodes) {
+        nextNodes = globalGraph.nodes.map(node => {
+          if (
+            node.status === 'running' || 
+            node.status === 'launching' || 
+            node.status === 'connecting' ||
+            node.status === 'spawning'
+          ) {
+            return { ...node, status: 'idle' as const };
+          }
+          return node;
+        });
+        changedNodes = true;
+      }
+    }
+
+    // 2. Clean node runtime bindings (adapter sessions don't survive restart)
+    const bindingEntries = Object.entries(nodeRuntimeBindings);
+    let nextBindings = nodeRuntimeBindings;
+    let changedBindings = false;
+    if (bindingEntries.length > 0) {
+      nextBindings = { ...nodeRuntimeBindings };
+      for (const [nodeId, binding] of bindingEntries) {
+        if (binding.runtimeSessionId || (binding.adapterStatus && binding.adapterStatus !== 'idle')) {
+          nextBindings[nodeId] = {
+            ...binding,
+            runtimeSessionId: undefined,
+            adapterStatus: 'idle',
+          };
+          changedBindings = true;
+        }
+      }
+    }
+
+    // 3. Clean stale terminal panes (builder/codex often persist unexpectedly)
+    let changedTabs = false;
+    const nextTabs = tabs.map(tab => {
+      const filteredPanes = tab.panes.filter(pane => {
+        if (pane.type === 'terminal') {
+          const role = String(pane.data?.roleId ?? '').toLowerCase();
+          const cli = String(pane.data?.cli ?? '').toLowerCase();
+          if (role === 'builder' && cli === 'codex') return false;
+        }
+        return true;
+      });
+      if (filteredPanes.length !== tab.panes.length) {
+        changedTabs = true;
+        return { ...tab, panes: filteredPanes };
+      }
+      return tab;
+    });
+
+    if (changedNodes || changedBindings || changedTabs) {
+      useWorkspaceStore.setState({ 
+        globalGraph: { ...globalGraph, nodes: nextNodes },
+        nodeRuntimeBindings: nextBindings,
+        tabs: nextTabs
+      });
+      hasCleanedRef.current = true;
+    } else if (globalGraph.nodes.length > 0) {
+      // Data is present but no cleanup needed - still mark as cleaned
+      hasCleanedRef.current = true;
+    }
+  }, [globalGraph, nodeRuntimeBindings]); 
 
   // Load tasks from SQLite on startup
   useEffect(() => {
@@ -195,10 +278,10 @@ function App() {
   useEffect(() => {
     const activePanes = tabs.find(t => t.id === activeTabId)?.panes ?? [];
     const hasLauncher = activePanes.some(p => p.type === 'launcher');
-    const shouldProbe = activeSidebarTab === 'nodetree' || hasLauncher;
+    const shouldProbe = appMode === 'workflow' || appMode === 'runtime' || hasLauncher;
     if (!shouldProbe) return;
     refreshCliDetectionForTerminals(activePanes, updatePaneData).catch(() => {});
-  }, [activeSidebarTab, activeTabId, tabs, updatePaneData]);
+  }, [appMode, activeTabId, tabs, updatePaneData]);
 
   const [showQuickOpen, setShowQuickOpen] = useState(false);
   const [editingTabId, setEditingTabId] = useState<string | null>(null);
@@ -292,25 +375,17 @@ function App() {
         </div>
 
         <div className="flex-1 flex justify-center items-center gap-1 h-full relative z-10" data-tauri-drag-region>
-          {activeSidebarTab !== 'nodetree' ? (
+          {appMode === 'workspace' ? (
             <div 
               className="flex items-center gap-1 bg-bg-surface border border-border-panel rounded-lg px-1 py-0.5"
               data-tauri-no-drag
             >
-              <DraggableOption type="terminal"     label="Terminal" icon={<TerminalSquare size={13} />} onClick={() => addPane('terminal', 'Terminal')} onDragStart={onNewPaneDragStart} />
-              <div className="w-px h-4 bg-border-divider" />
               <DraggableOption type="editor"       label="Editor"   icon={<FileCode2 size={13} />}      onClick={() => addPane('editor', 'Editor')}   onDragStart={onNewPaneDragStart} />
-              <div className="w-px h-4 bg-border-divider" />
-              <DraggableOption type="taskboard"    label="Tasks"    icon={<KanbanSquare size={13} />}   onClick={() => addPane('taskboard', 'Tasks')} onDragStart={onNewPaneDragStart} />
-              <div className="w-px h-4 bg-border-divider" />
-              <DraggableOption type="activityfeed" label="Swarm"    icon={<Activity size={13} />}       onClick={() => addPane('activityfeed', 'Swarm')} onDragStart={onNewPaneDragStart} />
-              <div className="w-px h-4 bg-border-divider" />
-              <DraggableOption type="launcher"     label="Launch"   icon={<Rocket size={13} />}          onClick={() => addPane('launcher', 'Launcher')} onDragStart={onNewPaneDragStart} />
             </div>
           ) : (
             <div className="flex items-center gap-2 text-xs font-bold text-accent-primary uppercase tracking-widest">
-               <Network size={14} />
-               <span>Workflow Designer</span>
+               {appMode === 'runtime' ? <Monitor size={14} /> : <Network size={14} />}
+               <span>{modeLabel}</span>
             </div>
           )}
         </div>
@@ -337,14 +412,18 @@ function App() {
 
       {/* Main Content Area */}
       <div className="flex-1 flex overflow-hidden relative">
-        <Sidebar />
+        <ModeRail />
+        {appMode === 'workspace' && <Sidebar />}
         
         <main className="flex-1 flex flex-col min-w-0 bg-bg-app relative">
           
-          {/* View Switcher: Node Tree takes over entire main area */}
-          {activeSidebarTab === 'nodetree' ? (
+          {appMode === 'workflow' ? (
              <div className="flex-1 overflow-hidden relative">
                <NodeTreePane graph={globalGraph} onGraphChange={setGlobalGraph} />
+             </div>
+          ) : appMode === 'runtime' ? (
+             <div className="flex-1 overflow-hidden relative">
+               <RuntimeView />
              </div>
           ) : (
             <>
@@ -413,7 +492,7 @@ function App() {
               </div>
 
               <div className="flex-1 flex flex-col overflow-hidden">
-                <WorkspaceGrid />
+                <WorkspaceGrid visibleTypes={['editor']} />
               </div>
             </>
           )}
@@ -473,6 +552,42 @@ function App() {
     >
       {content}
     </ErrorBoundary>
+  );
+}
+
+const MODE_OPTIONS: Array<{ id: AppMode; label: string; icon: React.ReactNode }> = [
+  { id: 'workflow', label: 'Workflow', icon: <Network size={18} /> },
+  { id: 'runtime', label: 'Runtime', icon: <Monitor size={18} /> },
+  { id: 'workspace', label: 'Workspace', icon: <FolderTree size={18} /> },
+];
+
+function ModeRail() {
+  const appMode = useWorkspaceStore((s) => s.appMode);
+  const setAppMode = useWorkspaceStore((s) => s.setAppMode);
+
+  return (
+    <nav className="w-12 shrink-0 h-full bg-bg-titlebar border-r border-border-panel flex flex-col items-center py-2 gap-1">
+      <div className="mb-3 flex items-center justify-center w-8 h-8">
+        <TerminalSquare size={20} className="text-accent-primary" />
+      </div>
+      {MODE_OPTIONS.map((mode) => (
+        <button
+          key={mode.id}
+          onClick={() => setAppMode(mode.id)}
+          title={mode.label}
+          className={`relative w-9 h-9 flex items-center justify-center rounded-lg transition-all ${
+            appMode === mode.id
+              ? 'text-accent-primary bg-accent-primary/10'
+              : 'text-text-muted hover:text-text-secondary hover:bg-bg-surface'
+          }`}
+        >
+          {mode.icon}
+          {appMode === mode.id && (
+            <span className="absolute left-0 top-1/2 -translate-y-1/2 w-0.5 h-5 bg-accent-primary rounded-r-full" />
+          )}
+        </button>
+      ))}
+    </nav>
   );
 }
 

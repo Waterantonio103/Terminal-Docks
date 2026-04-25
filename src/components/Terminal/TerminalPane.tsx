@@ -11,6 +11,7 @@ import { writeText, readText } from '@tauri-apps/plugin-clipboard-manager';
 import { openUrl } from '@tauri-apps/plugin-opener';
 import { useWorkspaceStore, Pane } from '../../store/workspace';
 import { ChevronDown, ChevronUp, X } from 'lucide-react';
+import { detectRuntimeAction } from '../../lib/runtimeActivity';
 
 interface ContextMenuState { x: number; y: number }
 
@@ -172,15 +173,37 @@ export function TerminalPane({ pane, dragEndSeq }: { pane: Pane; dragEndSeq?: nu
     let unlisten: UnlistenFn | null = null;
 
     const initPty = async () => {
+      const storeSnap = useWorkspaceStore.getState();
+      const workspaceDir = storeSnap.workspaceDir;
+      const boundNodeId = typeof pane.data?.nodeId === 'string' ? pane.data.nodeId : null;
+      // Read CLI from globalGraph (authoritative) by matching terminalId. pane.data.cli can
+      // be stale when the CLI was changed in workflow mode while the app was in workspace mode,
+      // or when NodeTreePane's useLayoutEffect sync never ran (e.g. app opened in workspace mode).
+      const graphNode = storeSnap.globalGraph.nodes.find(n => n.config?.terminalId === terminalId);
+      const cli = graphNode?.config?.cli ?? pane.data?.cli;
+
       unlisten = await listen<{ id: string; data: number[] }>('pty-out', (event) => {
         if (event.payload.id === terminalId) {
-          term.write(new Uint8Array(event.payload.data));
+          const bytes = new Uint8Array(event.payload.data);
+          term.write(bytes);
+          const chunk = new TextDecoder().decode(bytes);
+          if (boundNodeId) {
+            emit('workflow-node-action', {
+              nodeId: boundNodeId,
+              terminalId,
+              action: detectRuntimeAction(chunk),
+            }).catch(() => {});
+          }
         }
       });
 
-      const workspaceDir = useWorkspaceStore.getState().workspaceDir;
-      const cli = pane.data?.cli;
       const customCommand = pane.data?.customCliCommand;
+      await invoke('register_pty_runtime_metadata', {
+        terminalId,
+        nodeId: boundNodeId,
+        runtimeSessionId: typeof pane.data?.runtimeSessionId === 'string' ? pane.data.runtimeSessionId : null,
+        cli: typeof cli === 'string' ? cli : 'generic',
+      }).catch(() => {});
 
       if (customCommand) {
         await invoke<boolean>('spawn_pty_with_command', {
@@ -193,17 +216,25 @@ export function TerminalPane({ pane, dragEndSeq }: { pane: Pane; dragEndSeq?: nu
           env: pane.data?.customCliEnv ?? null,
         });
       } else if (cli && cli !== 'custom') {
-        // Map common agent CLIs to their binary names. 
-        // In a real environment, these must be in the PATH.
-        const command = String(cli);
-        await invoke<boolean>('spawn_pty_with_command', {
+        const command = String(cli).replace(/\0/g, '');
+        // For known CLIs in "interactive PTY" mode, we spawn a default shell
+        // and then send the command. This is more robust on Windows where
+        // binaries like 'codex' or 'claude' are often .cmd shims.
+        const spawned = await invoke<boolean>('spawn_pty', {
           id: terminalId,
           rows: term.rows || 24,
           cols: term.cols || 80,
           cwd: workspaceDir,
-          command,
-          args: [],
         });
+
+        // Only send the CLI launch command if we actually spawned a new PTY.
+        // spawn_pty returns false when the PTY already exists (e.g. on component
+        // remount), so we must not re-send the command into an already-running session.
+        if (spawned) {
+          setTimeout(() => {
+            invoke('write_to_pty', { id: terminalId, data: `${command}\r` }).catch(() => {});
+          }, 600);
+        }
       } else {
         await invoke<boolean>('spawn_pty', {
           id: terminalId,

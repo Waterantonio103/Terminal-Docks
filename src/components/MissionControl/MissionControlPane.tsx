@@ -1110,6 +1110,12 @@ export function MissionControlPane({ pane }: { pane: Pane }) {
           );
           return;
         }
+        await invoke('register_pty_runtime_metadata', {
+          terminalId,
+          nodeId,
+          runtimeSessionId: payload.sessionId,
+          cli: payload.cliType || 'generic',
+        }).catch(() => {});
 
         const baseUrl = await invoke<string>('get_mcp_base_url');
         logToAgent(pane.id, nodeId, `MCP URL: ${baseUrl}. Verifying server health...`);

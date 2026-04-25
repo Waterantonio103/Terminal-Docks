@@ -15,6 +15,7 @@
     "src/lib/cliCommandBuilders.ts",
     "src/lib/missionRuntime.ts",
     "src/lib/runtimeDispatcher.ts",
+    "src/lib/runtimeActivity.ts",
     "src/lib/workflowPresets.ts",
     "src/lib/cliAdapters.ts",
     "src/lib/workflowRuntimePlanning.ts"

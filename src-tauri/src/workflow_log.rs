@@ -5,6 +5,7 @@ use tauri::{AppHandle, Manager, State};
 use tauri_plugin_dialog::{DialogExt, FilePath};
 
 use crate::db::DbState;
+use crate::pty::{PermissionAuditEntry, PtyState};
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct AgentExport {
@@ -37,6 +38,7 @@ fn build_markdown(
     results: &[ResultExport],
     events: &[(String, String, Option<String>, String)],
     tasks: &[(i64, String, Option<String>, String, Option<String>, Option<i64>)],
+    permission_audit: &[PermissionAuditEntry],
 ) -> String {
     let mut md = String::with_capacity(8192);
 
@@ -149,6 +151,38 @@ fn build_markdown(
         md.push_str("---\n\n");
     }
 
+    if !permission_audit.is_empty() {
+        md.push_str("## PERMISSION AUDIT TRAIL\n\n");
+        md.push_str("| Time | Request | CLI | Type | State | Decision | Node | Excerpt |\n");
+        md.push_str("|------|---------|-----|------|-------|----------|------|---------|\n");
+        for entry in permission_audit {
+            let request_short = if entry.request_id.len() > 12 {
+                &entry.request_id[..12]
+            } else {
+                entry.request_id.as_str()
+            };
+            let node = entry.node_id.as_deref().unwrap_or("runtime-only");
+            let decision = entry.decision.as_deref().unwrap_or("");
+            let excerpt = entry
+                .prompt_excerpt
+                .replace('|', "\\|")
+                .replace('\n', " ");
+            md.push_str(&format!(
+                "| {} | `{}` | {} | {} | {:?} | {} | {} | {} |\n",
+                format_millis_utc(entry.timestamp),
+                request_short,
+                entry.cli,
+                entry.permission_type,
+                entry.state,
+                decision,
+                node,
+                excerpt
+            ));
+        }
+        md.push('\n');
+        md.push_str("---\n\n");
+    }
+
     // ── Published outputs ─────────────────────────────────────────────────────
     let markdown_results: Vec<&ResultExport> = results
         .iter()
@@ -202,6 +236,7 @@ pub fn export_workflow_log(
     pipeline_names: Vec<String>,
     results: Vec<ResultExport>,
     state: State<'_, DbState>,
+    pty_state: State<'_, PtyState>,
 ) -> Result<String, String> {
     let events = {
         let db_lock = state.db.lock().map_err(|_| "DB lock failed")?;
@@ -266,6 +301,7 @@ pub fn export_workflow_log(
         &results,
         &events,
         &tasks,
+        &pty_state.permission_audit.lock().unwrap().clone(),
     );
 
     let slug: String = task_description

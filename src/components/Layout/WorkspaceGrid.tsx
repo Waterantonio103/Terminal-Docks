@@ -146,7 +146,7 @@ function DashboardPanel({ pane, onDragStart, onResizeStart, isDragging, isResizi
   );
 }
 
-export function WorkspaceGrid() {
+export function WorkspaceGrid({ visibleTypes }: { visibleTypes?: PaneType[] } = {}) {
   const panes = useWorkspaceStore(selectActivePanes);
   const updatePaneLayout = useWorkspaceStore(s => s.updatePaneLayout);
   const updatePaneData = useWorkspaceStore(s => s.updatePaneData);
@@ -163,16 +163,21 @@ export function WorkspaceGrid() {
   const dragInfo = useRef<{ startX: number; startY: number; startGrid: GridPos; offsetX: number; offsetY: number } | null>(null);
 
   // Compute live preview of collisions
+  const visiblePanes = useMemo(
+    () => visibleTypes ? panes.filter(pane => visibleTypes.includes(pane.type)) : panes,
+    [panes, visibleTypes]
+  );
+
   const displayPanes = useMemo(() => {
-    if (!ghostPos || (!draggingId && !resizingId)) return panes;
+    if (!ghostPos || (!draggingId && !resizingId)) return visiblePanes;
     
     const activeId = draggingId || resizingId;
-    const previewPanes = panes.map(p => 
+    const previewPanes = visiblePanes.map(p => 
       p.id === activeId ? { ...p, gridPos: ghostPos } : p
     );
     
     return resolveCollisions(previewPanes, activeId!);
-  }, [panes, ghostPos, draggingId, resizingId]);
+  }, [visiblePanes, ghostPos, draggingId, resizingId]);
 
   useEffect(() => {
     if (!containerRef.current) return;
