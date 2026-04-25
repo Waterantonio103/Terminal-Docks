@@ -1,10 +1,10 @@
 import React, { useState, useEffect, useRef } from 'react';
 import CodeMirror from '@uiw/react-codemirror';
 import { javascript } from '@codemirror/lang-javascript';
-import { readTextFile, writeTextFile } from '@tauri-apps/plugin-fs';
 import { open } from '@tauri-apps/plugin-dialog';
 import { FolderOpen } from 'lucide-react';
 import { Pane, useWorkspaceStore } from '../../store/workspace';
+import { invoke } from '@tauri-apps/api/core';
 
 const WELCOME = '// Welcome to the Editor\nconsole.log("Hello, world!");';
 
@@ -17,16 +17,23 @@ export function EditorPane({ pane }: { pane: Pane }) {
   const updatePaneData = useWorkspaceStore(s => s.updatePaneData);
   
   const [content, setContent] = useState(() => {
+    if (data?.initialContent) return data.initialContent;
     if (!filePath) return WELCOME;
     return contentCache.get(filePath) ?? '';
   });
-  
+
   const [isDirty, setIsDirty] = useState(false);
   const [loading, setLoading] = useState(false);
   const lastLoadedPathRef = useRef<string | undefined>(undefined);
 
   useEffect(() => {
+    if (data?.initialContent && !filePath) {
+      setContent(data.initialContent);
+      return;
+    }
+
     if (!filePath) {
+
       if (lastLoadedPathRef.current !== undefined) {
         setContent(WELCOME);
         setIsDirty(false);
@@ -40,8 +47,8 @@ export function EditorPane({ pane }: { pane: Pane }) {
 
     setLoading(true);
     lastLoadedPathRef.current = filePath;
-    
-    readTextFile(filePath)
+
+    invoke<string>('workspace_read_text_file', { path: filePath })
       .then(val => {
         contentCache.set(filePath, val);
         setContent(val);
@@ -52,9 +59,9 @@ export function EditorPane({ pane }: { pane: Pane }) {
         setContent(`// Error loading file:\n// ${err}`);
       })
       .finally(() => setLoading(false));
-  }, [filePath]);
+    }, [filePath]);
 
-  const handleOpenFile = async () => {
+    const handleOpenFile = async () => {
     try {
       const selected = await open({ multiple: false, directory: false });
       const path = Array.isArray(selected) ? selected[0] : selected;
@@ -64,19 +71,18 @@ export function EditorPane({ pane }: { pane: Pane }) {
     } catch (err) {
       console.error('File dialog error:', err);
     }
-  };
+    };
 
-  const handleSave = async () => {
+    const handleSave = async () => {
     if (filePath) {
       try {
-        await writeTextFile(filePath, content);
+        await invoke('workspace_write_text_file', { path: filePath, content });
         setIsDirty(false);
       } catch (err) {
         console.error('Failed to save file', err);
       }
     }
-  };
-
+    };
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if ((e.ctrlKey || e.metaKey) && e.key === 's') {
       e.preventDefault();

@@ -1,10 +1,15 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useWorkspaceStore } from '../../store/workspace';
 import { open } from '@tauri-apps/plugin-dialog';
-import { readDir, DirEntry, writeFile, mkdir, remove, rename, readTextFile } from '@tauri-apps/plugin-fs';
 import { Folder, File as FileIcon, ChevronRight, ChevronDown, Lock, MoreVertical, FilePlus, FolderPlus, Trash2, Edit2, Copy, Scissors, Clipboard, ExternalLink, Search, FileText } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
-import { writeText, readText } from '@tauri-apps/plugin-clipboard-manager';
+import { writeText } from '@tauri-apps/plugin-clipboard-manager';
+
+interface DirEntry {
+  name: string;
+  isDirectory: boolean;
+  isFile: boolean;
+}
 
 interface FileLock {
   file_path: string;
@@ -29,25 +34,17 @@ function TreeNode({ file, parentPath, locks, refreshSignal, onContextMenu }: { f
 
   useEffect(() => {
     if (isOpen && file.isDirectory && refreshSignal > 0) {
-      readDir(fullPath).then(files => {
-        files.sort((a, b) => {
-          if (a.isDirectory === b.isDirectory) return a.name.localeCompare(a.name);
-          return a.isDirectory ? -1 : 1;
-        });
+      invoke<DirEntry[]>('workspace_read_dir', { path: fullPath }).then(files => {
         setChildren(files);
       }).catch(console.error);
     }
-  }, [refreshSignal]);
+  }, [refreshSignal, isOpen, file.isDirectory, fullPath]);
 
   const handleClick = async () => {
     if (file.isDirectory) {
       if (!isOpen) {
         try {
-          const files = await readDir(fullPath);
-          files.sort((a, b) => {
-            if (a.isDirectory === b.isDirectory) return a.name.localeCompare(b.name);
-            return a.isDirectory ? -1 : 1;
-          });
+          const files = await invoke<DirEntry[]>('workspace_read_dir', { path: fullPath });
           setChildren(files);
         } catch (err) {
           console.error(err);
@@ -113,13 +110,12 @@ export function FileTree() {
   const addPane = useWorkspaceStore(s => s.addPane);
   const [files, setFiles] = useState<DirEntry[]>([]);
   const [locks, setLocks] = useState<FileLock[]>([]);
-  const [refreshSignal, setRefreshSignal] = useState(0);
+  const [refreshSignal, setRefreshSignal] = useState(1);
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const [promptState, setPromptState] = useState<{ type: 'file' | 'folder' | 'rename', parentPath: string, fileName?: string } | null>(null);
   const [promptValue, setPromptValue] = useState('');
   const [clipboard, setClipboard] = useState<{ path: string, isCut: boolean } | null>(null);
   
-  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const promptInputRef = useRef<HTMLInputElement>(null);
 
   const handleOpenFolder = async () => {
@@ -148,11 +144,7 @@ export function FileTree() {
   }, []);
 
   const refreshRoot = useCallback((dir: string) => {
-    readDir(dir).then(f => {
-      f.sort((a, b) => {
-        if (a.isDirectory === b.isDirectory) return a.name.localeCompare(a.name);
-        return a.isDirectory ? -1 : 1;
-      });
+    invoke<DirEntry[]>('workspace_read_dir', { path: dir }).then(f => {
       setFiles(f);
     }).catch(console.error);
   }, []);
@@ -218,9 +210,11 @@ export function FileTree() {
   const handleDelete = async () => {
     if (!contextMenu) return;
     const path = getFullPath(contextMenu.file, contextMenu.parentPath);
-    if (confirm(`Are you sure you want to delete ${contextMenu.file.name}?`)) {
+    const fileName = contextMenu.file.name;
+    closeContextMenu();
+    if (confirm(`Are you sure you want to delete ${fileName}?`)) {
       try {
-        await remove(path, { recursive: true });
+        await invoke('workspace_delete', { targetPath: path });
         setRefreshSignal(s => s + 1);
         if (workspaceDir) refreshRoot(workspaceDir);
       } catch (err) {
@@ -232,12 +226,14 @@ export function FileTree() {
   const handleReveal = async () => {
     if (!contextMenu) return;
     const path = getFullPath(contextMenu.file, contextMenu.parentPath);
+    closeContextMenu();
     await invoke('reveal_in_explorer', { path });
   };
 
   const handleCopyPath = async () => {
     if (!contextMenu) return;
     const path = getFullPath(contextMenu.file, contextMenu.parentPath);
+    closeContextMenu();
     await writeText(path);
   };
 
@@ -245,17 +241,20 @@ export function FileTree() {
     if (!contextMenu || !workspaceDir) return;
     const path = getFullPath(contextMenu.file, contextMenu.parentPath);
     const relative = path.replace(workspaceDir, '').replace(/^[\\/]/, '');
+    closeContextMenu();
     await writeText(relative);
   };
 
   const handleCopy = () => {
     if (!contextMenu) return;
     setClipboard({ path: getFullPath(contextMenu.file, contextMenu.parentPath), isCut: false });
+    closeContextMenu();
   };
 
   const handleCut = () => {
     if (!contextMenu) return;
     setClipboard({ path: getFullPath(contextMenu.file, contextMenu.parentPath), isCut: true });
+    closeContextMenu();
   };
 
   const handlePaste = async () => {
@@ -263,14 +262,14 @@ export function FileTree() {
     const targetDir = contextMenu.file.isDirectory ? getFullPath(contextMenu.file, contextMenu.parentPath) : contextMenu.parentPath;
     const fileName = clipboard.path.split(/[\\/]/).pop()!;
     const destPath = targetDir + (targetDir.endsWith('/') || targetDir.endsWith('\\') ? '' : '/') + fileName;
+    closeContextMenu();
 
     try {
       if (clipboard.isCut) {
-        await rename(clipboard.path, destPath);
+        await invoke('workspace_move', { src: clipboard.path, dest: destPath });
         setClipboard(null);
       } else {
-        const content = await readTextFile(clipboard.path);
-        await writeFile(destPath, new TextEncoder().encode(content));
+        await invoke('workspace_copy', { src: clipboard.path, dest: destPath });
       }
       setRefreshSignal(s => s + 1);
       if (workspaceDir) refreshRoot(workspaceDir);
@@ -279,18 +278,32 @@ export function FileTree() {
     }
   };
 
+  const handleFindInFolder = async () => {
+    if (!contextMenu) return;
+    const targetPath = contextMenu.file.isDirectory ? getFullPath(contextMenu.file, contextMenu.parentPath) : contextMenu.parentPath;
+    closeContextMenu();
+    const query = prompt(`Search in ${targetPath}:`);
+    if (query && query.trim()) {
+       try {
+         const results = await invoke<string>('workspace_search', { dirPath: targetPath, query: query.trim() });
+         addPane('editor', `Search: ${query}`, { initialContent: results });
+       } catch (err) {
+         alert(`Search failed: ${err}`);
+       }
+    }
+  };
+
   const submitPrompt = async () => {
     if (!promptState || !promptValue.trim()) return;
-    const path = promptState.parentPath + (promptState.parentPath.endsWith('/') || promptState.parentPath.endsWith('\\') ? '' : '/') + promptValue.trim();
 
     try {
       if (promptState.type === 'file') {
-        await writeFile(path, new Uint8Array());
+        await invoke('workspace_create_file', { parentPath: promptState.parentPath, name: promptValue.trim() });
       } else if (promptState.type === 'folder') {
-        await mkdir(path);
+        await invoke('workspace_create_dir', { parentPath: promptState.parentPath, name: promptValue.trim() });
       } else if (promptState.type === 'rename') {
         const oldPath = promptState.parentPath + (promptState.parentPath.endsWith('/') || promptState.parentPath.endsWith('\\') ? '' : '/') + promptState.fileName;
-        await rename(oldPath, path);
+        await invoke('workspace_rename', { targetPath: oldPath, newName: promptValue.trim() });
       }
       setPromptState(null);
       setRefreshSignal(s => s + 1);
@@ -315,16 +328,18 @@ export function FileTree() {
     );
   }
 
+  const isRoot = contextMenu?.file.name === '' && contextMenu?.parentPath === workspaceDir;
+
   return (
     <div className="flex-1 flex flex-col min-h-0 relative" onContextMenu={(e) => {
       // Background right-click targets root
-      handleContextMenu(e, { name: '', isDirectory: true, isFile: false, isSymlink: false }, workspaceDir);
+      handleContextMenu(e, { name: '', isDirectory: true, isFile: false }, workspaceDir);
     }}>
       <div 
         className="flex items-center justify-between text-xs text-text-muted px-3 py-2 shrink-0 border-b border-border-panel cursor-pointer hover:bg-bg-surface transition-colors group select-none"
         onContextMenu={(e) => {
           e.stopPropagation();
-          handleContextMenu(e, { name: '', isDirectory: true, isFile: false, isSymlink: false }, workspaceDir);
+          handleContextMenu(e, { name: '', isDirectory: true, isFile: false }, workspaceDir);
         }}
         onClick={handleOpenFolder}
       >
@@ -355,21 +370,25 @@ export function FileTree() {
               <ContextMenuItem icon={<FilePlus size={12}/>} label="New File" onClick={handleCreateFile} />
               <ContextMenuItem icon={<FolderPlus size={12}/>} label="New Folder" onClick={handleCreateFolder} />
               <div className="h-px bg-border-panel my-1" />
-              <ContextMenuItem icon={<Search size={12}/>} label="Find in Folder" onClick={() => {}} disabled />
+              <ContextMenuItem icon={<Search size={12}/>} label="Find in Folder..." onClick={handleFindInFolder} />
               <div className="h-px bg-border-panel my-1" />
             </>
           ) : null}
           
-          <ContextMenuItem icon={<Scissors size={12}/>} label="Cut" onClick={handleCut} />
-          <ContextMenuItem icon={<Copy size={12}/>} label="Copy" onClick={handleCopy} />
+          {!isRoot && (
+            <>
+              <ContextMenuItem icon={<Scissors size={12}/>} label="Cut" onClick={handleCut} />
+              <ContextMenuItem icon={<Copy size={12}/>} label="Copy" onClick={handleCopy} />
+            </>
+          )}
           <ContextMenuItem icon={<Clipboard size={12}/>} label="Paste" onClick={handlePaste} disabled={!clipboard} />
           
           <div className="h-px bg-border-panel my-1" />
           <ContextMenuItem icon={<FileText size={12}/>} label="Copy Path" onClick={handleCopyPath} />
           <ContextMenuItem icon={<FileText size={12}/>} label="Copy Relative Path" onClick={handleCopyRelativePath} />
           
-          {/* Hide Rename/Delete for Root Directory */}
-          {contextMenu.file.name !== '' && (
+          {/* Show Rename/Delete only if not root */}
+          {!isRoot && (
             <>
               <div className="h-px bg-border-panel my-1" />
               <ContextMenuItem icon={<Edit2 size={12}/>} label="Rename..." onClick={handleRename} />

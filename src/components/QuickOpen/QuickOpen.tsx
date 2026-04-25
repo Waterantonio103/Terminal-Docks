@@ -1,7 +1,13 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { readDir } from '@tauri-apps/plugin-fs';
 import { Search, FileCode2, X } from 'lucide-react';
 import { useWorkspaceStore } from '../../store/workspace';
+import { invoke } from '@tauri-apps/api/core';
+
+interface DirEntry {
+  name: string;
+  isDirectory: boolean;
+  isFile: boolean;
+}
 
 interface FileEntry {
   path: string;
@@ -13,7 +19,7 @@ const MAX_FILES = 500;
 async function collectFiles(dir: string, depth = 0): Promise<FileEntry[]> {
   if (depth > 4) return [];
   try {
-    const entries = await readDir(dir);
+    const entries = await invoke<DirEntry[]>('workspace_read_dir', { path: dir });
     const results: FileEntry[] = [];
     for (const entry of entries) {
       if (!entry.name) continue;

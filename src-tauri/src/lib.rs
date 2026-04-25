@@ -6,6 +6,7 @@ pub mod swarm;
 pub mod workflow;
 pub mod workflow_engine;
 pub mod workflow_log;
+pub mod workspace;
 
 #[tauri::command]
 fn greet(name: &str) -> String {
@@ -67,6 +68,16 @@ pub fn run() {
             workflow_engine::acknowledge_runtime_activation,
             workflow_engine::get_runtime_activation,
             workflow_engine::get_mission_activations,
+            workspace::workspace_read_dir,
+            workspace::workspace_create_file,
+            workspace::workspace_create_dir,
+            workspace::workspace_rename,
+            workspace::workspace_delete,
+            workspace::workspace_read_text_file,
+            workspace::workspace_write_text_file,
+            workspace::workspace_copy,
+            workspace::workspace_move,
+            workspace::workspace_search,
         ])
         .setup(|app| {
             db::init_db(app.handle()).expect("Failed to init db");
@@ -91,8 +102,7 @@ fn reveal_in_explorer(path: String) {
         use std::process::Command;
         let p = path.replace("/", "\\");
         Command::new("explorer")
-            .arg("/select,")
-            .arg(p)
+            .arg(format!("/select,{}", p))
             .spawn()
             .ok();
     }
@@ -108,8 +118,10 @@ fn reveal_in_explorer(path: String) {
     #[cfg(target_os = "linux")]
     {
         use std::process::Command;
+        let p = std::path::Path::new(&path);
+        let dir = if p.is_dir() { p } else { p.parent().unwrap_or(std::path::Path::new("/")) };
         Command::new("xdg-open")
-            .arg(std::path::Path::new(&path).parent().unwrap_or(std::path::Path::new("/")))
+            .arg(dir)
             .spawn()
             .ok();
     }
