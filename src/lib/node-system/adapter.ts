@@ -178,6 +178,8 @@ function legacyRoleForNode(node: NodeInstance): string {
       return 'frame';
     case 'workflow.reroute':
       return 'reroute';
+    case 'workflow.output':
+      return 'output';
     default:
       return String(node.properties.roleId ?? 'agent');
   }

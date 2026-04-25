@@ -36,6 +36,7 @@ pub fn run() {
             pty::is_pty_active,
             pty::handle_workflow_permission_decision,
             pty::register_pty_runtime_metadata,
+            reveal_in_explorer,
             pty::list_active_permission_requests,
             pty::list_permission_audit_entries,
             db::get_tasks,
@@ -81,4 +82,35 @@ pub fn run() {
                 mcp::kill_mcp_server(app_handle);
             }
         });
+}
+
+#[tauri::command]
+fn reveal_in_explorer(path: String) {
+    #[cfg(target_os = "windows")]
+    {
+        use std::process::Command;
+        let p = path.replace("/", "\\");
+        Command::new("explorer")
+            .arg("/select,")
+            .arg(p)
+            .spawn()
+            .ok();
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use std::process::Command;
+        Command::new("open")
+            .arg("-R")
+            .arg(path)
+            .spawn()
+            .ok();
+    }
+    #[cfg(target_os = "linux")]
+    {
+        use std::process::Command;
+        Command::new("xdg-open")
+            .arg(std::path::Path::new(&path).parent().unwrap_or(std::path::Path::new("/")))
+            .spawn()
+            .ok();
+    }
 }

@@ -147,8 +147,7 @@ ${JSON.stringify(payload)}
       }
       if (SHELL_PROMPT_RE.test(text) && session.readyState === 'ready' && bannerConfirmed) {
         // Claude exited; visible shell prompt means the CLI died.
-        onEvent({ kind: 'crash', detail: 'shell-prompt-visible' });
-        registry.markDead(session.sessionId, 'shell-prompt-visible');
+        onEvent({ kind: 'process-exit', detail: 'shell-prompt-visible' });
       }
     });
 

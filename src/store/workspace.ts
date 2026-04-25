@@ -350,10 +350,13 @@ export interface DbTask {
 }
 
 export type SidebarTabType = 'files' | 'tasks' | 'swarm' | 'agents' | 'nodetree' | 'settings';
+export type LayoutMode = 'grid' | 'tabs';
 
 interface WorkspaceState {
   tabs: WorkspaceTab[];
   activeTabId: string;
+  activePaneId: string | null;
+  layoutMode: LayoutMode;
   sidebarOpen: boolean;
   activeSidebarTab: SidebarTabType;
   appMode: AppMode;
@@ -370,6 +373,8 @@ interface WorkspaceState {
   toggleSidebar: () => void;
   setActiveSidebarTab: (tab: SidebarTabType) => void;
   setAppMode: (mode: AppMode) => void;
+  setLayoutMode: (mode: LayoutMode) => void;
+  setActivePaneId: (id: string | null) => void;
   setGlobalGraph: (graph: WorkflowGraph) => void;
   addPane: (type: PaneType, title: string, data?: any) => void;
   addPaneAt: (type: PaneType, title: string, index: number, data?: any) => void;
@@ -399,6 +404,24 @@ interface WorkspaceState {
   setNodeRuntimeBinding: (nodeId: string, binding: NodeRuntimeBinding) => void;
   removeNodeTerminalBinding: (nodeId: string) => void;
   addMissionArtifact: (missionId: string, nodeId: string, artifact: MissionArtifact) => void;
+  createRuntimeTerminal: (opts: { nodeId: string; roleId: string; cli: WorkflowAgentCli; executionMode: WorkflowExecutionMode; title: string }) => { paneId: string; terminalId: string };
+}
+
+function findHighestAvailableSpot(panes: Pane[], w: number, h: number): GridPos {
+  const GRID_COLUMNS = 100;
+  let y = 0;
+  while (y < 2000) {
+    for (let x = 0; x <= GRID_COLUMNS - w; x++) {
+      const rect = { x, y, w, h };
+      const hasCollision = panes.some(p => {
+        const o = p.gridPos;
+        return rect.x < o.x + o.w && rect.x + rect.w > o.x && rect.y < o.y + o.h && rect.y + rect.h > o.y;
+      });
+      if (!hasCollision) return rect;
+    }
+    y += 2;
+  }
+  return { x: 0, y: 0, w, h };
 }
 
 const _initTabId = generateId();
@@ -411,11 +434,13 @@ export const useWorkspaceStore = create<WorkspaceState>()(
         name: 'Workspace 1',
         color: TAB_COLORS[0],
         panes: [
-          { id: generateId(), type: 'terminal', title: 'Terminal 1', gridPos: { x: 0, y: 0, w: 12, h: 18 }, data: { terminalId: generateId() } },
-          { id: generateId(), type: 'editor', title: 'Welcome', gridPos: { x: 12, y: 0, w: 12, h: 18 } },
+          { id: generateId(), type: 'terminal', title: 'Terminal 1', gridPos: { x: 0, y: 0, w: 50, h: 100 }, data: { terminalId: generateId() } },
+          { id: generateId(), type: 'editor', title: 'Welcome', gridPos: { x: 50, y: 0, w: 50, h: 100 } },
         ],
       }],
       activeTabId: _initTabId,
+      activePaneId: null,
+      layoutMode: 'grid',
       sidebarOpen: true,
       activeSidebarTab: 'files',
       appMode: 'workflow',
@@ -432,6 +457,8 @@ export const useWorkspaceStore = create<WorkspaceState>()(
 
       setActiveSidebarTab: (tab) => set({ activeSidebarTab: tab }),
       setAppMode: (mode) => set({ appMode: mode }),
+      setLayoutMode: (mode) => set({ layoutMode: mode }),
+      setActivePaneId: (id) => set({ activePaneId: id }),
       setGlobalGraph: (graph) => set({
         globalGraph: {
           ...graph,
@@ -504,6 +531,31 @@ export const useWorkspaceStore = create<WorkspaceState>()(
         })),
       })),
 
+      createRuntimeTerminal: ({ nodeId, roleId, cli, executionMode, title }) => {
+        const terminalId = generateId();
+        const paneId = generateId();
+        
+        set((state) => {
+          const panes = selectActivePanes(state);
+          const gridPos = findHighestAvailableSpot(panes, 25, 40);
+          
+          const newPane: Pane = {
+            id: paneId,
+            type: 'terminal',
+            title,
+            gridPos,
+            data: { terminalId, nodeId, roleId, cli, cliSource: 'heuristic', executionMode }
+          };
+          
+          return {
+            ...withActivePanes(state, ps => resolveCollisions([...ps, newPane])),
+            activePaneId: paneId
+          };
+        });
+        
+        return { paneId, terminalId };
+      },
+
       toggleSidebar: () => set((s) => ({ sidebarOpen: !s.sidebarOpen })),
 
       addPane: (type, title, data) => set((state) => {
@@ -520,22 +572,25 @@ export const useWorkspaceStore = create<WorkspaceState>()(
               messages: [],
               results: [],
               tasks: [],
+              activePaneId: existing.id
             };
           }
         }
 
-        if (data?.filePath && panes.find(p => p.data?.filePath === data.filePath)) return state;
+        const existingFile = data?.filePath ? panes.find(p => p.data?.filePath === data.filePath) : null;
+        if (existingFile) {
+          return { ...state, activePaneId: existingFile.id };
+        }
+
         const newData = data ? { ...data } : {};
         if (type === 'terminal' && !newData.terminalId) newData.terminalId = generateId();
         
-        // Find next Y position
-        const maxY = panes.reduce((max, p) => Math.max(max, p.gridPos.y + p.gridPos.h), 0);
-
-        const gridPos = newData.gridPos || { x: 0, y: maxY, w: 8, h: 12 };
+        const gridPos = newData.gridPos || findHighestAvailableSpot(panes, 25, 40);
         delete newData.gridPos;
 
+        const paneId = generateId();
         const newPane: Pane = { 
-          id: generateId(), 
+          id: paneId, 
           type, 
           title, 
           gridPos,
@@ -546,10 +601,10 @@ export const useWorkspaceStore = create<WorkspaceState>()(
         
         // If we just added a new mission control pane (not just updated an existing one)
         if (type === 'missioncontrol') {
-          return { ...nextState, messages: [], results: [], tasks: [] };
+          return { ...nextState, messages: [], results: [], tasks: [], activePaneId: paneId };
         }
         
-        return nextState;
+        return { ...nextState, activePaneId: paneId };
       }),
 
       addPaneAt: (type, title, index, data) => set((state) => {
@@ -557,13 +612,12 @@ export const useWorkspaceStore = create<WorkspaceState>()(
         if (type === 'terminal' && !newData.terminalId) newData.terminalId = generateId();
 
         const panes = selectActivePanes(state);
-        const maxY = panes.reduce((max, p) => Math.max(max, p.gridPos.y + p.gridPos.h), 0);
-
-        const gridPos = newData.gridPos || { x: 0, y: maxY, w: 8, h: 12 };
+        const gridPos = newData.gridPos || findHighestAvailableSpot(panes, 25, 40);
         delete newData.gridPos;
 
+        const paneId = generateId();
         const newPane: Pane = { 
-          id: generateId(), 
+          id: paneId, 
           type, 
           title, 
           gridPos,
@@ -577,20 +631,34 @@ export const useWorkspaceStore = create<WorkspaceState>()(
         });
 
         if (type === 'missioncontrol') {
-          return { ...nextState, messages: [], results: [], tasks: [] };
+          return { ...nextState, messages: [], results: [], tasks: [], activePaneId: paneId };
         }
 
-        return nextState;
+        return { ...nextState, activePaneId: paneId };
       }),
 
       removePane: (id) => set((state) => {
-        const pane = selectActivePanes(state).find(p => p.id === id);
+        const panes = selectActivePanes(state);
+        const pane = panes.find(p => p.id === id);
         if (pane?.type === 'terminal' && pane.data?.terminalId) {
           import('@tauri-apps/api/core').then(({ invoke }) => {
             invoke('destroy_pty', { id: pane.data?.terminalId }).catch(console.error);
           });
         }
-        return withActivePanes(state, ps => ps.filter(p => p.id !== id));
+        
+        const nextPanes = panes.filter(p => p.id !== id);
+        let nextActivePaneId = state.activePaneId;
+        if (state.activePaneId === id) {
+          const idx = panes.findIndex(p => p.id === id);
+          nextActivePaneId = nextPanes.length > 0 
+            ? nextPanes[Math.min(idx, nextPanes.length - 1)].id 
+            : null;
+        }
+
+        return {
+          ...withActivePanes(state, () => nextPanes),
+          activePaneId: nextActivePaneId
+        };
       }),
 
       movePane: (activeId, overId) => set((state) =>
@@ -738,7 +806,7 @@ export const useWorkspaceStore = create<WorkspaceState>()(
     }),
     {
       name: 'workspace-storage',
-      version: 8,
+      version: 11,
       migrate: (persistedState: any, version: number) => {
         if (version <= 2) {
           const tabs = (persistedState as any).tabs || [];
@@ -800,11 +868,69 @@ export const useWorkspaceStore = create<WorkspaceState>()(
             ),
           };
         }
+        if (version < 10) {
+          const tabs = persistedState?.tabs ?? [];
+          return {
+            ...persistedState,
+            nodeTerminalBindings: {},
+            nodeRuntimeBindings: {},
+            tabs: tabs.map((tab: any) => ({
+              ...tab,
+              panes: (tab.panes ?? [])
+                .filter((pane: any) => pane.type !== 'terminal')
+                .map((pane: any) => {
+                  if (pane.type === 'missioncontrol' && Array.isArray(pane.data?.agents)) {
+                    return {
+                      ...pane,
+                      data: {
+                        ...pane.data,
+                        agents: pane.data.agents.map((agent: any) => ({
+                          ...agent,
+                          terminalId: '',
+                          runtimeSessionId: null,
+                          status: 'idle',
+                        })),
+                      },
+                    };
+                  }
+                  return pane;
+                }),
+            })),
+          };
+        }
+        if (version < 11) {
+          return {
+            ...persistedState,
+            layoutMode: 'grid',
+            activePaneId: null,
+          };
+        }
         return persistedState;
       },
       partialize: (state) => ({
-        tabs: state.tabs,
+        tabs: state.tabs.map(tab => ({
+          ...tab,
+          panes: tab.panes.filter(p => p.type !== 'terminal').map(p => {
+            if (p.type === 'missioncontrol' && Array.isArray(p.data?.agents)) {
+              return {
+                ...p,
+                data: {
+                  ...p.data,
+                  agents: p.data.agents.map((agent: any) => ({
+                    ...agent,
+                    terminalId: '',
+                    runtimeSessionId: null,
+                    status: 'idle',
+                  })),
+                },
+              };
+            }
+            return p;
+          })
+        })),
         activeTabId: state.activeTabId,
+        activePaneId: state.activePaneId,
+        layoutMode: state.layoutMode,
         sidebarOpen: state.sidebarOpen,
         appMode: state.appMode,
         workspaceDir: state.workspaceDir,
@@ -812,9 +938,27 @@ export const useWorkspaceStore = create<WorkspaceState>()(
         savedLayouts: state.savedLayouts,
         results: state.results.slice(-100),
         agentInstructions: state.agentInstructions,
-        globalGraph: state.globalGraph,
-        nodeTerminalBindings: state.nodeTerminalBindings,
-        nodeRuntimeBindings: state.nodeRuntimeBindings,
+        globalGraph: {
+          ...state.globalGraph,
+          nodes: state.globalGraph.nodes.map(node => {
+            const config = node.config ? { ...node.config } : undefined;
+            if (config) {
+              delete config.terminalId;
+              delete config.paneId;
+              delete (config as any).runtimeSessionId;
+              delete (config as any).currentAttempt;
+              delete (config as any).heartbeat;
+            }
+            return {
+              ...node,
+              status: 'idle',
+              mcpState: undefined,
+              config,
+            };
+          })
+        },
+        nodeTerminalBindings: {},
+        nodeRuntimeBindings: {},
       }),
     }
   )

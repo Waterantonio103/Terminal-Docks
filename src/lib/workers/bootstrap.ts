@@ -34,6 +34,31 @@ export async function notifyTaskPushed(params: {
   }
 }
 
+export async function notifyTaskCompleted(params: {
+  sessionId: string;
+  missionId: string;
+  nodeId: string;
+  attempt: number;
+  outcome: 'success' | 'failure';
+  summary?: string;
+  rawOutput?: string;
+}): Promise<void> {
+  try {
+    await invoke('mcp_notify_agent', {
+      sessionId: params.sessionId,
+      kind: 'runtime_task_completed',
+      missionId: params.missionId,
+      nodeId: params.nodeId,
+      attempt: params.attempt,
+      outcome: params.outcome,
+      summary: params.summary,
+      rawOutput: params.rawOutput,
+    });
+  } catch (error) {
+    console.warn('mcp_notify_agent (complete) failed', error);
+  }
+}
+
 export function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
 }

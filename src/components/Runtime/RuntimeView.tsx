@@ -71,7 +71,8 @@ export function RuntimeView() {
 
     const byNode = new Map(liveAgents.filter(agent => agent.nodeId).map(agent => [agent.nodeId as string, agent]));
     for (const node of globalGraph.nodes) {
-      if (node.roleId !== 'agent' && !node.config?.profileId) continue;
+      const isSystemRole = ['task', 'barrier', 'frame', 'reroute', 'output'].includes(node.roleId);
+      if (isSystemRole && !node.config?.profileId) continue;
       if (byNode.has(node.id)) continue;
       const binding = nodeRuntimeBindings[node.id];
       const terminalId = String(node.config?.terminalId ?? binding?.terminalId ?? '').trim();
@@ -97,6 +98,10 @@ export function RuntimeView() {
     }
     return Array.from(deduped.values());
   }, [globalGraph.nodes, nodeRuntimeBindings, tabs]);
+
+  useEffect(() => {
+    console.log('[RuntimeView] Source data (agents):', agents);
+  }, [agents]);
 
   const runtimeNodes = useMemo<RuntimeNodeModel[]>(() => {
     const occupied = new Set<string>();

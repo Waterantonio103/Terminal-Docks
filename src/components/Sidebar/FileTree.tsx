@@ -1,9 +1,10 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useWorkspaceStore } from '../../store/workspace';
 import { open } from '@tauri-apps/plugin-dialog';
-import { readDir, DirEntry } from '@tauri-apps/plugin-fs';
-import { Folder, File as FileIcon, ChevronRight, ChevronDown, Lock } from 'lucide-react';
+import { readDir, DirEntry, writeFile, mkdir, remove, rename, readTextFile } from '@tauri-apps/plugin-fs';
+import { Folder, File as FileIcon, ChevronRight, ChevronDown, Lock, MoreVertical, FilePlus, FolderPlus, Trash2, Edit2, Copy, Scissors, Clipboard, ExternalLink, Search, FileText } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
+import { writeText, readText } from '@tauri-apps/plugin-clipboard-manager';
 
 interface FileLock {
   file_path: string;
@@ -11,7 +12,14 @@ interface FileLock {
   locked_at: string;
 }
 
-function TreeNode({ file, parentPath, locks, refreshSignal }: { file: DirEntry, parentPath: string, locks: FileLock[], refreshSignal: number }) {
+interface ContextMenuState {
+  x: number;
+  y: number;
+  file: DirEntry;
+  parentPath: string;
+}
+
+function TreeNode({ file, parentPath, locks, refreshSignal, onContextMenu }: { file: DirEntry, parentPath: string, locks: FileLock[], refreshSignal: number, onContextMenu: (e: React.MouseEvent, file: DirEntry, parentPath: string) => void }) {
   const [isOpen, setIsOpen] = useState(false);
   const [children, setChildren] = useState<DirEntry[]>([]);
   const addPane = useWorkspaceStore(s => s.addPane);
@@ -23,7 +31,7 @@ function TreeNode({ file, parentPath, locks, refreshSignal }: { file: DirEntry, 
     if (isOpen && file.isDirectory && refreshSignal > 0) {
       readDir(fullPath).then(files => {
         files.sort((a, b) => {
-          if (a.isDirectory === b.isDirectory) return a.name.localeCompare(b.name);
+          if (a.isDirectory === b.isDirectory) return a.name.localeCompare(a.name);
           return a.isDirectory ? -1 : 1;
         });
         setChildren(files);
@@ -70,6 +78,7 @@ function TreeNode({ file, parentPath, locks, refreshSignal }: { file: DirEntry, 
     <div className="pl-2">
       <div
         onMouseDown={onDragStart}
+        onContextMenu={(e) => onContextMenu(e, file, parentPath)}
         className="flex items-center gap-1 py-0.5 hover:bg-bg-surface cursor-pointer rounded px-1 text-xs transition-colors group select-none"
         onClick={handleClick}
       >
@@ -92,7 +101,7 @@ function TreeNode({ file, parentPath, locks, refreshSignal }: { file: DirEntry, 
         )}
       </div>
       {isOpen && file.isDirectory && children.map(child => (
-        <TreeNode key={child.name} file={child} parentPath={fullPath} locks={locks} refreshSignal={refreshSignal} />
+        <TreeNode key={child.name} file={child} parentPath={fullPath} locks={locks} refreshSignal={refreshSignal} onContextMenu={onContextMenu} />
       ))}
     </div>
   );
@@ -101,10 +110,17 @@ function TreeNode({ file, parentPath, locks, refreshSignal }: { file: DirEntry, 
 export function FileTree() {
   const workspaceDir = useWorkspaceStore(s => s.workspaceDir);
   const setWorkspaceDir = useWorkspaceStore(s => s.setWorkspaceDir);
+  const addPane = useWorkspaceStore(s => s.addPane);
   const [files, setFiles] = useState<DirEntry[]>([]);
   const [locks, setLocks] = useState<FileLock[]>([]);
   const [refreshSignal, setRefreshSignal] = useState(0);
+  const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
+  const [promptState, setPromptState] = useState<{ type: 'file' | 'folder' | 'rename', parentPath: string, fileName?: string } | null>(null);
+  const [promptValue, setPromptValue] = useState('');
+  const [clipboard, setClipboard] = useState<{ path: string, isCut: boolean } | null>(null);
+  
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const promptInputRef = useRef<HTMLInputElement>(null);
 
   const handleOpenFolder = async () => {
     const selected = await open({
@@ -127,22 +143,14 @@ export function FileTree() {
 
   useEffect(() => {
     fetchLocks();
-    
-    // Listen for MCP events instead of polling
-    import('@tauri-apps/api/event').then(({ listen }) => {
-      const unlisten = listen('mcp-message', (event: any) => {
-        if (event.payload?.type === 'lock_update') {
-          fetchLocks();
-        }
-      });
-      return () => unlisten.then(f => f());
-    });
+    const timer = setInterval(fetchLocks, 10000);
+    return () => clearInterval(timer);
   }, []);
 
   const refreshRoot = useCallback((dir: string) => {
     readDir(dir).then(f => {
       f.sort((a, b) => {
-        if (a.isDirectory === b.isDirectory) return a.name.localeCompare(b.name);
+        if (a.isDirectory === b.isDirectory) return a.name.localeCompare(a.name);
         return a.isDirectory ? -1 : 1;
       });
       setFiles(f);
@@ -151,32 +159,146 @@ export function FileTree() {
 
   useEffect(() => {
     if (!workspaceDir) return;
-
     refreshRoot(workspaceDir);
     invoke('watch_directory', { path: workspaceDir }).catch(console.error);
-
-    let unlisten: (() => void) | undefined;
-    import('@tauri-apps/api/event').then(({ listen }) => {
-      listen('fs-change', () => {
-        if (debounceRef.current) clearTimeout(debounceRef.current);
-        debounceRef.current = setTimeout(() => {
-          refreshRoot(workspaceDir);
-          setRefreshSignal(s => s + 1);
-        }, 150);
-      }).then(fn => { unlisten = fn; });
-    });
-
-    const pollInterval = setInterval(() => {
-      refreshRoot(workspaceDir);
-      setRefreshSignal(s => s + 1);
-    }, 5000);
-
-    return () => {
-      if (debounceRef.current) clearTimeout(debounceRef.current);
-      clearInterval(pollInterval);
-      unlisten?.();
-    };
   }, [workspaceDir, refreshRoot]);
+
+  useEffect(() => {
+    if (promptState) {
+      setTimeout(() => promptInputRef.current?.focus(), 50);
+    }
+  }, [promptState]);
+
+  const handleContextMenu = (e: React.MouseEvent, file: DirEntry, parentPath: string) => {
+    e.preventDefault();
+    setContextMenu({
+      x: e.clientX,
+      y: e.clientY,
+      file,
+      parentPath
+    });
+  };
+
+  const closeContextMenu = () => setContextMenu(null);
+
+  useEffect(() => {
+    const handleClick = () => closeContextMenu();
+    window.addEventListener('click', handleClick);
+    return () => window.removeEventListener('click', handleClick);
+  }, []);
+
+  const getFullPath = (file: DirEntry, parent: string) => {
+    return parent + (parent.endsWith('/') || parent.endsWith('\\') ? '' : '/') + file.name;
+  };
+
+  // Context Menu Actions
+  const handleCreateFile = () => {
+    if (!contextMenu) return;
+    const targetPath = contextMenu.file.isDirectory ? getFullPath(contextMenu.file, contextMenu.parentPath) : contextMenu.parentPath;
+    setPromptState({ type: 'file', parentPath: targetPath });
+    setPromptValue('');
+    closeContextMenu();
+  };
+
+  const handleCreateFolder = () => {
+    if (!contextMenu) return;
+    const targetPath = contextMenu.file.isDirectory ? getFullPath(contextMenu.file, contextMenu.parentPath) : contextMenu.parentPath;
+    setPromptState({ type: 'folder', parentPath: targetPath });
+    setPromptValue('');
+    closeContextMenu();
+  };
+
+  const handleRename = () => {
+    if (!contextMenu) return;
+    setPromptState({ type: 'rename', parentPath: contextMenu.parentPath, fileName: contextMenu.file.name });
+    setPromptValue(contextMenu.file.name);
+    closeContextMenu();
+  };
+
+  const handleDelete = async () => {
+    if (!contextMenu) return;
+    const path = getFullPath(contextMenu.file, contextMenu.parentPath);
+    if (confirm(`Are you sure you want to delete ${contextMenu.file.name}?`)) {
+      try {
+        await remove(path, { recursive: true });
+        setRefreshSignal(s => s + 1);
+        if (workspaceDir) refreshRoot(workspaceDir);
+      } catch (err) {
+        alert(`Failed to delete: ${err}`);
+      }
+    }
+  };
+
+  const handleReveal = async () => {
+    if (!contextMenu) return;
+    const path = getFullPath(contextMenu.file, contextMenu.parentPath);
+    await invoke('reveal_in_explorer', { path });
+  };
+
+  const handleCopyPath = async () => {
+    if (!contextMenu) return;
+    const path = getFullPath(contextMenu.file, contextMenu.parentPath);
+    await writeText(path);
+  };
+
+  const handleCopyRelativePath = async () => {
+    if (!contextMenu || !workspaceDir) return;
+    const path = getFullPath(contextMenu.file, contextMenu.parentPath);
+    const relative = path.replace(workspaceDir, '').replace(/^[\\/]/, '');
+    await writeText(relative);
+  };
+
+  const handleCopy = () => {
+    if (!contextMenu) return;
+    setClipboard({ path: getFullPath(contextMenu.file, contextMenu.parentPath), isCut: false });
+  };
+
+  const handleCut = () => {
+    if (!contextMenu) return;
+    setClipboard({ path: getFullPath(contextMenu.file, contextMenu.parentPath), isCut: true });
+  };
+
+  const handlePaste = async () => {
+    if (!clipboard || !contextMenu) return;
+    const targetDir = contextMenu.file.isDirectory ? getFullPath(contextMenu.file, contextMenu.parentPath) : contextMenu.parentPath;
+    const fileName = clipboard.path.split(/[\\/]/).pop()!;
+    const destPath = targetDir + (targetDir.endsWith('/') || targetDir.endsWith('\\') ? '' : '/') + fileName;
+
+    try {
+      if (clipboard.isCut) {
+        await rename(clipboard.path, destPath);
+        setClipboard(null);
+      } else {
+        const content = await readTextFile(clipboard.path);
+        await writeFile(destPath, new TextEncoder().encode(content));
+      }
+      setRefreshSignal(s => s + 1);
+      if (workspaceDir) refreshRoot(workspaceDir);
+    } catch (err) {
+      alert(`Paste failed: ${err}`);
+    }
+  };
+
+  const submitPrompt = async () => {
+    if (!promptState || !promptValue.trim()) return;
+    const path = promptState.parentPath + (promptState.parentPath.endsWith('/') || promptState.parentPath.endsWith('\\') ? '' : '/') + promptValue.trim();
+
+    try {
+      if (promptState.type === 'file') {
+        await writeFile(path, new Uint8Array());
+      } else if (promptState.type === 'folder') {
+        await mkdir(path);
+      } else if (promptState.type === 'rename') {
+        const oldPath = promptState.parentPath + (promptState.parentPath.endsWith('/') || promptState.parentPath.endsWith('\\') ? '' : '/') + promptState.fileName;
+        await rename(oldPath, path);
+      }
+      setPromptState(null);
+      setRefreshSignal(s => s + 1);
+      if (workspaceDir) refreshRoot(workspaceDir);
+    } catch (err) {
+      alert(`Operation failed: ${err}`);
+    }
+  };
 
   if (!workspaceDir) {
     return (
@@ -194,18 +316,109 @@ export function FileTree() {
   }
 
   return (
-    <div className="flex-1 overflow-y-auto p-2">
-      <div className="flex items-center justify-between text-xs text-text-muted px-1 mb-1.5">
-        <span className="truncate font-medium text-text-secondary opacity-70">{workspaceDir.split(/[\\/]/).pop()}</span>
-        <button className="hover:text-accent-primary transition-colors" onClick={handleOpenFolder} title="Open Folder">
-          <Folder size={12} />
-        </button>
+    <div className="flex-1 flex flex-col min-h-0 relative" onContextMenu={(e) => {
+      // Background right-click targets root
+      handleContextMenu(e, { name: '', isDirectory: true, isFile: false, isSymlink: false }, workspaceDir);
+    }}>
+      <div 
+        className="flex items-center justify-between text-xs text-text-muted px-3 py-2 shrink-0 border-b border-border-panel cursor-pointer hover:bg-bg-surface transition-colors group select-none"
+        onContextMenu={(e) => {
+          e.stopPropagation();
+          handleContextMenu(e, { name: '', isDirectory: true, isFile: false, isSymlink: false }, workspaceDir);
+        }}
+        onClick={handleOpenFolder}
+      >
+        <span className="truncate font-bold text-text-secondary opacity-70 uppercase tracking-wider text-[10px]">
+          {workspaceDir.split(/[\\/]/).pop()}
+        </span>
+        <Folder size={13} className="text-text-muted opacity-40 group-hover:text-accent-primary transition-colors" />
       </div>
-      <div className="pb-4">
-        {files.map(file => (
-          <TreeNode key={file.name} file={file} parentPath={workspaceDir} locks={locks} refreshSignal={refreshSignal} />
-        ))}
+      
+      <div className="flex-1 overflow-y-auto p-2 no-scrollbar">
+        <div className="pb-4">
+          {files.map(file => (
+            <TreeNode key={file.name} file={file} parentPath={workspaceDir} locks={locks} refreshSignal={refreshSignal} onContextMenu={handleContextMenu} />
+          ))}
+        </div>
       </div>
+
+      {/* Context Menu Overlay */}
+      {contextMenu && (
+        <div 
+          className="fixed z-[1000] bg-bg-panel border border-border-panel rounded shadow-xl py-1 min-w-[180px] text-xs text-text-secondary animate-in fade-in zoom-in duration-75"
+          style={{ left: contextMenu.x, top: contextMenu.y }}
+          onClick={e => e.stopPropagation()}
+          onContextMenu={e => e.preventDefault()}
+        >
+          {contextMenu.file.isDirectory ? (
+            <>
+              <ContextMenuItem icon={<FilePlus size={12}/>} label="New File" onClick={handleCreateFile} />
+              <ContextMenuItem icon={<FolderPlus size={12}/>} label="New Folder" onClick={handleCreateFolder} />
+              <div className="h-px bg-border-panel my-1" />
+              <ContextMenuItem icon={<Search size={12}/>} label="Find in Folder" onClick={() => {}} disabled />
+              <div className="h-px bg-border-panel my-1" />
+            </>
+          ) : null}
+          
+          <ContextMenuItem icon={<Scissors size={12}/>} label="Cut" onClick={handleCut} />
+          <ContextMenuItem icon={<Copy size={12}/>} label="Copy" onClick={handleCopy} />
+          <ContextMenuItem icon={<Clipboard size={12}/>} label="Paste" onClick={handlePaste} disabled={!clipboard} />
+          
+          <div className="h-px bg-border-panel my-1" />
+          <ContextMenuItem icon={<FileText size={12}/>} label="Copy Path" onClick={handleCopyPath} />
+          <ContextMenuItem icon={<FileText size={12}/>} label="Copy Relative Path" onClick={handleCopyRelativePath} />
+          
+          {/* Hide Rename/Delete for Root Directory */}
+          {contextMenu.file.name !== '' && (
+            <>
+              <div className="h-px bg-border-panel my-1" />
+              <ContextMenuItem icon={<Edit2 size={12}/>} label="Rename..." onClick={handleRename} />
+              <ContextMenuItem icon={<Trash2 size={12}/>} label="Delete" onClick={handleDelete} className="text-red-400 hover:bg-red-500/10" />
+            </>
+          )}
+          
+          <div className="h-px bg-border-panel my-1" />
+          <ContextMenuItem icon={<ExternalLink size={12}/>} label="Reveal in Explorer" onClick={handleReveal} />
+        </div>
+      )}
+
+      {/* Prompt Overlay */}
+      {promptState && (
+        <div className="absolute top-8 left-2 right-2 z-50 bg-bg-panel border border-accent-primary rounded shadow-lg p-2">
+          <div className="flex items-center gap-2 mb-2 px-1">
+             {promptState.type === 'file' && <FileIcon size={12} className="text-text-muted"/>}
+             {promptState.type === 'folder' && <Folder size={12} className="text-accent-primary"/>}
+             {promptState.type === 'rename' && <Edit2 size={12} className="text-text-muted"/>}
+             <span className="text-[10px] uppercase font-bold text-text-muted">
+               {promptState.type === 'rename' ? 'Rename' : `New ${promptState.type}`}
+             </span>
+          </div>
+          <input
+            ref={promptInputRef}
+            className="w-full bg-bg-surface border border-border-panel rounded px-2 py-1 text-xs text-text-primary outline-none focus:border-accent-primary"
+            value={promptValue}
+            onChange={e => setPromptValue(e.target.value)}
+            onKeyDown={e => {
+              if (e.key === 'Enter') submitPrompt();
+              if (e.key === 'Escape') setPromptState(null);
+            }}
+            onBlur={() => setTimeout(() => setPromptState(null), 200)}
+          />
+        </div>
+      )}
     </div>
+  );
+}
+
+function ContextMenuItem({ icon, label, onClick, className = '', disabled = false }: { icon: React.ReactNode, label: string, onClick: () => void, className?: string, disabled?: boolean }) {
+  return (
+    <button
+      onClick={() => !disabled && onClick()}
+      disabled={disabled}
+      className={`w-full flex items-center gap-2 px-3 py-1.5 hover:bg-bg-surface transition-colors text-left disabled:opacity-30 disabled:hover:bg-transparent ${className}`}
+    >
+      <span className="shrink-0">{icon}</span>
+      <span className="flex-1 truncate">{label}</span>
+    </button>
   );
 }

@@ -8,8 +8,8 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { homeDir } from '@tauri-apps/api/path';
 import { Window } from '@tauri-apps/api/window';
-import { PanelLeft, TerminalSquare, FileCode2, KanbanSquare, Activity, Palette, Plus, Rocket, Monitor, Minus, Square, X, Network, FolderTree } from 'lucide-react';
-import { useState, useEffect, useRef } from 'react';
+import { PanelLeft, TerminalSquare, FileCode2, KanbanSquare, Activity, Palette, Plus, Rocket, Monitor, Minus, Square, X, Network, FolderTree, LayoutGrid, Maximize } from 'lucide-react';
+import React, { useState, useEffect, useRef } from 'react';
 import { detectRoleFromText, normalizeCli } from './lib/cliDetection';
 import { refreshCliDetectionForTerminals } from './lib/terminalCliRuntime';
 import { ErrorBoundary } from './components/Diagnostics/ErrorBoundary';
@@ -90,6 +90,12 @@ function DraggableOption({ type, label, icon, onClick, onDragStart }: DraggableO
 }
 
 function App() {
+  // Log raw localStorage workspace value
+  useEffect(() => {
+    const raw = localStorage.getItem('workspace-storage');
+    console.log('[App Startup] Raw localStorage workspace-storage:', raw);
+  }, []);
+
   const toggleSidebar = useWorkspaceStore((s) => s.toggleSidebar);
   const sidebarOpen   = useWorkspaceStore((s) => s.sidebarOpen);
   const appMode       = useWorkspaceStore((s) => s.appMode);
@@ -97,6 +103,11 @@ function App() {
   const theme        = useWorkspaceStore((s) => s.theme);
   const setTheme     = useWorkspaceStore((s) => s.setTheme);
   const tabs         = useWorkspaceStore((s) => s.tabs);
+
+  // Log tabs after rehydrate
+  useEffect(() => {
+    console.log('[App Startup] Tabs after rehydrate (from store):', tabs);
+  }, [tabs]);
   const activeTabId  = useWorkspaceStore((s) => s.activeTabId);
   const addTab       = useWorkspaceStore((s) => s.addTab);
   const removeTab    = useWorkspaceStore((s) => s.removeTab);
@@ -112,6 +123,9 @@ function App() {
   const globalGraph     = useWorkspaceStore((s) => s.globalGraph);
   const setGlobalGraph  = useWorkspaceStore((s) => s.setGlobalGraph);
   const nodeRuntimeBindings = useWorkspaceStore((s) => s.nodeRuntimeBindings);
+  const setNodeRuntimeBinding = useWorkspaceStore((s) => s.setNodeRuntimeBinding);
+  const layoutMode   = useWorkspaceStore((s) => s.layoutMode);
+  const setLayoutMode = useWorkspaceStore((s) => s.setLayoutMode);
   const modeLabel = MODE_OPTIONS.find(mode => mode.id === appMode)?.label ?? 'Workflow';
 
   // Default terminal working directory to home folder on first launch
@@ -120,6 +134,7 @@ function App() {
       homeDir().then(dir => setWorkspaceDir(dir)).catch(() => {});
     }
   }, []);
+
 
   const hasCleanedRef = useRef(false);
   // Startup cleanup: Reset stale 'running' or 'launching' statuses to 'idle'
@@ -130,54 +145,51 @@ function App() {
     let changedNodes = false;
     let nextNodes = globalGraph.nodes;
     if (globalGraph.nodes.length) {
-      const hasStaleNodes = globalGraph.nodes.some(node => 
-        node.status === 'running' || 
-        node.status === 'launching' || 
-        node.status === 'connecting' ||
-        node.status === 'spawning'
-      );
-      if (hasStaleNodes) {
-        nextNodes = globalGraph.nodes.map(node => {
-          if (
-            node.status === 'running' || 
-            node.status === 'launching' || 
-            node.status === 'connecting' ||
-            node.status === 'spawning'
-          ) {
-            return { ...node, status: 'idle' as const };
+      nextNodes = globalGraph.nodes.map(node => {
+        let changed = false;
+        const nextNode = { ...node };
+        if (
+          nextNode.status !== 'idle'
+        ) {
+          nextNode.status = 'idle';
+          changed = true;
+        }
+        if (nextNode.mcpState) {
+          nextNode.mcpState = undefined;
+          changed = true;
+        }
+        if (nextNode.config) {
+          const config = { ...nextNode.config };
+          if (config.terminalId || config.paneId || (config as any).runtimeSessionId || (config as any).currentAttempt || (config as any).heartbeat) {
+            delete config.terminalId;
+            delete config.paneId;
+            delete (config as any).runtimeSessionId;
+            delete (config as any).currentAttempt;
+            delete (config as any).heartbeat;
+            nextNode.config = config;
+            changed = true;
           }
-          return node;
-        });
-        changedNodes = true;
-      }
+        }
+        if (changed) changedNodes = true;
+        return nextNode;
+      });
     }
 
     // 2. Clean node runtime bindings (adapter sessions don't survive restart)
     const bindingEntries = Object.entries(nodeRuntimeBindings);
     let nextBindings = nodeRuntimeBindings;
     let changedBindings = false;
-    if (bindingEntries.length > 0) {
-      nextBindings = { ...nodeRuntimeBindings };
-      for (const [nodeId, binding] of bindingEntries) {
-        if (binding.runtimeSessionId || (binding.adapterStatus && binding.adapterStatus !== 'idle')) {
-          nextBindings[nodeId] = {
-            ...binding,
-            runtimeSessionId: undefined,
-            adapterStatus: 'idle',
-          };
-          changedBindings = true;
-        }
-      }
+    if (bindingEntries.length > 0 || Object.keys(useWorkspaceStore.getState().nodeTerminalBindings).length > 0) {
+      nextBindings = {};
+      changedBindings = true;
     }
 
-    // 3. Clean stale terminal panes (builder/codex often persist unexpectedly)
+    // 3. Clean stale terminal panes representing runtime terminals
     let changedTabs = false;
     const nextTabs = tabs.map(tab => {
       const filteredPanes = tab.panes.filter(pane => {
         if (pane.type === 'terminal') {
-          const role = String(pane.data?.roleId ?? '').toLowerCase();
-          const cli = String(pane.data?.cli ?? '').toLowerCase();
-          if (role === 'builder' && cli === 'codex') return false;
+          if (pane.data?.nodeId || pane.data?.roleId) return false;
         }
         return true;
       });
@@ -192,6 +204,7 @@ function App() {
       useWorkspaceStore.setState({ 
         globalGraph: { ...globalGraph, nodes: nextNodes },
         nodeRuntimeBindings: nextBindings,
+        nodeTerminalBindings: {},
         tabs: nextTabs
       });
       hasCleanedRef.current = true;
@@ -376,11 +389,23 @@ function App() {
 
         <div className="flex-1 flex justify-center items-center gap-1 h-full relative z-10" data-tauri-drag-region>
           {appMode === 'workspace' ? (
-            <div 
-              className="flex items-center gap-1 bg-bg-surface border border-border-panel rounded-lg px-1 py-0.5"
-              data-tauri-no-drag
-            >
-              <DraggableOption type="editor"       label="Editor"   icon={<FileCode2 size={13} />}      onClick={() => addPane('editor', 'Editor')}   onDragStart={onNewPaneDragStart} />
+            <div className="flex items-center gap-4">
+              <div className="flex items-center gap-1 bg-bg-surface border border-border-panel rounded-lg px-1 py-0.5" data-tauri-no-drag>
+                <button 
+                  onClick={() => setLayoutMode('grid')}
+                  className={`flex items-center gap-1.5 text-[10px] uppercase font-bold px-2.5 py-1 rounded-md transition-all ${layoutMode === 'grid' ? 'bg-accent-primary text-white shadow-sm' : 'text-text-muted hover:text-text-primary hover:bg-bg-surface-hover'}`}
+                >
+                  <LayoutGrid size={12} />
+                  <span>Panels</span>
+                </button>
+                <button 
+                  onClick={() => setLayoutMode('tabs')}
+                  className={`flex items-center gap-1.5 text-[10px] uppercase font-bold px-2.5 py-1 rounded-md transition-all ${layoutMode === 'tabs' ? 'bg-accent-primary text-white shadow-sm' : 'text-text-muted hover:text-text-primary hover:bg-bg-surface-hover'}`}
+                >
+                  <Maximize size={12} />
+                  <span>Tabs</span>
+                </button>
+              </div>
             </div>
           ) : (
             <div className="flex items-center gap-2 text-xs font-bold text-accent-primary uppercase tracking-widest">
@@ -428,71 +453,73 @@ function App() {
           ) : (
             <>
               {/* Workspace Tab Bar */}
-              <div
-                className="flex items-center h-8 bg-bg-titlebar border-b border-border-panel px-2 gap-0.5 overflow-x-auto shrink-0 select-none relative"
-                data-tauri-drag-region
-              >
-                {tabs.map((tab) => (
-                  <div
-                    key={tab.id}
-                    onClick={() => switchTab(tab.id)}
-                    onDoubleClick={() => {
-                      setEditingTabId(tab.id);
-                      setEditingTabName(tab.name);
-                    }}
-                    className={`
-                      group flex items-center h-6 px-3 gap-2 rounded-t-md text-[11px] font-medium transition-all cursor-pointer min-w-[80px] max-w-[160px] border-x border-t relative
-                      ${activeTabId === tab.id 
-                        ? 'bg-bg-panel text-text-primary border-border-panel z-10 -mb-[1px]' 
-                        : 'bg-transparent text-text-muted border-transparent hover:bg-bg-surface/50'}
-                    `}
-                  >
-                    <div className="w-1.5 h-1.5 rounded-full shrink-0" style={{ backgroundColor: tab.color }} />
-                    
-                    {editingTabId === tab.id ? (
-                      <input
-                        ref={tabInputRef}
-                        value={editingTabName}
-                        onChange={(e) => setEditingTabName(e.target.value)}
-                        onBlur={() => {
-                          if (editingTabName.trim()) renameTab(tab.id, editingTabName.trim());
-                          setEditingTabId(null);
-                        }}
-                        onKeyDown={(e) => {
-                          if (e.key === 'Enter') {
+              {layoutMode === 'grid' && (
+                <div
+                  className="flex items-center h-8 bg-bg-titlebar border-b border-border-panel px-2 gap-0.5 overflow-x-auto shrink-0 select-none relative"
+                  data-tauri-drag-region
+                >
+                  {tabs.map((tab) => (
+                    <div
+                      key={tab.id}
+                      onClick={() => switchTab(tab.id)}
+                      onDoubleClick={() => {
+                        setEditingTabId(tab.id);
+                        setEditingTabName(tab.name);
+                      }}
+                      className={`
+                        group flex items-center h-6 px-3 gap-2 rounded-t-md text-[11px] font-medium transition-all cursor-pointer min-w-[80px] max-w-[160px] border-x border-t relative
+                        ${activeTabId === tab.id 
+                          ? 'bg-bg-panel text-text-primary border-border-panel z-10 -mb-[1px]' 
+                          : 'bg-transparent text-text-muted border-transparent hover:bg-bg-surface/50'}
+                      `}
+                    >
+                      <div className="w-1.5 h-1.5 rounded-full shrink-0" style={{ backgroundColor: tab.color }} />
+                      
+                      {editingTabId === tab.id ? (
+                        <input
+                          ref={tabInputRef}
+                          value={editingTabName}
+                          onChange={(e) => setEditingTabName(e.target.value)}
+                          onBlur={() => {
                             if (editingTabName.trim()) renameTab(tab.id, editingTabName.trim());
                             setEditingTabId(null);
-                          }
-                          if (e.key === 'Escape') setEditingTabId(null);
-                        }}
-                        className="bg-transparent border-none outline-none text-xs w-[100px] text-text-primary"
-                      />
-                    ) : (
-                      <span className="truncate max-w-[100px]">{tab.name}</span>
-                    )}
-                    {tabs.length > 1 && (
-                      <button
-                        onClick={(e) => { e.stopPropagation(); removeTab(tab.id); }}
-                        className="ml-0.5 opacity-0 group-hover:opacity-60 hover:!opacity-100 text-text-muted hover:text-red-400 transition-all leading-none text-base shrink-0"
-                        title="Close tab (Ctrl+W)"
-                      >
-                        <X size={10} />
-                      </button>
-                    )}
-                  </div>
-                ))}
+                          }}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') {
+                              if (editingTabName.trim()) renameTab(tab.id, editingTabName.trim());
+                              setEditingTabId(null);
+                            }
+                            if (e.key === 'Escape') setEditingTabId(null);
+                          }}
+                          className="bg-transparent border-none outline-none text-xs w-[100px] text-text-primary"
+                        />
+                      ) : (
+                        <span className="truncate max-w-[100px]">{tab.name}</span>
+                      )}
+                      {tabs.length > 1 && (
+                        <button
+                          onClick={(e) => { e.stopPropagation(); removeTab(tab.id); }}
+                          className="ml-0.5 opacity-0 group-hover:opacity-60 hover:!opacity-100 text-text-muted hover:text-red-400 transition-all leading-none text-base shrink-0"
+                          title="Close tab (Ctrl+W)"
+                        >
+                          <X size={10} />
+                        </button>
+                      )}
+                    </div>
+                  ))}
 
-                <button 
-                  onClick={addTab}
-                  className="w-6 h-6 flex items-center justify-center text-text-muted hover:text-text-primary hover:bg-bg-surface rounded transition-colors ml-1"
-                  title="New Tab (Ctrl+T)"
-                >
-                  <Plus size={14} />
-                </button>
-              </div>
+                  <button 
+                    onClick={addTab}
+                    className="w-6 h-6 flex items-center justify-center text-text-muted hover:text-text-primary hover:bg-bg-surface rounded transition-colors ml-1"
+                    title="New Tab (Ctrl+T)"
+                  >
+                    <Plus size={14} />
+                  </button>
+                </div>
+              )}
 
               <div className="flex-1 flex flex-col overflow-hidden">
-                <WorkspaceGrid visibleTypes={['editor']} />
+                <WorkspaceGrid />
               </div>
             </>
           )}

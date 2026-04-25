@@ -1,3 +1,7 @@
+import { notifyTaskCompleted } from './workers/bootstrap';
+import type { WorkerAdapter, WorkerSession } from './workers/types';
+import { captureTerminalOutput } from './workflowRuntimeAdapter';
+
 export interface WorkflowNodeTriggeredPayload {
   missionId: string;
   nodeId: string;
@@ -259,4 +263,69 @@ export function parseNewTaskSignal(raw: string): NewTaskSignalPayload | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * Heuristic to analyze terminal output and determine outcome/summary.
+ */
+function analyzeOutput(text: string): { outcome: 'success' | 'failure'; summary: string } {
+  const lines = text.split('\n').map(l => l.trim()).filter(l => l.length > 0);
+  const lastLines = lines.slice(-20).join('\n').toLowerCase();
+  
+  // Basic failure heuristics
+  const failureMarkers = [
+    'error:',
+    'failed',
+    'exception',
+    'stack trace',
+    'command not found',
+    'exit code 1',
+  ];
+  
+  const isFailure = failureMarkers.some(marker => lastLines.includes(marker));
+  
+  // Extract summary: use the last few meaningful lines
+  const summaryLines = lines.slice(-5);
+  const summary = summaryLines.join('\n') || 'Agent process exited.';
+  
+  return {
+    outcome: isFailure ? 'failure' : 'success',
+    summary,
+  };
+}
+
+/**
+ * Orchestrator hook that monitors a worker for process exits and auto-completes the task.
+ */
+export function attachExitDetector(
+  adapter: WorkerAdapter,
+  session: WorkerSession,
+  options: {
+    missionId: string;
+    nodeId: string;
+    attempt: number;
+  }
+): () => void {
+  return adapter.streamOutput(session, async (ev) => {
+    if (ev.kind === 'process-exit') {
+      try {
+        const finalOutput = await captureTerminalOutput(session.terminalId);
+        const { outcome, summary } = analyzeOutput(finalOutput);
+        
+        console.log(`[ExitDetector] Auto-completing ${options.nodeId} with outcome: ${outcome}`);
+        
+        await notifyTaskCompleted({
+          sessionId: session.sessionId,
+          missionId: options.missionId,
+          nodeId: options.nodeId,
+          attempt: options.attempt,
+          outcome,
+          summary,
+          rawOutput: finalOutput,
+        });
+      } catch (err) {
+        console.error('[ExitDetector] Failed to auto-complete task', err);
+      }
+    }
+  });
 }

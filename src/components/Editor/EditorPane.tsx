@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import CodeMirror from '@uiw/react-codemirror';
 import { javascript } from '@codemirror/lang-javascript';
 import { readTextFile, writeTextFile } from '@tauri-apps/plugin-fs';
@@ -8,24 +8,42 @@ import { Pane, useWorkspaceStore } from '../../store/workspace';
 
 const WELCOME = '// Welcome to the Editor\nconsole.log("Hello, world!");';
 
+// Global cache to prevent blank flashes on re-mount during layout shifts
+const contentCache = new Map<string, string>();
+
 export function EditorPane({ pane }: { pane: Pane }) {
   const { id, title, data } = pane;
   const filePath = data?.filePath as string | undefined;
   const updatePaneData = useWorkspaceStore(s => s.updatePaneData);
-  const [content, setContent] = useState(filePath ? '' : WELCOME);
+  
+  const [content, setContent] = useState(() => {
+    if (!filePath) return WELCOME;
+    return contentCache.get(filePath) ?? '';
+  });
+  
   const [isDirty, setIsDirty] = useState(false);
   const [loading, setLoading] = useState(false);
+  const lastLoadedPathRef = useRef<string | undefined>(undefined);
 
   useEffect(() => {
     if (!filePath) {
-      setContent(WELCOME);
-      setIsDirty(false);
+      if (lastLoadedPathRef.current !== undefined) {
+        setContent(WELCOME);
+        setIsDirty(false);
+        lastLoadedPathRef.current = undefined;
+      }
       return;
     }
+    
+    // If we have cached content and it's the same path, skip the disk read
+    if (filePath === lastLoadedPathRef.current) return;
+
     setLoading(true);
-    setContent('');
+    lastLoadedPathRef.current = filePath;
+    
     readTextFile(filePath)
       .then(val => {
+        contentCache.set(filePath, val);
         setContent(val);
         setIsDirty(false);
       })
@@ -100,6 +118,7 @@ export function EditorPane({ pane }: { pane: Pane }) {
           extensions={[javascript({ jsx: true })]}
           onChange={(val) => {
             setContent(val);
+            if (filePath) contentCache.set(filePath, val);
             if (filePath && !isDirty) setIsDirty(true);
           }}
           className="h-full text-sm"

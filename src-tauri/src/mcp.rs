@@ -706,6 +706,9 @@ pub fn mcp_notify_agent(
     task_seq: Option<u64>,
     attempt: Option<u64>,
     reason: Option<String>,
+    outcome: Option<String>,
+    summary: Option<String>,
+    raw_output: Option<String>,
 ) -> Result<serde_json::Value, String> {
     let token = state.internal_push_token.lock().unwrap().clone();
     if token.is_empty() {
@@ -732,6 +735,16 @@ pub fn mcp_notify_agent(
             "nodeId": node_id,
             "attempt": attempt,
             "reason": reason,
+        }),
+        "runtime_task_completed" => serde_json::json!({
+            "type": "runtime_task_completed",
+            "sessionId": session_id,
+            "missionId": mission_id,
+            "nodeId": node_id,
+            "attempt": attempt,
+            "outcome": outcome,
+            "summary": summary,
+            "rawOutput": raw_output,
         }),
         other => return Err(format!("Unsupported notify kind: {}", other)),
     };

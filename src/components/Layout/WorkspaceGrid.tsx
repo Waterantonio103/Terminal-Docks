@@ -1,6 +1,6 @@
 import { TerminalSquare, FileCode2, KanbanSquare, Activity, Rocket, Monitor, X, Network } from 'lucide-react';
 import { useWorkspaceStore, PaneType, Pane, selectActivePanes, GridPos, resolveCollisions } from '../../store/workspace';
-import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { TerminalPane } from '../Terminal/TerminalPane';
 import { EditorPane } from '../Editor/EditorPane';
 import { TaskBoardPane } from '../TaskBoard/TaskBoardPane';
@@ -18,8 +18,8 @@ const PANE_ICONS: Record<PaneType, React.ReactNode> = {
   nodetree:       <Network size={13} />,
 };
 
-const CELL_HEIGHT = 30;
-const GRID_COLUMNS = 24;
+const CELL_HEIGHT = 8;
+const GRID_COLUMNS = 50;
 
 interface DashboardPanelProps {
   pane: Pane;
@@ -28,12 +28,10 @@ interface DashboardPanelProps {
   isDragging: boolean;
   isResizing: boolean;
   anyActive: boolean;
-  // Increments each time a drag/resize operation completes — terminal panes
-  // use this to force a repaint after the panel finishes moving.
   dragEndSeq: number;
 }
 
-function DashboardPanel({ pane, onDragStart, onResizeStart, isDragging, isResizing, anyActive, dragEndSeq }: DashboardPanelProps) {
+const DashboardPanel = React.memo(function DashboardPanel({ pane, onDragStart, onResizeStart, isDragging, isResizing, anyActive, dragEndSeq }: DashboardPanelProps) {
   const { x, y, w, h } = pane.gridPos;
   const renamePane = useWorkspaceStore(s => s.renamePane);
   const removePane = useWorkspaceStore(s => s.removePane);
@@ -54,9 +52,6 @@ function DashboardPanel({ pane, onDragStart, onResizeStart, isDragging, isResizi
     top: `${top}px`,
     width: `${width}%`,
     height: `${height}px`,
-    // Only transition layout properties — using 'all' or 'opacity' on a container
-    // that holds a WebGL canvas forces WKWebView (macOS) to create/destroy GPU
-    // compositing layers, which silently kills the WebGL context in xterm.js.
     transition: anyActive ? 'none' : 'left 0.2s cubic-bezier(0.2, 0, 0, 1), top 0.2s cubic-bezier(0.2, 0, 0, 1), width 0.2s cubic-bezier(0.2, 0, 0, 1), height 0.2s cubic-bezier(0.2, 0, 0, 1)',
     zIndex: isDragging || isResizing ? 50 : 10,
   };
@@ -71,7 +66,6 @@ function DashboardPanel({ pane, onDragStart, onResizeStart, isDragging, isResizi
     const t = draft.trim();
     if (t) renamePane(pane.id, t);
     setEditing(false);
-    // Restore focus to the terminal after rename — xterm requires explicit focus
     if (pane.type === 'terminal') {
       setTimeout(() => {
         const textarea = bodyRef.current?.querySelector<HTMLTextAreaElement>('.xterm-helper-textarea');
@@ -82,7 +76,7 @@ function DashboardPanel({ pane, onDragStart, onResizeStart, isDragging, isResizi
 
   return (
     <div style={style} className="p-1 group">
-      <div className={`w-full h-full bg-bg-panel border rounded shadow-sm flex flex-col overflow-hidden transition-colors
+      <div className={`w-full h-full bg-bg-app border rounded shadow-sm flex flex-col overflow-hidden transition-colors
         ${isDragging || isResizing ? 'border-accent-primary ring-2 ring-accent-primary/20 shadow-xl' : 'border-border-panel hover:border-accent-primary/50'}
       `}>
         {/* Header - Drag Handle */}
@@ -144,6 +138,70 @@ function DashboardPanel({ pane, onDragStart, onResizeStart, isDragging, isResizi
       </div>
     </div>
   );
+});
+
+function TabsView({ panes }: { panes: Pane[] }) {
+  const activePaneId = useWorkspaceStore(s => s.activePaneId);
+  const setActivePaneId = useWorkspaceStore(s => s.setActivePaneId);
+  const removePane = useWorkspaceStore(s => s.removePane);
+  
+  const activePane = panes.find(p => p.id === activePaneId) || panes[0];
+
+  useEffect(() => {
+    if (!activePaneId && panes.length > 0) {
+      setActivePaneId(panes[0].id);
+    }
+  }, [panes, activePaneId]);
+
+  return (
+    <div className="flex-1 flex flex-col bg-bg-app overflow-hidden">
+      {/* File Tab Bar */}
+      <div className="flex items-center h-9 bg-bg-titlebar border-b border-border-panel overflow-x-auto shrink-0 no-scrollbar">
+        {panes.map(pane => (
+          <div
+            key={pane.id}
+            onClick={() => setActivePaneId(pane.id)}
+            className={`
+              group flex items-center h-full px-3 gap-2 border-r border-border-panel cursor-pointer select-none transition-colors min-w-[120px] max-w-[200px]
+              ${activePaneId === pane.id ? 'bg-bg-app border-b-2 border-b-accent-primary' : 'bg-transparent text-text-muted hover:bg-bg-surface/50 hover:text-text-secondary'}
+            `}
+          >
+            <span className={activePaneId === pane.id ? 'text-accent-primary' : 'text-text-muted opacity-60'}>
+              {PANE_ICONS[pane.type]}
+            </span>
+            <span className={`text-[11px] font-medium truncate flex-1 ${activePaneId === pane.id ? 'text-text-primary' : ''}`}>
+              {pane.title}
+            </span>
+            <button
+              onClick={(e) => { e.stopPropagation(); removePane(pane.id); }}
+              className="opacity-0 group-hover:opacity-100 p-0.5 rounded hover:bg-bg-surface text-text-muted hover:text-red-400 transition-all"
+            >
+              <X size={12} />
+            </button>
+          </div>
+        ))}
+      </div>
+
+      {/* Active Pane Content */}
+      <div className="flex-1 overflow-hidden relative">
+        {activePane ? (
+          <div className="w-full h-full flex flex-col">
+            {activePane.type === 'terminal'       && <TerminalPane pane={activePane} dragEndSeq={0} />}
+            {activePane.type === 'editor'         && <EditorPane pane={activePane} />}
+            {activePane.type === 'taskboard'      && <TaskBoardPane />}
+            {activePane.type === 'activityfeed'   && <ActivityFeedPane />}
+            {activePane.type === 'launcher'       && <LauncherPane />}
+            {activePane.type === 'missioncontrol' && <MissionControlPane pane={activePane} />}
+          </div>
+        ) : (
+          <div className="w-full h-full flex flex-col items-center justify-center text-text-muted">
+            <FileCode2 size={48} className="opacity-10 mb-4" />
+            <p className="text-sm">No files open</p>
+          </div>
+        )}
+      </div>
+    </div>
+  );
 }
 
 export function WorkspaceGrid({ visibleTypes }: { visibleTypes?: PaneType[] } = {}) {
@@ -151,6 +209,7 @@ export function WorkspaceGrid({ visibleTypes }: { visibleTypes?: PaneType[] } = 
   const updatePaneLayout = useWorkspaceStore(s => s.updatePaneLayout);
   const updatePaneData = useWorkspaceStore(s => s.updatePaneData);
   const addPaneAt = useWorkspaceStore(s => s.addPaneAt);
+  const layoutMode = useWorkspaceStore(s => s.layoutMode);
   
   const containerRef = useRef<HTMLDivElement>(null);
   const [containerWidth, setContainerWidth] = useState(0);
@@ -307,7 +366,6 @@ export function WorkspaceGrid({ visibleTypes }: { visibleTypes?: PaneType[] } = 
     }
 
     const handleMouseUp = (e: MouseEvent) => {
-      // Capture the current ghostPos from the dragInfo and current mouse position for a clean commit
       if (dragInfo.current && containerRef.current && (draggingId || resizingId)) {
         const { startX, startY, startGrid, offsetX, offsetY } = dragInfo.current;
         const rect = containerRef.current.getBoundingClientRect();
@@ -356,6 +414,10 @@ export function WorkspaceGrid({ visibleTypes }: { visibleTypes?: PaneType[] } = 
       window.removeEventListener('mouseup', handleMouseUp);
     };
   }, [draggingId, resizingId, containerWidth, updatePaneLayout]);
+
+  if (layoutMode === 'tabs') {
+    return <TabsView panes={visiblePanes} />;
+  }
 
   const totalHeight = displayPanes.reduce((max, p) => Math.max(max, p.gridPos.y + p.gridPos.h), 0) * CELL_HEIGHT + 400;
 

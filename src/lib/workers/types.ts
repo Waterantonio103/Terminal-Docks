@@ -116,7 +116,8 @@ export type WorkerEvent =
   | { kind: 'task-completed'; taskSeq: number; outcome: 'success' | 'failure' }
   | { kind: 'prompt-line'; line: string }
   | { kind: 'crash'; detail: string }
-  | { kind: 'stale'; detail: string };
+  | { kind: 'stale'; detail: string }
+  | { kind: 'process-exit'; detail?: string };
 
 export interface WorkerAdapter {
   readonly kind: WorkerKind;

@@ -27,6 +27,10 @@ export function TerminalPane({ pane, dragEndSeq }: { pane: Pane; dragEndSeq?: nu
   const [isScrolledUp, setIsScrolledUp] = useState(false);
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
 
+  useEffect(() => {
+    console.log(`[TerminalPane] Mounted pane: ${pane.id}`, pane.data);
+  }, [pane.id, pane.data]);
+
   const showSearchRef = useRef(false);
   useEffect(() => { showSearchRef.current = showSearch; }, [showSearch]);
 
@@ -205,8 +209,9 @@ export function TerminalPane({ pane, dragEndSeq }: { pane: Pane; dragEndSeq?: nu
         cli: typeof cli === 'string' ? cli : 'generic',
       }).catch(() => {});
 
+      console.log(`[TerminalPane] Auto-launch check for ${pane.id} (${terminalId})`, { customCommand, cli, spawned: false });
       if (customCommand) {
-        await invoke<boolean>('spawn_pty_with_command', {
+        const spawned = await invoke<boolean>('spawn_pty_with_command', {
           id: terminalId,
           rows: term.rows || 24,
           cols: term.cols || 80,
@@ -215,6 +220,7 @@ export function TerminalPane({ pane, dragEndSeq }: { pane: Pane; dragEndSeq?: nu
           args: Array.isArray(pane.data?.customCliArgs) ? pane.data?.customCliArgs : [],
           env: pane.data?.customCliEnv ?? null,
         });
+        console.log(`[TerminalPane] Spawned with command: ${spawned}`, customCommand);
       } else if (cli && cli !== 'custom') {
         const command = String(cli).replace(/\0/g, '');
         // For known CLIs in "interactive PTY" mode, we spawn a default shell
@@ -226,22 +232,25 @@ export function TerminalPane({ pane, dragEndSeq }: { pane: Pane; dragEndSeq?: nu
           cols: term.cols || 80,
           cwd: workspaceDir,
         });
+        console.log(`[TerminalPane] Spawned default shell: ${spawned} for CLI ${command}`);
 
         // Only send the CLI launch command if we actually spawned a new PTY.
         // spawn_pty returns false when the PTY already exists (e.g. on component
         // remount), so we must not re-send the command into an already-running session.
         if (spawned) {
           setTimeout(() => {
+            console.log(`[TerminalPane] Auto-launching CLI: ${command}`);
             invoke('write_to_pty', { id: terminalId, data: `${command}\r` }).catch(() => {});
           }, 600);
         }
       } else {
-        await invoke<boolean>('spawn_pty', {
+        const spawned = await invoke<boolean>('spawn_pty', {
           id: terminalId,
           rows: term.rows || 24,
           cols: term.cols || 80,
           cwd: workspaceDir,
         });
+        console.log(`[TerminalPane] Spawned empty shell: ${spawned}`);
       }
 
       const initialCommand = pane.data?.initialCommand;

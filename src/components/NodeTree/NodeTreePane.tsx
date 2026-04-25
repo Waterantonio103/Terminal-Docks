@@ -882,28 +882,16 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
 
         // Spawn a real terminal pane for this node (inline so it doesn't depend
         // on stale component state via createAndBindRuntime).
-        const beforeIds = new Set(openTerminals.map(t => t.id));
         const paneTitle = `Runtime ${role}`;
-        addPane('terminal', paneTitle, {
+        const { paneId, terminalId } = useWorkspaceStore.getState().createRuntimeTerminal({
           nodeId,
           roleId: role,
           cli: selectedCli,
-          cliSource: 'heuristic',
           executionMode: 'interactive_pty',
+          title: paneTitle,
         });
-        const nextTabs = useWorkspaceStore.getState().tabs;
-        let created: { id: string; paneId: string; title: string; cli: WorkflowAgentCli } | null = null;
-        outer: for (const tab of nextTabs) {
-          for (const pane of tab.panes) {
-            if (pane.type !== 'terminal' || !pane.data?.terminalId) continue;
-            if (beforeIds.has(pane.data.terminalId)) continue;
-            created = { id: pane.data.terminalId, paneId: pane.id, title: pane.title, cli: selectedCli };
-            break outer;
-          }
-        }
-        if (!created) {
-          throw new Error(`Failed to spawn terminal for agent node ${nodeId}.`);
-        }
+
+        const created = { id: terminalId, paneId, title: paneTitle, cli: selectedCli };
         applyOperator({ type: 'set_node_property', nodeId, key: 'terminalId', value: created.id });
         applyOperator({ type: 'set_node_property', nodeId, key: 'terminalTitle', value: created.title });
         applyOperator({ type: 'set_node_property', nodeId, key: 'paneId', value: created.paneId });
