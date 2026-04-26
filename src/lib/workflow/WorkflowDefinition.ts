@@ -25,6 +25,7 @@ import type {
   WorkflowEdge,
   WorkflowGraph,
   WorkflowNode,
+  CompiledMission,
 } from '../../store/workspace.js';
 
 // ──────────────────────────────────────────────
@@ -57,6 +58,9 @@ export interface WorkflowNodeDefinition {
     readonly label?: string;
     readonly position?: { x: number; y: number };
     readonly autoLinked?: boolean;
+    readonly terminalId?: string;
+    readonly paneId?: string;
+    readonly terminalTitle?: string;
   };
 }
 
@@ -157,6 +161,72 @@ export function workflowGraphToDefinition(
   };
 }
 
+export function compiledMissionToDefinition(
+  mission: CompiledMission,
+  name?: string,
+): WorkflowDefinition {
+  const baseIso = new Date(mission.metadata.compiledAt || Date.now()).toISOString();
+  const nodeIds = new Set(mission.nodes.map(node => node.id));
+
+  const nodes: WorkflowNodeDefinition[] = [
+    {
+      id: mission.task.nodeId,
+      kind: 'task',
+      roleId: 'task',
+      config: {
+        prompt: mission.task.prompt,
+        mode: mission.task.mode,
+        workspaceDir: mission.task.workspaceDir ?? undefined,
+        authoringMode: mission.metadata.authoringMode,
+        presetId: mission.metadata.presetId ?? undefined,
+        runVersion: mission.metadata.runVersion,
+      },
+    },
+    ...mission.nodes.map(node => ({
+      id: node.id,
+      kind: 'agent' as const,
+      roleId: node.roleId,
+      config: {
+        instructionOverride: node.instructionOverride,
+        profileId: node.profileId,
+        capabilities: node.capabilities,
+        requirements: node.requirements,
+        cli: node.terminal.cli,
+        executionMode: node.terminal.executionMode,
+        terminalId: node.terminal.terminalId,
+        paneId: node.terminal.paneId,
+        terminalTitle: node.terminal.terminalTitle,
+      },
+    })),
+  ];
+
+  const startEdges: WorkflowEdgeDefinition[] = mission.metadata.startNodeIds
+    .filter(nodeId => nodeIds.has(nodeId))
+    .map(nodeId => ({
+      fromNodeId: mission.task.nodeId,
+      toNodeId: nodeId,
+      condition: 'always' as const,
+    }));
+
+  const edges: WorkflowEdgeDefinition[] = [
+    ...startEdges,
+    ...mission.edges.map(edge => ({
+      fromNodeId: edge.fromNodeId,
+      toNodeId: edge.toNodeId,
+      condition: edge.condition,
+    })),
+  ];
+
+  return {
+    id: mission.missionId,
+    name: name ?? mission.graphId,
+    nodes,
+    edges,
+    createdAt: baseIso,
+    updatedAt: baseIso,
+  };
+}
+
 // ──────────────────────────────────────────────
 // Conversion: WorkflowDefinition → WorkflowGraph
 //
@@ -181,6 +251,43 @@ export function definitionToWorkflowGraph(
   }));
 
   return { id: def.id, nodes, edges };
+}
+
+// ──────────────────────────────────────────────
+// Runtime Enrichment
+//
+// Re-injects runtime-only fields (terminalId, paneId, terminalTitle)
+// into a sanitized definition so the orchestrator can pass them to
+// RuntimeManager. These fields are stripped by sanitizeNodeConfig for
+// persistence but are required for live activation.
+// ──────────────────────────────────────────────
+
+export interface RuntimeBinding {
+  terminalId: string;
+  paneId?: string;
+  terminalTitle?: string;
+}
+
+export function enrichDefinitionWithBindings(
+  def: WorkflowDefinition,
+  bindings: ReadonlyMap<string, RuntimeBinding>,
+): WorkflowDefinition {
+  return {
+    ...def,
+    nodes: def.nodes.map(node => {
+      const binding = bindings.get(node.id);
+      if (!binding) return node;
+      return {
+        ...node,
+        config: {
+          ...node.config,
+          terminalId: binding.terminalId,
+          paneId: binding.paneId,
+          terminalTitle: binding.terminalTitle,
+        },
+      };
+    }),
+  };
 }
 
 // ──────────────────────────────────────────────

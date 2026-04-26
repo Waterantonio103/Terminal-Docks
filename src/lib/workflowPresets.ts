@@ -138,7 +138,7 @@ export function buildPresetFlowGraph(options: {
           terminalId: binding?.terminalId ?? '',
           terminalTitle: binding?.terminalTitle ?? '',
           paneId: binding?.paneId ?? '',
-          executionMode: binding?.executionMode ?? 'streaming_headless',
+          executionMode: binding?.executionMode ?? 'interactive_pty',
           autoLinked: true,
         },
       };

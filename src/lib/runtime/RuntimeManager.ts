@@ -160,8 +160,9 @@ class RuntimeManager {
       // UI Bridge: Sync to Workspace Store (only when status actually changes to avoid re-render loops)
       const existingBinding = useWorkspaceStore.getState().nodeRuntimeBindings[session.nodeId];
       if (existingBinding?.adapterStatus !== to || existingBinding?.runtimeSessionId !== session.sessionId) {
+        const existingTerminalId = existingBinding?.terminalId;
         useWorkspaceStore.getState().setNodeRuntimeBinding(session.nodeId, {
-          terminalId: session.terminalId,
+          terminalId: session.terminalId || existingTerminalId || '',
           runtimeSessionId: session.sessionId,
           adapterStatus: to as any,
         });
@@ -581,11 +582,19 @@ class RuntimeManager {
           if (Date.now() >= ptyDeadline) break;
           await sleep(100);
         }
-        await sleep(CLI_LAUNCH_DELAY_MS);
-        try {
-          await writeToTerminal(session.terminalId, `${session.cliId}\r`);
-        } catch {
-          // PTY still not available — user can interact with the terminal manually
+        // Check if CLI is already running before writing the launch command
+        const storeState = useWorkspaceStore.getState();
+        const allPanes = storeState.tabs.flatMap(t => t.panes);
+        const pane = allPanes.find(p => p.data?.terminalId === session.terminalId);
+        const hasExistingRuntime = typeof pane?.data?.runtimeSessionId === 'string';
+        const cliDetectedFromOutput = pane?.data?.cliSource === 'stdout' || pane?.data?.cliSource === 'connect_agent';
+        if (!hasExistingRuntime && !cliDetectedFromOutput) {
+          await sleep(CLI_LAUNCH_DELAY_MS);
+          try {
+            await writeToTerminal(session.terminalId, `${session.cliId}\r`);
+          } catch {
+            // PTY still not available — user can interact with the terminal manually
+          }
         }
       }
       session.transitionTo('running');
@@ -632,12 +641,19 @@ class RuntimeManager {
       throw new Error('MCP server unavailable during activation handshake.');
     }
 
-    // 3. For interactive PTY: launch CLI in terminal
+    // 3. For interactive PTY: launch CLI in terminal (skip if already running)
     if (session.isTerminal) {
       session.transitionTo('awaiting_cli_ready');
-      await sleep(CLI_LAUNCH_DELAY_MS);
-      await writeToTerminal(session.terminalId, `${session.cliId}\r`);
-      await sleep(CLI_STARTUP_WAIT_MS);
+      const storeState = useWorkspaceStore.getState();
+      const allPanes = storeState.tabs.flatMap(t => t.panes);
+      const pane = allPanes.find(p => p.data?.terminalId === session.terminalId);
+      const hasExistingRuntime = typeof pane?.data?.runtimeSessionId === 'string';
+      const cliDetectedFromOutput = pane?.data?.cliSource === 'stdout' || pane?.data?.cliSource === 'connect_agent';
+      if (!hasExistingRuntime && !cliDetectedFromOutput) {
+        await sleep(CLI_LAUNCH_DELAY_MS);
+        await writeToTerminal(session.terminalId, `${session.cliId}\r`);
+        await sleep(CLI_STARTUP_WAIT_MS);
+      }
     }
 
     // 4. Register session with MCP
@@ -669,6 +685,18 @@ class RuntimeManager {
       attempt: session.attempt,
       status: 'registered',
     });
+
+    if (session.isTerminal) {
+      const bootstrapPrompt = this.buildInteractiveBootstrapPrompt(
+        session,
+        activationPayload,
+        await getMcpBaseUrl(),
+      );
+      if (bootstrapPrompt) {
+        await writeToTerminal(session.terminalId, bootstrapPrompt);
+        await sleep(PASTE_SUBMIT_GAP_MS);
+      }
+    }
 
     // 5. Wait for agent:ready handshake
     session.transitionTo('awaiting_mcp_ready');
@@ -792,6 +820,23 @@ class RuntimeManager {
       nodeId: session.nodeId,
       attempt: session.attempt,
     });
+  }
+
+  private buildInteractiveBootstrapPrompt(
+    session: RuntimeSession,
+    activationPayload: import('../missionRuntime.js').RuntimeActivationPayload,
+    mcpUrl: string,
+  ): string {
+    const role = session.role;
+    const profileId = session.profileId ?? role;
+    const payload = activationPayload.inputPayload ? JSON.stringify(activationPayload.inputPayload) : null;
+    const payloadSuffix = payload ? `, payload=${payload}` : '';
+    const prompt =
+      `Connect to MCP before task activation. MCP URL: ${mcpUrl}. ` +
+      `Call connect_agent with role="${role}", agentId="${session.agentId}", terminalId="${session.terminalId}", ` +
+      `cli="${session.cliId}", profileId="${profileId}", missionId="${session.missionId}", nodeId="${session.nodeId}", attempt=${session.attempt}${payloadSuffix}. ` +
+      'After connection, wait for NEW_TASK and run get_task_details.';
+    return `${prompt}\r`;
   }
 
   // ── Internal: Helpers ──────────────────────────────────────────────

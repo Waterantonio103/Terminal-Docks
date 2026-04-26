@@ -67,6 +67,8 @@ import { mcpBus } from '../workers/mcpEventBus.js';
 export interface RuntimeManagerPort {
   createRuntimeForNode(args: any): Promise<{ sessionId: string; terminalId: string }>;
 
+  getSessionForNode(missionId: string, nodeId: string, attempt: number): { sessionId: string; terminalId: string; cliId: string } | undefined;
+
   launchCli(sessionId: string, externalPayload?: unknown): Promise<void>;
 
   sendTask(args: import('../runtime/RuntimeTypes.js').SendTaskArgs): Promise<void>;
@@ -441,6 +443,30 @@ export class WorkflowOrchestrator {
     nodeDef: WorkflowNodeDefinition,
   ): Promise<void> {
     try {
+      const attempt = run.nodeStates[nodeId]?.attempt || 1;
+      const existing = this.runtimeManager!.getSessionForNode(run.definitionId, nodeId, attempt);
+      if (existing) {
+        const refreshedRun = this.runs.get(run.runId);
+        if (!refreshedRun) return;
+        const session: RuntimeSessionInfo = {
+          sessionId: existing.sessionId,
+          terminalId: existing.terminalId,
+          cliId: existing.cliId,
+          executionMode: nodeDef.config.executionMode ?? 'interactive_pty',
+          createdAt: Date.now(),
+        };
+        attachRuntime(refreshedRun, nodeId, session);
+        this.emit({
+          type: 'runtime_attached',
+          runId: run.runId,
+          nodeId,
+          sessionId: existing.sessionId,
+          terminalId: existing.terminalId,
+          timestamp: Date.now(),
+        });
+        return;
+      }
+
       const result = await this.runtimeManager!.createRuntimeForNode({
         missionId: run.definitionId,
         nodeId,
@@ -450,8 +476,8 @@ export class WorkflowOrchestrator {
         profileId: nodeDef.config.profileId ?? nodeDef.roleId,
         cliId: nodeDef.config.cli ?? 'claude',
         executionMode: nodeDef.config.executionMode ?? 'interactive_pty',
-        terminalId: (nodeDef.config as any).terminalId || '',
-        paneId: (nodeDef.config as any).paneId,
+        terminalId: nodeDef.config.terminalId || '',
+        paneId: nodeDef.config.paneId,
         workspaceDir: nodeDef.config.workspaceDir ?? null,
         goal: (run.definition as any).task?.prompt || '',
         legalTargets: getLegalTargetsForNode(run, nodeId) as any,

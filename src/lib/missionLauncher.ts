@@ -66,7 +66,7 @@ export async function stageMissionPrompts(
     const prompt = buildLaunchPrompt(node.roleId, ctx, node.instructionOverride || undefined);
     if (prompt) {
       const terminalId = pane.data?.terminalId ?? `term-${pane.id}`;
-      await invoke('write_to_pty', { id: terminalId, data: prompt });
+      await invoke('write_to_pty', { id: terminalId, data: prompt + '\r' });
     }
   }
 }

@@ -49,7 +49,23 @@
       "Bash(python -c ' *)",
       "Bash(del *)",
       "Bash(grep -E \"\\\\.ts$\")",
-      "Bash(awk '{print $NF}')"
+      "Bash(awk '{print $NF}')",
+      "Bash(cat)",
+      "Bash(bash /tmp/analyze.sh)",
+      "Bash(python3 -c \"import sys,json; d=json.loads\\(sys.stdin.read\\(\\)\\); print\\(json.dumps\\(d.get\\('message',{}\\).get\\('usage',{}\\), indent=2\\)\\)\")",
+      "Bash(python *)",
+      "Bash(pip install *)",
+      "Bash(python3 -c \"import click, rich; print\\('OK'\\)\")",
+      "Bash(python3.10 -c \"import click, rich; print\\('OK'\\)\")",
+      "Bash(C:\\\\Users\\\\james\\\\AppData\\\\Local\\\\Programs\\\\Python\\\\Python310\\\\python.exe *)",
+      "Bash(chmod +x ~/bin/claude-stats)",
+      "Read(//c/Users/james/**)",
+      "Read(//usr/local/**)",
+      "Bash(mkdir -p /c/Users/james/bin)",
+      "Bash(chmod +x /c/Users/james/bin/claude-stats)",
+      "Bash(claude-stats *)",
+      "PowerShell(claude-stats *)",
+      "Bash('C:\\\\Users\\\\james\\\\AppData\\\\Local\\\\Programs\\\\Python\\\\Python310\\\\python.exe' -c ' *)"
     ]
   }
 }

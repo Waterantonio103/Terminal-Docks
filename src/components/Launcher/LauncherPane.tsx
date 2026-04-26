@@ -129,7 +129,7 @@ function workflowGraphToFlowGraph(options: {
         terminalId,
         terminalTitle,
         paneId,
-        executionMode: node.config?.executionMode ?? 'streaming_headless',
+        executionMode: node.config?.executionMode ?? 'interactive_pty',
         autoLinked: Boolean(node.config?.autoLinked ?? picked),
       },
     };
@@ -186,7 +186,7 @@ function buildAdaptiveSeedFlowGraph(options: {
         terminalId: coordinator.pane.data?.terminalId ?? `term-${coordinator.pane.id}`,
         terminalTitle: coordinator.pane.title,
         paneId: coordinator.pane.id,
-        executionMode: (coordinator.pane.data?.executionMode as WorkflowExecutionMode | undefined) ?? 'streaming_headless',
+        executionMode: (coordinator.pane.data?.executionMode as WorkflowExecutionMode | undefined) ?? 'interactive_pty',
         autoLinked: true,
       },
     },
@@ -354,7 +354,7 @@ export function LauncherPane() {
           terminalTitle: picked.pane.title,
           paneId: picked.pane.id,
           cli: picked.cli,
-          executionMode: (picked.pane.data?.executionMode as WorkflowExecutionMode | undefined) ?? 'streaming_headless',
+          executionMode: (picked.pane.data?.executionMode as WorkflowExecutionMode | undefined) ?? 'interactive_pty',
         };
       }
 
@@ -481,16 +481,11 @@ export function LauncherPane() {
           throw new Error('No staged mission found. Re-stage prompts before confirming.');
         }
 
-        await invoke('start_mission_graph', {
-          missionId: pendingLaunch.missionId,
-          graph: pendingLaunch.mission,
-        });
-
-        // Establish TS Orchestrator as the canonical brain (Phase 8)
+        // TS Orchestrator is the canonical runtime brain.
         const { workflowOrchestrator } = await import('../../lib/workflow/WorkflowOrchestrator');
-        const { workflowGraphToDefinition } = await import('../../lib/workflow/index');
+        const { compiledMissionToDefinition } = await import('../../lib/workflow/index');
         workflowOrchestrator.startRun(
-          workflowGraphToDefinition(globalGraph),
+          compiledMissionToDefinition(pendingLaunch.mission),
           { runId: pendingLaunch.missionId }
         );
 

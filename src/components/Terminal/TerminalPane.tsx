@@ -240,10 +240,16 @@ export function TerminalPane({ pane, dragEndSeq }: { pane: Pane; dragEndSeq?: nu
         // runtimeSessionId after mount but before this timeout fires.
         if (spawned) {
           setTimeout(() => {
-            const allPanes = useWorkspaceStore.getState().tabs.flatMap(t => t.panes);
+            const storeState = useWorkspaceStore.getState();
+            const allPanes = storeState.tabs.flatMap(t => t.panes);
             const latestPane = allPanes.find(p => p.id === pane.id);
-            const isManaged = typeof latestPane?.data?.runtimeSessionId === 'string';
-            if (!isManaged) {
+            const hasPaneSessionId = typeof latestPane?.data?.runtimeSessionId === 'string';
+            const nodeId = latestPane?.data?.nodeId as string | undefined;
+            const hasStoreBinding = nodeId
+              ? Boolean(storeState.nodeRuntimeBindings[nodeId]?.runtimeSessionId)
+              : false;
+            const cliAlreadyRunning = latestPane?.data?.cliSource === 'stdout' || latestPane?.data?.cliSource === 'connect_agent';
+            if (!hasPaneSessionId && !hasStoreBinding && !cliAlreadyRunning) {
               console.log(`[TerminalPane] Auto-launching CLI: ${command}`);
               invoke('write_to_pty', { id: terminalId, data: `${command}\r` }).catch(() => {});
             }

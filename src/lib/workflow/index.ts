@@ -45,6 +45,8 @@ export type {
 
 export {
   definitionToWorkflowGraph,
+  compiledMissionToDefinition,
+  enrichDefinitionWithBindings,
   getExecutableNodeIds,
   getIncomingEdges,
   getOutgoingEdges,

@@ -19,7 +19,6 @@ import { getActiveTreeId, getViewState } from '../../lib/node-system/editor';
 import { applyNodeEditorOperator } from '../../lib/node-system/operators';
 import type { MaterializedNode, NodeInstance, Point2D } from '../../lib/node-system/types';
 import { detectRoleForPane } from '../../lib/cliDetection';
-import { stageMissionPrompts } from '../../lib/missionLauncher';
 import { runtimeManager } from '../../lib/runtime/RuntimeManager';
 type NodeOutcome = 'success' | 'failure';
 import { useWorkspaceStore, type MissionAgent, type Pane, type ResultEntry, type WorkflowAgentCli, type WorkflowExecutionMode, type WorkflowGraph } from '../../store/workspace';
@@ -289,7 +288,29 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
     const incoming = JSON.stringify(graph);
     if (incoming !== lastGraphSnapshotRef.current) {
       isUserChangeRef.current = false;
-      setState(legacyGraphToNodeDocument(graph));
+      const newState = legacyGraphToNodeDocument(graph);
+      setState(prev => {
+        const runtimeKeys = ['terminalId', 'paneId', 'terminalTitle'] as const;
+        for (const treeId of Object.keys(newState.document.trees)) {
+          const newTree = newState.document.trees[treeId];
+          const oldTree = prev.document.trees[treeId];
+          if (!oldTree) continue;
+          for (const nodeId of Object.keys(newTree.nodes)) {
+            const oldNode = oldTree.nodes[nodeId];
+            if (!oldNode) continue;
+            let dirty = false;
+            const patched = { ...newTree.nodes[nodeId], properties: { ...newTree.nodes[nodeId].properties } };
+            for (const key of runtimeKeys) {
+              if ((oldNode.properties as any)[key] && !(patched.properties as any)[key]) {
+                (patched.properties as any)[key] = (oldNode.properties as any)[key];
+                dirty = true;
+              }
+            }
+            if (dirty) newTree.nodes[nodeId] = patched;
+          }
+        }
+        return newState;
+      });
       lastGraphSnapshotRef.current = incoming;
       setActiveMissionId(null);
     }
@@ -885,7 +906,17 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
 
         // If a real terminal is already bound and still open, reuse it.
         const currentTerminalId = typeof data.terminalId === 'string' ? data.terminalId : '';
-        if (currentTerminalId && openTerminals.some(t => t.id === currentTerminalId)) {
+        const storedTerminalId = storedBindings[nodeId];
+        const resolvedTerminalId = currentTerminalId || storedTerminalId;
+        if (resolvedTerminalId && openTerminals.some(t => t.id === resolvedTerminalId)) {
+          if (!currentTerminalId && storedTerminalId) {
+            applyOperator({ type: 'set_node_property', nodeId, key: 'terminalId', value: storedTerminalId });
+            const existing = openTerminals.find(t => t.id === storedTerminalId);
+            if (existing) {
+              applyOperator({ type: 'set_node_property', nodeId, key: 'terminalTitle', value: existing.title });
+              applyOperator({ type: 'set_node_property', nodeId, key: 'paneId', value: existing.paneId });
+            }
+          }
           continue;
         }
 
@@ -1014,9 +1045,6 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
       setActiveMissionId(missionId);
       activeMissionRef.current = mission;
 
-      const allPanes = tabs.flatMap(t => t.panes);
-      await stageMissionPrompts(mission, workspaceDir, allPanes);
-
       addPane('missioncontrol', 'Mission Control', {
         taskDescription: mission.task.prompt ?? '',
         agents,
@@ -1024,13 +1052,11 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
         mission,
       });
 
-      await invoke('start_mission_graph', { missionId, graph: mission });
-
-      // Establish TS Orchestrator as the canonical brain (Phase 8)
+      // TS Orchestrator is the canonical runtime brain.
       const { workflowOrchestrator } = await import('../../lib/workflow/WorkflowOrchestrator');
-      const { workflowGraphToDefinition } = await import('../../lib/workflow/index');
+      const { compiledMissionToDefinition } = await import('../../lib/workflow/index');
       workflowOrchestrator.startRun(
-        workflowGraphToDefinition(graph),
+        compiledMissionToDefinition(mission),
         { runId: missionId }
       );
 
