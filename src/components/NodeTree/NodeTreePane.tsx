@@ -20,6 +20,7 @@ import { applyNodeEditorOperator } from '../../lib/node-system/operators';
 import type { MaterializedNode, NodeInstance, Point2D } from '../../lib/node-system/types';
 import { detectRoleForPane } from '../../lib/cliDetection';
 import { stageMissionPrompts } from '../../lib/missionLauncher';
+import { runtimeManager } from '../../lib/runtime/RuntimeManager';
 type NodeOutcome = 'success' | 'failure';
 import { useWorkspaceStore, type MissionAgent, type Pane, type ResultEntry, type WorkflowAgentCli, type WorkflowExecutionMode, type WorkflowGraph } from '../../store/workspace';
 import { detectRuntimeAction } from '../../lib/runtimeActivity';
@@ -610,7 +611,7 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
   }, []);
 
   const createAndBindRuntime = useCallback(
-    (nodeId: string): { id: string; paneId: string; title: string; cli: WorkflowAgentCli } | null => {
+    async (nodeId: string): Promise<{ id: string; paneId: string; title: string; cli: WorkflowAgentCli } | null> => {
       const node = activeTree.nodes[nodeId];
       const role = String(node?.properties.roleId ?? 'agent');
       const cli = SELECTABLE_WORKFLOW_CLIS.includes(node?.properties.cli as WorkflowAgentCli)
@@ -622,34 +623,60 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
       const title = `Runtime ${role}`;
       const terminalId = generateId();
 
-      if (executionMode !== 'interactive_pty') {
+      // Create a live session in RuntimeManager so it appears in Machine View
+      // and is managed by the new canonical brain.
+      const missionId = activeMissionId || `adhoc-${generateId().slice(0, 8)}`;
+      
+      try {
+        const session = await runtimeManager.createRuntimeForNode({
+          missionId,
+          nodeId,
+          attempt: Number(node?.properties.attempt ?? 0) + 1,
+          role,
+          agentId: role,
+          profileId: role,
+          cliId: cli,
+          executionMode,
+          terminalId,
+          workspaceDir: workspaceDir || null,
+        });
+
+        // For interactive PTY, add the pane first so the PTY can spawn before
+        // launchCli tries to write to it (the ad-hoc pipeline polls until ready).
+        if (executionMode === 'interactive_pty') {
+          addPane('terminal', title, {
+            terminalId,
+            nodeId,
+            roleId: role,
+            cli,
+            cliSource: 'heuristic',
+            executionMode,
+            runtimeSessionId: session.sessionId
+          });
+        }
+
+        // Launch it immediately
+        await runtimeManager.launchCli(session.sessionId);
+
+        // Update persistent node properties in a single batch if possible (though applyOperator is currently single-op)
         applyOperator({ type: 'set_node_property', nodeId, key: 'terminalId', value: terminalId });
         applyOperator({ type: 'set_node_property', nodeId, key: 'terminalTitle', value: title });
-        applyOperator({ type: 'set_node_property', nodeId, key: 'paneId', value: '' });
-        applyOperator({ type: 'set_node_property', nodeId, key: 'cli', value: cli });
-        applyOperator({ type: 'set_node_property', nodeId, key: 'executionMode', value: executionMode });
-        setNodeTerminalBinding(nodeId, terminalId);
-        setValidationTone('ok');
-        setValidationMessage(`Node ${nodeId} bound to ${title}.`);
-        return { id: terminalId, paneId: '', title, cli };
-      }
+        applyOperator({ type: 'set_node_property', nodeId, key: 'status', value: 'launching' });
 
-      // Pass the pre-generated terminalId to addPane
-      addPane('terminal', title, { terminalId, nodeId, roleId: role, cli, cliSource: 'heuristic', executionMode });
-      
-      // Since addPane is async for the store, we don't try to find the paneId yet.
-      // The NodeTree inspector will show "bound" based on terminalId existence.
-      applyOperator({ type: 'set_node_property', nodeId, key: 'terminalId', value: terminalId });
-      applyOperator({ type: 'set_node_property', nodeId, key: 'terminalTitle', value: title });
-      applyOperator({ type: 'set_node_property', nodeId, key: 'paneId', value: '' });
-      applyOperator({ type: 'set_node_property', nodeId, key: 'cli', value: cli });
-      applyOperator({ type: 'set_node_property', nodeId, key: 'executionMode', value: executionMode });
-      setNodeTerminalBinding(nodeId, terminalId);
-      setValidationTone('ok');
-      setValidationMessage(`Node ${nodeId} bound to ${title}.`);
-      return { id: terminalId, paneId: '', title, cli };
+        setNodeTerminalBinding(nodeId, terminalId);
+
+        setValidationTone('ok');
+        setValidationMessage(`Runtime session ${session.sessionId.slice(0, 8)} started for node ${nodeId}.`);
+        
+        return { id: terminalId, paneId: '', title, cli };
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : String(error);
+        setValidationTone('error');
+        setValidationMessage(`Failed to start runtime: ${msg}`);
+        return null;
+      }
     },
-    [activeTree.nodes, addPane, applyOperator, setNodeTerminalBinding]
+    [activeMissionId, activeTree.nodes, addPane, applyOperator, setNodeTerminalBinding, workspaceDir]
   );
 
   const handleCliChange = useCallback(async (nodeId: string, newCli: WorkflowAgentCli) => {
@@ -999,6 +1026,14 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
 
       await invoke('start_mission_graph', { missionId, graph: mission });
 
+      // Establish TS Orchestrator as the canonical brain (Phase 8)
+      const { workflowOrchestrator } = await import('../../lib/workflow/WorkflowOrchestrator');
+      const { workflowGraphToDefinition } = await import('../../lib/workflow/index');
+      workflowOrchestrator.startRun(
+        workflowGraphToDefinition(graph),
+        { runId: missionId }
+      );
+
       setValidationTone('ok');
       setValidationMessage(
         `Mission ${missionId.substring(0, 8)} registered. Mission Control will activate nodes automatically.`
@@ -1152,7 +1187,7 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
     // The node needs to be in activeTree for createAndBindRuntime to find it
     const node = activeTree.nodes[lastAddedNodeId];
     if (node && node.type === 'workflow.agent' && !node.properties.terminalId) {
-      createAndBindRuntime(lastAddedNodeId);
+      void createAndBindRuntime(lastAddedNodeId);
       setLastAddedNodeId(null);
     }
   }, [activeTree.nodes, createAndBindRuntime, lastAddedNodeId]);
@@ -1619,8 +1654,8 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
     : '';
 
   return (
-    <div className="h-full w-full bg-bg-app text-text-primary flex flex-col">
-      <div className="h-12 shrink-0 border-b border-border-panel px-3 flex items-center justify-between bg-bg-titlebar">
+    <div className="h-full w-full background-bg-app text-text-primary flex flex-col">
+      <div className="h-12 shrink-0 border-b border-border-panel px-3 flex items-center justify-between background-bg-titlebar">
         <div className="flex items-center gap-2 text-[11px] uppercase tracking-[0.24em] text-accent-primary">
           <Workflow size={14} />
           <span>Node Graph Architecture</span>
@@ -1629,7 +1664,7 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
           {state.editor.treePath.length > 1 && (
             <button
               onClick={() => applyOperator({ type: 'end_group_edit' })}
-              className="px-2.5 py-1 rounded border border-border-panel text-text-muted hover:text-text-primary hover:bg-bg-panel"
+              className="px-2.5 py-1 rounded border border-border-panel text-text-muted hover:text-text-primary hover:background-bg-panel"
             >
               <ChevronLeft size={12} className="inline mr-1" />
               Back
@@ -1639,14 +1674,14 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
             <Play size={12} className="inline mr-1" />
             Run
           </button>
-          <button onClick={validateCurrentGraph} className="px-2.5 py-1 rounded border border-border-panel text-accent-primary hover:bg-bg-panel">
+          <button onClick={validateCurrentGraph} className="px-2.5 py-1 rounded border border-border-panel text-accent-primary hover:background-bg-panel">
             <ScanSearch size={12} className="inline mr-1" />
             Validate
           </button>
-          <button onClick={viewRuntimeMapping} className="px-2.5 py-1 rounded border border-border-panel text-text-muted hover:text-text-primary hover:bg-bg-panel">
+          <button onClick={viewRuntimeMapping} className="px-2.5 py-1 rounded border border-border-panel text-text-muted hover:text-text-primary hover:background-bg-panel">
             Runtime Map
           </button>
-          <button onClick={importPresetGraph} className="px-2.5 py-1 rounded border border-border-panel text-text-muted hover:text-text-primary hover:bg-bg-panel">
+          <button onClick={importPresetGraph} className="px-2.5 py-1 rounded border border-border-panel text-text-muted hover:text-text-primary hover:background-bg-panel">
             <Sparkles size={12} className="inline mr-1" />
             Import Preset
           </button>
@@ -1657,7 +1692,7 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
         </div>
       </div>
 
-      <div className="px-3 py-2 shrink-0 border-b border-border-panel bg-bg-surface flex items-center justify-between text-[11px]">
+      <div className="px-3 py-2 shrink-0 border-b border-border-panel background-bg-surface flex items-center justify-between text-[11px]">
         <div className="flex items-center gap-2">
           {state.editor.treePath.map((treeId, index) => (
             <span key={treeId} className={index === state.editor.treePath.length - 1 ? 'text-text-primary' : 'text-text-muted'}>
@@ -1776,7 +1811,7 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
             return (
               <div
                 key={materializedNode.node.id}
-                className={`absolute rounded-xl border bg-bg-panel ${borderClass(isSelected)}`}
+                className={`absolute rounded-xl border background-bg-panel ${borderClass(isSelected)}`}
                 style={{ left: rect.x, top: rect.y, width: rect.width, minHeight: rect.height, zIndex: isFrame ? 0 : 10 }}
                 onDoubleClick={() => {
                   if (materializedNode.node.type === 'workflow.group') {
@@ -1784,10 +1819,14 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
                   }
                 }}
               >
-                <div className="h-11 px-3 rounded-t-xl border-b border-border-panel flex items-center justify-between bg-bg-titlebar" onMouseDown={event => startNodeDrag(event, materializedNode.node)}>
+                <div className="h-11 px-3 rounded-t-xl border-b border-border-panel flex items-center justify-between background-bg-titlebar" onMouseDown={event => startNodeDrag(event, materializedNode.node)}>
                   <div>
                     <div className="text-[10px] uppercase tracking-[0.22em] text-accent-primary">{registry.get(materializedNode.node.type).category}</div>
-                    <div className="text-sm font-semibold text-text-primary">{materializedNode.node.label ?? registry.get(materializedNode.node.type).label}</div>
+                    <div className="text-sm font-semibold text-text-primary">
+                      {materializedNode.node.type === 'workflow.agent' ? 'Agent' :
+                       materializedNode.node.type === 'workflow.task' ? 'Task' :
+                       (materializedNode.node.label ?? registry.get(materializedNode.node.type).label)}
+                    </div>
                   </div>
                   <div className={`text-[10px] uppercase tracking-wide px-2 py-1 rounded border ${workflowStatusTone(runtimeStatus, 'graph')}`}>
                     {workflowStatusLabel(runtimeStatus)}
@@ -1802,7 +1841,7 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
                     return (
                       <button
                         key={socket.id}
-                        className={`absolute left-0 w-4 h-4 -translate-x-1/2 rounded-full border border-accent-primary transition-all duration-75 ${isFilled ? 'bg-accent-primary' : 'bg-bg-app'}`}
+                        className={`absolute left-0 w-4 h-4 -translate-x-1/2 rounded-full border border-accent-primary transition-all duration-75 ${isFilled ? 'bg-accent-primary' : 'background-bg-app'}`}
                         style={{ top: 12 + index * 24, ...(isSnapTarget ? { boxShadow: '0 0 4px var(--accent-primary), 0 0 10px var(--accent-primary), 0 0 22px var(--accent-primary)' } : {}) }}
                         onMouseEnter={() => { if (interaction.kind !== 'dragging_link') setHoveredInput({ nodeId: materializedNode.node.id, socketId: socket.id }); }}
                         onMouseLeave={() => { if (interaction.kind !== 'dragging_link') setHoveredInput(current => (current?.nodeId === materializedNode.node.id && current?.socketId === socket.id ? null : current)); }}
@@ -1815,7 +1854,7 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
                     return (
                       <button
                         key={socket.id}
-                        className={`absolute right-0 w-4 h-4 translate-x-1/2 rounded-full border border-accent-primary ${isConnectedOutput ? 'bg-accent-primary' : 'bg-bg-app'}`}
+                        className={`absolute right-0 w-4 h-4 translate-x-1/2 rounded-full border border-accent-primary ${isConnectedOutput ? 'bg-accent-primary' : 'background-bg-app'}`}
                         style={{ top: 12 + index * 24 }}
                         onMouseDown={event => beginLinkDrag(event, materializedNode.node.id, socket.id)}
                         title={`${socket.name} (${socket.dataType})`}
@@ -1843,13 +1882,13 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
                         onChange={event => applyOperator({ type: 'set_node_property', nodeId: materializedNode.node.id, key: 'prompt', value: event.target.value })}
                         onWheel={event => event.stopPropagation()}
                         placeholder="Task prompt"
-                        className="w-full bg-bg-surface border border-border-panel rounded-lg px-2 py-2 text-[11px] text-text-primary resize-none"
+                        className="w-full background-bg-surface border border-border-panel rounded-lg px-2 py-2 text-[11px] text-text-primary resize-none"
                       />
                       <div className="grid grid-cols-2 gap-2">
                         <select
                           value={String(materializedNode.node.properties.mode ?? 'build')}
                           onChange={event => applyOperator({ type: 'set_node_property', nodeId: materializedNode.node.id, key: 'mode', value: event.target.value })}
-                          className="bg-bg-surface border border-border-panel rounded-lg px-2 py-1.5 text-[11px]"
+                          className="background-bg-surface border border-border-panel rounded-lg px-2 py-1.5 text-[11px]"
                         >
                           <option value="build">Build</option>
                           <option value="edit">Edit</option>
@@ -1858,7 +1897,7 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
                           value={String(materializedNode.node.properties.workspaceDir ?? workspaceDir ?? '')}
                           onChange={event => applyOperator({ type: 'set_node_property', nodeId: materializedNode.node.id, key: 'workspaceDir', value: event.target.value })}
                           placeholder="Workspace dir"
-                          className="bg-bg-surface border border-border-panel rounded-lg px-2 py-1.5 text-[11px]"
+                          className="background-bg-surface border border-border-panel rounded-lg px-2 py-1.5 text-[11px]"
                         />
                       </div>
                     </div>
@@ -1870,7 +1909,7 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
                         <select
                           value={String(materializedNode.node.properties.roleId ?? 'agent')}
                           onChange={event => applyOperator({ type: 'set_node_property', nodeId: materializedNode.node.id, key: 'roleId', value: event.target.value })}
-                          className="flex-1 bg-bg-surface border border-border-panel rounded-lg px-2 py-1.5 text-[11px]"
+                          className="flex-1 background-bg-surface border border-border-panel rounded-lg px-2 py-1.5 text-[11px]"
                         >
                           {agentsConfig.agents.map(agent => (
                             <option key={agent.id} value={agent.id}>
@@ -1883,7 +1922,7 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
                             ? String(materializedNode.node.properties.cli ?? runtimeCli)
                             : 'claude'}
                           onChange={event => handleCliChange(materializedNode.node.id, event.target.value as WorkflowAgentCli)}
-                          className="flex-1 bg-bg-surface border border-border-panel rounded-lg px-2 py-1.5 text-[11px]"
+                          className="flex-1 background-bg-surface border border-border-panel rounded-lg px-2 py-1.5 text-[11px]"
                           title="Runtime CLI"
                         >
                           {SELECTABLE_WORKFLOW_CLIS.map(cli => (
@@ -1896,12 +1935,12 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
                           <div className="uppercase tracking-wide opacity-70">Status</div>
                           <div className="font-medium uppercase">{workflowStatusLabel(runtimeStatus)}</div>
                         </div>
-                        <div className="rounded border border-border-panel bg-bg-surface px-2 py-1.5">
+                        <div className="rounded border border-border-panel background-bg-surface px-2 py-1.5">
                           <div className="uppercase tracking-wide text-text-muted">Action</div>
                           <div className="text-text-primary truncate">{currentAction}</div>
                         </div>
                       </div>
-                      <div className="rounded border border-border-panel bg-bg-surface px-2 py-1.5 text-[10px]">
+                      <div className="rounded border border-border-panel background-bg-surface px-2 py-1.5 text-[10px]">
                         <div className="uppercase tracking-wide text-text-muted">Runtime</div>
                         <div className="mt-0.5 flex items-center justify-between gap-2 text-text-secondary">
                           <span className="truncate">{runtimeCli ? runtimeCli.toUpperCase() : 'Unknown CLI'}</span>
@@ -1909,11 +1948,11 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
                         </div>
                       </div>
                       {artifactHints.length > 0 && (
-                        <div className="rounded border border-border-panel bg-bg-surface px-2 py-1.5">
+                        <div className="rounded border border-border-panel background-bg-surface px-2 py-1.5">
                           <div className="text-[10px] uppercase tracking-wide text-text-muted mb-1">Artifacts / Files</div>
                           <div className="flex flex-wrap gap-1">
                             {artifactHints.map(hint => (
-                              <span key={hint} className="px-1.5 py-0.5 text-[10px] rounded border border-border-panel bg-bg-surface text-text-secondary">
+                              <span key={hint} className="px-1.5 py-0.5 text-[10px] rounded border border-border-panel background-bg-surface text-text-secondary">
                                 {hint}
                               </span>
                             ))}
@@ -1931,7 +1970,7 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
                             key: 'executionMode',
                             value: event.target.value,
                           })}
-                          className="bg-bg-surface border border-border-panel rounded px-2 py-1.5 text-[10px] text-text-secondary"
+                          className="background-bg-surface border border-border-panel rounded px-2 py-1.5 text-[10px] text-text-secondary"
                           title="Runtime execution mode"
                         >
                           <option value="streaming_headless">Stream</option>
@@ -1941,7 +1980,7 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
                         <button
                           type="button"
                           onClick={() => createAndBindRuntime(materializedNode.node.id)}
-                          className="flex items-center justify-center gap-1 rounded border border-border-panel px-2 py-1.5 text-[10px] text-text-muted hover:text-text-primary hover:bg-bg-surface transition-colors"
+                          className="flex items-center justify-center gap-1 rounded border border-border-panel px-2 py-1.5 text-[10px] text-text-muted hover:text-text-primary hover:background-bg-surface transition-colors"
                         >
                           <Plus size={11} />
                           New Runtime
@@ -1967,7 +2006,7 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
                       </div>
                       {typeof materializedNode.node.properties.lastOutputSummary === 'string' &&
                         String(materializedNode.node.properties.lastOutputSummary).trim() && (
-                          <div className="rounded border border-border-panel bg-bg-surface px-2 py-1.5">
+                          <div className="rounded border border-border-panel background-bg-surface px-2 py-1.5">
                             <div className="text-[10px] uppercase tracking-wide text-text-muted mb-1 flex items-center justify-between">
                               <span>Captured Output</span>
                               <span className="text-[9px] text-emerald-300">
@@ -2001,7 +2040,7 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
                               Agent Results
                             </div>
                             {agentResults.map(entry => (
-                              <div key={entry.id} className="rounded border border-border-panel bg-bg-surface px-2 py-1.5">
+                              <div key={entry.id} className="rounded border border-border-panel background-bg-surface px-2 py-1.5">
                                 <div className="flex items-center justify-between mb-0.5">
                                   <span className="text-[10px] font-semibold text-accent-primary">{entry.roleId}</span>
                                   <span className={`text-[9px] ${entry.outcome === 'failure' ? 'text-red-300' : 'text-emerald-300'}`}>
@@ -2038,7 +2077,7 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
                           return sorted.map(art => (
                             <div 
                               key={art.id} 
-                              className="p-2.5 rounded-lg border border-border-panel bg-bg-app hover:border-accent-primary/30 hover:bg-bg-surface transition-all group cursor-pointer"
+                              className="p-2.5 rounded-lg border border-border-panel background-bg-app hover:border-accent-primary/30 hover:background-bg-surface transition-all group cursor-pointer"
                               onClick={() => {
                                 if (art.path) {
                                   addPane('editor', art.label, { filePath: art.path });
@@ -2087,7 +2126,7 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
                       value={String(materializedNode.node.properties.label ?? 'Frame')}
                       onChange={event => applyOperator({ type: 'set_node_property', nodeId: materializedNode.node.id, key: 'label', value: event.target.value })}
                       placeholder="Frame label"
-                      className="w-full bg-bg-surface border border-border-panel rounded-lg px-2 py-1.5 text-[11px]"
+                      className="w-full background-bg-surface border border-border-panel rounded-lg px-2 py-1.5 text-[11px]"
                     />
                   )}
                 </div>
@@ -2136,7 +2175,7 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
 
         {contextMenu && (
           <div
-            className="absolute z-50 bg-bg-titlebar border border-border-panel rounded-lg shadow-2xl p-2 w-64"
+            className="absolute z-50 background-bg-titlebar border border-border-panel rounded-lg shadow-2xl p-2 w-64"
             style={{ left: contextMenu.screen.x, top: contextMenu.screen.y }}
             onMouseDown={e => e.stopPropagation()}
           >
@@ -2157,7 +2196,7 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
                   {nodeOptions.map(option => (
                     <button
                       key={option.type}
-                      className="w-full text-left px-2 py-1.5 text-[12px] text-text-primary hover:bg-bg-surface rounded flex items-center justify-between"
+                      className="w-full text-left px-2 py-1.5 text-[12px] text-text-primary hover:background-bg-surface rounded flex items-center justify-between"
                       onClick={() => addNodeAt(option.type, contextMenu.world, contextMenu.linkFrom)}
                     >
                       <span>{option.label}</span>
@@ -2172,14 +2211,16 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
 
         {inspectorNodeId && (
           <div
-            className="absolute z-40 right-3 top-3 bottom-3 w-[420px] rounded-xl border border-border-panel bg-bg-panel shadow-2xl flex flex-col"
+            className="absolute z-40 right-3 top-3 bottom-3 w-[420px] rounded-xl border border-border-panel background-bg-panel shadow-2xl flex flex-col"
             onMouseDown={event => event.stopPropagation()}
           >
-            <div className="px-3 py-2 border-b border-border-panel bg-bg-titlebar flex items-center justify-between">
+            <div className="px-3 py-2 border-b border-border-panel background-bg-titlebar flex items-center justify-between">
               <div className="min-w-0">
                 <div className="text-[10px] uppercase tracking-[0.2em] text-accent-primary">Node Runtime Inspector</div>
                 <div className="text-[12px] text-text-primary truncate">
-                  {inspectedNode?.label ?? inspectedNode?.id ?? inspectorNodeId}
+                  {inspectedNode?.type === 'workflow.agent' ? 'Agent' :
+                   inspectedNode?.type === 'workflow.task' ? 'Task' :
+                   (inspectedNode?.label ?? inspectedNode?.id ?? inspectorNodeId)}
                 </div>
               </div>
               <div className="flex items-center gap-1">
@@ -2187,7 +2228,7 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
                   <button
                     type="button"
                     onClick={() => openTerminalById(inspectedTerminalId)}
-                    className="p-1.5 rounded border border-border-panel text-text-muted hover:text-text-primary hover:bg-bg-surface"
+                    className="p-1.5 rounded border border-border-panel text-text-muted hover:text-text-primary hover:background-bg-surface"
                     title="Open full terminal pane"
                   >
                     <ArrowUpRight size={12} />
@@ -2196,7 +2237,7 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
                 <button
                   type="button"
                   onClick={() => setInspectorNodeId(null)}
-                  className="p-1.5 rounded border border-border-panel text-text-muted hover:text-text-primary hover:bg-bg-surface"
+                  className="p-1.5 rounded border border-border-panel text-text-muted hover:text-text-primary hover:background-bg-surface"
                   title="Close inspector"
                 >
                   <X size={12} />
@@ -2216,7 +2257,7 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
                   onClick={() => {
                     if (inspectorNodeId) createAndBindRuntime(inspectorNodeId);
                   }}
-                  className="px-2.5 py-1.5 rounded border border-border-panel text-text-muted hover:text-text-primary hover:bg-bg-surface text-[11px] inline-flex items-center gap-1"
+                  className="px-2.5 py-1.5 rounded border border-border-panel text-text-muted hover:text-text-primary hover:background-bg-surface text-[11px] inline-flex items-center gap-1"
                 >
                   <Plus size={11} />
                   Create Runtime Binding
@@ -2233,7 +2274,7 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
                     <button
                       type="button"
                       onClick={() => void refreshTerminalOutput(inspectedTerminalId)}
-                      className="inline-flex items-center gap-1 px-2 py-1 rounded border border-border-panel hover:bg-bg-surface text-text-muted hover:text-text-primary"
+                      className="inline-flex items-center gap-1 px-2 py-1 rounded border border-border-panel hover:background-bg-surface text-text-muted hover:text-text-primary"
                       title="Refresh runtime output"
                     >
                       <RefreshCw size={11} />
@@ -2242,7 +2283,7 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
                   )}
                 </div>
 
-                <pre className="flex-1 overflow-auto px-3 py-3 text-[11px] leading-relaxed text-text-secondary whitespace-pre-wrap bg-bg-app">
+                <pre className="flex-1 overflow-auto px-3 py-3 text-[11px] leading-relaxed text-text-secondary whitespace-pre-wrap background-bg-app">
                   {inspectorOutput || 'Waiting for runtime output...'}
                 </pre>
 
@@ -2254,7 +2295,7 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
 
                 {inspectedUsesPty && (
                   <form
-                    className="px-3 py-2 border-t border-border-panel bg-bg-titlebar flex gap-2"
+                    className="px-3 py-2 border-t border-border-panel background-bg-titlebar flex gap-2"
                     onSubmit={event => {
                       event.preventDefault();
                       void sendInspectorCommand();
@@ -2264,7 +2305,7 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
                       value={inspectorCommand}
                       onChange={event => setInspectorCommand(event.target.value)}
                       placeholder="Send command to runtime"
-                      className="flex-1 bg-bg-surface border border-border-panel rounded px-2 py-1.5 text-[11px] text-text-primary"
+                      className="flex-1 background-bg-surface border border-border-panel rounded px-2 py-1.5 text-[11px] text-text-primary"
                     />
                     <button
                       type="submit"
@@ -2281,7 +2322,7 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
         )}
       </div>
 
-      <div className="px-3 py-2 shrink-0 border-t border-border-panel bg-bg-titlebar flex items-center justify-between text-[11px] text-text-muted">
+      <div className="px-3 py-2 shrink-0 border-t border-border-panel background-bg-titlebar flex items-center justify-between text-[11px] text-text-muted">
         <div>
           Tree: <span className="text-text-primary">{activeTree.name}</span> | Nodes: <span className="text-text-primary">{materializedNodes.length}</span> | Links:{' '}
           <span className="text-text-primary">{Object.keys(activeTree.links).length}</span>

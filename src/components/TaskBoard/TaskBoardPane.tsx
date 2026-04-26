@@ -140,19 +140,19 @@ export function TaskBoardPane() {
     };
 
     return (
-      <span className={`text-[10px] px-1.5 py-0.5 rounded-md border font-medium ${colors[agentId] || 'bg-bg-surface-hover text-text-muted border-border-panel'}`}>
+      <span className={`text-[10px] px-1.5 py-0.5 rounded-md border font-medium ${colors[agentId] || 'background-bg-surface-hover text-text-muted border-border-panel'}`}>
         {agent.name}
       </span>
     );
   };
 
   return (
-    <div className="flex flex-col h-full bg-bg-panel text-text-secondary overflow-hidden">
+    <div className="flex flex-col h-full background-bg-panel text-text-secondary overflow-hidden">
       {/* Header */}
       <div className="flex items-center justify-between px-4 py-2.5 border-b border-border-panel shrink-0">
         <div className="flex items-center gap-2">
-          <span className="text-xs font-semibold text-text-secondary uppercase tracking-wider">BridgeSwarm Board</span>
-          <span className="text-xs bg-bg-surface text-text-muted px-1.5 py-0.5 rounded-full">
+          <span className="text-xs font-semibold text-text-secondary uppercase tracking-wider">CometAI Board</span>
+          <span className="text-xs background-bg-surface text-text-muted px-1.5 py-0.5 rounded-full">
             {tasks.length}
           </span>
         </div>
@@ -174,7 +174,7 @@ export function TaskBoardPane() {
             placeholder="High-level goal or specific task..."
             value={newTaskTitle}
             onChange={(e) => setNewTaskTitle(e.target.value)}
-            className="w-full bg-bg-surface border border-border-divider text-text-primary rounded-md px-3 py-1.5 text-xs focus:outline-none focus:border-accent-primary transition-colors"
+            className="w-full background-bg-surface border border-border-divider text-text-primary rounded-md px-3 py-1.5 text-xs focus:outline-none focus:border-accent-primary transition-colors"
           />
           <div className="flex items-center justify-between">
             <div className="flex gap-2">
@@ -186,7 +186,7 @@ export function TaskBoardPane() {
                   className={`text-[10px] px-2 py-1 rounded transition-colors border ${
                     selectedAgent === agent.id 
                       ? 'bg-accent-primary/20 border-accent-primary text-accent-primary' 
-                      : 'bg-bg-panel border-border-panel text-text-muted hover:border-border-divider'
+                      : 'background-bg-panel border-border-panel text-text-muted hover:border-border-divider'
                   }`}
                 >
                   {agent.name}
@@ -213,13 +213,13 @@ export function TaskBoardPane() {
         {COLUMNS.map((column) => (
           <div
             key={column.id}
-            className="flex flex-col bg-bg-surface rounded-lg min-w-[280px] max-w-[320px] flex-1 border border-border-panel"
+            className="flex flex-col background-bg-surface rounded-lg min-w-[280px] max-w-[320px] flex-1 border border-border-panel"
             onDragOver={onDragOver}
             onDrop={(e) => onDrop(e, column.id)}
           >
             <div className="flex items-center justify-between px-3 py-2.5 border-b border-border-divider">
               <span className="text-xs font-semibold text-text-secondary">{column.title}</span>
-              <span className="text-xs bg-bg-surface-hover text-text-muted px-1.5 py-0.5 rounded-full">
+              <span className="text-xs background-bg-surface-hover text-text-muted px-1.5 py-0.5 rounded-full">
                 {tasks.filter((t) => t.status === column.id).length}
               </span>
             </div>
@@ -232,7 +232,7 @@ export function TaskBoardPane() {
                     key={task.id}
                     draggable
                     onDragStart={(e) => onDragStart(e, task.id)}
-                    className="bg-bg-panel border border-border-panel p-3 rounded-md cursor-grab active:cursor-grabbing hover:border-border-divider group relative transition-all shadow-sm"
+                    className="background-bg-panel border border-border-panel p-3 rounded-md cursor-grab active:cursor-grabbing hover:border-border-divider group relative transition-all shadow-sm"
                   >
                     <div className="flex flex-col gap-2">
                       <div className="pr-10 text-xs font-medium text-text-primary break-words leading-relaxed">
@@ -248,14 +248,14 @@ export function TaskBoardPane() {
                     <div className="absolute top-2 right-2 flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
                       <button
                         onClick={() => handleRunTask(task)}
-                        className="w-6 h-6 flex items-center justify-center text-text-muted hover:text-accent-primary bg-bg-surface rounded-md border border-border-panel transition-colors"
+                        className="w-6 h-6 flex items-center justify-center text-text-muted hover:text-accent-primary background-bg-surface rounded-md border border-border-panel transition-colors"
                         title="Run Task"
                       >
                         <Play size={12} />
                       </button>
                       <button
                         onClick={() => handleDeleteTask(task.id)}
-                        className="w-6 h-6 flex items-center justify-center text-text-muted hover:text-red-400 bg-bg-surface rounded-md border border-border-panel transition-colors"
+                        className="w-6 h-6 flex items-center justify-center text-text-muted hover:text-red-400 background-bg-surface rounded-md border border-border-panel transition-colors"
                         title="Delete"
                       >
                         <Trash2 size={12} />

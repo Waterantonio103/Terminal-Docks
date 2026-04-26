@@ -1,0 +1,193 @@
+/**
+ * CLI Adapter Interface
+ *
+ * Generic contract for CLI-specific runtime behavior.
+ * The Workflow Orchestrator and Runtime Manager speak to this interface
+ * and never directly to any particular CLI.
+ *
+ * Each adapter encapsulates:
+ *   - how to build the launch command
+ *   - how to detect the CLI is ready for task injection
+ *   - how to format the initial task prompt
+ *   - how to detect permission requests from PTY output
+ *   - how to build the PTY input that approves/denies a permission
+ *   - how to detect task completion from PTY output
+ *   - how to normalize raw PTY output into structured events
+ */
+
+// ---------------------------------------------------------------------------
+// Shared result types
+// ---------------------------------------------------------------------------
+
+export type PermissionCategory =
+  | 'shell_execution'
+  | 'file_edit'
+  | 'file_read'
+  | 'network_access'
+  | 'package_install'
+  | 'unknown';
+
+export type CompletionOutcome = 'success' | 'failure';
+
+export type ReadyDetectionConfidence = 'low' | 'medium' | 'high';
+
+// ---------------------------------------------------------------------------
+// Context types passed into adapter methods by the Runtime Manager
+// ---------------------------------------------------------------------------
+
+export interface LaunchContext {
+  sessionId: string;
+  missionId: string;
+  nodeId: string;
+  role: string;
+  agentId: string;
+  profileId: string;
+  workspaceDir: string | null;
+  mcpUrl: string;
+  executionMode: 'headless' | 'streaming_headless' | 'interactive_pty';
+  envOverrides?: Record<string, string>;
+}
+
+export interface TaskContext {
+  sessionId: string;
+  missionId: string;
+  nodeId: string;
+  role: string;
+  agentId: string;
+  attempt: number;
+  taskSeq: number;
+  prompt: string;
+  payloadJson: string;
+}
+
+export interface PermissionRequest {
+  permissionId: string;
+  category: PermissionCategory;
+  rawPrompt: string;
+  detail: string;
+}
+
+export type PermissionDecision = 'approve' | 'deny';
+
+export interface PermissionResponse {
+  input: string;
+}
+
+// ---------------------------------------------------------------------------
+// Detection result types
+// ---------------------------------------------------------------------------
+
+export interface ReadyDetectionResult {
+  ready: boolean;
+  confidence: ReadyDetectionConfidence;
+  detail?: string;
+}
+
+export interface PermissionDetectionResult {
+  detected: true;
+  request: PermissionRequest;
+}
+
+export interface CompletionDetectionResult {
+  detected: true;
+  outcome: CompletionOutcome;
+  summary?: string;
+}
+
+// ---------------------------------------------------------------------------
+// Normalized output event
+// ---------------------------------------------------------------------------
+
+export type RuntimeOutputEventKind =
+  | 'banner'
+  | 'ready'
+  | 'heartbeat'
+  | 'task_acked'
+  | 'task_completed'
+  | 'permission_request'
+  | 'process_exit'
+  | 'unknown';
+
+export interface RuntimeOutputEvent {
+  kind: RuntimeOutputEventKind;
+  cli: string;
+  timestamp: number;
+  detail?: string;
+  confidence?: ReadyDetectionConfidence;
+  permissionRequest?: PermissionRequest;
+  outcome?: CompletionOutcome;
+  taskSeq?: number;
+}
+
+// ---------------------------------------------------------------------------
+// Launch command result
+// ---------------------------------------------------------------------------
+
+export type PromptDelivery = 'arg_file' | 'arg_text' | 'stdin' | 'interactive_pty' | 'unsupported';
+
+export interface LaunchCommand {
+  command: string;
+  args: string[];
+  env: Record<string, string>;
+  promptDelivery: PromptDelivery;
+  unsupportedReason?: string;
+}
+
+// ---------------------------------------------------------------------------
+// CLI Adapter interface
+// ---------------------------------------------------------------------------
+
+export interface CliAdapter {
+  /** Unique CLI identifier, e.g. 'claude', 'codex', 'gemini', 'opencode'. */
+  readonly id: string;
+
+  /** Human-readable label, e.g. 'Claude Code'. */
+  readonly label: string;
+
+  /**
+   * Build the command to launch this CLI.
+   * Returns a LaunchCommand with the binary, args, env, and prompt delivery mode.
+   */
+  buildLaunchCommand(context: LaunchContext): LaunchCommand;
+
+  /**
+   * Inspect raw PTY output and determine if the CLI is ready for task injection.
+   * The adapter accumulates output across calls if needed.
+   */
+  detectReady(output: string): ReadyDetectionResult;
+
+  /**
+   * Build the initial task prompt to inject into the CLI.
+   * This is the text the Runtime Manager writes into the PTY or passes as an arg.
+   */
+  buildInitialPrompt(context: TaskContext): string;
+
+  /**
+   * Inspect raw PTY output for a permission prompt.
+   * Returns null if no permission request is detected.
+   */
+  detectPermissionRequest(output: string): PermissionDetectionResult | null;
+
+  /**
+   * Given a user decision on a permission request, return the exact PTY input
+   * to inject (e.g. 'y\r', 'n\r', '\r', '\x1b[B\r').
+   */
+  buildPermissionResponse(decision: PermissionDecision, request: PermissionRequest): PermissionResponse;
+
+  /**
+   * Inspect raw PTY output for task completion.
+   * Returns null if no completion is detected.
+   */
+  detectCompletion(output: string): CompletionDetectionResult | null;
+
+  /**
+   * Normalize a chunk of raw PTY output into structured runtime events.
+   */
+  normalizeOutput(output: string): RuntimeOutputEvent[];
+
+  /**
+   * Build the PTY input for sending a NEW_TASK activation signal.
+   * Some CLIs need bracketed paste, some need raw text + enter.
+   */
+  buildActivationInput(signal: string): { paste: string; submit: string };
+}

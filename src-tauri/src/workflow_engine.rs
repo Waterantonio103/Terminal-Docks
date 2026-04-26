@@ -1814,6 +1814,29 @@ pub fn acknowledge_runtime_activation(
         attempt,
         reason
     );
+
+    // Permissive path for ad-hoc missions not tracked in the workflow engine.
+    // These are launched directly from the UI without a compiled mission graph.
+    {
+        let state = app.state::<WorkflowState>();
+        let missions = state
+            .active_missions
+            .lock()
+            .map_err(|_| "Failed to lock workflow state".to_string())?;
+        if !missions.contains_key(&mission_id) {
+            drop(missions);
+            let normalized = match status.as_str() {
+                "connecting" => "adapter_starting",
+                "activated" => "activation_acked",
+                other => other,
+            };
+            persist_node_runtime(&app, &mission_id, &node_id, "", normalized, attempt, None, None, None);
+            mark_runtime_session_status(&app, &mission_id, &node_id, attempt, normalized);
+            emit_node_status(&app, &node_id, normalized, Some(attempt), None, reason);
+            return Ok(());
+        }
+    }
+
     let (role_id, current_wave_id, last_payload, next_status, next_reason, run_version) = {
         let state = app.state::<WorkflowState>();
         let mut missions = state

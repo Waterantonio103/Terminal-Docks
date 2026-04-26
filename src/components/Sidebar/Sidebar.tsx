@@ -8,7 +8,7 @@ export function Sidebar() {
   if (!sidebarOpen) return null;
 
   return (
-    <aside className="w-64 shrink-0 h-full border-r border-border-panel bg-bg-panel overflow-hidden flex flex-col">
+    <aside className="w-64 shrink-0 h-full border-r border-border-panel background-bg-panel overflow-hidden flex flex-col">
       <div className="flex items-center justify-between px-3 py-2 border-b border-border-panel shrink-0">
         <div className="flex items-center gap-2 min-w-0">
           <Files size={14} className="text-accent-primary shrink-0" />

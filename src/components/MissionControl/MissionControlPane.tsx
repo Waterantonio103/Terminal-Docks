@@ -26,23 +26,21 @@ import ReactMarkdown from 'react-markdown';
 import { invoke } from '@tauri-apps/api/core';
 import { emit, listen } from '@tauri-apps/api/event';
 import {
-  buildNewTaskSignal,
+  
   summarizeHandoffPayload,
   type StructuredCompletionPayload,
   type RuntimeActivationPayload,
 } from '../../lib/missionRuntime';
 import { workflowStatusLabel, workflowStatusTone } from '../../lib/workflowStatus';
-import { mcpBus, type McpServerEvent } from '../../lib/workers';
+
 import {
-  buildRuntimeBootstrapRegistrationRequest,
-  getRuntimeBootstrapContract,
   normalizeRuntimeCli,
 } from '../../lib/runtimeBootstrap';
-import { buildStartAgentRunRequest, isHeadlessExecutionMode } from '../../lib/runtimeDispatcher';
+
 
 type MissionTab = 'nodes' | 'preview' | 'output' | 'tasks';
-const BOOTSTRAP_EVENT_TIMEOUT_MS = 8_000;
-const TASK_ACK_TIMEOUT_MS = 30_000;
+
+
 const RUNTIME_ACTIVE_STATES = new Set<MissionAgent['status']>([
   'launching',
   'connecting',
@@ -60,21 +58,7 @@ const RUNTIME_ACTIVE_STATES = new Set<MissionAgent['status']>([
   'waiting',
 ]);
 
-interface RuntimeActivationRecord {
-  sessionId: string;
-  agentId: string;
-  missionId: string;
-  nodeId: string;
-  attempt: number;
-  terminalId: string;
-  status: string;
-  activationId?: string | null;
-  runId?: string | null;
-  statusReason?: string | null;
-  activationPayload?: string | null;
-}
 
-const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
 function logToAgent(paneId: string, nodeId: string, message: string) {
   const state = useWorkspaceStore.getState();
@@ -92,71 +76,6 @@ function logToAgent(paneId: string, nodeId: string, message: string) {
       update(paneId, { agents: updated });
       return;
     }
-  }
-}
-
-async function waitForRuntimeActivationState(params: {
-  sessionId: string;
-  missionId: string;
-  nodeId: string;
-  attempt: number;
-  eventType: McpServerEvent['type'];
-  acceptedStatuses: Set<string>;
-  timeoutMs: number;
-  paneId?: string; // Optional for logging
-}): Promise<void> {
-  const deadline = Date.now() + params.timeoutMs;
-  let settled = false;
-  let unsubscribe: (() => void) | undefined;
-
-  if (params.paneId) {
-    logToAgent(params.paneId, params.nodeId, `Waiting for ${params.eventType}...`);
-  }
-
-  const eventPromise = new Promise<void>(resolve => {
-    unsubscribe = mcpBus.subscribe(params.sessionId, event => {
-      if (event.type !== params.eventType) return;
-      if (event.missionId && event.missionId !== params.missionId) return;
-      if (event.nodeId && event.nodeId !== params.nodeId) return;
-      if (typeof event.attempt === 'number' && event.attempt !== params.attempt) return;
-      settled = true;
-      if (params.paneId) {
-        logToAgent(params.paneId, params.nodeId, `Received ${params.eventType} via MCP event bus.`);
-      }
-      resolve();
-    });
-  });
-
-  const pollPromise = (async () => {
-    while (!settled && Date.now() < deadline) {
-      try {
-        const record = await invoke<RuntimeActivationRecord | null>('get_runtime_activation', {
-          missionId: params.missionId,
-          nodeId: params.nodeId,
-          attempt: params.attempt,
-        });
-        if (record?.status && params.acceptedStatuses.has(record.status)) {
-          settled = true;
-          if (params.paneId) {
-            logToAgent(params.paneId, params.nodeId, `Detected ${record.status} via backend polling.`);
-          }
-          return;
-        }
-      } catch {
-        // Keep waiting; the SSE path may still resolve and transient backend
-        // misses should not fail an activation handshake.
-      }
-      await sleep(250);
-    }
-    if (settled) return;
-    throw new Error(`Timed out waiting for ${params.eventType} on ${params.sessionId}`);
-  })();
-
-  try {
-    await Promise.race([eventPromise, pollPromise]);
-  } finally {
-    settled = true;
-    if (unsubscribe) unsubscribe();
   }
 }
 
@@ -327,19 +246,6 @@ function readAgentsForPane(paneId: string, fallback: MissionAgent[]): MissionAge
   return fallback;
 }
 
-function buildTerminalActivationInput(cliType: string | undefined, signal: string): { paste: string; submit: string } {
-  if ((cliType ?? '').toLowerCase() !== 'claude') {
-    return { paste: signal, submit: '\r' };
-  }
-
-  // Claude's TUI can be in an editable prompt when Mission Control injects a task.
-  // Clear any partial line and use bracketed paste so multiline task envelopes are
-  // treated as one paste operation instead of individual interactive keystrokes.
-  // The submit (\r) is sent as a separate write after a short delay so Claude's
-  // input buffer has time to finish processing the paste before the Enter fires.
-  return { paste: `\x15\x1b[200~${signal}\x1b[201~`, submit: '\r' };
-}
-
 function focusAgentTerminal(terminalId: string) {
   const state = useWorkspaceStore.getState();
   const targetTab = state.tabs.find(tab =>
@@ -354,23 +260,6 @@ function focusAgentTerminal(terminalId: string) {
   window.setTimeout(() => {
     emit('focus-terminal', { terminalId }).catch(console.error);
   }, 80);
-}
-
-function getTerminalRuntimeConfig(terminalId: string) {
-  const state = useWorkspaceStore.getState();
-  for (const tab of state.tabs) {
-    const terminalPane = tab.panes.find(candidate =>
-      candidate.type === 'terminal' && candidate.data?.terminalId === terminalId
-    );
-    if (terminalPane) {
-      return {
-        customCommand: terminalPane.data?.customCliCommand ?? null,
-        customArgs: Array.isArray(terminalPane.data?.customCliArgs) ? terminalPane.data?.customCliArgs : null,
-        customEnv: terminalPane.data?.customCliEnv ?? null,
-      };
-    }
-  }
-  return {};
 }
 
 function runtimeBootstrapLabel(state?: MissionAgent['runtimeBootstrapState']): string {
@@ -418,7 +307,7 @@ function AgentBadge({
       disabled={!clickable}
       title={clickable ? 'Open live terminal' : 'Terminal not available'}
       className={`flex items-center gap-1.5 px-2 py-1 rounded-md border shrink-0 transition-colors ${
-        clickable ? 'hover:border-accent-primary/50 hover:bg-bg-surface' : 'cursor-default'
+        clickable ? 'hover:border-accent-primary/50 hover:background-bg-surface' : 'cursor-default'
       } ${workflowStatusTone(agent.status, 'mission')}`}
     >
       <StatusIcon status={agent.status} />
@@ -456,8 +345,8 @@ function NodeCard({
   const canRetry = agent.status === 'failed' || agent.status === 'unbound' || agent.status === 'done' || agent.status === 'completed';
 
   return (
-    <div className="border border-border-panel rounded-lg bg-bg-panel overflow-hidden">
-      <div className="flex items-center gap-2 px-3 py-2 border-b border-border-panel bg-bg-surface">
+    <div className="border border-border-panel rounded-lg background-bg-panel overflow-hidden">
+      <div className="flex items-center gap-2 px-3 py-2 border-b border-border-panel background-bg-surface">
         <StatusIcon status={agent.status} />
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2 min-w-0">
@@ -476,7 +365,7 @@ function NodeCard({
             <button
               type="button"
               onClick={() => onRetryNode(agent)}
-              className="flex items-center gap-1 px-2 py-1 rounded text-[10px] text-accent-primary hover:text-accent-secondary hover:bg-bg-panel border border-accent-primary/30 transition-colors"
+              className="flex items-center gap-1 px-2 py-1 rounded text-[10px] text-accent-primary hover:text-accent-secondary hover:background-bg-panel border border-accent-primary/30 transition-colors"
             >
               <RefreshCw size={11} />
               Retry
@@ -485,7 +374,7 @@ function NodeCard({
           <button
             type="button"
             onClick={() => onOpenTerminal(agent)}
-            className="flex items-center gap-1 px-2 py-1 rounded text-[10px] text-text-muted hover:text-text-primary hover:bg-bg-panel border border-border-panel transition-colors"
+            className="flex items-center gap-1 px-2 py-1 rounded text-[10px] text-text-muted hover:text-text-primary hover:background-bg-panel border border-border-panel transition-colors"
           >
             <TerminalSquare size={11} />
             Open PTY
@@ -495,34 +384,34 @@ function NodeCard({
 
       <div className="px-3 py-3 space-y-3">
         <div className="grid grid-cols-2 gap-2 text-[11px]">
-          <div className="rounded border border-border-panel bg-bg-surface px-2 py-1.5">
+          <div className="rounded border border-border-panel background-bg-surface px-2 py-1.5">
             <div className="text-[9px] uppercase tracking-wide text-text-muted">Current Attempt</div>
             <div className="text-text-primary font-medium">{agent.attempt ?? 0}</div>
           </div>
-          <div className="rounded border border-border-panel bg-bg-surface px-2 py-1.5">
+          <div className="rounded border border-border-panel background-bg-surface px-2 py-1.5">
             <div className="text-[9px] uppercase tracking-wide text-text-muted">Last Outcome</div>
             <div className="text-text-primary font-medium">{agent.lastOutcome ?? '—'}</div>
           </div>
-          <div className="rounded border border-border-panel bg-bg-surface px-2 py-1.5">
+          <div className="rounded border border-border-panel background-bg-surface px-2 py-1.5">
             <div className="text-[9px] uppercase tracking-wide text-text-muted">Started</div>
             <div className="text-text-primary font-medium">{formatTime(agent.startedAt)}</div>
           </div>
-          <div className="rounded border border-border-panel bg-bg-surface px-2 py-1.5">
+          <div className="rounded border border-border-panel background-bg-surface px-2 py-1.5">
             <div className="text-[9px] uppercase tracking-wide text-text-muted">Completed</div>
             <div className="text-text-primary font-medium">
               {formatTime(agent.completedAt)}
               {latestDuration ? ` · ${latestDuration}` : ''}
             </div>
           </div>
-          <div className="rounded border border-border-panel bg-bg-surface px-2 py-1.5">
+          <div className="rounded border border-border-panel background-bg-surface px-2 py-1.5">
             <div className="text-[9px] uppercase tracking-wide text-text-muted">Terminal Binding</div>
             <div className="text-text-primary font-medium">{agent.terminalId ? 'bound' : 'missing'}</div>
           </div>
-          <div className="rounded border border-border-panel bg-bg-surface px-2 py-1.5">
+          <div className="rounded border border-border-panel background-bg-surface px-2 py-1.5">
             <div className="text-[9px] uppercase tracking-wide text-text-muted">MCP Runtime</div>
             <div className="text-text-primary font-medium">{runtimeState}</div>
           </div>
-          <div className="rounded border border-border-panel bg-bg-surface px-2 py-1.5 col-span-2">
+          <div className="rounded border border-border-panel background-bg-surface px-2 py-1.5 col-span-2">
             <div className="text-[9px] uppercase tracking-wide text-text-muted">Session / Heartbeat</div>
             <div className="text-text-primary font-medium break-all">
               {sessionDisplay}
@@ -539,7 +428,7 @@ function NodeCard({
         )}
 
         {agent.lastPayload && (
-          <div className="rounded border border-border-panel bg-bg-surface px-2 py-1.5">
+          <div className="rounded border border-border-panel background-bg-surface px-2 py-1.5">
             <div className="text-[9px] uppercase tracking-wide text-text-muted mb-1">Latest Handoff Preview</div>
             <div className="text-[11px] text-text-secondary break-words">
               {summarizePayload(agent.lastPayload) ?? 'No preview'}
@@ -559,7 +448,7 @@ function NodeCard({
             <div className="text-[10px] font-semibold uppercase tracking-wide text-text-muted">
               Activation Pipeline Logs
             </div>
-            <div className="rounded border border-border-panel bg-bg-surface overflow-hidden">
+            <div className="rounded border border-border-panel background-bg-surface overflow-hidden">
               <div className="max-h-[160px] overflow-y-auto px-2 py-1.5 space-y-0.5 font-mono text-[10px]">
                 {agent.runtimeLogs.map((log, i) => (
                   <div key={i} className="text-text-secondary border-b border-border-panel/30 last:border-0 pb-0.5 mb-0.5">
@@ -581,7 +470,7 @@ function NodeCard({
                 <div 
                   key={art.id} 
                   title={art.path ?? art.label}
-                  className="flex items-center gap-1.5 px-2 py-1 rounded border border-border-panel bg-bg-surface text-[10px] text-text-secondary"
+                  className="flex items-center gap-1.5 px-2 py-1 rounded border border-border-panel background-bg-surface text-[10px] text-text-secondary"
                 >
                   {art.type === 'file_change' ? <FileText size={10} className="text-blue-400" /> : <ChevronRight size={10} className="text-accent-primary" />}
                   <span className="truncate max-w-[120px]">{art.label}</span>
@@ -603,7 +492,7 @@ function NodeCard({
             history.map(entry => {
               const duration = formatDuration(entry.startedAt, entry.completedAt);
               return (
-                <div key={entry.attempt} className="rounded border border-border-panel bg-bg-surface px-2 py-2">
+                <div key={entry.attempt} className="rounded border border-border-panel background-bg-surface px-2 py-2">
                   <div className="flex items-center gap-2">
                     <span className="text-[11px] font-medium text-text-primary">Attempt {entry.attempt}</span>
                     <span className={`text-[10px] uppercase tracking-wide px-2 py-1 rounded border ${workflowStatusTone(entry.status, 'mission')}`}>
@@ -628,7 +517,7 @@ function NodeCard({
                   {entry.artifacts && entry.artifacts.length > 0 && (
                     <div className="mt-2 flex flex-wrap gap-1">
                       {entry.artifacts.map(art => (
-                        <div key={art.id} className="flex items-center gap-1 px-1.5 py-0.5 rounded bg-bg-panel border border-border-panel text-[9px] text-text-muted">
+                        <div key={art.id} className="flex items-center gap-1 px-1.5 py-0.5 rounded background-bg-panel border border-border-panel text-[9px] text-text-muted">
                           {art.type === 'file_change' ? <FileText size={9} /> : <ChevronRight size={9} />}
                           {art.label}
                         </div>
@@ -648,15 +537,15 @@ function NodeCard({
 function HandoffTimeline({ entries }: { entries: HandoffViewModel[] }) {
   if (entries.length === 0) {
     return (
-      <div className="rounded-lg border border-dashed border-border-panel bg-bg-surface px-3 py-3 text-[11px] text-text-muted">
+      <div className="rounded-lg border border-dashed border-border-panel background-bg-surface px-3 py-3 text-[11px] text-text-muted">
         Handoffs will appear here after the first downstream transition.
       </div>
     );
   }
 
   return (
-    <div className="rounded-lg border border-border-panel bg-bg-panel overflow-hidden">
-      <div className="px-3 py-2 border-b border-border-panel bg-bg-surface text-[10px] uppercase tracking-wide text-text-muted">
+    <div className="rounded-lg border border-border-panel background-bg-panel overflow-hidden">
+      <div className="px-3 py-2 border-b border-border-panel background-bg-surface text-[10px] uppercase tracking-wide text-text-muted">
         Runtime Handoff Chain
       </div>
       <div className="divide-y divide-border-panel/60">
@@ -912,116 +801,9 @@ export function MissionControlPane({ pane }: { pane: Pane }) {
     let unlistenRunExitFn: (() => void) | undefined;
     let unmounted = false;
 
-    const ensureSessionSubscription = (
-      sessionId: string,
-      missionId: string,
-      nodeId: string,
-      attempt: number,
-    ) => {
-      if (sessionUnsubscribersRef.current.has(sessionId)) {
-        return;
-      }
-
-      const unsubscribe = mcpBus.subscribe(sessionId, event => {
-        if (unmounted) return;
-        if (currentMissionId && currentMissionId !== missionId) return;
-
-        const liveAgents = readAgentsForPane(pane.id, agents);
-        if (event.type === 'agent:heartbeat') {
-          const nextAgents = liveAgents.map(agent =>
-            agent.runtimeSessionId === sessionId
-              ? {
-                  ...agent,
-                  runtimeLastHeartbeatAt: event.at,
-                }
-              : agent
-          );
-          updatePaneData(pane.id, { agents: nextAgents });
-          const readyAgent = liveAgents.find(agent => agent.runtimeSessionId === sessionId);
-          setNodeRuntimeBinding(nodeId, {
-            terminalId: readyAgent?.terminalId,
-            runtimeSessionId: sessionId,
-            adapterStatus: 'registered',
-          });
-          return;
-        }
-
-        if (event.type === 'agent:ready') {
-          const at = typeof event.at === 'number' ? event.at : Date.now();
-          const nextAgents = liveAgents.map(agent =>
-            agent.runtimeSessionId === sessionId
-              ? {
-                  ...agent,
-                  runtimeBootstrapState: 'registered',
-                  runtimeBootstrapReason: null,
-                  runtimeRegisteredAt: at,
-                  runtimeLastHeartbeatAt: at,
-                }
-              : agent
-          );
-          updatePaneData(pane.id, { agents: nextAgents });
-          return;
-        }
-
-        if (event.type === 'agent:artifact') {
-          const artifact = {
-            id: `art-${event.at}-${Math.random().toString(36).slice(2, 7)}`,
-            type: event.artifactType ?? 'reference',
-            label: event.label ?? 'Artifact',
-            content: event.content,
-            path: event.path,
-            timestamp: event.at,
-          };
-          const nextAgents = liveAgents.map(agent =>
-            agent.runtimeSessionId === sessionId
-              ? {
-                  ...agent,
-                  artifacts: [...(agent.artifacts ?? []), artifact],
-                  attemptHistory: upsertAttemptHistory(agent.attemptHistory, event.attempt ?? agent.attempt ?? 1, {
-                    artifacts: [artifact],
-                  }),
-                }
-              : agent
-          );
-          updatePaneData(pane.id, { agents: nextAgents });
-          return;
-        }
-
-        if (event.type === 'agent:disconnected') {
-          const reason = event.reason ?? 'Runtime session disconnected from MCP.';
-          const nextAgents = liveAgents.map(agent =>
-            agent.runtimeSessionId === sessionId
-              ? {
-                  ...agent,
-                  status: RUNTIME_ACTIVE_STATES.has(agent.status) ? 'disconnected' : agent.status,
-                  lastError: reason,
-                  runtimeBootstrapState: 'NOT_CONNECTED',
-                  runtimeBootstrapReason: reason,
-                }
-              : agent
-          );
-          updatePaneData(pane.id, { agents: nextAgents });
-          const disconnectedAgent = liveAgents.find(agent => agent.runtimeSessionId === sessionId);
-          setNodeRuntimeBinding(nodeId, {
-            terminalId: disconnectedAgent?.terminalId,
-            runtimeSessionId: sessionId,
-            adapterStatus: 'failed',
-          });
-
-          invoke('acknowledge_runtime_activation', {
-            missionId,
-            nodeId,
-            attempt,
-            status: 'disconnected',
-            reason,
-          }).catch(() => {});
-        }
-      });
-
-      sessionUnsubscribersRef.current.set(sessionId, unsubscribe);
-    };
-
     const processActivation = async (payload: RuntimeActivationPayload, missionId: string, nodeId: string, attempt: number) => {
+      // The sequencing logic (PTY launch, MCP registration, task injection, ACK waits)
+      // has been moved to Orchestrator and Runtime Manager (Phase 6).
       if (unmounted) return;
       if (currentMissionId && currentMissionId !== missionId) return;
 
@@ -1029,8 +811,7 @@ export function MissionControlPane({ pane }: { pane: Pane }) {
       if (inflightActivationsRef.current.has(activationKey)) return;
       inflightActivationsRef.current.add(activationKey);
 
-      logToAgent(pane.id, nodeId, `Activation processing STARTED. Session: ${payload.sessionId}`);
-      console.log(`[Activation] Processing for ${nodeId} (attempt ${attempt})`, payload);
+      logToAgent(pane.id, nodeId, `Activation request queued in backend. Session: ${payload.sessionId}`);
       
       const now = Date.now();
       const cli = normalizeRuntimeCli(payload.cliType);
@@ -1068,301 +849,8 @@ export function MissionControlPane({ pane }: { pane: Pane }) {
         runtimeSessionId: payload.sessionId,
         adapterStatus: 'activation_pending',
       });
-
-      const terminalId = payload.terminalId;
-      const contract = getRuntimeBootstrapContract(payload.cliType);
-      const bootstrapRequest = buildRuntimeBootstrapRegistrationRequest(payload);
-      ensureSessionSubscription(payload.sessionId, missionId, nodeId, attempt);
-
-      const failActivation = async (reason: string) => {
-        console.error(`[Activation] Failed for ${nodeId}: ${reason}`);
-        logToAgent(pane.id, nodeId, `Activation FAILED: ${reason}`);
-        const failedAgents = readAgentsForPane(pane.id, agents).map(agent =>
-          agent.nodeId === nodeId
-            ? {
-                ...agent,
-                lastError: reason,
-                runtimeBootstrapState: 'failed',
-                runtimeBootstrapReason: reason,
-              }
-            : agent
-        );
-        updatePaneData(pane.id, { agents: failedAgents });
-        setNodeRuntimeBinding(nodeId, {
-          terminalId: payload.terminalId,
-          runtimeSessionId: payload.sessionId,
-          adapterStatus: 'failed',
-        });
-
-        try {
-          await invoke('acknowledge_runtime_activation', {
-            missionId,
-            nodeId,
-            attempt,
-            status: 'failed',
-            reason,
-          });
-        } catch (error) {
-          console.warn('Failed to report activation failure', error);
-        }
-      };
-
-      try {
-        logToAgent(pane.id, nodeId, `Registering dispatch with backend...`);
-        await invoke('register_runtime_activation_dispatch', {
-          missionId,
-          nodeId,
-          attempt,
-          sessionId: payload.sessionId,
-          agentId: payload.agentId,
-          terminalId: payload.terminalId,
-          activatedAt: payload.emittedAt || Date.now(),
-        });
-
-        if (!contract || !bootstrapRequest) {
-          await failActivation(
-            `CLI "${payload.cliType || 'unknown'}" does not have a runtime bootstrap contract.`
-          );
-          return;
-        }
-        await invoke('register_pty_runtime_metadata', {
-          terminalId,
-          nodeId,
-          runtimeSessionId: payload.sessionId,
-          cli: payload.cliType || 'generic',
-        }).catch(() => {});
-
-        const baseUrl = await invoke<string>('get_mcp_base_url');
-        logToAgent(pane.id, nodeId, `MCP URL: ${baseUrl}. Verifying server health...`);
-        await invoke('acknowledge_runtime_activation', {
-          missionId,
-          nodeId,
-          attempt,
-          status: 'mcp_connecting',
-          reason: null,
-        });
-        const mcpHealth = await fetch(`${baseUrl}/health`, { method: 'GET' })
-          .then(response => response.ok)
-          .catch(() => false);
-        if (!mcpHealth) {
-          await failActivation('MCP server unavailable during activation handshake.');
-          return;
-        }
-
-        // If we are in an interactive PTY mode, proactively launch the intended CLI
-        // by writing its name to the PTY. This fulfills the mandate that the node "owns" 
-        // its runtime. We send a clear-line signal (\x15) first to ensure we start 
-        // from a fresh prompt if a shell was already running.
-        if (!isHeadlessExecutionMode(payload.executionMode)) {
-          logToAgent(pane.id, nodeId, `Interactive mode: launching ${payload.cliType} in PTY ${terminalId}...`);
-          await new Promise(r => setTimeout(r, 500));
-          try {
-            await invoke('write_to_pty', {
-              id: terminalId,
-              data: `\x15${payload.cliType}\r`
-            });
-            logToAgent(pane.id, nodeId, `Sent launch command to PTY ${terminalId}.`);
-            // Wait for CLI to start before proceeding to MCP registration
-            await new Promise(r => setTimeout(r, 2000));
-          } catch (e) {
-            await failActivation(`Failed to write to PTY ${terminalId}: ${e}`);
-            return;
-          }
-        }
-
-        const readyEvent = waitForRuntimeActivationState({
-          sessionId: payload.sessionId,
-          missionId,
-          nodeId,
-          attempt,
-          eventType: contract.handshakeEvent,
-          acceptedStatuses: new Set(['registered', 'ready', 'activation_acked', 'running', 'completed', 'done']),
-          timeoutMs: BOOTSTRAP_EVENT_TIMEOUT_MS,
-          paneId: pane.id,
-        });
-        
-        logToAgent(pane.id, nodeId, `Registering session ${payload.sessionId} with MCP...`);
-        let registration: { ok?: boolean; message?: string; error?: string };
-        try {
-          registration = await invoke<{ ok?: boolean; message?: string; error?: string }>('mcp_register_runtime_session', {
-            payload: bootstrapRequest,
-          });
-        } catch (error) {
-          void readyEvent.catch(() => {});
-          throw error;
-        }
-        if (!registration?.ok) {
-          void readyEvent.catch(() => {});
-          const reason = registration?.message ?? registration?.error ?? 'Runtime registration was rejected by MCP.';
-          await failActivation(reason);
-          return;
-        }
-        logToAgent(pane.id, nodeId, `Session registered. Waiting for agent readiness handshake...`);
-        await invoke('acknowledge_runtime_activation', {
-          missionId,
-          nodeId,
-          attempt,
-          status: 'registered',
-          reason: null,
-        });
-
-        await readyEvent;
-        logToAgent(pane.id, nodeId, `Agent is READY.`);
-        await invoke('acknowledge_runtime_activation', {
-          missionId,
-          nodeId,
-          attempt,
-          status: 'ready',
-          reason: null,
-        });
-
-        const signal = buildNewTaskSignal({
-          missionId,
-          nodeId,
-          roleId: payload.role,
-          sessionId: payload.sessionId,
-          agentId: payload.agentId,
-          terminalId: payload.terminalId,
-          activatedAt: payload.emittedAt,
-          attempt,
-          payload: payload.inputPayload ?? null,
-          runId: payload.runId,
-          cliType: payload.cliType,
-          executionMode: payload.executionMode,
-          goal: payload.goal,
-          workspaceDir: payload.workspaceDir ?? null,
-          assignment: payload.assignment,
-        }, baseUrl);
-
-        if (isHeadlessExecutionMode(payload.executionMode)) {
-          const { request, error } = buildStartAgentRunRequest(payload, signal, {
-            ...getTerminalRuntimeConfig(terminalId),
-            mcpUrl: baseUrl,
-          });
-          if (!request || error) {
-            await failActivation(error ?? 'Headless execution is not configured for this node.');
-            return;
-          }
-
-          const ackEvent = waitForRuntimeActivationState({
-            sessionId: payload.sessionId,
-            missionId,
-            nodeId,
-            attempt,
-            eventType: 'activation:acked',
-            acceptedStatuses: new Set(['activation_acked', 'running', 'completed', 'done']),
-            timeoutMs: TASK_ACK_TIMEOUT_MS,
-            paneId: pane.id,
-          });
-          logToAgent(pane.id, nodeId, `Starting headless run ${payload.runId}`);
-          await invoke('start_agent_run', { payload: request });
-
-          try {
-            await ackEvent;
-            logToAgent(pane.id, nodeId, `Headless run ACK received.`);
-            console.log(`[Activation] ACK received for ${nodeId}`);
-            await invoke('acknowledge_runtime_activation', {
-              missionId,
-              nodeId,
-              attempt,
-              status: 'activation_acked',
-              reason: null,
-            });
-            await invoke('acknowledge_runtime_activation', {
-              missionId,
-              nodeId,
-              attempt,
-              status: 'running',
-              reason: null,
-            });
-          } catch {
-            await failActivation(
-              `Agent did not call get_task_details within ${Math.round(TASK_ACK_TIMEOUT_MS / 1000)}s of the headless run starting.`
-            );
-          }
-          return;
-        }
-
-        if (!terminalId) {
-          await failActivation('No terminal bound for this node activation.');
-          return;
-        }
-
-        const isPtyAlive = await invoke<boolean>('is_pty_active', { id: terminalId });
-        if (!isPtyAlive) {
-          console.warn(`[Activation] Terminal ${terminalId} is dead or missing.`);
-          await failActivation(`Terminal process for ${nodeId} has exited.`);
-          return;
-        }
-
-        const ackEvent = waitForRuntimeActivationState({
-          sessionId: payload.sessionId,
-          missionId,
-          nodeId,
-          attempt,
-          eventType: 'activation:acked',
-          acceptedStatuses: new Set(['activation_acked', 'running', 'completed', 'done']),
-          timeoutMs: TASK_ACK_TIMEOUT_MS,
-          paneId: pane.id,
-        });
-        logToAgent(pane.id, nodeId, `Sending NEW_TASK signal to PTY ${terminalId}`);
-        console.log(`[Activation] Sending NEW_TASK signal to PTY ${terminalId}`);
-        // Delay to ensure CLI is ready for input
-        await new Promise(r => setTimeout(r, 2000));
-        const { paste, submit } = buildTerminalActivationInput(payload.cliType, signal);
-        try {
-          await invoke('write_to_pty', { id: terminalId, data: paste });
-          // Give the CLI's input buffer time to process the paste before Enter fires.
-          await new Promise(r => setTimeout(r, 150));
-          await invoke('write_to_pty', { id: terminalId, data: submit });
-          logToAgent(pane.id, nodeId, `NEW_TASK signal injected.`);
-        } catch (e) {
-          await failActivation(`Failed to write NEW_TASK signal to PTY ${terminalId}: ${e}`);
-          return;
-        }
-        logToAgent(pane.id, nodeId, `Waiting for task ACK (get_task_details)...`);
-        console.log(`[Activation] Waiting for ACK (get_task_details) from session ${payload.sessionId}`);
-        try {
-          await ackEvent;
-          logToAgent(pane.id, nodeId, `Task ACK received. Node is RUNNING.`);
-          console.log(`[Activation] ACK received for ${nodeId}`);
-          await invoke('acknowledge_runtime_activation', {
-            missionId,
-            nodeId,
-            attempt,
-            status: 'activation_acked',
-            reason: null,
-          });
-          await invoke('acknowledge_runtime_activation', {
-            missionId,
-            nodeId,
-            attempt,
-            status: 'running',
-            reason: null,
-          });
-        } catch {
-          logToAgent(pane.id, nodeId, `Task ACK TIMEOUT.`);
-          const recentOutput = await invoke<string>('get_pty_recent_output', {
-            id: terminalId,
-            maxBytes: 4096,
-          }).catch(() => '');
-          const mcpFailed = /\bMCP server failed\b|1 MCP server failed|\/mcp/i.test(recentOutput);
-          const editorMode = /--\s*INSERT\s*--|--\s*VISUAL\s*--|--\s*REPLACE\s*--/.test(recentOutput);
-          await failActivation(
-            mcpFailed
-              ? 'Agent did not call get_task_details because the CLI reports its MCP server failed. Reconnect the terminal-docks MCP server in that CLI, then retry this node.'
-              : editorMode
-                ? 'Agent appears to have opened a text editor (editor mode detected in terminal output). Press Escape to exit, then retry this node.'
-                : `Agent did not call get_task_details within ${Math.round(TASK_ACK_TIMEOUT_MS / 1000)}s of receiving NEW_TASK. Check terminal for errors.`
-          );
-          return;
-        }
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        await failActivation(`Activation pipeline error: ${message}`);
-      } finally {
-        inflightActivationsRef.current.delete(activationKey);
-      }
+      
+      inflightActivationsRef.current.delete(activationKey);
     };
 
     // Discovery phase: check for any nodes already in 'activation_pending' for this mission.
@@ -1665,7 +1153,7 @@ export function MissionControlPane({ pane }: { pane: Pane }) {
   }
 
   return (
-    <div className="flex flex-col h-full bg-bg-panel overflow-hidden">
+    <div className="flex flex-col h-full background-bg-panel overflow-hidden">
       <div className="shrink-0 px-3 py-2 border-b border-border-panel bg-bg-titlebar">
         <div className="flex items-center justify-between mb-1.5 gap-2">
           <div className="min-w-0">
@@ -1681,7 +1169,7 @@ export function MissionControlPane({ pane }: { pane: Pane }) {
           <button
             onClick={exportLog}
             title="Export workflow log"
-            className="flex items-center gap-1 px-2 py-0.5 rounded text-[10px] text-text-muted hover:text-text-primary hover:bg-bg-surface border border-transparent hover:border-border-panel transition-colors shrink-0"
+            className="flex items-center gap-1 px-2 py-0.5 rounded text-[10px] text-text-muted hover:text-text-primary hover:background-bg-surface border border-transparent hover:border-border-panel transition-colors shrink-0"
           >
             <Download size={10} />
             Export Log
@@ -1713,7 +1201,7 @@ export function MissionControlPane({ pane }: { pane: Pane }) {
                   ) : (
                     <span
                       key={nodeId}
-                      className="text-[10px] px-2 py-1 rounded-md border border-border-panel bg-bg-surface text-text-muted"
+                      className="text-[10px] px-2 py-1 rounded-md border border-border-panel background-bg-surface text-text-muted"
                     >
                       {nodeId}
                     </span>
@@ -1735,19 +1223,19 @@ export function MissionControlPane({ pane }: { pane: Pane }) {
         <button
           onClick={() => setTab('nodes')}
           className={`flex items-center gap-1.5 px-2.5 py-1 rounded text-[11px] font-medium transition-colors ${
-            tab === 'nodes' ? 'bg-bg-surface text-text-primary' : 'text-text-muted hover:text-text-secondary'
+            tab === 'nodes' ? 'background-bg-surface text-text-primary' : 'text-text-muted hover:text-text-secondary'
           }`}
         >
           <TerminalSquare size={11} />
           Nodes
-          <span className="text-[9px] bg-bg-surface text-text-muted border border-border-panel rounded-full px-1 leading-4">
+          <span className="text-[9px] background-bg-surface text-text-muted border border-border-panel rounded-full px-1 leading-4">
             {orderedAgents.length}
           </span>
         </button>
         <button
           onClick={() => setTab('preview')}
           className={`flex items-center gap-1.5 px-2.5 py-1 rounded text-[11px] font-medium transition-colors ${
-            tab === 'preview' ? 'bg-bg-surface text-text-primary' : 'text-text-muted hover:text-text-secondary'
+            tab === 'preview' ? 'background-bg-surface text-text-primary' : 'text-text-muted hover:text-text-secondary'
           }`}
         >
           <Monitor size={11} />
@@ -1757,7 +1245,7 @@ export function MissionControlPane({ pane }: { pane: Pane }) {
         <button
           onClick={() => setTab('output')}
           className={`flex items-center gap-1.5 px-2.5 py-1 rounded text-[11px] font-medium transition-colors ${
-            tab === 'output' ? 'bg-bg-surface text-text-primary' : 'text-text-muted hover:text-text-secondary'
+            tab === 'output' ? 'background-bg-surface text-text-primary' : 'text-text-muted hover:text-text-secondary'
           }`}
         >
           <FileText size={11} />
@@ -1771,13 +1259,13 @@ export function MissionControlPane({ pane }: { pane: Pane }) {
         <button
           onClick={() => setTab('tasks')}
           className={`flex items-center gap-1.5 px-2.5 py-1 rounded text-[11px] font-medium transition-colors ${
-            tab === 'tasks' ? 'bg-bg-surface text-text-primary' : 'text-text-muted hover:text-text-secondary'
+            tab === 'tasks' ? 'background-bg-surface text-text-primary' : 'text-text-muted hover:text-text-secondary'
           }`}
         >
           <ListTree size={11} />
           Tasks
           {allTasks.length > 0 && (
-            <span className="text-[9px] bg-bg-surface text-text-muted border border-border-panel rounded-full px-1 leading-4">
+            <span className="text-[9px] background-bg-surface text-text-muted border border-border-panel rounded-full px-1 leading-4">
               {allTasks.length}
             </span>
           )}
@@ -1842,7 +1330,7 @@ export function MissionControlPane({ pane }: { pane: Pane }) {
             <>
             {runOutput.map(line => (
               <div key={line.id} className="border border-border-panel rounded-md overflow-hidden">
-                <div className="flex items-center gap-2 px-3 py-1.5 bg-bg-surface border-b border-border-panel">
+                <div className="flex items-center gap-2 px-3 py-1.5 background-bg-surface border-b border-border-panel">
                   <ChevronRight size={10} className={line.stream === 'stderr' ? 'text-red-400' : 'text-accent-primary'} />
                   <span className={line.stream === 'stderr' ? 'text-red-300 font-semibold' : 'text-accent-primary font-semibold'}>
                     {line.nodeId} {line.stream}
@@ -1862,7 +1350,7 @@ export function MissionControlPane({ pane }: { pane: Pane }) {
             ))}
             {markdownEntries.map(entry => (
               <div key={entry.id} className="border border-border-panel rounded-md overflow-hidden">
-                <div className="flex items-center gap-2 px-3 py-1.5 bg-bg-surface border-b border-border-panel">
+                <div className="flex items-center gap-2 px-3 py-1.5 background-bg-surface border-b border-border-panel">
                   <ChevronRight size={10} className="text-accent-primary" />
                   <span className="text-accent-primary font-semibold">{entry.agentId}</span>
                   <span className="text-text-muted opacity-50 ml-auto text-[10px]">
@@ -1873,7 +1361,7 @@ export function MissionControlPane({ pane }: { pane: Pane }) {
                     })}
                   </span>
                 </div>
-                <div className="px-3 py-2 text-text-secondary whitespace-pre-wrap break-words leading-relaxed text-[11px] prose prose-invert max-w-none prose-sm prose-pre:bg-bg-panel prose-pre:border prose-pre:border-border-panel">
+                <div className="px-3 py-2 text-text-secondary whitespace-pre-wrap break-words leading-relaxed text-[11px] prose prose-invert max-w-none prose-sm prose-pre:background-bg-panel prose-pre:border prose-pre:border-border-panel">
                   <ReactMarkdown>{entry.content}</ReactMarkdown>
                 </div>
               </div>
@@ -1891,7 +1379,7 @@ export function MissionControlPane({ pane }: { pane: Pane }) {
 }
 
 const STATUS_STYLES: Record<string, string> = {
-  todo: 'text-text-muted border-border-panel bg-bg-surface',
+  todo: 'text-text-muted border-border-panel background-bg-surface',
   'in-progress': 'text-accent-primary border-accent-primary/30 bg-accent-primary/10',
   done: 'text-green-400 border-green-400/30 bg-green-400/10',
   blocked: 'text-red-400 border-red-400/30 bg-red-400/10',
@@ -1902,7 +1390,7 @@ function TaskRow({ task, depth }: { task: DbTask & { children?: DbTask[] }; dept
   return (
     <>
       <div
-        className="flex items-start gap-2 py-1.5 border-b border-border-panel/40 last:border-0 hover:bg-bg-surface/40 transition-colors px-3"
+        className="flex items-start gap-2 py-1.5 border-b border-border-panel/40 last:border-0 hover:background-bg-surface/40 transition-colors px-3"
         style={{ paddingLeft: `${12 + depth * 16}px` }}
       >
         {depth > 0 && <span className="text-text-muted opacity-30 shrink-0 mt-0.5">↳</span>}

@@ -234,13 +234,19 @@ export function TerminalPane({ pane, dragEndSeq }: { pane: Pane; dragEndSeq?: nu
         });
         console.log(`[TerminalPane] Spawned default shell: ${spawned} for CLI ${command}`);
 
-        // Only send the CLI launch command if we actually spawned a new PTY.
-        // spawn_pty returns false when the PTY already exists (e.g. on component
-        // remount), so we must not re-send the command into an already-running session.
+        // Only send the CLI launch command if we actually spawned a new PTY
+        // and it's not managed by RuntimeManager (which handles its own booting).
+        // Re-read pane data at fire time — RuntimeManager may have registered
+        // runtimeSessionId after mount but before this timeout fires.
         if (spawned) {
           setTimeout(() => {
-            console.log(`[TerminalPane] Auto-launching CLI: ${command}`);
-            invoke('write_to_pty', { id: terminalId, data: `${command}\r` }).catch(() => {});
+            const allPanes = useWorkspaceStore.getState().tabs.flatMap(t => t.panes);
+            const latestPane = allPanes.find(p => p.id === pane.id);
+            const isManaged = typeof latestPane?.data?.runtimeSessionId === 'string';
+            if (!isManaged) {
+              console.log(`[TerminalPane] Auto-launching CLI: ${command}`);
+              invoke('write_to_pty', { id: terminalId, data: `${command}\r` }).catch(() => {});
+            }
           }, 600);
         }
       } else {
@@ -393,10 +399,10 @@ export function TerminalPane({ pane, dragEndSeq }: { pane: Pane; dragEndSeq?: nu
   };
 
   return (
-    <div className="flex flex-col h-full bg-bg-app" onContextMenu={handleContextMenu}>
+    <div className="flex flex-col h-full background-bg-app" onContextMenu={handleContextMenu}>
       {/* Inline search bar */}
       {showSearch && (
-        <div className="flex items-center gap-1.5 px-3 py-1.5 bg-bg-titlebar border-b border-border-panel shrink-0 animate-fade-in">
+        <div className="flex items-center gap-1.5 px-3 py-1.5 background-bg-titlebar border-b border-border-panel shrink-0 animate-fade-in">
           <input
             ref={searchInputRef}
             type="text"
@@ -410,7 +416,7 @@ export function TerminalPane({ pane, dragEndSeq }: { pane: Pane; dragEndSeq?: nu
               else if (e.key === 'Enter') handleSearch(searchQuery, !e.shiftKey);
             }}
             placeholder="Search terminal… (Enter / Shift+Enter)"
-            className="flex-1 bg-bg-surface border border-border-panel text-text-primary text-xs px-2.5 py-1 rounded-md focus:outline-none focus:border-accent-primary min-w-0 transition-colors"
+            className="flex-1 background-bg-surface border border-border-panel text-text-primary text-xs px-2.5 py-1 rounded-md focus:outline-none focus:border-accent-primary min-w-0 transition-colors"
           />
           <button
             onClick={() => handleSearch(searchQuery, false)}
@@ -463,7 +469,7 @@ export function TerminalPane({ pane, dragEndSeq }: { pane: Pane; dragEndSeq?: nu
       {/* Context menu */}
       {contextMenu && (
         <div
-          className="fixed z-50 bg-bg-panel border border-border-panel rounded-lg shadow-xl py-1 min-w-[150px] animate-fade-in"
+          className="fixed z-50 background-bg-panel border border-border-panel rounded-lg shadow-xl py-1 min-w-[150px] animate-fade-in"
           style={{ left: contextMenu.x, top: contextMenu.y }}
           onClick={(e) => e.stopPropagation()}
         >
@@ -480,7 +486,7 @@ export function TerminalPane({ pane, dragEndSeq }: { pane: Pane; dragEndSeq?: nu
               <button
                 key={item.id}
                 onClick={() => handleContextAction(item.id)}
-                className="w-full flex items-center justify-between px-3 py-1.5 text-xs text-text-secondary hover:bg-bg-surface hover:text-text-primary transition-colors"
+                className="w-full flex items-center justify-between px-3 py-1.5 text-xs text-text-secondary hover:background-bg-surface hover:text-text-primary transition-colors"
               >
                 <span>{item.label}</span>
                 {item.shortcut && <span className="text-text-muted ml-6 font-mono text-[10px]">{item.shortcut}</span>}

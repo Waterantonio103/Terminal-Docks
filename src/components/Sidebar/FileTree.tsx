@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useWorkspaceStore } from '../../store/workspace';
 import { open } from '@tauri-apps/plugin-dialog';
-import { Folder, File as FileIcon, ChevronRight, ChevronDown, Lock, MoreVertical, FilePlus, FolderPlus, Trash2, Edit2, Copy, Scissors, Clipboard, ExternalLink, Search, FileText } from 'lucide-react';
+import { Folder, File as FileIcon, ChevronRight, ChevronDown, Lock, FilePlus, FolderPlus, Trash2, Edit2, Copy, Scissors, Clipboard, ExternalLink, Search, FileText } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
 import { writeText } from '@tauri-apps/plugin-clipboard-manager';
 
@@ -76,7 +76,7 @@ function TreeNode({ file, parentPath, locks, refreshSignal, onContextMenu }: { f
       <div
         onMouseDown={onDragStart}
         onContextMenu={(e) => onContextMenu(e, file, parentPath)}
-        className="flex items-center gap-1 py-0.5 hover:bg-bg-surface cursor-pointer rounded px-1 text-xs transition-colors group select-none"
+        className="flex items-center gap-1 py-0.5 hover:background-bg-surface cursor-pointer rounded px-1 text-xs transition-colors group select-none"
         onClick={handleClick}
       >
         {file.isDirectory ? (
@@ -336,7 +336,7 @@ export function FileTree() {
       handleContextMenu(e, { name: '', isDirectory: true, isFile: false }, workspaceDir);
     }}>
       <div 
-        className="flex items-center justify-between text-xs text-text-muted px-3 py-2 shrink-0 border-b border-border-panel cursor-pointer hover:bg-bg-surface transition-colors group select-none"
+        className="flex items-center justify-between text-xs text-text-muted px-3 py-2 shrink-0 border-b border-border-panel cursor-pointer hover:background-bg-surface transition-colors group select-none"
         onContextMenu={(e) => {
           e.stopPropagation();
           handleContextMenu(e, { name: '', isDirectory: true, isFile: false }, workspaceDir);
@@ -360,7 +360,7 @@ export function FileTree() {
       {/* Context Menu Overlay */}
       {contextMenu && (
         <div 
-          className="fixed z-[1000] bg-bg-panel border border-border-panel rounded shadow-xl py-1 min-w-[180px] text-xs text-text-secondary animate-in fade-in zoom-in duration-75"
+          className="fixed z-[1000] background-bg-panel border border-border-panel rounded shadow-xl py-1 min-w-[180px] text-xs text-text-secondary animate-in fade-in zoom-in duration-75"
           style={{ left: contextMenu.x, top: contextMenu.y }}
           onClick={e => e.stopPropagation()}
           onContextMenu={e => e.preventDefault()}
@@ -403,7 +403,7 @@ export function FileTree() {
 
       {/* Prompt Overlay */}
       {promptState && (
-        <div className="absolute top-8 left-2 right-2 z-50 bg-bg-panel border border-accent-primary rounded shadow-lg p-2">
+        <div className="absolute top-8 left-2 right-2 z-50 background-bg-panel border border-accent-primary rounded shadow-lg p-2">
           <div className="flex items-center gap-2 mb-2 px-1">
              {promptState.type === 'file' && <FileIcon size={12} className="text-text-muted"/>}
              {promptState.type === 'folder' && <Folder size={12} className="text-accent-primary"/>}
@@ -414,7 +414,7 @@ export function FileTree() {
           </div>
           <input
             ref={promptInputRef}
-            className="w-full bg-bg-surface border border-border-panel rounded px-2 py-1 text-xs text-text-primary outline-none focus:border-accent-primary"
+            className="w-full background-bg-surface border border-border-panel rounded px-2 py-1 text-xs text-text-primary outline-none focus:border-accent-primary"
             value={promptValue}
             onChange={e => setPromptValue(e.target.value)}
             onKeyDown={e => {
@@ -434,7 +434,7 @@ function ContextMenuItem({ icon, label, onClick, className = '', disabled = fals
     <button
       onClick={() => !disabled && onClick()}
       disabled={disabled}
-      className={`w-full flex items-center gap-2 px-3 py-1.5 hover:bg-bg-surface transition-colors text-left disabled:opacity-30 disabled:hover:bg-transparent ${className}`}
+      className={`w-full flex items-center gap-2 px-3 py-1.5 hover:background-bg-surface transition-colors text-left disabled:opacity-30 disabled:hover:bg-transparent ${className}`}
     >
       <span className="shrink-0">{icon}</span>
       <span className="flex-1 truncate">{label}</span>

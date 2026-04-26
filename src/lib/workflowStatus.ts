@@ -21,5 +21,5 @@ export function workflowStatusTone(
   if (state === 'online') return 'badge-beam badge-beam-online text-accent-primary border-transparent bg-accent-primary/10';
   if (state === 'success') return 'badge-beam badge-beam-success text-green-500 border-transparent bg-green-500/10';
   if (state === 'failure') return 'badge-beam badge-beam-failure text-red-500 border-transparent bg-red-500/10';
-  return 'badge-beam badge-beam-idle text-text-muted border-transparent bg-bg-surface';
+  return 'badge-beam badge-beam-idle text-text-muted border-transparent background-bg-surface';
 }

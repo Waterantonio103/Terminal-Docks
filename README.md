@@ -1,4 +1,4 @@
-# terminal-docks
+# CometAI
 
 WORK IN PROGRESS — this repository is under active development. Expect incomplete features, API churn and unfinished documentation.
 
@@ -15,6 +15,7 @@ What this repo contains (high level)
 - Terminal: xterm-based PTY panes (`src/components/Terminal/TerminalPane.tsx`) talking to the Rust PTY via Tauri commands/events.
 - Graph & runtime: Node graph editor (`src/components/NodeTree/NodeTreePane.tsx`), runtime view (`src/components/Runtime/RuntimeView.tsx`), and Mission Control (`src/components/MissionControl/MissionControlPane.tsx`) for orchestration.
 - Backend glue: Tauri commands invoked from the frontend (spawn/resize/write PTY, mission APIs) and local runtime adapters in `src-tauri/`.
+- MCP Server: A standalone Node.js MCP server (Starlink) under `mcp-server/` that provides the multi-agent Starlink coordination layer.
 
 Current functionality (summary)
 - Mode system implemented (workflow / runtime / workspace).
@@ -22,6 +23,7 @@ Current functionality (summary)
 - Terminal panes: PTY spawn, resize, write, and stream output to the frontend (xterm + addons: fit, webgl, search, web-links).
 - Runtime view: renders live runtime nodes (one node = an agent session) and embeds terminal panes for active sessions.
 - Mission control: compiles missions, stages prompts, launches start nodes and drives basic activation lifecycle.
+- Starlink MCP: Multi-agent coordination via Starlink, providing file locking, message passing, and task delegation.
 - Action detection and a basic permission-request signal: PTY output is parsed for activity and permission prompts; UI receives permission requests and can forward decisions to the backend.
 
 Not yet finished / areas to expect changes
@@ -42,6 +44,8 @@ Where to look first
 - `src/components/Runtime/RuntimeView.tsx` — runtime node rendering and permission popups
 - `src/components/Terminal/TerminalPane.tsx` — xterm integration and PTY wiring
 - `src/components/MissionControl/MissionControlPane.tsx` — mission lifecycle and MCP interactions
+- `mcp-server/server.mjs` — Starlink coordination layer
+
 
 
 

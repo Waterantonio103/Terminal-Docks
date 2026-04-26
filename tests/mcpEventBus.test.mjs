@@ -7,9 +7,9 @@ const tempRoot = mkdtempSync(join(tmpdir(), 'terminal-docks-mcpbus-'));
 process.env.MCP_DB_PATH = join(tempRoot, 'tasks.db');
 process.env.MCP_DISABLE_HTTP = '1';
 
-const bridge = await import('../mcp-server/server.mjs');
+const starlink = await import('../mcp-server/server.mjs');
 const {
-  resetBridgeState,
+  resetStarlinkState,
   emitAgentEvent,
   agentEvents,
   getRecentAgentEvents,
@@ -23,7 +23,7 @@ const {
   seedCompiledMission,
   seedMissionNodeRuntime,
   seedAgentRuntimeSession,
-} = bridge;
+} = starlink;
 
 function run(name, fn) {
   try {
@@ -36,7 +36,7 @@ function run(name, fn) {
 }
 
 try {
-  resetBridgeState();
+  resetStarlinkState();
 
   run('recordTaskPush inserts once and replays return duplicate', () => {
     const first = recordTaskPush({
@@ -101,7 +101,7 @@ try {
   });
 
   run('runtime bootstrap registration validates attempt and emits ready', () => {
-    resetBridgeState();
+    resetStarlinkState();
     seedMissionNodeRuntime({
       missionId: 'boot-mission',
       nodeId: 'boot-node',
@@ -145,7 +145,7 @@ try {
   });
 
   run('runtime bootstrap registration rejects stale attempts', () => {
-    resetBridgeState();
+    resetStarlinkState();
     seedMissionNodeRuntime({
       missionId: 'stale-mission',
       nodeId: 'stale-node',
@@ -191,7 +191,7 @@ try {
   });
 
   run('task:completed emits from graph-mode handoff_task', () => {
-    resetBridgeState();
+    resetStarlinkState();
     const mission = {
       missionId: 'evt-mission',
       graphId: 'evt-graph',
@@ -244,7 +244,7 @@ try {
   });
 
   run('runtime disconnect emits agent:disconnected', () => {
-    resetBridgeState();
+    resetStarlinkState();
     executeConnectAgent(
       { role: 'builder', agentId: 'builder-2', terminalId: 'term-z', cli: 'claude' },
       'disconnect-sess',

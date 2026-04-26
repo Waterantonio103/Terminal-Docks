@@ -18,7 +18,7 @@ const {
   seedConnectedSession,
   seedFileLock,
   appendAdaptivePatch,
-  resetBridgeState,
+  resetStarlinkState,
   seedCompiledMission,
   seedMissionNodeRuntime,
   seedAgentRuntimeSession,
@@ -117,7 +117,7 @@ function extractTaskIdFromHandoffResult(result) {
 
 try {
   await run('get_task_details exposes exact legal same-role targets', async () => {
-    resetBridgeState();
+    resetStarlinkState();
     seedCompiledMission(demoMission());
     seedMissionNodeRuntime({
       missionId: 'mission-graph',
@@ -149,7 +149,7 @@ try {
   });
 
   await run('validateGraphHandoff rejects off-graph routes and bad outcomes', async () => {
-    resetBridgeState();
+    resetStarlinkState();
     seedCompiledMission(demoMission());
     seedMissionNodeRuntime({
       missionId: 'mission-graph',
@@ -189,7 +189,7 @@ try {
   });
 
   await run('handoff_task rejects stale fromAttempt values', async () => {
-    resetBridgeState();
+    resetStarlinkState();
     seedCompiledMission(demoMission());
     seedMissionNodeRuntime({
       missionId: 'mission-graph',
@@ -223,7 +223,7 @@ try {
   });
 
   await run('handoff_task persists the chosen target node deterministically', async () => {
-    resetBridgeState();
+    resetStarlinkState();
     seedCompiledMission(demoMission());
     seedMissionNodeRuntime({
       missionId: 'mission-graph',
@@ -289,7 +289,7 @@ try {
   });
 
   await run('complete_task resolves all legal downstream graph targets', async () => {
-    resetBridgeState();
+    resetStarlinkState();
     seedCompiledMission(demoMission());
     seedMissionNodeRuntime({
       missionId: 'mission-graph',
@@ -343,7 +343,7 @@ try {
   });
 
   await run('assign_task_by_requirements picks the best available worker', async () => {
-    resetBridgeState();
+    resetStarlinkState();
     seedConnectedSession('worker-a', { role: 'builder' });
     seedConnectedSession('worker-b', { role: 'builder' });
 
@@ -387,7 +387,7 @@ try {
   });
 
   await run('assign_task_by_requirements reports queued when write scope is contended', async () => {
-    resetBridgeState();
+    resetStarlinkState();
     seedConnectedSession('worker-c', { role: 'builder' });
     executeRegisterWorkerCapabilities({
       capabilities: [{ id: 'coding', level: 3 }],
@@ -421,7 +421,7 @@ try {
   });
 
   await run('assign_task_by_requirements can reassign by excluding the previous worker', async () => {
-    resetBridgeState();
+    resetStarlinkState();
     seedConnectedSession('worker-old', { role: 'builder' });
     seedConnectedSession('worker-new', { role: 'builder' });
     executeRegisterWorkerCapabilities({
@@ -461,7 +461,7 @@ try {
   });
 
   await run('adaptive patch appends legal nodes and bumps runVersion', async () => {
-    resetBridgeState();
+    resetStarlinkState();
     seedCompiledMission({
       ...demoMission(),
       metadata: {
@@ -506,7 +506,7 @@ try {
   });
 
   await run('adaptive patch rejects stale runVersion', async () => {
-    resetBridgeState();
+    resetStarlinkState();
     seedCompiledMission({
       ...demoMission(),
       metadata: {

@@ -97,7 +97,7 @@ export function QuickOpen({ onClose }: QuickOpenProps) {
       onClick={onClose}
     >
       <div
-        className="bg-bg-panel border border-border-panel rounded-xl shadow-2xl w-[560px] max-h-[60vh] flex flex-col overflow-hidden animate-fade-in"
+        className="background-bg-panel border border-border-panel rounded-xl shadow-2xl w-[560px] max-h-[60vh] flex flex-col overflow-hidden animate-fade-in"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Search input */}
@@ -141,7 +141,7 @@ export function QuickOpen({ onClose }: QuickOpenProps) {
                 onClick={() => openFile(file)}
                 onMouseEnter={() => setSelected(i)}
                 className={`w-full flex items-center gap-3 px-4 py-2 text-left transition-colors ${
-                  i === selected ? 'bg-accent-primary/15 text-text-primary' : 'text-text-secondary hover:bg-bg-surface'
+                  i === selected ? 'bg-accent-primary/15 text-text-primary' : 'text-text-secondary hover:background-bg-surface'
                 }`}
               >
                 <FileCode2 size={13} className="shrink-0 text-text-muted" />

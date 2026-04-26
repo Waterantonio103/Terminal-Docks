@@ -4,8 +4,8 @@ export type Breadcrumb = {
   data?: Record<string, unknown>;
 };
 
-const BREADCRUMB_KEY = 'terminal-docks:breadcrumbs';
-const FATAL_KEY = 'terminal-docks:last-fatal';
+const BREADCRUMB_KEY = 'comet-ai:breadcrumbs';
+const FATAL_KEY = 'comet-ai:last-fatal';
 const MAX_BREADCRUMBS = 50;
 
 function safeJson(value: unknown) {

@@ -286,7 +286,7 @@ export function LauncherPane() {
 
           const cliHint =
             cli === 'claude'
-              ? `If terminal-docks MCP tools are not yet available run: !claude mcp add --transport sse terminal-docks ${mcpUrl} --scope user `
+              ? `If CometAI Starlink tools are not yet available run: !claude mcp add --transport sse starlink-mcp ${mcpUrl} --scope user `
               : cli === 'gemini'
                 ? `The MCP server uses SSE transport at ${mcpUrl}. `
                 : cli === 'custom'
@@ -301,7 +301,7 @@ export function LauncherPane() {
           const profileId = profile?.profileId ?? `${role}_profile`;
           const escapedWorkingDir = workspaceDir ? workspaceDir.replace(/\\/g, '\\\\') : '';
           const prompt =
-            `The terminal-docks MCP server is at ${mcpUrl} (SSE). ` +
+            `The CometAI Starlink server is at ${mcpUrl} (SSE). ` +
             cliHint +
             `Graph runtime is control-plane driven: wait for NEW_TASK payloads and use mission/node-scoped tools. ` +
             `Session bootstrap: call connect_agent with role="${roleParam}", agentId="${row.pane.title}", terminalId="${terminalId}", cli="${cli}", profileId="${profileId}", capabilities=${capabilityJson}${workspaceDir ? `, workingDir="${escapedWorkingDir}"` : ''}. ` +
@@ -485,6 +485,14 @@ export function LauncherPane() {
           missionId: pendingLaunch.missionId,
           graph: pendingLaunch.mission,
         });
+
+        // Establish TS Orchestrator as the canonical brain (Phase 8)
+        const { workflowOrchestrator } = await import('../../lib/workflow/WorkflowOrchestrator');
+        const { workflowGraphToDefinition } = await import('../../lib/workflow/index');
+        workflowOrchestrator.startRun(
+          workflowGraphToDefinition(globalGraph),
+          { runId: pendingLaunch.missionId }
+        );
 
         addPane('missioncontrol', 'Mission Control', {
           taskDescription: task.trim(),

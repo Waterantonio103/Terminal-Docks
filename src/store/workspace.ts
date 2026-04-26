@@ -210,11 +210,20 @@ export type ThemeType =
   // Original themes
   | 'dark' | 'light' | 'nord' | 'dracula' | 'cyberpunk' | 'ocean' | 'solarized'
   // Spec dark themes
-  | 'void' | 'ghost' | 'plasma' | 'carbon' | 'hex' | 'neon-tokyo' | 'obsidian'
-  | 'nebula' | 'storm' | 'infrared' | 'nova' | 'stealth' | 'hologram' | 'bridgemind'
+  | 'void' | 'ghost' | 'plasma' | 'hex' | 'neon-tokyo' | 'obsidian'
+  | 'nebula' | 'storm' | 'infrared' | 'nova' | 'stealth' | 'hologram' | 'cometmind'
   | 'synthwave' | 'cybernetics' | 'quantum' | 'mecha' | 'abyss'
   // Spec light themes
-  | 'paper' | 'chalk' | 'solar' | 'arctic' | 'ivory';
+  | 'paper' | 'starlink-light' | 'solar' | 'arctic' | 'ivory';
+
+function getInitialTheme(): ThemeType {
+  if (typeof window !== 'undefined' && window.matchMedia) {
+    if (window.matchMedia('(prefers-color-scheme: light)').matches) {
+      return 'starlink-light';
+    }
+  }
+  return 'dark';
+}
 
 export interface GridPos {
   x: number;
@@ -352,6 +361,23 @@ export interface DbTask {
 export type SidebarTabType = 'files' | 'tasks' | 'swarm' | 'agents' | 'nodetree' | 'settings';
 export type LayoutMode = 'grid' | 'tabs';
 
+export interface CustomThemeColors {
+  // UI Colors
+  '--bg-app'?: string;
+  '--bg-panel'?: string;
+  '--bg-surface'?: string;
+  '--accent-primary'?: string;
+  '--accent-subtle'?: string;
+  '--text-primary'?: string;
+  // Syntax Colors
+  '--syntax-keyword'?: string;
+  '--syntax-string'?: string;
+  '--syntax-function'?: string;
+  '--syntax-variable'?: string;
+  '--syntax-number'?: string;
+  '--syntax-comment'?: string;
+}
+
 interface WorkspaceState {
   tabs: WorkspaceTab[];
   activeTabId: string;
@@ -362,6 +388,8 @@ interface WorkspaceState {
   appMode: AppMode;
   workspaceDir: string | null;
   theme: ThemeType;
+  showSettings: boolean;
+  customTheme: CustomThemeColors;
   savedLayouts: SavedLayout[];
   messages: McpMessage[];
   results: ResultEntry[];
@@ -376,6 +404,10 @@ interface WorkspaceState {
   setLayoutMode: (mode: LayoutMode) => void;
   setActivePaneId: (id: string | null) => void;
   setGlobalGraph: (graph: WorkflowGraph) => void;
+  setShowSettings: (open: boolean) => void;
+  setTheme: (theme: ThemeType) => void;
+  setCustomThemeColor: (key: keyof CustomThemeColors, value: string) => void;
+  resetCustomTheme: () => void;
   addPane: (type: PaneType, title: string, data?: any) => void;
   addPaneAt: (type: PaneType, title: string, index: number, data?: any) => void;
   removePane: (id: string) => void;
@@ -419,7 +451,7 @@ function findHighestAvailableSpot(panes: Pane[], w: number, h: number): GridPos 
       });
       if (!hasCollision) return rect;
     }
-    y += 2;
+    y += 1;
   }
   return { x: 0, y: 0, w, h };
 }
@@ -434,8 +466,8 @@ export const useWorkspaceStore = create<WorkspaceState>()(
         name: 'Workspace 1',
         color: TAB_COLORS[0],
         panes: [
-          { id: generateId(), type: 'terminal', title: 'Terminal 1', gridPos: { x: 0, y: 0, w: 50, h: 100 }, data: { terminalId: generateId() } },
-          { id: generateId(), type: 'editor', title: 'Welcome', gridPos: { x: 50, y: 0, w: 50, h: 100 } },
+          { id: generateId(), type: 'terminal', title: 'Terminal 1', gridPos: { x: 0, y: 0, w: 50, h: 200 }, data: { terminalId: generateId() } },
+          { id: generateId(), type: 'editor', title: 'Welcome', gridPos: { x: 50, y: 0, w: 50, h: 200 } },
         ],
       }],
       activeTabId: _initTabId,
@@ -445,7 +477,9 @@ export const useWorkspaceStore = create<WorkspaceState>()(
       activeSidebarTab: 'files',
       appMode: 'workflow',
       workspaceDir: null,
-      theme: 'dark',
+      theme: getInitialTheme(),
+      showSettings: false,
+      customTheme: {},
       savedLayouts: [],
       messages: [],
       results: [],
@@ -472,6 +506,12 @@ export const useWorkspaceStore = create<WorkspaceState>()(
           }))
         }
       }),
+      setShowSettings: (open) => set({ showSettings: open }),
+      setTheme: (theme) => set({ theme }),
+      setCustomThemeColor: (key, value) => set((s) => ({
+        customTheme: { ...s.customTheme, [key]: value }
+      })),
+      resetCustomTheme: () => set({ customTheme: {} }),
 
       addMessage: (msg) => set((s) => ({ messages: [...s.messages, msg].slice(-500) })),
       addResult: (result) => set((s) => ({ results: [...s.results, result].slice(-200) })),
@@ -537,7 +577,7 @@ export const useWorkspaceStore = create<WorkspaceState>()(
         
         set((state) => {
           const panes = selectActivePanes(state);
-          const gridPos = findHighestAvailableSpot(panes, 25, 40);
+          const gridPos = findHighestAvailableSpot(panes, 50, 80);
           
           const newPane: Pane = {
             id: paneId,
@@ -720,7 +760,7 @@ export const useWorkspaceStore = create<WorkspaceState>()(
             id: generateId(),
             type: 'missioncontrol',
             title: 'Mission Control',
-            gridPos: { x: 0, y: 0, w: 24, h: 20 },
+            gridPos: { x: 0, y: 0, w: 100, h: 100 },
             data: { taskDescription, agents },
           }],
         };
@@ -753,7 +793,7 @@ export const useWorkspaceStore = create<WorkspaceState>()(
             id: generateId(), 
             type: p.type, 
             title: p.title, 
-            gridPos: p.gridPos || { x: 0, y: 0, w: 8, h: 12 },
+            gridPos: p.gridPos || { x: 0, y: 0, w: 25, h: 40 },
             data: newData 
           };
         });
@@ -773,7 +813,7 @@ export const useWorkspaceStore = create<WorkspaceState>()(
           name: `Workspace ${tabNum}`,
           color,
           panes: [
-            { id: generateId(), type: 'terminal', title: 'Terminal 1', gridPos: { x: 0, y: 0, w: 12, h: 18 }, data: { terminalId: generateId() } },
+            { id: generateId(), type: 'terminal', title: 'Terminal 1', gridPos: { x: 0, y: 0, w: 50, h: 100 }, data: { terminalId: generateId() } },
           ],
         };
         return { tabs: [...state.tabs, newTab], activeTabId: newTabId };

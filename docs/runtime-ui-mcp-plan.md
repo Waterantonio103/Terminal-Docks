@@ -38,3 +38,4 @@ After completing a phase:
 - Terminal = worker body
 - MCP = communication line
 - Graph = workflow plan
+

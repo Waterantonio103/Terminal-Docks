@@ -1,8 +1,8 @@
-# terminal-docks
+# CometAI
 
 ## Project Overview
 
-A fully local, subscription-free **Agentic Development Environment** — a desktop app that combines a multi-pane terminal workspace, AI agent orchestration, a task board, and a built-in code editor in one native window. Inspired by BridgeSpace (bridgemind.ai) but runs 100% offline with no accounts, no API keys to a hosted service, and no telemetry.
+A fully local, subscription-free **Agentic Development Environment** — a desktop app that combines a multi-pane terminal workspace, AI agent orchestration, a task board, and a built-in code editor in one native window. Inspired by Starlink (cometmind.ai) but runs 100% offline with no accounts, no API keys to a hosted service, and no telemetry.
 
 **Compatibility:** The app must always be Windows and Mac compatible (excepting platform-specific installer outputs like .exe and .dmg).
 
@@ -34,7 +34,7 @@ A fully local, subscription-free **Agentic Development Environment** — a deskt
 - **OSC 133 command blocks** — shell integration marks command start/end for collapsible, clickable output blocks (Warp-style)
 - Command history with block-level navigation
 - Per-pane working directory and env overrides
-- **IPC bridge**: PTY stdout streamed to frontend via Tauri `emit()` events; keystrokes sent backend via `invoke()` commands
+- **Starlink IPC**: PTY stdout streamed to frontend via Tauri `emit()` events; keystrokes sent backend via `invoke()` commands
 
 ### 3. AI Agent Integration
 - One-click **Run Task** button: spawns a terminal pane with the user's chosen AI CLI agent pre-loaded (`claude`, `aider`, `continue`, custom script)
@@ -57,13 +57,13 @@ A fully local, subscription-free **Agentic Development Environment** — a deskt
 - Syntax highlighting via CodeMirror language packages; no LSP required
 - Opened via Quick Open or by clicking a file path in a terminal block
 
-### 6. Multi-Agent Orchestration ("Swarm Mode")
+### 6. Multi-Agent Orchestration ("CometAI Mode")
 - Define agent teams with roles: **builder**, **reviewer**, **scout**, **coordinator**
 - Each agent runs in its own terminal pane
-- **Local mailbox**: agents write to a shared local directory (`.swarm/mailbox/`) and read each other's outputs; coordinator agent drives sequencing
+- **Local mailbox**: agents write to a shared local directory (`.CometAI/mailbox/`) and read each other's outputs; coordinator agent drives sequencing
 - Real-time **Activity Feed** pane: aggregated live log of all agent stdout, tagged by agent name and role
 - Scales from 2 to 16 concurrent agents
-- Swarm config stored as a local JSON file (shareable, version-controllable)
+- CometAI config stored as a local JSON file (shareable, version-controllable)
 
 ### 7. Themes
 - 20+ built-in themes covering: terminal colors, app chrome, scrollbars, syntax highlighting
@@ -74,7 +74,7 @@ A fully local, subscription-free **Agentic Development Environment** — a deskt
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│  [Logo] terminal-docks    [Layout Picker] [Theme] [⚙]  │  ← App chrome / titlebar
+│  [Logo] CometAI    [Layout Picker] [Theme] [⚙]  │  ← App chrome / titlebar
 ├──────────┬──────────────────────────────────────────────┤
 │          │  Pane 1 (Terminal / Editor / Board)          │
 │  Sidebar │──────────────────────────────────────────────│
@@ -86,14 +86,14 @@ A fully local, subscription-free **Agentic Development Environment** — a deskt
 └──────────┴──────────────────────────┴───────────────────┘
 ```
 
-- **Sidebar**: collapsible, contains Task Board nav, Swarm status, file tree, agent profiles
+- **Sidebar**: collapsible, contains Task Board nav, CometAI status, file tree, agent profiles
 - **Pane area**: drag-and-drop grid, each pane has a tab bar for type switching
 - **Pane header**: shows pane type icon, current path or task name, Run Task button
 - **Activity Feed**: optional overlay or dedicated pane showing real-time agent output log
 
 ## Local-First Principles
 
-- All data (tasks, workspace configs, swarm configs, themes) stored in `~/.terminal-docks/` or beside the binary
+- All data (tasks, workspace configs, CometAI configs, themes) stored in `~/.CometAI/` or beside the binary
 - No network requests except those the user's own AI CLI makes
 - No telemetry, no analytics, no crash reporting unless user explicitly opts in
 - Zero account/login required — install and run
@@ -117,13 +117,13 @@ npm run dev
 ## Project Structure
 
 ```
-terminal-docks/
+CometAI/
 ├── src/                    # React frontend
 │   ├── components/
 │   │   ├── Terminal/       # xterm.js pane wrapper
 │   │   ├── Editor/         # CodeMirror 6 editor pane
 │   │   ├── TaskBoard/      # Kanban board
-│   │   ├── ActivityFeed/   # Swarm log aggregator
+│   │   ├── ActivityFeed/   # CometAI log aggregator
 │   │   ├── Sidebar/        # Nav, file tree, agent profiles
 │   │   └── Layout/         # Grid, drag-drop, pane management
 │   ├── store/              # Zustand stores
@@ -138,3 +138,4 @@ terminal-docks/
 ├── CLAUDE.md               # This file
 └── agents.md               # Agent orchestration design
 ```
+

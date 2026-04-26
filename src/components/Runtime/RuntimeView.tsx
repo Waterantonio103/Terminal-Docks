@@ -1,26 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { DotTunnelBackground } from '../shared/DotTunnelBackground';
-import { invoke } from '@tauri-apps/api/core';
-import { emit, listen } from '@tauri-apps/api/event';
 import { Bot, Cpu, FileCode2, Focus, Maximize2, RefreshCw, ShieldAlert, Square } from 'lucide-react';
 import { TerminalPane } from '../Terminal/TerminalPane';
-import { useWorkspaceStore, type CompiledMission, type MissionAgent, type Pane, type WorkflowAgentCli, type WorkflowEdgeCondition, type WorkflowNodeStatus } from '../../store/workspace';
+import { useWorkspaceStore, type Pane, type WorkflowAgentCli, type WorkflowEdgeCondition } from '../../store/workspace';
 import { workflowStatusLabel, workflowStatusTone } from '../../lib/workflowStatus';
-
-interface PermissionRequest {
-  id: string;
-  nodeId?: string | null;
-  terminalId?: string;
-  cli?: string;
-  permissionType: string;
-  label?: string;
-  message?: string;
-  dedupeKey?: string;
-  timestamp?: number;
-  state?: 'pending' | 'approved' | 'denied' | 'injected' | 'failed' | 'expired';
-  decision?: 'approve' | 'deny' | string | null;
-  error?: string | null;
-}
+import { useRuntimeSessions, useRuntimeObserver, type EnrichedRuntimeSession } from './useRuntimeSessions';
+import { runtimeObserver } from './RuntimeObserver';
 
 type ResizeCorner = 'se' | 'sw' | 'ne' | 'nw';
 
@@ -58,8 +43,15 @@ const MIN_NODE_HEIGHT = 220;
 const GRID_GAP_X = 80;
 const GRID_GAP_Y = 60;
 const GRID_SIZE = 24;
-const ACTIVE_STATUSES = new Set(['launching', 'connecting', 'spawning', 'terminal_started', 'adapter_starting', 'mcp_connecting', 'registered', 'ready', 'activation_pending', 'activation_acked', 'activated', 'running', 'handoff_pending', 'waiting']);
-const WORKING_STATUSES = new Set(['activated', 'activation_acked', 'running', 'handoff_pending', 'waiting']);
+const ACTIVE_STATUSES = new Set<string>([
+  'launching', 'connecting', 'spawning', 'terminal_started',
+  'adapter_starting', 'mcp_connecting', 'registered', 'ready',
+  'activation_pending', 'activation_acked', 'activated',
+  'running', 'handoff_pending', 'waiting',
+]);
+const WORKING_STATUSES = new Set<string>([
+  'activated', 'activation_acked', 'running', 'handoff_pending', 'waiting',
+]);
 
 const _sessionLayouts: Record<string, RuntimeNodeLayout> = {};
 const _sessionPan: Point = { x: 0, y: 0 };
@@ -77,36 +69,42 @@ function screenToWorld(screen: Point, pan: Point, zoom: number): Point {
   return { x: (screen.x - pan.x) / zoom, y: (screen.y - pan.y) / zoom };
 }
 
-function runtimePaneFor(agent: MissionAgent): Pane | null {
-  if (!agent.terminalId) return null;
+function runtimePaneFor(session: EnrichedRuntimeSession): Pane {
   return {
-    id: `runtime-${agent.terminalId}`,
+    id: `runtime-${session.terminalId}`,
     type: 'terminal',
-    title: agent.title || agent.roleId || 'Runtime',
+    title: session.title || session.roleId || 'Runtime',
     gridPos: { x: 0, y: 0, w: 12, h: 12 },
     data: {
-      terminalId: agent.terminalId,
-      nodeId: agent.nodeId,
-      roleId: agent.roleId,
-      cli: (agent.runtimeCli ?? agent.cli ?? 'claude') as WorkflowAgentCli,
-      executionMode: agent.executionMode ?? 'interactive_pty',
+      terminalId: session.terminalId,
+      nodeId: session.nodeId,
+      roleId: session.roleId,
+      cli: (session.cli ?? 'claude') as WorkflowAgentCli,
+      executionMode: session.executionMode ?? 'interactive_pty',
     },
   };
 }
 
 export function RuntimeView() {
-  const tabs = useWorkspaceStore(state => state.tabs);
-  const nodeRuntimeBindings = useWorkspaceStore(state => state.nodeRuntimeBindings);
-  const globalGraph = useWorkspaceStore(state => state.globalGraph);
   const setAppMode = useWorkspaceStore(state => state.setAppMode);
   const addPane = useWorkspaceStore(state => state.addPane);
-  const [permissionRequests, setPermissionRequests] = useState<Record<string, PermissionRequest>>({});
+  const globalGraph = useWorkspaceStore(state => state.globalGraph);
+
+  const sessions = useRuntimeSessions();
+  const { focusRuntime, stopRuntime, retryRuntime, resolvePermission } = useRuntimeObserver();
 
   const [pan, setPan] = useState<Point>(() => ({ ..._sessionPan }));
   const [zoom, setZoom] = useState(() => _sessionZoom);
   const [interaction, setInteraction] = useState<CanvasInteraction>({ kind: 'idle' });
   const [nodeLayouts, setNodeLayouts] = useState<Record<string, RuntimeNodeLayout>>(() => ({ ..._sessionLayouts }));
   const canvasRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    runtimeObserver.start();
+    return () => {
+      runtimeObserver.stop();
+    };
+  }, []);
 
   const persistPan = useCallback((next: Point) => {
     _sessionPan.x = next.x;
@@ -126,240 +124,6 @@ export function RuntimeView() {
       return next;
     });
   }, []);
-
-  const agents = useMemo(() => {
-    const liveAgents: MissionAgent[] = [];
-    for (const tab of tabs) {
-      for (const pane of tab.panes) {
-        if (pane.type !== 'missioncontrol') continue;
-        const paneAgents = (pane.data?.agents as MissionAgent[] | undefined) ?? [];
-        liveAgents.push(...paneAgents.filter(agent => agent.terminalId || agent.runtimeSessionId));
-      }
-    }
-
-    const graphStatusByNodeId = new Map<string, WorkflowNodeStatus>();
-    for (const node of globalGraph.nodes) {
-      if (node.status && node.status !== 'idle') {
-        graphStatusByNodeId.set(node.id, node.status);
-      }
-    }
-
-    const byNode = new Map(liveAgents.filter(agent => agent.nodeId).map(agent => [agent.nodeId as string, agent]));
-    for (const node of globalGraph.nodes) {
-      const isSystemRole = ['task', 'barrier', 'frame', 'reroute', 'output'].includes(node.roleId);
-      if (isSystemRole && !node.config?.profileId) continue;
-      if (byNode.has(node.id)) continue;
-      const binding = nodeRuntimeBindings[node.id];
-      const terminalId = String(node.config?.terminalId ?? binding?.terminalId ?? '').trim();
-      const runtimeSessionId = String(binding?.runtimeSessionId ?? '').trim();
-      if (!terminalId && !runtimeSessionId) continue;
-      liveAgents.push({
-        nodeId: node.id,
-        terminalId,
-        title: node.config?.terminalTitle || `Runtime ${node.roleId ?? 'agent'}`,
-        roleId: node.roleId ?? 'agent',
-        status: graphStatusByNodeId.get(node.id) ?? binding?.adapterStatus ?? node.status ?? 'idle',
-        runtimeSessionId: runtimeSessionId || null,
-        cli: node.config?.cli,
-        runtimeCli: node.config?.cli ?? null,
-        executionMode: node.config?.executionMode ?? 'interactive_pty',
-      });
-    }
-
-    const deduped = new Map<string, MissionAgent>();
-    for (const agent of liveAgents) {
-      const key = agent.nodeId || agent.terminalId || agent.runtimeSessionId || `${agent.roleId}-${deduped.size}`;
-      const graphStatus = agent.nodeId ? graphStatusByNodeId.get(agent.nodeId) : undefined;
-      const merged = { ...(deduped.get(key) ?? {}), ...agent };
-      if (graphStatus && graphStatus !== 'idle' && graphStatus !== 'disconnected' && graphStatus !== 'failed') {
-        merged.status = graphStatus;
-        merged.lastError = null;
-        merged.runtimeBootstrapReason = null;
-      }
-      deduped.set(key, merged);
-    }
-    return Array.from(deduped.values());
-  }, [globalGraph.nodes, nodeRuntimeBindings, tabs]);
-
-  const runtimeNodes = useMemo(() => {
-    const occupied = new Set<string>();
-    return agents.map((agent, index) => {
-      const key = agent.nodeId || agent.terminalId || agent.runtimeSessionId || `runtime-${index}`;
-      const workflowNode = agent.nodeId ? globalGraph.nodes.find(node => node.id === agent.nodeId) : null;
-      const position = workflowNode?.config?.position;
-      const existing = nodeLayouts[key];
-      let x: number, y: number;
-      if (existing) {
-        x = existing.x;
-        y = existing.y;
-      } else {
-        x = typeof position?.x === 'number' ? position.x : 60 + (index % 3) * (DEFAULT_NODE_WIDTH + GRID_GAP_X);
-        y = typeof position?.y === 'number' ? position.y : 70 + Math.floor(index / 3) * (DEFAULT_NODE_HEIGHT + GRID_GAP_Y);
-      }
-      let guard = 0;
-      while (occupied.has(`${Math.round(x)}:${Math.round(y)}`) && guard < 20) {
-        x += 32;
-        y += 28;
-        guard += 1;
-      }
-      occupied.add(`${Math.round(x)}:${Math.round(y)}`);
-      return { key, agent, x, y };
-    });
-  }, [agents, globalGraph.nodes, nodeLayouts]);
-
-  useEffect(() => {
-    persistLayouts(prev => {
-      let changed = false;
-      const next = { ...prev };
-      for (const node of runtimeNodes) {
-        if (!next[node.key]) {
-          next[node.key] = { x: node.x, y: node.y, width: DEFAULT_NODE_WIDTH, height: DEFAULT_NODE_HEIGHT };
-          changed = true;
-        }
-      }
-      return changed ? next : prev;
-    });
-  }, [runtimeNodes, persistLayouts]);
-
-  const getNodeLayout = useCallback((key: string): RuntimeNodeLayout => {
-    return nodeLayouts[key] ?? { x: 0, y: 0, width: DEFAULT_NODE_WIDTH, height: DEFAULT_NODE_HEIGHT };
-  }, [nodeLayouts]);
-
-  const runtimeNodeByNodeId = useMemo(() => {
-    const map = new Map<string, typeof runtimeNodes[number]>();
-    for (const node of runtimeNodes) {
-      if (node.agent.nodeId) map.set(node.agent.nodeId, node);
-    }
-    return map;
-  }, [runtimeNodes]);
-
-  const runtimeEdges = useMemo<RuntimeEdge[]>(() => {
-    const seen = new Set<string>();
-    const edges: RuntimeEdge[] = [];
-
-    const addEdge = (fromNodeId: string, toNodeId: string, condition: WorkflowEdgeCondition) => {
-      const id = `${fromNodeId}->${toNodeId}`;
-      if (seen.has(id)) return;
-      seen.add(id);
-      edges.push({ id, fromNodeId, toNodeId, condition, fromKey: '', toKey: '' });
-    };
-
-    for (const edge of globalGraph.edges) {
-      addEdge(edge.fromNodeId, edge.toNodeId, edge.condition ?? 'always');
-    }
-
-    for (const tab of tabs) {
-      for (const pane of tab.panes) {
-        if (pane.type !== 'missioncontrol') continue;
-        const mission = pane.data?.mission as CompiledMission | undefined;
-        if (!mission?.edges) continue;
-        for (const edge of mission.edges) {
-          addEdge(edge.fromNodeId, edge.toNodeId, edge.condition ?? 'always');
-        }
-      }
-    }
-
-    return edges
-      .map(edge => {
-        const fromNode = runtimeNodeByNodeId.get(edge.fromNodeId);
-        const toNode = runtimeNodeByNodeId.get(edge.toNodeId);
-        if (!fromNode || !toNode) return null;
-        return { ...edge, fromKey: fromNode.key, toKey: toNode.key };
-      })
-      .filter((e): e is RuntimeEdge & { fromKey: string; toKey: string } => e !== null);
-  }, [globalGraph.edges, runtimeNodeByNodeId, tabs]);
-
-  useEffect(() => {
-    let unlistenRequested: (() => void) | undefined;
-    let unlistenUpdated: (() => void) | undefined;
-    let unmounted = false;
-    invoke<PermissionRequest[]>('list_active_permission_requests')
-      .then(requests => {
-        if (unmounted) return;
-        setPermissionRequests(Object.fromEntries(requests.map(request => [request.id, request])));
-      })
-      .catch(() => {});
-    listen<PermissionRequest>('workflow-permission-requested', event => {
-      if (unmounted) return;
-      setPermissionRequests(previous => {
-        const dedupeKey = event.payload.dedupeKey ?? event.payload.id;
-        const existing = Object.values(previous).find(request => (request.dedupeKey ?? request.id) === dedupeKey);
-        if (existing?.state === 'pending') return previous;
-        return {
-          ...previous,
-          [event.payload.id]: { ...event.payload, dedupeKey, state: 'pending' },
-        };
-      });
-    }).then(fn => {
-      unlistenRequested = fn;
-      if (unmounted) fn();
-    });
-    listen<PermissionRequest>('workflow-permission-updated', event => {
-      if (unmounted) return;
-      setPermissionRequests(previous => ({
-        ...previous,
-        [event.payload.id]: event.payload,
-      }));
-    }).then(fn => {
-      unlistenUpdated = fn;
-      if (unmounted) fn();
-    });
-    return () => {
-      unmounted = true;
-      unlistenRequested?.();
-      unlistenUpdated?.();
-    };
-  }, []);
-
-  const decidePermission = (request: PermissionRequest, decision: 'approve' | 'deny') => {
-    setPermissionRequests(previous => ({
-      ...previous,
-      [request.id]: { ...request, state: decision === 'approve' ? 'approved' : 'denied' },
-    }));
-    invoke('handle_workflow_permission_decision', {
-      requestId: request.id,
-      decision,
-    }).catch(() => {
-      setPermissionRequests(previous => ({
-        ...previous,
-        [request.id]: { ...request, state: 'failed', decision, error: 'Decision was rejected by the backend.' },
-      }));
-    });
-  };
-
-  const focusRuntime = (agent: MissionAgent) => {
-    if (!agent.terminalId) return;
-    emit('focus-terminal', { terminalId: agent.terminalId }).catch(() => {});
-  };
-
-  const stopRuntime = (agent: MissionAgent) => {
-    if (!agent.terminalId) return;
-    invoke('destroy_pty', { id: agent.terminalId }).catch(() => {});
-  };
-
-  const retryRuntime = (agent: MissionAgent) => {
-    emit('workflow-runtime-retry-requested', {
-      nodeId: agent.nodeId ?? null,
-      terminalId: agent.terminalId ?? null,
-      runtimeSessionId: agent.runtimeSessionId ?? null,
-    }).catch(() => {});
-  };
-
-  const openArtifact = (agent: MissionAgent) => {
-    const artifact = agent.artifacts?.find(item => item.path);
-    if (!artifact?.path) return;
-    addPane('editor', artifact.label || artifact.path.split(/[\\/]/).pop() || 'Artifact', { filePath: artifact.path });
-    setAppMode('workspace');
-  };
-
-  const requestsByNode = useMemo(() => {
-    const map = new Map<string, PermissionRequest[]>();
-    for (const request of Object.values(permissionRequests)) {
-      const key = request.nodeId || request.terminalId || 'global';
-      map.set(key, [...(map.get(key) ?? []), request]);
-    }
-    return map;
-  }, [permissionRequests]);
 
   const onWheel = useCallback(
     (event: React.WheelEvent<HTMLDivElement>) => {
@@ -408,7 +172,7 @@ export function RuntimeView() {
       if (!canvasRef.current) return;
       const rect = canvasRef.current.getBoundingClientRect();
       const screenPoint = pointFromMouse(event.clientX, event.clientY, rect);
-      const layout = getNodeLayout(nodeKey);
+      const layout = nodeLayouts[nodeKey] ?? { x: 0, y: 0, width: DEFAULT_NODE_WIDTH, height: DEFAULT_NODE_HEIGHT };
       setInteraction({
         kind: 'dragging_node',
         nodeKey,
@@ -416,7 +180,7 @@ export function RuntimeView() {
         nodeOrigin: { x: layout.x, y: layout.y },
       });
     },
-    [getNodeLayout]
+    [nodeLayouts]
   );
 
   const startNodeResize = useCallback(
@@ -426,7 +190,7 @@ export function RuntimeView() {
       if (!canvasRef.current) return;
       const rect = canvasRef.current.getBoundingClientRect();
       const screenPoint = pointFromMouse(event.clientX, event.clientY, rect);
-      const layout = getNodeLayout(nodeKey);
+      const layout = nodeLayouts[nodeKey] ?? { x: 0, y: 0, width: DEFAULT_NODE_WIDTH, height: DEFAULT_NODE_HEIGHT };
       setInteraction({
         kind: 'resizing_node',
         nodeKey,
@@ -435,7 +199,7 @@ export function RuntimeView() {
         startRect: { ...layout },
       });
     },
-    [getNodeLayout]
+    [nodeLayouts]
   );
 
   useEffect(() => {
@@ -522,6 +286,79 @@ export function RuntimeView() {
     };
   }, [interaction, zoom, persistPan, persistLayouts]);
 
+  const runtimeNodes = useMemo(() => {
+    const occupied = new Set<string>();
+    return sessions.map((session, index) => {
+      const key = session.nodeId || session.terminalId || `runtime-${index}`;
+      const position = session.position;
+      const existing = nodeLayouts[key];
+      let x: number, y: number;
+      if (existing) {
+        x = existing.x;
+        y = existing.y;
+      } else {
+        x = typeof position?.x === 'number' ? position.x : 60 + (index % 3) * (DEFAULT_NODE_WIDTH + GRID_GAP_X);
+        y = typeof position?.y === 'number' ? position.y : 70 + Math.floor(index / 3) * (DEFAULT_NODE_HEIGHT + GRID_GAP_Y);
+      }
+      let guard = 0;
+      while (occupied.has(`${Math.round(x)}:${Math.round(y)}`) && guard < 20) {
+        x += 32;
+        y += 28;
+        guard += 1;
+      }
+      occupied.add(`${Math.round(x)}:${Math.round(y)}`);
+      return { key, session, x, y };
+    });
+  }, [sessions, nodeLayouts]);
+
+  useEffect(() => {
+    persistLayouts(prev => {
+      let changed = false;
+      const next = { ...prev };
+      for (const node of runtimeNodes) {
+        if (!next[node.key]) {
+          next[node.key] = { x: node.x, y: node.y, width: DEFAULT_NODE_WIDTH, height: DEFAULT_NODE_HEIGHT };
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+  }, [runtimeNodes, persistLayouts]);
+
+  const runtimeNodeByNodeId = useMemo(() => {
+    const map = new Map<string, typeof runtimeNodes[number]>();
+    for (const node of runtimeNodes) {
+      if (node.session.nodeId) map.set(node.session.nodeId, node);
+    }
+    return map;
+  }, [runtimeNodes]);
+
+  const runtimeEdges = useMemo<RuntimeEdge[]>(() => {
+    const seen = new Set<string>();
+    const edges: RuntimeEdge[] = [];
+
+    for (const edge of globalGraph.edges) {
+      const id = `${edge.fromNodeId}->${edge.toNodeId}`;
+      if (seen.has(id)) continue;
+      seen.add(id);
+
+      const fromNode = runtimeNodeByNodeId.get(edge.fromNodeId);
+      const toNode = runtimeNodeByNodeId.get(edge.toNodeId);
+      if (!fromNode || !toNode) continue;
+
+      edges.push({
+        id,
+        fromNodeId: edge.fromNodeId,
+        toNodeId: edge.toNodeId,
+        condition: edge.condition ?? 'always',
+        fromKey: fromNode.key,
+        toKey: toNode.key,
+      });
+    }
+
+    return edges;
+  }, [globalGraph.edges, runtimeNodeByNodeId]);
+
   const resetView = useCallback(() => {
     if (runtimeNodes.length === 0) {
       persistPan({ x: 0, y: 0 });
@@ -530,7 +367,7 @@ export function RuntimeView() {
     }
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
     for (const node of runtimeNodes) {
-      const layout = getNodeLayout(node.key);
+      const layout = nodeLayouts[node.key] || { x: 0, y: 0, width: DEFAULT_NODE_WIDTH, height: DEFAULT_NODE_HEIGHT };
       minX = Math.min(minX, layout.x);
       minY = Math.min(minY, layout.y);
       maxX = Math.max(maxX, layout.x + layout.width);
@@ -549,23 +386,30 @@ export function RuntimeView() {
       });
       persistZoom(nextZoom);
     }
-  }, [runtimeNodes, getNodeLayout, persistPan, persistZoom]);
+  }, [runtimeNodes, nodeLayouts, persistPan, persistZoom]);
+
+  const openArtifact = (session: EnrichedRuntimeSession) => {
+    const artifact = session.artifacts?.find(item => item.path);
+    if (!artifact?.path) return;
+    addPane('editor', artifact.label || artifact.path.split(/[\\/]/).pop() || 'Artifact', { filePath: artifact.path });
+    setAppMode('workspace');
+  };
 
   const isInteracting = interaction.kind !== 'idle';
 
   return (
-    <div className="h-full w-full bg-bg-app flex flex-col">
-      <div className="shrink-0 z-20 px-5 py-3 border-b border-border-panel bg-bg-app/95 backdrop-blur flex items-center justify-between">
+    <div className="h-full w-full background-bg-app flex flex-col">
+      <div className="shrink-0 z-20 px-5 py-3 border-b border-border-panel background-bg-app/95 backdrop-blur flex items-center justify-between">
         <div>
           <div className="text-[10px] uppercase tracking-[0.24em] text-accent-primary">Machine View</div>
           <div className="text-lg font-semibold text-text-primary">Runtime Execution</div>
         </div>
         <div className="flex items-center gap-3">
           <div className="text-[11px] text-text-muted">
-            {agents.length} runtime node{agents.length === 1 ? '' : 's'} · {runtimeEdges.length} edge{runtimeEdges.length === 1 ? '' : 's'}
+            {sessions.length} runtime node{sessions.length === 1 ? '' : 's'} · {runtimeEdges.length} edge{runtimeEdges.length === 1 ? '' : 's'}
           </div>
           <button
-            className="px-2 py-1 rounded border border-border-panel text-text-muted hover:text-text-primary hover:bg-bg-surface text-[11px] flex items-center gap-1"
+            className="px-2 py-1 rounded border border-border-panel text-text-muted hover:text-text-primary hover:background-bg-surface text-[11px] flex items-center gap-1"
             onClick={resetView}
             title="Fit all nodes in view"
           >
@@ -578,7 +422,7 @@ export function RuntimeView() {
         </div>
       </div>
 
-      {agents.length === 0 ? (
+      {sessions.length === 0 ? (
         <div className="flex-1 flex flex-col items-center justify-center text-center text-text-muted gap-3">
           <Cpu size={34} className="opacity-40" />
           <div className="text-sm text-text-secondary">No active agent sessions.</div>
@@ -590,7 +434,7 @@ export function RuntimeView() {
           className="relative flex-1 overflow-hidden"
           onWheel={onWheel}
           onMouseDown={onCanvasMouseDown}
-          style={{ cursor: isInteracting ? 'grabbing' : 'default' }}
+          style={{ cursor: isInteracting ? 'grabbing' : 'grab' }}
         >
           <DotTunnelBackground />
           <div
@@ -613,8 +457,8 @@ export function RuntimeView() {
           >
             <svg className="absolute pointer-events-none overflow-visible" style={{ left: 0, top: 0, width: '100%', height: '100%', overflow: 'visible' }}>
               {runtimeEdges.map(edge => {
-                const fromLayout = getNodeLayout(edge.fromKey);
-                const toLayout = getNodeLayout(edge.toKey);
+                const fromLayout = nodeLayouts[edge.fromKey] || { x: 0, y: 0, width: DEFAULT_NODE_WIDTH, height: DEFAULT_NODE_HEIGHT };
+                const toLayout = nodeLayouts[edge.toKey] || { x: 0, y: 0, width: DEFAULT_NODE_WIDTH, height: DEFAULT_NODE_HEIGHT };
                 const fromX = fromLayout.x + fromLayout.width;
                 const fromY = fromLayout.y + 86;
                 const toX = toLayout.x;
@@ -634,18 +478,17 @@ export function RuntimeView() {
             </svg>
 
             {runtimeNodes.map(runtimeNode => {
-              const agent = runtimeNode.agent;
-              const pane = runtimePaneFor(agent);
-              const status = agent.status ?? 'idle';
+              const session = runtimeNode.session;
+              const pane = runtimePaneFor(session);
+              const status = session.status ?? 'idle';
               const isActive = ACTIVE_STATUSES.has(status);
-              const nodeRequests = requestsByNode.get(agent.nodeId || agent.terminalId || 'global') ?? [];
-              const layout = getNodeLayout(runtimeNode.key);
+              const layout = nodeLayouts[runtimeNode.key] || { x: 0, y: 0, width: DEFAULT_NODE_WIDTH, height: DEFAULT_NODE_HEIGHT };
               const isDragging = interaction.kind === 'dragging_node' && interaction.nodeKey === runtimeNode.key;
 
               return (
                 <div
                   key={runtimeNode.key}
-                  className={`absolute rounded-lg border bg-bg-panel overflow-hidden flex flex-col shadow-lg transition-shadow ${
+                  className={`absolute rounded-lg border background-bg-panel overflow-hidden flex flex-col shadow-lg transition-shadow ${
                     isActive ? 'border-accent-primary/50 shadow-accent-primary/5' : 'border-border-panel'
                   } ${isDragging ? 'shadow-2xl ring-2 ring-accent-primary/30' : ''}`}
                   style={{
@@ -657,7 +500,7 @@ export function RuntimeView() {
                   }}
                 >
                   <div
-                    className="h-12 px-3 border-b border-border-panel bg-bg-titlebar flex items-center justify-between gap-3 select-none"
+                    className="h-12 px-3 border-b border-border-panel background-bg-titlebar flex items-center justify-between gap-3 select-none"
                     style={{ cursor: isInteracting ? 'grabbing' : 'grab' }}
                     onMouseDown={event => {
                       if (event.button === 0 && !event.altKey) {
@@ -668,8 +511,8 @@ export function RuntimeView() {
                     <div className="min-w-0 flex items-center gap-2">
                       <Bot size={15} className="text-accent-primary shrink-0" />
                       <div className="min-w-0">
-                        <div className="text-sm font-semibold text-text-primary truncate">{agent.roleId || agent.title}</div>
-                        <div className="text-[10px] text-text-muted truncate">{agent.runtimeCli ?? agent.cli ?? 'CLI unknown'} · {agent.terminalId || agent.runtimeSessionId}</div>
+                        <div className="text-sm font-semibold text-text-primary truncate">{session.roleId || session.title}</div>
+                        <div className="text-[10px] text-text-muted truncate">{session.cli ?? 'CLI unknown'} · {session.terminalId || session.sessionId}</div>
                       </div>
                     </div>
                     <div className={`text-[10px] uppercase tracking-wide px-2 py-1 rounded border ${workflowStatusTone(status, 'mission')}`}>
@@ -677,44 +520,49 @@ export function RuntimeView() {
                     </div>
                   </div>
 
-                  <div className="h-9 px-3 border-b border-border-panel bg-bg-panel flex items-center justify-between">
-                    <div className="text-[10px] text-text-muted truncate">{agent.currentAction || (WORKING_STATUSES.has(status) ? 'Working...' : isActive ? 'Ready' : '—')}</div>
+                  <div className="h-9 px-3 border-b border-border-panel background-bg-panel flex items-center justify-between">
+                    <div className="text-[10px] text-text-muted truncate">{session.currentAction || (WORKING_STATUSES.has(status) ? 'Working...' : isActive ? 'Ready' : '—')}</div>
                     <div className="flex items-center gap-1">
-                      <button className="w-6 h-6 flex items-center justify-center rounded text-text-muted hover:text-text-primary hover:bg-bg-surface" title="Focus terminal" onClick={() => focusRuntime(agent)} disabled={!agent.terminalId}>
+                      <button className="w-6 h-6 flex items-center justify-center rounded text-text-muted hover:text-text-primary hover:background-bg-surface" title="Focus terminal" onClick={() => focusRuntime(session)} disabled={!session.terminalId}>
                         <Focus size={13} />
                       </button>
-                      <button className="w-6 h-6 flex items-center justify-center rounded text-text-muted hover:text-red-300 hover:bg-red-500/10" title="Stop session" onClick={() => stopRuntime(agent)} disabled={!agent.terminalId}>
+                      <button className="w-6 h-6 flex items-center justify-center rounded text-text-muted hover:text-red-300 hover:bg-red-500/10" title="Stop session" onClick={() => stopRuntime(session)} disabled={!session.terminalId}>
                         <Square size={12} />
                       </button>
-                      <button className="w-6 h-6 flex items-center justify-center rounded text-text-muted hover:text-text-primary hover:bg-bg-surface" title="Retry activation" onClick={() => retryRuntime(agent)}>
+                      <button className="w-6 h-6 flex items-center justify-center rounded text-text-muted hover:text-text-primary hover:background-bg-surface" title="Retry activation" onClick={() => retryRuntime(session)}>
                         <RefreshCw size={13} />
                       </button>
-                      <button className="w-6 h-6 flex items-center justify-center rounded text-text-muted hover:text-text-primary hover:bg-bg-surface disabled:opacity-30" title="Open artifact in Workspace" onClick={() => openArtifact(agent)} disabled={!agent.artifacts?.some(item => item.path)}>
+                      <button className="w-6 h-6 flex items-center justify-center rounded text-text-muted hover:text-text-primary hover:background-bg-surface disabled:opacity-30" title="Open artifact in Workspace" onClick={() => openArtifact(session)} disabled={!session.artifacts?.some(item => item.path)}>
                         <FileCode2 size={13} />
                       </button>
                     </div>
                   </div>
 
-                  {nodeRequests.map(request => (
-                    <div key={request.id} className="m-3 mb-0 rounded border border-amber-400/40 bg-amber-400/10 p-3 text-[11px] text-amber-100">
+                  {session.activePermission && (
+                    <div className="m-3 mb-0 rounded border border-amber-400/40 bg-amber-400/10 p-3 text-[11px] text-amber-100">
                       <div className="flex items-center gap-2 font-semibold">
                         <ShieldAlert size={13} />
-                        Grant permission for: {request.label ?? request.permissionType}?
+                        Grant permission for: {session.activePermission.category}?
                       </div>
-                      {request.message && <div className="mt-1 text-amber-100/70 line-clamp-2">{request.message}</div>}
-                      {request.error && <div className="mt-1 text-red-200/80 line-clamp-2">{request.error}</div>}
-                      {request.state === 'pending' ? (
-                        <div className="mt-2 flex gap-2">
-                          <button className="px-2 py-1 rounded bg-emerald-500/20 text-emerald-200 border border-emerald-400/30" onClick={() => decidePermission(request, 'approve')}>Approve</button>
-                          <button className="px-2 py-1 rounded bg-red-500/20 text-red-200 border border-red-400/30" onClick={() => decidePermission(request, 'deny')}>Deny</button>
-                        </div>
-                      ) : (
-                        <div className="mt-2 uppercase tracking-wide text-[9px] text-amber-100/70">{request.state}{request.decision ? ` · ${request.decision}` : ''}</div>
-                      )}
+                      <div className="mt-1 text-amber-100/70 line-clamp-2">{session.activePermission.detail}</div>
+                      <div className="mt-2 flex gap-2">
+                        <button 
+                          className="px-2 py-1 rounded bg-emerald-500/20 text-emerald-200 border border-emerald-400/30 hover:bg-emerald-500/30 transition-colors" 
+                          onClick={() => resolvePermission(session.sessionId, session.activePermission!.permissionId, 'approve')}
+                        >
+                          Approve
+                        </button>
+                        <button 
+                          className="px-2 py-1 rounded bg-red-500/20 text-red-200 border border-red-400/30 hover:bg-red-500/30 transition-colors" 
+                          onClick={() => resolvePermission(session.sessionId, session.activePermission!.permissionId, 'deny')}
+                        >
+                          Deny
+                        </button>
+                      </div>
                     </div>
-                  ))}
+                  )}
 
-                  <div className="flex-1 min-h-0 bg-bg-app overflow-hidden">
+                  <div className="flex-1 min-h-0 background-bg-app overflow-hidden">
                     {pane ? (
                       <TerminalPane pane={pane} />
                     ) : (
@@ -729,34 +577,6 @@ export function RuntimeView() {
                   >
                     <svg className="w-4 h-4 text-text-muted opacity-30 hover:opacity-70" viewBox="0 0 16 16">
                       <path d="M14 14L14 8M14 14L8 14" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
-                      <path d="M14 14L14 10M14 14L10 14" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" opacity="0.5" />
-                    </svg>
-                  </button>
-                  <button
-                    className="absolute bottom-0 left-0 w-4 h-4 cursor-nesw-resize z-10"
-                    onMouseDown={event => startNodeResize(event, runtimeNode.key, 'sw')}
-                    title="Resize node"
-                  >
-                    <svg className="w-4 h-4 text-text-muted opacity-30 hover:opacity-70" viewBox="0 0 16 16">
-                      <path d="M2 14L2 8M2 14L8 14" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
-                    </svg>
-                  </button>
-                  <button
-                    className="absolute top-0 right-0 w-4 h-4 cursor-nesw-resize z-10"
-                    onMouseDown={event => startNodeResize(event, runtimeNode.key, 'ne')}
-                    title="Resize node"
-                  >
-                    <svg className="w-4 h-4 text-text-muted opacity-30 hover:opacity-70" viewBox="0 0 16 16">
-                      <path d="M14 2L14 8M14 2L8 2" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
-                    </svg>
-                  </button>
-                  <button
-                    className="absolute top-0 left-0 w-4 h-4 cursor-nwse-resize z-10"
-                    onMouseDown={event => startNodeResize(event, runtimeNode.key, 'nw')}
-                    title="Resize node"
-                  >
-                    <svg className="w-4 h-4 text-text-muted opacity-30 hover:opacity-70" viewBox="0 0 16 16">
-                      <path d="M2 2L2 8M2 2L8 2" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
                     </svg>
                   </button>
                 </div>

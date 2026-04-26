@@ -16,22 +16,53 @@
   --color-accent-text: var(--accent-text);
 }
 
+@utility background-bg-app {
+  background: var(--bg-app);
+}
+@utility background-bg-titlebar {
+  background: var(--bg-titlebar);
+}
+@utility background-bg-panel {
+  background: var(--bg-panel);
+}
+@utility background-bg-surface {
+  background: var(--bg-surface);
+}
+@utility background-bg-surface-hover {
+  background: var(--bg-surface-hover);
+}
+@utility background-accent-primary {
+  background: var(--accent-primary);
+}
+
 :root {
-  /* BridgeSpace Dark (default) */
-  --bg-app: #0c0c14;
-  --bg-titlebar: #09090f;
-  --bg-panel: #11111e;
-  --bg-surface: #181828;
-  --bg-surface-hover: #20203a;
-  --border-panel: #1c1c30;
-  --border-divider: #252542;
-  --text-primary: #e2e4f0;
-  --text-secondary: #9094b0;
-  --text-muted: #50547a;
-  --accent-primary: #7059f5;
-  --accent-hover: #8f7ef8;
-  --accent-subtle: rgba(112, 89, 245, 0.14);
-  --accent-text: #ffffff;
+  /* Starlink Dark (default) */
+  --bg-app: #1a1a1a;
+  --bg-titlebar: #141414;
+  --bg-panel: #202020;
+  --bg-surface: #2a2a2a;
+  --bg-surface-hover: #323232;
+  --border-panel: #2c2c2c;
+  --border-divider: #383838;
+  --text-primary: #e8e8e8;
+  --text-secondary: #a0a0a0;
+  --text-muted: #606060;
+  --accent-primary: #d4d4d4;
+  --accent-hover: #ffffff;
+  --accent-subtle: rgba(212, 212, 212, 0.14);
+  --accent-text: #1a1a1a;
+
+  /* Syntax Highlighting */
+  --syntax-keyword: #569cd6;
+  --syntax-string: #ce9178;
+  --syntax-function: #dcdcaa;
+  --syntax-variable: #9cdcfe;
+  --syntax-comment: #6a9955;
+  --syntax-number: #b5cea8;
+  --syntax-type: #4ec9b0;
+  --syntax-constant: #4fc1ff;
+  --syntax-property: #9cdcfe;
+  --syntax-operator: #d4d4d4;
 }
 
 /* ── Dark Themes ─────────────────────────────────────────── */
@@ -257,7 +288,7 @@
   --accent-text: #020c14;
 }
 
-.theme-bridgemind {
+.theme-cometmind {
   --bg-app: #0d0d1a;
   --bg-titlebar: #080812;
   --bg-panel: #111122;
@@ -482,24 +513,25 @@
   --accent-text: #ffffff;
 }
 
-.theme-chalk {
-  --bg-app: #f2f2f0;
-  --bg-titlebar: #ebebea;
-  --bg-panel: #f7f7f5;
-  --bg-surface: #eaeae8;
-  --bg-surface-hover: #dfdfe0;
-  --border-panel: #d8d8d6;
-  --border-divider: #ccccca;
-  --text-primary: #2a2a28;
+.theme-starlink-light {
+  --bg-app: #f2f2f2;
+  --bg-titlebar: #e8e8e8;
+  --bg-panel: #ffffff;
+  --bg-surface: #f7f7f7;
+  --bg-surface-hover: #efefef;
+  --border-panel: #e0e0e0;
+  --border-divider: #d0d0d0;
+  --text-primary: #1a1a1a;
   --text-secondary: #606060;
-  --text-muted: #a0a0a0;
+  --text-muted: #909090;
   --accent-primary: #444444;
-  --accent-hover: #222222;
+  --accent-hover: #000000;
   --accent-subtle: rgba(68, 68, 68, 0.1);
   --accent-text: #ffffff;
 }
 
-.theme-solar {
+.theme-light {
+
   --bg-app: #fdf6e3;
   --bg-titlebar: #f8f0d4;
   --bg-panel: #f9f2e4;
@@ -630,10 +662,15 @@
 
 /* ── Base styles ─────────────────────────────────────────── */
 
+::selection {
+  background: color-mix(in srgb, var(--accent-subtle), transparent 70%);
+  color: inherit;
+}
+
 body {
   margin: 0;
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Inter', Roboto, 'Helvetica Neue', Arial, sans-serif;
-  background-color: var(--bg-app);
+  background: var(--bg-app);
   color: var(--text-primary);
   font-size: 13px;
   line-height: 1.5;
@@ -756,5 +793,25 @@ body {
 }
 
 .react-flow__background {
-  background-color: var(--bg-app);
+  background: var(--bg-app);
+}
+
+/* -- Theme Syntax Overrides -------------------------------- */
+
+.theme-neon-tokyo {
+  --syntax-keyword: #bb9af7;
+  --syntax-string: #9ece6a;
+  --syntax-function: #7aa2f7;
+  --syntax-variable: #c0caf5;
+  --syntax-comment: #565f89;
+  --syntax-number: #ff9e64;
+}
+
+.theme-dracula {
+  --syntax-keyword: #ff79c6;
+  --syntax-string: #f1fa8c;
+  --syntax-function: #50fa7b;
+  --syntax-variable: #f8f8f2;
+  --syntax-comment: #6272a4;
+  --syntax-number: #bd93f9;
 }

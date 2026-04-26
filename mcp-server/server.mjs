@@ -387,7 +387,50 @@ function extractUpstreamContext(inboxMessages) {
 
 export function buildTaskDetails(missionId, nodeId) {
   const record = loadCompiledMissionRecord(missionId);
-  if (!record) return null;
+
+  if (!record) {
+    // Ad-hoc mission: no compiled graph. Return a minimal context from runtime tables.
+    const runtime = getMissionNodeRuntime(missionId, nodeId);
+    if (!runtime) return null;
+    const runtimeSession = Number.isInteger(runtime.attempt) && runtime.attempt > 0
+      ? getRuntimeSessionByAttempt(missionId, nodeId, runtime.attempt)
+      : null;
+    return {
+      missionId,
+      graphId: null,
+      missionStatus: 'active',
+      authoringMode: 'adhoc',
+      presetId: null,
+      runVersion: 1,
+      objective: '',
+      task: null,
+      node: {
+        id: nodeId,
+        roleId: runtime.role_id ?? 'agent',
+        instructionOverride: '',
+        status: runtime.status ?? 'running',
+        attempt: runtime.attempt ?? 0,
+        currentWaveId: null,
+        lastOutcome: null,
+        lastPayload: null,
+        updatedAt: runtime.updated_at ?? null,
+      },
+      runtimeSession: runtimeSession ? {
+        sessionId: runtimeSession.session_id,
+        agentId: runtimeSession.agent_id,
+        terminalId: runtimeSession.terminal_id,
+        status: runtimeSession.status,
+        createdAt: runtimeSession.created_at,
+        updatedAt: runtimeSession.updated_at,
+      } : null,
+      legalNextTargets: [],
+      latestTask: null,
+      recentTasks: [],
+      inbox: [],
+      pendingPushes: [],
+      upstreamContext: {},
+    };
+  }
 
   const node = getMissionNode(record.mission, nodeId);
   if (!node) return null;
@@ -833,7 +876,7 @@ export function ackTaskPush({ sessionId, missionId, nodeId, taskSeq }) {
   return info.changes > 0;
 }
 
-export function resetBridgeState() {
+export function resetStarlinkState() {
   db.exec(`
     DELETE FROM tasks;
     DELETE FROM file_locks;
@@ -976,7 +1019,7 @@ export function executeConnectAgent(
       messageQueues[targetSid].push({ from: agentId, text: `[BROADCAST] ${message}`, timestamp: ts });
     }
 
-    broadcast('Bridge', JSON.stringify({
+    broadcast('Starlink', JSON.stringify({
       sessionId: sid,
       agentId,
       role,
@@ -987,9 +1030,9 @@ export function executeConnectAgent(
       workingDir: sessions[sid].workingDir,
     }), 'agent_connected');
 
-    broadcast('Bridge', `Agent "${agentId}" (${role}) connected via session ${sid}`);
+    broadcast('Starlink', `Agent "${agentId}" (${role}) connected via session ${sid}`);
   } else {
-    broadcast('Bridge', JSON.stringify({
+    broadcast('Starlink', JSON.stringify({
       sessionId: sid,
       missionId,
       nodeId,
@@ -1029,7 +1072,7 @@ export function executeConnectAgent(
     });
   }
 
-  return makeToolText(`Successfully connected to terminal-docks bridge.\nSession ID: ${sid}\nStatus: Online`);
+  return makeToolText(`Successfully connected to CometAI Starlink.\nSession ID: ${sid}\nStatus: Online`);
 }
 
 function validateRuntimeBootstrapRegistration({ sessionId, missionId, nodeId, attempt }) {
@@ -1046,34 +1089,40 @@ function validateRuntimeBootstrapRegistration({ sessionId, missionId, nodeId, at
     return { ok: false, code: 'invalid_attempt', message: 'Runtime bootstrap requires attempt >= 1.' };
   }
 
-  const nodeRuntime = db.prepare(
+  let nodeRuntime = db.prepare(
     `SELECT status, attempt
        FROM mission_node_runtime
       WHERE mission_id = ? AND node_id = ?`
   ).get(missionId, nodeId);
+
   if (!nodeRuntime) {
-    return {
-      ok: false,
-      code: 'missing_runtime',
-      message: `No mission runtime state found for ${missionId}/${nodeId}.`,
-    };
-  }
+    // Ad-hoc mission: create runtime row on the fly and proceed permissively.
+    db.prepare(
+      `INSERT INTO mission_node_runtime (mission_id, node_id, role_id, status, attempt, updated_at)
+       VALUES (?, ?, 'agent', 'running', ?, CURRENT_TIMESTAMP)
+       ON CONFLICT(mission_id, node_id) DO UPDATE SET
+         status = excluded.status,
+         attempt = excluded.attempt,
+         updated_at = CURRENT_TIMESTAMP`
+    ).run(missionId, nodeId, attempt);
+    nodeRuntime = { status: 'running', attempt };
+  } else {
+    const currentAttempt = Number(nodeRuntime.attempt ?? 0);
+    if (currentAttempt !== attempt) {
+      return {
+        ok: false,
+        code: 'stale_attempt',
+        message: `Stale runtime bootstrap for ${missionId}/${nodeId}: got attempt ${attempt}, current attempt ${currentAttempt}.`,
+      };
+    }
 
-  const currentAttempt = Number(nodeRuntime.attempt ?? 0);
-  if (currentAttempt !== attempt) {
-    return {
-      ok: false,
-      code: 'stale_attempt',
-      message: `Stale runtime bootstrap for ${missionId}/${nodeId}: got attempt ${attempt}, current attempt ${currentAttempt}.`,
-    };
-  }
-
-  if (['done', 'failed', 'unbound'].includes(String(nodeRuntime.status ?? ''))) {
-    return {
-      ok: false,
-      code: 'terminal_state',
-      message: `Runtime bootstrap rejected because node is already ${nodeRuntime.status}.`,
-    };
+    if (['done', 'failed', 'unbound'].includes(String(nodeRuntime.status ?? ''))) {
+      return {
+        ok: false,
+        code: 'terminal_state',
+        message: `Runtime bootstrap rejected because node is already ${nodeRuntime.status}.`,
+      };
+    }
   }
 
   const runtimeSession = db.prepare(
@@ -1083,21 +1132,25 @@ function validateRuntimeBootstrapRegistration({ sessionId, missionId, nodeId, at
       ORDER BY updated_at DESC
       LIMIT 1`
   ).get(sessionId, missionId, nodeId);
-  if (!runtimeSession) {
-    return {
-      ok: false,
-      code: 'missing_activation',
-      message: `No runtime activation row found for session ${sessionId}.`,
-    };
-  }
 
-  const recordedAttempt = Number(runtimeSession.attempt ?? 0);
-  if (recordedAttempt !== attempt) {
-    return {
-      ok: false,
-      code: 'stale_activation',
-      message: `Runtime session ${sessionId} attempt mismatch: got ${attempt}, recorded ${recordedAttempt}.`,
-    };
+  if (!runtimeSession) {
+    // Ad-hoc mission: create the session row so the rest of the pipeline can proceed.
+    db.prepare(
+      `INSERT INTO agent_runtime_sessions (session_id, agent_id, mission_id, node_id, attempt, terminal_id, status)
+       VALUES (?, 'agent', ?, ?, ?, '', 'registered')
+       ON CONFLICT(session_id) DO UPDATE SET
+         status = excluded.status,
+         updated_at = CURRENT_TIMESTAMP`
+    ).run(sessionId, missionId, nodeId, attempt);
+  } else {
+    const recordedAttempt = Number(runtimeSession.attempt ?? 0);
+    if (recordedAttempt !== attempt) {
+      return {
+        ok: false,
+        code: 'stale_activation',
+        message: `Runtime session ${sessionId} attempt mismatch: got ${attempt}, recorded ${recordedAttempt}.`,
+      };
+    }
   }
 
   return { ok: true };
@@ -1398,7 +1451,7 @@ function persistGraphHandoff({
   broadcast(fromRole ?? 'graph', JSON.stringify(eventBody), 'handoff');
 
   if (taskId !== null) {
-    broadcast('Bridge', JSON.stringify({
+    broadcast('Starlink', JSON.stringify({
       id: taskId,
       title,
       agentId: targetRole,
@@ -1420,50 +1473,19 @@ export function executeHandoffTask(
 
   let fromRole = rawFrom?.trim().toLowerCase() ?? null;
   let targetRole = rawTarget?.trim().toLowerCase() ?? null;
-  let validatedGraph = null;
 
-  if (missionId || fromNodeId || targetNodeId || outcome) {
-    validatedGraph = validateGraphHandoff({
-      missionId,
-      fromNodeId,
-      targetNodeId,
-      outcome,
-      fromRole,
-      targetRole,
-      fromAttempt,
-    });
-    if (validatedGraph.error) {
-      return makeToolText(validatedGraph.error, true);
-    }
-    fromRole = String(validatedGraph.fromNode.roleId).trim().toLowerCase();
-    targetRole = String(validatedGraph.targetNode.roleId).trim().toLowerCase();
-  } else {
-    if (!fromRole || !targetRole) {
-      return makeToolText('Legacy handoff_task requires fromRole and targetRole.', true);
-    }
-
-    if (!isValidTransition(fromRole, targetRole)) {
-      const allowed = WORKFLOW_GRAPH[fromRole]?.next ?? [];
-      const message = WORKFLOW_GRAPH[fromRole]
-        ? `Invalid transition: ${fromRole} → ${targetRole}. Allowed next roles: ${allowed.join(', ') || '(none; this is a terminal role)'}.`
-        : `Unknown fromRole "${fromRole}". Valid roles: ${Object.keys(WORKFLOW_GRAPH).join(', ')}.`;
-      return makeToolText(message, true);
-    }
-  }
-
-  const finalOutcome = validatedGraph?.outcome ?? normalizeCompletionStatus(outcome);
-  const finalAttempt = validatedGraph?.fromAttempt ?? fromAttempt ?? null;
+  const normalizedOutcome = outcome?.trim().toLowerCase() ?? 'success';
   const structuredCompletion = buildStructuredCompletionPayload({
     completion,
     payload,
     title,
     description,
-    finalOutcome,
+    finalOutcome: normalizedOutcome,
   });
   const payloadStr = JSON.stringify(structuredCompletion);
 
   let taskId = null;
-  if (targetRole !== 'done') {
+  if (targetRole && targetRole !== 'done') {
     const info = db.prepare(
       'INSERT INTO tasks (title, description, agent_id, parent_id, status, from_role, target_role, payload, mission_id, node_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
     ).run(title, description ?? null, targetRole, parentTaskId ?? null, 'todo', fromRole, targetRole, payloadStr, missionId ?? null, targetNodeId ?? null);
@@ -1479,30 +1501,16 @@ export function executeHandoffTask(
       fromNodeId: fromNodeId ?? null,
       targetNodeId,
       fromRole,
-        targetRole,
-        outcome: finalOutcome ?? structuredCompletion.status,
-        fromAttempt: finalAttempt,
-        payload: payloadStr,
-        completion: structuredCompletion,
-      });
+      targetRole,
+      outcome: normalizedOutcome,
+      fromAttempt,
+      payload: payloadStr,
+      completion: structuredCompletion,
+    });
     db.prepare(
       "INSERT INTO session_log (session_id, event_type, content, mission_id, node_id, recipient_node_id, is_read) VALUES (?, 'message', ?, ?, ?, ?, 0)"
     ).run(sid, handoffMessage, missionId, fromNodeId ?? null, targetNodeId);
   }
-
-  logSession(sid, 'handoff_task', JSON.stringify({
-    taskId,
-    fromRole,
-    targetRole,
-    title,
-    missionId,
-    fromNodeId,
-    targetNodeId,
-    outcome: finalOutcome ?? structuredCompletion.status,
-    fromAttempt: finalAttempt,
-    completionStatus: structuredCompletion.status,
-    filesChanged: structuredCompletion.filesChanged,
-  }));
 
   const eventBody = {
     taskId,
@@ -1515,12 +1523,13 @@ export function executeHandoffTask(
     missionId,
     fromNodeId,
     targetNodeId,
-    outcome: finalOutcome ?? structuredCompletion.status,
-    fromAttempt: finalAttempt,
+    outcome: normalizedOutcome,
+    fromAttempt,
   };
+
   broadcast(fromRole ?? 'graph', JSON.stringify(eventBody), 'handoff');
   if (taskId !== null) {
-    broadcast('Bridge', JSON.stringify({
+    broadcast('Starlink', JSON.stringify({
       id: taskId,
       title,
       agentId: targetRole,
@@ -1530,32 +1539,22 @@ export function executeHandoffTask(
       targetNodeId,
     }), 'task_update');
   }
-  const suffix = finalOutcome ? ` [${finalOutcome}]` : '';
-  const taskSuffix = taskId ? ` (task ${taskId}: "${title}")` : '';
-  broadcast(
-    'Bridge',
-    `Handoff: ${fromRole}${fromNodeId ? `(${fromNodeId})` : ''} → ${targetRole}${targetNodeId ? `(${targetNodeId})` : ''}${suffix}${taskSuffix}`,
-  );
 
-  const outcomeForEvent = finalOutcome ?? structuredCompletion.status;
-  if (missionId && fromNodeId && (outcomeForEvent === 'success' || outcomeForEvent === 'failure')) {
-    emitAgentEvent({
-      type: 'task:completed',
-      sessionId: sid,
-      missionId,
-      nodeId: fromNodeId,
-      attempt: Number.isInteger(finalAttempt) ? finalAttempt : null,
-      outcome: outcomeForEvent,
-      targetNodeId: targetNodeId ?? null,
-      at: Date.now(),
-    });
-  }
+  emitAgentEvent({
+    type: 'task:completed',
+    sessionId: sid,
+    missionId,
+    nodeId: fromNodeId,
+    attempt: fromAttempt,
+    outcome: normalizedOutcome,
+    targetNodeId: targetNodeId ?? null,
+    at: Date.now(),
+    payload: structuredCompletion,
+  });
 
-  const resultText = targetRole === 'done'
-    ? 'Workflow marked complete. Call publish_result with your final summary if you have not already.'
-    : `Handoff queued as task ${taskId}. The ${targetRole} stage will pick this up.`;
-  return makeToolText(resultText);
+  return { taskId, eventBody };
 }
+
 
 export function executeCompleteTask(
   {
@@ -1862,7 +1861,7 @@ export function executeRegisterWorkerCapabilities(
     status: session.status,
     workingDir: session.workingDir,
   }));
-  broadcast('Bridge', JSON.stringify({ sessionId: sid, profileId: session.profileId }), 'session_update');
+  broadcast('Starlink', JSON.stringify({ sessionId: sid, profileId: session.profileId }), 'session_update');
 
   return makeToolText(JSON.stringify(summarizeSession(sid, session), null, 2));
 }
@@ -1988,7 +1987,7 @@ export function executeAssignTaskByRequirements(
     previousSessionId: previousSessionId ?? null,
   }));
   broadcast(sid, JSON.stringify({ taskId, targetSessionId: winner.sessionId, assignee }), 'task_assigned');
-  broadcast('Bridge', JSON.stringify({ id: taskId, agentId: assignee, status: task.status }), 'task_update');
+  broadcast('Starlink', JSON.stringify({ id: taskId, agentId: assignee, status: task.status }), 'task_update');
 
   return makeToolText(JSON.stringify({
     status: 'assigned',
@@ -2026,8 +2025,8 @@ export function seedFileLock({ filePath, agentId, sessionId = null }) {
 
 // Factory: creates a McpServer with all tools registered.
 function createMcpServer(getSessionId) {
-  const server = new McpServer({ name: 'terminal-docks-bridge', version: '1.0.0' });
-  const bc = (msg) => broadcast('Bridge', msg);
+  const server = new McpServer({ name: 'starlink-mcp', version: '1.0.0' });
+  const bc = (msg) => broadcast('Starlink', msg);
 
   // ── Project tools ──────────────────────────────────────────────────────────
   server.registerTool('list_projects', {
@@ -2516,7 +2515,7 @@ function createMcpServer(getSessionId) {
     const sid = getSessionId() ?? 'unknown';
     logSession(sid, 'assign_task', JSON.stringify({ taskId, targetSessionId, agentId: assignee }));
     broadcast(sid, JSON.stringify({ taskId, targetSessionId, agentId: assignee, title: row.title }), 'task_assigned');
-    broadcast('Bridge', JSON.stringify({ id: taskId, agentId: assignee, status: row.status }), 'task_update');
+    broadcast('Starlink', JSON.stringify({ id: taskId, agentId: assignee, status: row.status }), 'task_update');
     bc(`Assigned task ${taskId} → session ${targetSessionId} (${assignee})`);
 
     return { content: [{ type: 'text', text: `Task ${taskId} assigned to ${assignee} (session ${targetSessionId}).` }] };
@@ -2612,7 +2611,7 @@ function createMcpServer(getSessionId) {
         'INSERT INTO file_locks (file_path, agent_id, locked_at) VALUES (?, ?, CURRENT_TIMESTAMP) ON CONFLICT(file_path) DO UPDATE SET agent_id = excluded.agent_id, locked_at = CURRENT_TIMESTAMP'
       ).run(filePath, ownerId);
       bc(`Lock acquired: ${filePath} by ${ownerId}`);
-      broadcast('Bridge', 'lock_update', 'lock_update');
+      broadcast('Starlink', 'lock_update', 'lock_update');
       return { content: [{ type: 'text', text: `Lock acquired: ${filePath}` }] };
     }
 
@@ -2633,7 +2632,7 @@ function createMcpServer(getSessionId) {
     if (existing.sessionId && sessions[existing.sessionId]) {
       if (!messageQueues[existing.sessionId]) messageQueues[existing.sessionId] = [];
       messageQueues[existing.sessionId].push({
-        from: 'Bridge',
+        from: 'Starlink',
         text: `Agent "${ownerId}" is queued for your lock on: ${filePath} (queue depth ${queue.length}). Release when done.`,
         timestamp: Date.now(),
       });
@@ -2688,7 +2687,7 @@ function createMcpServer(getSessionId) {
       ).run(filePath, next.ownerId);
       if (!messageQueues[next.sessionId]) messageQueues[next.sessionId] = [];
       messageQueues[next.sessionId].push({
-        from: 'Bridge',
+        from: 'Starlink',
         text: `[LOCK GRANTED] You now hold the lock on ${filePath}. Proceed with your edits. Call unlock_file when done.`,
         timestamp: Date.now(),
       });
@@ -2698,7 +2697,7 @@ function createMcpServer(getSessionId) {
     }
     if (queue.length === 0) delete fileWaitQueues[filePath];
 
-    broadcast('Bridge', 'lock_update', 'lock_update');
+    broadcast('Starlink', 'lock_update', 'lock_update');
 
     const tail = granted ? ` Auto-granted to "${granted.ownerId}".` : '';
     return { content: [{ type: 'text', text: `Lock released: ${filePath}.${tail}` }] };
@@ -2726,7 +2725,7 @@ function createMcpServer(getSessionId) {
     inputSchema: {
       role: z.string().describe('Your assigned role (e.g. Coordinator, Scout, Builder, Reviewer)'),
       agentId: z.string().describe('A friendly name for your agent instance'),
-      terminalId: z.string().optional().describe('Terminal pane ID in terminal-docks, if known'),
+      terminalId: z.string().optional().describe('Terminal pane ID in CometAI, if known'),
       cli: z.enum(['claude', 'gemini', 'opencode', 'codex']).optional().describe('CLI running in that terminal'),
       profileId: z.string().optional().describe('Optional worker profile label (for example "reviewer_profile")'),
       capabilities: z.array(z.union([
@@ -2900,7 +2899,7 @@ function createMcpServer(getSessionId) {
         type: 'text',
         text: `# Team Collaboration Protocol
 
-You are part of a multi-agent team (Claude, Gemini, OpenCode, or other CLIs) working on a shared codebase via the terminal-docks MCP bridge. Follow this protocol to avoid conflicts and collaborate effectively.
+You are part of a multi-agent team (Claude, Gemini, OpenCode, or other CLIs) working on a shared codebase via the CometAI Starlink. Follow this protocol to avoid conflicts and collaborate effectively.
 
 ## On Session Start
 1. Call \`get_file_locks()\` — see what files teammates currently own.
@@ -3222,7 +3221,7 @@ app.get('/events', (req, res) => {
   res.setHeader('Connection', 'keep-alive');
   res.flushHeaders();
   clients.add(res);
-  broadcast('Bridge', 'Client connected to activity feed', 'status');
+  broadcast('Starlink', 'Client connected to activity feed', 'status');
   req.on('close', () => { clients.delete(res); });
 });
 
@@ -3435,7 +3434,7 @@ app.post('/mcp', async (req, res) => {
           sessions[sessionId].transport = transport;
           sessions[sessionId].mcpServer = mcpServer;
           console.log(`[mcp] Registered session ${sessionId}`);
-          broadcast('Bridge', 'session_update', 'session_update');
+          broadcast('Starlink', 'session_update', 'session_update');
         },
       });
 
@@ -3448,7 +3447,7 @@ app.post('/mcp', async (req, res) => {
           logSession(closedSessionId, 'disconnect', null);
           delete sessions[closedSessionId];
         }
-        broadcast('Bridge', 'session_update', 'session_update');
+        broadcast('Starlink', 'session_update', 'session_update');
       };
 
       await mcpServer.connect(transport);

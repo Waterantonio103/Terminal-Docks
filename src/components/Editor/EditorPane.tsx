@@ -5,8 +5,25 @@ import { open } from '@tauri-apps/plugin-dialog';
 import { FolderOpen } from 'lucide-react';
 import { Pane, useWorkspaceStore } from '../../store/workspace';
 import { invoke } from '@tauri-apps/api/core';
+import { HighlightStyle, syntaxHighlighting } from "@codemirror/language";
+import { tags } from "@lezer/highlight";
 
 const WELCOME = '// Welcome to the Editor\nconsole.log("Hello, world!");';
+
+// Dynamic syntax style using CSS variables
+const dynamicSyntaxStyle = HighlightStyle.define([
+  { tag: tags.keyword, color: "var(--syntax-keyword)" },
+  { tag: tags.string,  color: "var(--syntax-string)" },
+  { tag: tags.function(tags.variableName), color: "var(--syntax-function)" },
+  { tag: tags.comment, color: "var(--syntax-comment)", fontStyle: "italic" },
+  { tag: tags.number,  color: "var(--syntax-number)" },
+  { tag: tags.typeName, color: "var(--syntax-type)" },
+  { tag: tags.className, color: "var(--syntax-type)" },
+  { tag: tags.variableName, color: "var(--syntax-variable)" },
+  { tag: tags.propertyName, color: "var(--syntax-property)" },
+  { tag: tags.operator, color: "var(--syntax-operator)" },
+  { tag: tags.constant(tags.variableName), color: "var(--syntax-constant)" },
+]);
 
 // Global cache to prevent blank flashes on re-mount during layout shifts
 const contentCache = new Map<string, string>();
@@ -115,21 +132,47 @@ export function EditorPane({ pane }: { pane: Pane }) {
           )}
         </div>
       </div>
-      <div className="flex-1 overflow-auto h-full">
+      <div className="flex-1 overflow-auto h-full bg-bg-panel">
         <CodeMirror
           key={filePath || '__welcome__'}
           value={content}
           height="100%"
           theme="dark"
-          extensions={[javascript({ jsx: true })]}
+          extensions={[
+            javascript({ jsx: true }),
+            syntaxHighlighting(dynamicSyntaxStyle)
+          ]}
           onChange={(val) => {
             setContent(val);
             if (filePath) contentCache.set(filePath, val);
             if (filePath && !isDirty) setIsDirty(true);
           }}
-          className="h-full text-sm"
+          className="h-full text-sm cm-theme-custom"
         />
       </div>
+      <style>{`
+        .cm-theme-custom .cm-editor {
+          background-color: var(--bg-panel) !important;
+          color: var(--text-primary) !important;
+        }
+        .cm-theme-custom .cm-gutters {
+          background-color: var(--bg-panel) !important;
+          color: var(--text-muted) !important;
+          border-right: 1px solid var(--border-panel) !important;
+        }
+        .cm-theme-custom .cm-activeLine {
+          background-color: var(--bg-surface) !important;
+        }
+        .cm-theme-custom .cm-activeLineGutter {
+          background-color: var(--bg-surface) !important;
+        }
+        .cm-theme-custom .cm-selectionBackground {
+          background-color: var(--accent-subtle) !important;
+        }
+        .cm-theme-custom .cm-cursor {
+          border-left-color: var(--accent-primary) !important;
+        }
+      `}</style>
     </div>
   );
 }

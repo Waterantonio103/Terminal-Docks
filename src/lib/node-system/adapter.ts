@@ -56,10 +56,18 @@ function inputSocketForNodeType(nodeType: string) {
 }
 
 function legacyNodeToDocumentNode(node: WorkflowNode, index: number): NodeInstance {
+  const type = nodeTypeFromLegacy(node);
+  let fallbackLabel = node.roleId;
+  if (type === 'workflow.agent') fallbackLabel = 'Agent';
+  else if (type === 'workflow.task') fallbackLabel = 'Task';
+  else if (type === 'workflow.barrier') fallbackLabel = 'Barrier';
+  else if (type === 'workflow.frame') fallbackLabel = 'Frame';
+  else if (type === 'workflow.reroute') fallbackLabel = 'Reroute';
+
   return {
     id: node.id,
-    type: nodeTypeFromLegacy(node),
-    label: node.config?.label ?? node.roleId,
+    type,
+    label: node.config?.label || fallbackLabel,
     location: node.config?.position ?? defaultPoint(index),
     size:
       typeof node.config?.width === 'number' && typeof node.config?.height === 'number'

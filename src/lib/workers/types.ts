@@ -164,4 +164,5 @@ export interface McpServerEvent {
   label?: string;
   content?: string;
   path?: string;
+  payload?: unknown;
 }

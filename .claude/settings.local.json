@@ -47,7 +47,9 @@
       "Bash(tsc -p tsconfig.graph-tests.json --noEmit)",
       "Bash(git check-ignore *)",
       "Bash(python -c ' *)",
-      "Bash(del *)"
+      "Bash(del *)",
+      "Bash(grep -E \"\\\\.ts$\")",
+      "Bash(awk '{print $NF}')"
     ]
   }
 }

@@ -7,7 +7,7 @@ const tempRoot = mkdtempSync(join(tmpdir(), 'terminal-docks-smoke-'));
 process.env.MCP_DB_PATH = join(tempRoot, 'tasks.db');
 process.env.MCP_DISABLE_HTTP = '1';
 
-const [{ buildLaunchPrompt }, { compileMission }, { buildNewTaskSignal, parseNewTaskSignal }, bridge] = await Promise.all([
+const [{ buildLaunchPrompt }, { compileMission }, { buildNewTaskSignal, parseNewTaskSignal }, starlink] = await Promise.all([
   import('../.tmp-tests/lib/buildPrompt.js'),
   import('../.tmp-tests/lib/graphCompiler.js'),
   import('../.tmp-tests/lib/missionRuntime.js'),
@@ -15,7 +15,7 @@ const [{ buildLaunchPrompt }, { compileMission }, { buildNewTaskSignal, parseNew
 ]);
 
 const {
-  resetBridgeState,
+  resetStarlinkState,
   seedCompiledMission,
   seedMissionNodeRuntime,
   seedAgentRuntimeSession,
@@ -23,7 +23,7 @@ const {
   buildTaskDetails,
   executeReceiveMessages,
   getBroadcastHistory,
-} = bridge;
+} = starlink;
 
 function taskNode(id = 'task-1') {
   return {
@@ -90,7 +90,7 @@ function run(name, fn) {
 }
 
 try {
-  resetBridgeState();
+  resetStarlinkState();
 
   const mission = compileMission({
     graphId: 'smoke-graph',

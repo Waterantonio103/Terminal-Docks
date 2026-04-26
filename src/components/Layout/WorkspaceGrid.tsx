@@ -18,8 +18,8 @@ const PANE_ICONS: Record<PaneType, React.ReactNode> = {
   nodetree:       <Network size={13} />,
 };
 
-const CELL_HEIGHT = 8;
-const GRID_COLUMNS = 50;
+const CELL_HEIGHT = 4;
+const GRID_COLUMNS = 100;
 
 interface DashboardPanelProps {
   pane: Pane;
@@ -301,8 +301,8 @@ export function WorkspaceGrid({ visibleTypes }: { visibleTypes?: PaneType[] } = 
       const mouseY = clientY - rect.top;
       
       // Calculate drop position
-      const x = Math.max(0, Math.min(GRID_COLUMNS - 8, Math.round(mouseX / cellW - 4)));
-      const y = Math.max(0, Math.round(mouseY / CELL_HEIGHT - 6));
+      const x = Math.max(0, Math.min(GRID_COLUMNS - 25, Math.round(mouseX / cellW - 12)));
+      const y = Math.max(0, Math.round(mouseY / CELL_HEIGHT - 20));
 
       // Check if dropped over an existing pane
       const overPane = panes.find(p => {
@@ -320,7 +320,7 @@ export function WorkspaceGrid({ visibleTypes }: { visibleTypes?: PaneType[] } = 
       } else {
         // Add new pane at dropped position
         const newTitle = title || (type.charAt(0).toUpperCase() + type.slice(1));
-        addPaneAt(type, newTitle, panes.length, { ...data, gridPos: { x, y, w: 8, h: 12 } });
+        addPaneAt(type, newTitle, panes.length, { ...data, gridPos: { x, y, w: 25, h: 40 } });
       }
     };
 

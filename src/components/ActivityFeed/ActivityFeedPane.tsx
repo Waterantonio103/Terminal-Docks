@@ -138,7 +138,7 @@ export function ActivityFeedPane() {
   }, [messages]);
 
   return (
-    <div className="flex flex-col h-full bg-bg-panel overflow-hidden">
+    <div className="flex flex-col h-full background-bg-panel overflow-hidden">
 
       {/* Header */}
       <div className="flex items-center justify-between px-4 py-2.5 border-b border-border-panel shrink-0">
