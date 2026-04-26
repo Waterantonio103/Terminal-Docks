@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { DotTunnelBackground } from '../shared/DotTunnelBackground';
 import { invoke } from '@tauri-apps/api/core';
 import { emit, listen } from '@tauri-apps/api/event';
 import { Bot, Cpu, FileCode2, Focus, Maximize2, RefreshCw, ShieldAlert, Square } from 'lucide-react';
@@ -58,6 +59,7 @@ const GRID_GAP_X = 80;
 const GRID_GAP_Y = 60;
 const GRID_SIZE = 24;
 const ACTIVE_STATUSES = new Set(['launching', 'connecting', 'spawning', 'terminal_started', 'adapter_starting', 'mcp_connecting', 'registered', 'ready', 'activation_pending', 'activation_acked', 'activated', 'running', 'handoff_pending', 'waiting']);
+const WORKING_STATUSES = new Set(['activated', 'activation_acked', 'running', 'handoff_pending', 'waiting']);
 
 const _sessionLayouts: Record<string, RuntimeNodeLayout> = {};
 const _sessionPan: Point = { x: 0, y: 0 };
@@ -590,6 +592,7 @@ export function RuntimeView() {
           onMouseDown={onCanvasMouseDown}
           style={{ cursor: isInteracting ? 'grabbing' : 'default' }}
         >
+          <DotTunnelBackground />
           <div
             className="absolute inset-0 opacity-60"
             data-runtime-canvas
@@ -669,13 +672,13 @@ export function RuntimeView() {
                         <div className="text-[10px] text-text-muted truncate">{agent.runtimeCli ?? agent.cli ?? 'CLI unknown'} · {agent.terminalId || agent.runtimeSessionId}</div>
                       </div>
                     </div>
-                    <div className={`text-[9px] uppercase tracking-wide px-1.5 py-0.5 rounded border ${workflowStatusTone(status, 'mission')}`}>
+                    <div className={`text-[10px] uppercase tracking-wide px-2 py-1 rounded border ${workflowStatusTone(status, 'mission')}`}>
                       {workflowStatusLabel(status)}
                     </div>
                   </div>
 
                   <div className="h-9 px-3 border-b border-border-panel bg-bg-panel flex items-center justify-between">
-                    <div className="text-[10px] text-text-muted truncate">{agent.currentAction || (isActive ? 'Working...' : 'No active action')}</div>
+                    <div className="text-[10px] text-text-muted truncate">{agent.currentAction || (WORKING_STATUSES.has(status) ? 'Working...' : isActive ? 'Ready' : '—')}</div>
                     <div className="flex items-center gap-1">
                       <button className="w-6 h-6 flex items-center justify-center rounded text-text-muted hover:text-text-primary hover:bg-bg-surface" title="Focus terminal" onClick={() => focusRuntime(agent)} disabled={!agent.terminalId}>
                         <Focus size={13} />

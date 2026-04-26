@@ -550,6 +550,84 @@
   --accent-text: #ffffff;
 }
 
+/* ── Status badge beam animation ────────────────────────── */
+
+@property --badge-beam-angle {
+  syntax: '<angle>';
+  initial-value: 0deg;
+  inherits: false;
+}
+
+@keyframes badge-beam-spin {
+  to { --badge-beam-angle: 360deg; }
+}
+
+.badge-beam {
+  position: relative;
+  isolation: isolate;
+}
+
+.badge-beam::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  padding: 1px;
+  -webkit-mask:
+    linear-gradient(#fff 0 0) content-box,
+    linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  pointer-events: none;
+}
+
+.badge-beam-idle::before {
+  background: conic-gradient(
+    from var(--badge-beam-angle),
+    transparent 0%,
+    transparent 72%,
+    rgba(130, 130, 165, 0.25) 84%,
+    transparent 94%
+  );
+  animation: badge-beam-spin 10s linear infinite;
+}
+
+.badge-beam-online::before {
+  background: conic-gradient(
+    from var(--badge-beam-angle),
+    transparent 0%,
+    transparent 52%,
+    var(--accent-primary) 68%,
+    color-mix(in srgb, var(--accent-primary) 60%, transparent) 78%,
+    transparent 88%
+  );
+  animation: badge-beam-spin 2s linear infinite;
+}
+
+.badge-beam-success::before {
+  background: conic-gradient(
+    from var(--badge-beam-angle),
+    transparent 0%,
+    transparent 58%,
+    #22c55e 73%,
+    color-mix(in srgb, #22c55e 55%, transparent) 82%,
+    transparent 92%
+  );
+  animation: badge-beam-spin 3.5s linear infinite;
+}
+
+.badge-beam-failure::before {
+  background: conic-gradient(
+    from var(--badge-beam-angle),
+    transparent 0%,
+    transparent 50%,
+    #ef4444 64%,
+    color-mix(in srgb, #ef4444 55%, transparent) 74%,
+    transparent 86%
+  );
+  animation: badge-beam-spin 1.2s linear infinite;
+}
+
 /* ── Base styles ─────────────────────────────────────────── */
 
 body {

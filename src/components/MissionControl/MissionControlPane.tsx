@@ -327,15 +327,17 @@ function readAgentsForPane(paneId: string, fallback: MissionAgent[]): MissionAge
   return fallback;
 }
 
-function buildTerminalActivationInput(cliType: string | undefined, signal: string): string {
+function buildTerminalActivationInput(cliType: string | undefined, signal: string): { paste: string; submit: string } {
   if ((cliType ?? '').toLowerCase() !== 'claude') {
-    return `${signal}\r`;
+    return { paste: signal, submit: '\r' };
   }
 
   // Claude's TUI can be in an editable prompt when Mission Control injects a task.
   // Clear any partial line and use bracketed paste so multiline task envelopes are
   // treated as one paste operation instead of individual interactive keystrokes.
-  return `\x15\x1b[200~${signal}\x1b[201~\r`;
+  // The submit (\r) is sent as a separate write after a short delay so Claude's
+  // input buffer has time to finish processing the paste before the Enter fires.
+  return { paste: `\x15\x1b[200~${signal}\x1b[201~`, submit: '\r' };
 }
 
 function focusAgentTerminal(terminalId: string) {
@@ -460,7 +462,7 @@ function NodeCard({
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2 min-w-0">
             <span className="text-xs font-semibold text-text-primary truncate">{agent.title}</span>
-            <span className={`text-[9px] uppercase tracking-wide px-1.5 py-0.5 rounded border ${workflowStatusTone(agent.status, 'mission')}`}>
+            <span className={`text-[10px] uppercase tracking-wide px-2 py-1 rounded border ${workflowStatusTone(agent.status, 'mission')}`}>
               {workflowStatusLabel(agent.status)}
             </span>
           </div>
@@ -604,7 +606,7 @@ function NodeCard({
                 <div key={entry.attempt} className="rounded border border-border-panel bg-bg-surface px-2 py-2">
                   <div className="flex items-center gap-2">
                     <span className="text-[11px] font-medium text-text-primary">Attempt {entry.attempt}</span>
-                    <span className={`text-[9px] uppercase tracking-wide px-1.5 py-0.5 rounded border ${workflowStatusTone(entry.status, 'mission')}`}>
+                    <span className={`text-[10px] uppercase tracking-wide px-2 py-1 rounded border ${workflowStatusTone(entry.status, 'mission')}`}>
                       {workflowStatusLabel(entry.status)}
                     </span>
                     {entry.outcome && (
@@ -665,7 +667,7 @@ function HandoffTimeline({ entries }: { entries: HandoffViewModel[] }) {
               <ChevronRight size={11} className="text-text-muted opacity-70" />
               <span className="text-text-primary font-medium">{entry.targetNodeId}</span>
               {entry.outcome && (
-                <span className={`ml-auto text-[9px] uppercase tracking-wide px-1.5 py-0.5 rounded border ${workflowStatusTone(entry.outcome === 'success' ? 'done' : 'failed', 'mission')}`}>
+                <span className={`ml-auto text-[10px] uppercase tracking-wide px-2 py-1 rounded border ${workflowStatusTone(entry.outcome === 'success' ? 'done' : 'failed', 'mission')}`}>
                   {entry.outcome}
                 </span>
               )}
@@ -1307,11 +1309,12 @@ export function MissionControlPane({ pane }: { pane: Pane }) {
         console.log(`[Activation] Sending NEW_TASK signal to PTY ${terminalId}`);
         // Delay to ensure CLI is ready for input
         await new Promise(r => setTimeout(r, 2000));
+        const { paste, submit } = buildTerminalActivationInput(payload.cliType, signal);
         try {
-          await invoke('write_to_pty', {
-            id: terminalId,
-            data: buildTerminalActivationInput(payload.cliType, signal),
-          });
+          await invoke('write_to_pty', { id: terminalId, data: paste });
+          // Give the CLI's input buffer time to process the paste before Enter fires.
+          await new Promise(r => setTimeout(r, 150));
+          await invoke('write_to_pty', { id: terminalId, data: submit });
           logToAgent(pane.id, nodeId, `NEW_TASK signal injected.`);
         } catch (e) {
           await failActivation(`Failed to write NEW_TASK signal to PTY ${terminalId}: ${e}`);
@@ -1908,7 +1911,7 @@ function TaskRow({ task, depth }: { task: DbTask & { children?: DbTask[] }; dept
           {task.agent_id && (
             <span className="text-[9px] text-text-muted opacity-50 font-mono">{task.agent_id}</span>
           )}
-          <span className={`text-[9px] font-semibold uppercase tracking-wide px-1.5 py-0.5 rounded border ${statusStyle}`}>
+          <span className={`text-[10px] font-semibold uppercase tracking-wide px-2 py-1 rounded border ${statusStyle}`}>
             {task.status}
           </span>
         </div>

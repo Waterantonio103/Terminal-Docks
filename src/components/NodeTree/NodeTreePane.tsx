@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { DotTunnelBackground } from '../shared/DotTunnelBackground';
 import { ArrowUpRight, ChevronLeft, Play, Plus, RefreshCw, ScanSearch, Sparkles, Trash2, Workflow, X } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
 import { emit, listen } from '@tauri-apps/api/event';
@@ -62,6 +63,7 @@ const SELECTABLE_WORKFLOW_CLIS: WorkflowAgentCli[] = ['claude', 'codex', 'gemini
 const SELECTABLE_EXECUTION_MODES: WorkflowExecutionMode[] = ['streaming_headless', 'headless', 'interactive_pty'];
 const MAX_RUNTIME_SNIPPET_BYTES = 3072;
 const MAX_ACTIVITY_SUMMARY_LENGTH = 180;
+const WORKING_STATUSES = new Set(['activated', 'activation_acked', 'running', 'handoff_pending', 'waiting']);
 const ARTIFACT_PATH_REGEX = /\b(?:\.{0,2}\/)?[a-zA-Z0-9_\-./]+\.(?:ts|tsx|js|jsx|mjs|cjs|rs|md|json|yaml|yml|toml|css|scss|html|sh|py|go|java|kt|swift|sql)\b/g;
 
 function clampZoom(nextZoom: number) {
@@ -1667,7 +1669,8 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
         <div className={validationTone === 'error' ? 'text-red-300' : validationTone === 'ok' ? 'text-emerald-300' : 'text-text-muted'}>{validationMessage}</div>
       </div>
 
-      <div ref={canvasRef} className="relative flex-1 overflow-hidden bg-bg-app" onMouseDown={onCanvasMouseDown} onContextMenu={onCanvasContextMenu} onWheel={onWheel}>
+      <div ref={canvasRef} className="relative flex-1 overflow-hidden" onMouseDown={onCanvasMouseDown} onContextMenu={onCanvasContextMenu} onWheel={onWheel}>
+        <DotTunnelBackground />
         <div
           className="absolute inset-0 opacity-60"
           style={{
@@ -1768,7 +1771,7 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
               runtimeOutput ||
               (runtimeAgent?.lastPayload ?? null)
             );
-            const currentAction = actionByNodeId[materializedNode.node.id] || detectRuntimeAction(runtimeSummary);
+            const currentAction = actionByNodeId[materializedNode.node.id] || (WORKING_STATUSES.has(runtimeStatus) ? detectRuntimeAction(runtimeSummary) : '—');
             const artifactHints = artifactHintsByNodeId.get(materializedNode.node.id) ?? [];
             return (
               <div
@@ -1786,7 +1789,7 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
                     <div className="text-[10px] uppercase tracking-[0.22em] text-accent-primary">{registry.get(materializedNode.node.type).category}</div>
                     <div className="text-sm font-semibold text-text-primary">{materializedNode.node.label ?? registry.get(materializedNode.node.type).label}</div>
                   </div>
-                  <div className={`text-[9px] uppercase tracking-wide px-1.5 py-0.5 rounded border ${workflowStatusTone(runtimeStatus, 'graph')}`}>
+                  <div className={`text-[10px] uppercase tracking-wide px-2 py-1 rounded border ${workflowStatusTone(runtimeStatus, 'graph')}`}>
                     {workflowStatusLabel(runtimeStatus)}
                   </div>
                 </div>
@@ -1838,6 +1841,7 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
                         rows={5}
                         value={String(materializedNode.node.properties.prompt ?? '')}
                         onChange={event => applyOperator({ type: 'set_node_property', nodeId: materializedNode.node.id, key: 'prompt', value: event.target.value })}
+                        onWheel={event => event.stopPropagation()}
                         placeholder="Task prompt"
                         className="w-full bg-bg-surface border border-border-panel rounded-lg px-2 py-2 text-[11px] text-text-primary resize-none"
                       />
