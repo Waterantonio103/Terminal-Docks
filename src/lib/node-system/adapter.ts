@@ -1,5 +1,6 @@
 import { generateId } from '../graphUtils';
 import type { WorkflowEdge, WorkflowGraph, WorkflowNode } from '../../store/workspace';
+import { normalizeCliId } from '../cliIdentity';
 import { createNodeEditorState, type NodeEditorState } from './editor';
 import { createWorkflowNodeRegistry, type NodeTypeRegistry } from './declarations';
 import type {
@@ -222,12 +223,7 @@ export function nodeDocumentToWorkflowGraph(
         terminalTitle: String(node.properties.terminalTitle ?? ''),
         paneId: String(node.properties.paneId ?? ''),
         cli:
-          node.properties.cli === 'gemini' ||
-          node.properties.cli === 'opencode' ||
-          node.properties.cli === 'codex' ||
-          node.properties.cli === 'custom'
-            ? node.properties.cli
-            : 'claude',
+          normalizeCliId(node.properties.cli) ?? 'claude',
         executionMode:
           node.properties.executionMode === 'headless' ||
           node.properties.executionMode === 'interactive_pty'

@@ -188,6 +188,27 @@ export interface CliAdapter {
   /**
    * Build the PTY input for sending a NEW_TASK activation signal.
    * Some CLIs need bracketed paste, some need raw text + enter.
+   *
+   * Optional `preClear` is written first (e.g. Ctrl+U) with a settle gap before
+   * `paste` so that an adapter's line-clear and the pasted text arrive as
+   * separate PTY writes rather than a single atomic chunk.
    */
-  buildActivationInput(signal: string): { paste: string; submit: string };
+  buildActivationInput(signal: string): { preClear?: string; paste: string; submit: string };
+
+  /**
+   * Optional milliseconds RuntimeManager waits after detecting CLI ready
+   * before injecting the bootstrap prompt.  Use for CLIs whose readline
+   * continues to reset for a short period after the first prompt appears.
+   */
+  readonly postReadySettleDelayMs?: number;
+
+  /**
+   * Execution strategy for this adapter:
+   *   'pty'        — launch in an interactive PTY terminal (default for most CLIs)
+   *   'exec_stdin' — spawn as a child process with piped stdin; the full prompt
+   *                  (bootstrap + task) is written to stdin then stdin is closed.
+   *                  Use for CLIs like Codex whose TUI has an input-readiness race
+   *                  that makes interactive PTY injection unreliable.
+   */
+  readonly execMode?: 'pty' | 'exec_stdin';
 }

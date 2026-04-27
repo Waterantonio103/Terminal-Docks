@@ -65,11 +65,17 @@ import { mcpBus } from '../workers/mcpEventBus.js';
 // ──────────────────────────────────────────────
 
 export interface RuntimeManagerPort {
-  createRuntimeForNode(args: any): Promise<{ sessionId: string; terminalId: string }>;
+  createRuntimeForNode(args: import('../runtime/RuntimeTypes.js').CreateRuntimeArgs): Promise<import('../runtime/RuntimeSession.js').RuntimeSession>;
 
-  getSessionForNode(missionId: string, nodeId: string, attempt: number): { sessionId: string; terminalId: string; cliId: string } | undefined;
+  getSessionForNode(missionId: string, nodeId: string, attempt: number): import('../runtime/RuntimeSession.js').RuntimeSession | undefined;
 
   launchCli(sessionId: string, externalPayload?: unknown): Promise<void>;
+
+  validateSessionForReuse(sessionId: string, expectedCliId: string): Promise<import('../runtime/RuntimeTypes.js').SessionLivenessResult>;
+
+  ensureRuntimeReadyForTask(args: import('../runtime/RuntimeTypes.js').CreateRuntimeArgs): Promise<import('../runtime/RuntimeSession.js').RuntimeSession>;
+
+  reinjectTask(sessionId: string): Promise<void>;
 
   sendTask(args: import('../runtime/RuntimeTypes.js').SendTaskArgs): Promise<void>;
 
@@ -77,8 +83,11 @@ export interface RuntimeManagerPort {
 
   stopRuntime(args: import('../runtime/RuntimeTypes.js').StopRuntimeArgs): Promise<void>;
 
+  writeBootstrapToTerminal(terminalId: string, data: string, caller: string): Promise<void>;
+
   subscribe(listener: (event: import('../runtime/RuntimeTypes.js').RuntimeManagerEvent) => void): () => void;
 }
+
 
 // ──────────────────────────────────────────────
 // Node Activation Context
@@ -444,33 +453,13 @@ export class WorkflowOrchestrator {
   ): Promise<void> {
     try {
       const attempt = run.nodeStates[nodeId]?.attempt || 1;
-      const existing = this.runtimeManager!.getSessionForNode(run.definitionId, nodeId, attempt);
-      if (existing) {
-        const refreshedRun = this.runs.get(run.runId);
-        if (!refreshedRun) return;
-        const session: RuntimeSessionInfo = {
-          sessionId: existing.sessionId,
-          terminalId: existing.terminalId,
-          cliId: existing.cliId,
-          executionMode: nodeDef.config.executionMode ?? 'interactive_pty',
-          createdAt: Date.now(),
-        };
-        attachRuntime(refreshedRun, nodeId, session);
-        this.emit({
-          type: 'runtime_attached',
-          runId: run.runId,
-          nodeId,
-          sessionId: existing.sessionId,
-          terminalId: existing.terminalId,
-          timestamp: Date.now(),
-        });
-        return;
-      }
 
-      const result = await this.runtimeManager!.createRuntimeForNode({
+      // Group 5: Single entry point for runtime readiness.
+      // Handles reuse, stale cleanup, and new launch.
+      const result = await this.runtimeManager!.ensureRuntimeReadyForTask({
         missionId: run.definitionId,
         nodeId,
-        attempt: run.nodeStates[nodeId]?.attempt || 1,
+        attempt,
         role: nodeDef.roleId,
         agentId: nodeDef.roleId, // Fallback agentId
         profileId: nodeDef.config.profileId ?? nodeDef.roleId,
@@ -490,16 +479,14 @@ export class WorkflowOrchestrator {
       const session: RuntimeSessionInfo = {
         sessionId: result.sessionId,
         terminalId: result.terminalId,
-        cliId: nodeDef.config.cli ?? 'claude',
-        executionMode: nodeDef.config.executionMode ?? 'interactive_pty',
-        createdAt: Date.now(),
+        cliId: result.cliId,
+        executionMode: result.executionMode,
+        createdAt: result.createdAt,
       };
 
       attachRuntime(refreshedRun, nodeId, session);
 
-      // Wire MCP events now that the session is attached to the run (session_created fired
-      // before attachRuntime, so the earlier wireMcpForSession call in handleRuntimeManagerEvent
-      // couldn't find the run — we must wire it explicitly here).
+      // Wire MCP events now that the session is attached to the run.
       this.wireMcpForSession(run.runId, result.sessionId);
 
       this.emit({
@@ -510,16 +497,12 @@ export class WorkflowOrchestrator {
         terminalId: result.terminalId,
         timestamp: Date.now(),
       });
-
-      // Run the full activation pipeline: launch CLI, MCP handshake, inject task.
-      // createRuntimeForNode only registers the session — launchCli is required separately.
-      await this.runtimeManager!.launchCli(result.sessionId);
     } catch (err) {
       const refreshedRun = this.runs.get(run.runId);
       if (!refreshedRun) return;
 
       const errorMessage = err instanceof Error ? err.message : String(err);
-      this.failNodeInternal(refreshedRun, nodeId, `Runtime creation failed: ${errorMessage}`);
+      this.failNodeInternal(refreshedRun, nodeId, `Runtime readiness check failed: ${errorMessage}`);
     }
   }
 

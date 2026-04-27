@@ -18,6 +18,13 @@ import type {
   WorkerSession,
 } from './types';
 
+/**
+ * @deprecated This legacy adapter does direct PTY writes outside RuntimeManager.
+ * Use RuntimeManager.createRuntimeForNode() + launchCli() instead.
+ * All launch, injection, and readiness should go through RuntimeManager.
+ * This file will be removed once the legacy worker system is fully deprecated.
+ */
+
 const BOOT_TIMEOUT_MS = 30_000;
 const REPRIME_TIMEOUT_MS = 15_000;
 const BANNER_HINT_RE = /\bclaude (code|assistant)\b/i;

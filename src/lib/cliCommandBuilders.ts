@@ -1,4 +1,5 @@
 import type { RuntimeActivationPayload } from './missionRuntime.js';
+import { normalizeCliId, supportsHeadless } from './cliIdentity.js';
 
 export type PromptDelivery = 'arg_file' | 'arg_text' | 'stdin' | 'unsupported';
 
@@ -18,10 +19,6 @@ export interface CliCommandBuilderOptions {
   localHttpUrl?: string | null;
   localHttpModel?: string | null;
   localHttpApiKey?: string | null;
-}
-
-function normalizeCli(value: unknown): string {
-  return typeof value === 'string' ? value.trim().toLowerCase() : '';
 }
 
 function baseEnv(payload: RuntimeActivationPayload, mcpUrl?: string | null): Record<string, string> {
@@ -53,8 +50,15 @@ export function buildCliRunCommand(
   payload: RuntimeActivationPayload,
   options: CliCommandBuilderOptions = {},
 ): CliRunCommand {
-  const cli = normalizeCli(payload.cliType);
+  const cli = normalizeCliId(payload.cliType);
   const env = { ...baseEnv(payload, options.mcpUrl), ...(options.customEnv ?? {}) };
+
+  if (!cli || !supportsHeadless(cli)) {
+    return unsupported(
+      `Headless command builder for "${cli ?? 'unknown'}" is not configured yet. Switch this node to interactive PTY or use a custom command template.`,
+      env,
+    );
+  }
 
   if (cli === 'custom') {
     const command = options.customCommand?.trim();
@@ -113,14 +117,28 @@ export function buildCliRunCommand(
     };
   }
 
-  if (cli === 'gemini' || cli === 'opencode' || cli === 'codex') {
-    return unsupported(
-      `Headless command builder for "${cli}" is not configured yet. Switch this node to interactive PTY or use a custom command template.`,
-      env,
-    );
+  if (cli === 'codex') {
+    const codexEnv = { ...env };
+    // Use a workspace-local Codex home by default to avoid profile ACL issues
+    // (common on Windows when spawning from desktop app runtimes).
+    if (!codexEnv.CODEX_HOME) {
+      codexEnv.CODEX_HOME = '.terminal-docks\\codex-home';
+    }
+
+    // On Windows, `codex` is installed as `codex.cmd` (an npm shim) which
+    // Command::new("codex") cannot find — it only resolves .exe.  Route through
+    // cmd.exe so the shell resolves the .cmd extension and handles the < stdin
+    // redirect (Rust's Command does not pipe stdin for us).
+    // The prompt is pre-written to {promptPath} by the Rust backend before spawn.
+    return {
+      command: 'cmd',
+      args: ['/c', 'codex exec --json --skip-git-repo-check -a never - < "{promptPath}"'],
+      env: codexEnv,
+      promptDelivery: 'arg_file',
+    };
   }
 
-  return unsupported(`Unknown CLI "${payload.cliType || 'unknown'}".`, env);
+  return unsupported(`Unknown or unsupported CLI "${cli || 'unknown'}".`, env);
 }
 
 export function materializePromptArgs(command: CliRunCommand, prompt: string): CliRunCommand {

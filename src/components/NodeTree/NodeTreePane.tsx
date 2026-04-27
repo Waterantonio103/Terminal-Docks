@@ -20,6 +20,7 @@ import { applyNodeEditorOperator } from '../../lib/node-system/operators';
 import type { MaterializedNode, NodeInstance, Point2D } from '../../lib/node-system/types';
 import { detectRoleForPane } from '../../lib/cliDetection';
 import { runtimeManager } from '../../lib/runtime/RuntimeManager';
+import { supportsHeadless } from '../../lib/cliIdentity';
 type NodeOutcome = 'success' | 'failure';
 import { useWorkspaceStore, type MissionAgent, type Pane, type ResultEntry, type WorkflowAgentCli, type WorkflowExecutionMode, type WorkflowGraph } from '../../store/workspace';
 import { detectRuntimeAction } from '../../lib/runtimeActivity';
@@ -656,9 +657,14 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
       const cli = SELECTABLE_WORKFLOW_CLIS.includes(node?.properties.cli as WorkflowAgentCli)
         ? (node?.properties.cli as WorkflowAgentCli)
         : 'claude';
-      const executionMode = SELECTABLE_EXECUTION_MODES.includes(node?.properties.executionMode as WorkflowExecutionMode)
+      let executionMode = SELECTABLE_EXECUTION_MODES.includes(node?.properties.executionMode as WorkflowExecutionMode)
         ? (node?.properties.executionMode as WorkflowExecutionMode)
         : 'streaming_headless';
+
+      if (executionMode !== 'interactive_pty' && !supportsHeadless(cli as any)) {
+        executionMode = 'interactive_pty';
+      }
+
       const title = `Runtime ${role}`;
       const terminalId = generateId();
 
@@ -721,6 +727,11 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
   const handleCliChange = useCallback(async (nodeId: string, newCli: WorkflowAgentCli) => {
     applyOperator({ type: 'set_node_property', nodeId, key: 'cli', value: newCli });
 
+    // Force interactive PTY if headless is unsupported for the new CLI
+    if (!supportsHeadless(newCli)) {
+      applyOperator({ type: 'set_node_property', nodeId, key: 'executionMode', value: 'interactive_pty' });
+    }
+
     // Find the terminal pane by nodeId — more reliable than using node.properties.terminalId
     // which can drift out of sync with pane.data.terminalId.
     const storeState = useWorkspaceStore.getState();
@@ -755,6 +766,18 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
       ? boundPane.data.terminalId
       : null;
 
+    // Stop any active runtime session for this node before destroying the terminal.
+    // Without this, RuntimeManager keeps a stale session that blocks the next launch.
+    const runtimeBinding = storeState.nodeRuntimeBindings[nodeId];
+    if (runtimeBinding?.runtimeSessionId) {
+      try {
+        await runtimeManager.stopRuntime({
+          sessionId: runtimeBinding.runtimeSessionId,
+          reason: 'CLI swapped by user',
+        });
+      } catch { /* session may already be cleaned up */ }
+    }
+
     if (existingTerminalId) {
       try { await invoke('destroy_pty', { id: existingTerminalId }); } catch { /* already gone */ }
     }
@@ -762,8 +785,10 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
     // Issue a fresh terminalId so TerminalPane's useEffect([terminalId]) re-runs
     // and spawns a new PTY with the new CLI. Use the pane's own id (stable) for
     // the update so we never miss due to a stale terminalId lookup.
+    // Clear cliSource so shouldLaunchCliInTerminal doesn't skip launching the new CLI.
     const newTerminalId = generateId();
-    storeState.updatePaneData(boundPane.id, { terminalId: newTerminalId, cli: newCli });
+    storeState.updatePaneData(boundPane.id, { terminalId: newTerminalId, cli: newCli, cliSource: undefined });
+    storeState.setNodeRuntimeBinding(nodeId, { terminalId: newTerminalId, runtimeSessionId: null, adapterStatus: null });
     applyOperator({ type: 'set_node_property', nodeId, key: 'terminalId', value: newTerminalId });
     setNodeTerminalBinding(nodeId, newTerminalId);
   }, [applyOperator, setNodeTerminalBinding]);
@@ -782,7 +807,7 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
       return;
     }
     try {
-      await invoke('write_to_pty', { id: terminalId, data: `${command}\r` });
+      await runtimeManager.writeBootstrapToTerminal(terminalId, `${command}\r`, 'NodeTreePane.sendInspectorCommand');
       setInspectorCommand('');
       setInspectorError(null);
       setTimeout(() => {
@@ -2040,8 +2065,12 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
                           className="background-bg-surface border border-border-panel rounded px-2 py-1.5 text-[10px] text-text-secondary"
                           title="Runtime execution mode"
                         >
-                          <option value="streaming_headless">Stream</option>
-                          <option value="headless">Headless</option>
+                          {supportsHeadless(runtimeCli as any) && (
+                            <>
+                              <option value="streaming_headless">Stream</option>
+                              <option value="headless">Headless</option>
+                            </>
+                          )}
                           <option value="interactive_pty">PTY</option>
                         </select>
                         <button

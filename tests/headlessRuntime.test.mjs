@@ -73,10 +73,13 @@ run('runtime dispatcher materializes non-path variables and keeps promptPath for
   assert.equal(request.prompt, 'hello');
 });
 
-run('unsupported CLI returns an actionable reason', () => {
+run('codex headless command uses stdin prompt file and safe defaults', () => {
   const command = buildCliRunCommand(payload({ cliType: 'codex' }));
-  assert.equal(command.promptDelivery, 'unsupported');
-  assert.match(command.unsupportedReason ?? '', /interactive PTY|custom command/i);
+  assert.equal(command.command, 'cmd');
+  assert.equal(command.promptDelivery, 'arg_file');
+  assert.equal(command.args[0], '/c');
+  assert.match(command.args[1] ?? '', /codex exec --json --skip-git-repo-check -a never - < "\{promptPath\}"/);
+  assert.equal(command.env.CODEX_HOME, '.terminal-docks\\codex-home');
 });
 
 run('local HTTP runtimes share the headless adapter request path', () => {

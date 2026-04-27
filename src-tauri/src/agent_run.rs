@@ -160,6 +160,87 @@ fn replace_placeholders(value: &str, replacements: &HashMap<&str, String>) -> St
     })
 }
 
+fn home_dir() -> Option<PathBuf> {
+    std::env::var("USERPROFILE")
+        .or_else(|_| std::env::var("HOME"))
+        .ok()
+        .map(PathBuf::from)
+}
+
+fn seed_codex_auth_if_needed(cli: &str, env: &HashMap<String, String>) -> Result<(), String> {
+    if !cli.eq_ignore_ascii_case("codex") {
+        return Ok(());
+    }
+
+    let codex_home = match env.get("CODEX_HOME").map(|value| value.trim()).filter(|value| !value.is_empty()) {
+        Some(path) => PathBuf::from(path),
+        None => return Ok(()),
+    };
+
+    let auth_dst = codex_home.join("auth.json");
+    if auth_dst.exists() {
+        return Ok(());
+    }
+
+    let source_home = match home_dir() {
+        Some(home) => home.join(".codex"),
+        None => return Ok(()),
+    };
+    let auth_src = source_home.join("auth.json");
+    if !auth_src.exists() {
+        return Ok(());
+    }
+
+    fs::create_dir_all(&codex_home).map_err(|e| e.to_string())?;
+    fs::copy(&auth_src, &auth_dst).map_err(|e| e.to_string())?;
+
+    let cap_src = source_home.join("cap_sid");
+    let cap_dst = codex_home.join("cap_sid");
+    if cap_src.exists() && !cap_dst.exists() {
+        let _ = fs::copy(cap_src, cap_dst);
+    }
+
+    Ok(())
+}
+
+fn normalize_codex_home_env(
+    cli: &str,
+    cwd: Option<&str>,
+    env: &mut HashMap<String, String>,
+) {
+    if !cli.eq_ignore_ascii_case("codex") {
+        return;
+    }
+
+    let raw = match env
+        .get("CODEX_HOME")
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+    {
+        Some(value) => value.to_string(),
+        None => return,
+    };
+
+    let home_path = PathBuf::from(&raw);
+    if home_path.is_absolute() {
+        return;
+    }
+
+    let base = match cwd
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+    {
+        Some(value) => PathBuf::from(value),
+        None => return,
+    };
+
+    let resolved = base.join(home_path);
+    env.insert(
+        "CODEX_HOME".to_string(),
+        resolved.to_string_lossy().to_string(),
+    );
+}
+
 fn with_runtime_env(request: &StartAgentRunRequest, prompt_path: &str) -> HashMap<String, String> {
     let mut env = request.env.clone();
     env.insert("TD_SESSION_ID".to_string(), request.session_id.clone());
@@ -323,6 +404,29 @@ fn emit_output(app: &AppHandle, run_id: &str, mission_id: &str, node_id: &str, s
             node_id: node_id.to_string(),
             stream: stream.to_string(),
             chunk,
+            at: unix_millis_now(),
+        },
+    );
+}
+
+fn emit_exit(
+    app: &AppHandle,
+    run_id: &str,
+    mission_id: &str,
+    node_id: &str,
+    status: &str,
+    exit_code: Option<i32>,
+    error: Option<String>,
+) {
+    let _ = app.emit(
+        "agent-run-exit",
+        AgentRunExitEvent {
+            run_id: run_id.to_string(),
+            mission_id: mission_id.to_string(),
+            node_id: node_id.to_string(),
+            status: status.to_string(),
+            exit_code,
+            error,
             at: unix_millis_now(),
         },
     );
@@ -627,6 +731,8 @@ pub fn start_agent_run(
         let error = "Headless command is empty.".to_string();
         update_run_status(&app, &payload.run_id, "failed", None, Some(&error), false, true).ok();
         emit_status(&app, &payload.run_id, &payload.mission_id, &payload.node_id, "failed", Some(error.clone()));
+        emit_output(&app, &payload.run_id, &payload.mission_id, &payload.node_id, "stderr", error.clone());
+        emit_exit(&app, &payload.run_id, &payload.mission_id, &payload.node_id, "failed", None, Some(error.clone()));
         return Err(error);
     }
 
@@ -652,10 +758,20 @@ pub fn start_agent_run(
         .iter()
         .map(|arg| replace_placeholders(arg, &replacements))
         .collect();
-    let env = with_runtime_env(&payload, &prompt_path_string)
+    let mut env = with_runtime_env(&payload, &prompt_path_string)
         .into_iter()
         .map(|(key, value)| (key, replace_placeholders(&value, &replacements)))
         .collect::<HashMap<_, _>>();
+    normalize_codex_home_env(&payload.cli, payload.cwd.as_deref(), &mut env);
+
+    if let Err(error) = seed_codex_auth_if_needed(&payload.cli, &env) {
+        let message = format!("Failed preparing Codex auth state: {error}");
+        update_run_status(&app, &payload.run_id, "failed", None, Some(&message), false, true).ok();
+        emit_status(&app, &payload.run_id, &payload.mission_id, &payload.node_id, "failed", Some(message.clone()));
+        emit_output(&app, &payload.run_id, &payload.mission_id, &payload.node_id, "stderr", message.clone());
+        emit_exit(&app, &payload.run_id, &payload.mission_id, &payload.node_id, "failed", None, Some(message.clone()));
+        return Err(message);
+    }
 
     let record = AgentRunRecord {
         run_id: payload.run_id.clone(),
@@ -703,6 +819,8 @@ pub fn start_agent_run(
             let message = format!("CLI launch failed: {error}");
             update_run_status(&app, &payload.run_id, "failed", None, Some(&message), false, true).ok();
             emit_status(&app, &payload.run_id, &payload.mission_id, &payload.node_id, "failed", Some(message.clone()));
+            emit_output(&app, &payload.run_id, &payload.mission_id, &payload.node_id, "stderr", message.clone());
+            emit_exit(&app, &payload.run_id, &payload.mission_id, &payload.node_id, "failed", None, Some(message.clone()));
             return Err(message);
         }
     };

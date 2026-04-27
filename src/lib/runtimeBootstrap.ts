@@ -1,6 +1,8 @@
 import type { RuntimeActivationPayload } from './missionRuntime';
+import type { CliId } from './cliIdentity';
+import { normalizeCliId } from './cliIdentity';
 
-export type SupportedRuntimeCli = 'claude' | 'gemini' | 'opencode' | 'codex' | 'custom' | 'ollama' | 'lmstudio';
+export type SupportedRuntimeCli = CliId;
 export type RuntimeExecutionMode = 'headless' | 'streaming_headless' | 'interactive_pty';
 
 export interface RuntimeBootstrapContract {
@@ -85,12 +87,7 @@ const CONTRACTS: Record<SupportedRuntimeCli, RuntimeBootstrapContract> = {
 };
 
 export function normalizeRuntimeCli(value: unknown): SupportedRuntimeCli | null {
-  if (typeof value !== 'string') return null;
-  const cli = value.trim().toLowerCase();
-  if (cli === 'claude' || cli === 'gemini' || cli === 'opencode' || cli === 'codex' || cli === 'custom' || cli === 'ollama' || cli === 'lmstudio') {
-    return cli;
-  }
-  return null;
+  return normalizeCliId(value);
 }
 
 export function getRuntimeBootstrapContract(value: unknown): RuntimeBootstrapContract | null {

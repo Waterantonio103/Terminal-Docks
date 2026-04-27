@@ -1,14 +1,20 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
 pub enum WorkflowAgentCli {
+    #[serde(rename = "claude")]
     Claude,
+    #[serde(rename = "gemini")]
     Gemini,
+    #[serde(rename = "opencode")]
     OpenCode,
+    #[serde(rename = "codex")]
     Codex,
+    #[serde(rename = "custom")]
     Custom,
+    #[serde(rename = "ollama")]
     Ollama,
+    #[serde(rename = "lmstudio")]
     Lmstudio,
 }
 

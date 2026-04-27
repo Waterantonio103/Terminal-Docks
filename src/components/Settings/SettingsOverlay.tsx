@@ -57,10 +57,33 @@ const SYNTAX_VARS: { label: string; var: keyof CustomThemeColors }[] = [
   { label: 'Comments', var: '--syntax-comment' },
 ];
 
+function parseColorToHex(color: string): string {
+  if (color.startsWith('#')) return color;
+  if (!color.startsWith('rgb')) return color;
+  
+  // Handle rgb(r, g, b) or rgba(r, g, b, a)
+  const matches = color.match(/[\d.]+/g);
+  if (!matches || matches.length < 3) return color;
+  
+  const r = Math.round(parseFloat(matches[0]));
+  const g = Math.round(parseFloat(matches[1]));
+  const b = Math.round(parseFloat(matches[2]));
+  
+  return "#" + ((1 << 24) + (r << 16) + (g << 8) + b).toString(16).slice(1);
+}
+
 export function SettingsOverlay() {
   const { theme, setTheme, setShowSettings, customTheme, setCustomThemeColor, resetCustomTheme } = useWorkspaceStore();
   const [activePicker, setActivePicker] = useState<keyof CustomThemeColors | null>(null);
   const pickerRef = useRef<HTMLDivElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [, setTick] = useState(0);
+
+  useEffect(() => {
+    // Force a re-render once containerRef is available or theme changes 
+    // to get correct computed styles from the themed container.
+    setTick(t => t + 1);
+  }, [theme]);
 
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
@@ -77,7 +100,12 @@ export function SettingsOverlay() {
   }, [activePicker]);
 
   const renderColorCard = (v: { label: string; var: keyof CustomThemeColors }) => {
-    const currentColor = customTheme[v.var] || getComputedStyle(document.documentElement).getPropertyValue(v.var).trim() || '#000000';
+    // Attempt to read the variable from the actual themed wrapper or document root
+    const el = containerRef.current || document.documentElement;
+    const computedValue = getComputedStyle(el).getPropertyValue(v.var).trim();
+    const defaultColor = parseColorToHex(computedValue) || '#000000';
+    
+    const currentColor = customTheme[v.var] || defaultColor;
     const isOpen = activePicker === v.var;
     const isSyntaxVar = v.var.startsWith('--syntax-');
 
@@ -119,7 +147,7 @@ export function SettingsOverlay() {
   };
 
   return (
-    <div className="absolute inset-0 background-bg-app z-[100] flex flex-col animate-fade-in text-text-primary">
+    <div ref={containerRef} className="absolute inset-0 background-bg-app z-[100] flex flex-col animate-fade-in text-text-primary">
       {/* Header */}
       <div className="h-12 border-b border-border-panel flex items-center justify-between px-6 background-bg-titlebar shrink-0">
         <div className="flex items-center gap-2">

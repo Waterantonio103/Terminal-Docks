@@ -14,7 +14,6 @@ import {
 } from '../../store/workspace';
 import agentsConfig from '../../config/agents';
 import { type LaunchMode } from '../../lib/buildPrompt';
-import { stageMissionPrompts } from '../../lib/missionLauncher';
 import { compileMission } from '../../lib/graphCompiler';
 import { generateId } from '../../lib/graphUtils';
 import { buildPresetFlowGraph, getWorkflowPreset, listWorkflowPresets } from '../../lib/workflowPresets';
@@ -273,6 +272,8 @@ export function LauncherPane() {
     setStatus(null);
 
     try {
+      const { runtimeManager } = await import('../../lib/runtime/RuntimeManager');
+
       await Promise.all(
         targets.map(async row => {
           const cli = row.cli ?? 'claude';
@@ -280,7 +281,7 @@ export function LauncherPane() {
           const terminalId = row.pane.data?.terminalId ?? `term-${row.pane.id}`;
 
           if (cli === 'claude') {
-            await invoke('write_to_pty', { id: terminalId, data: '\x03' });
+            await runtimeManager.writeBootstrapToTerminal(terminalId, '\x03', 'LauncherPane.handleConnect');
             await new Promise(resolve => setTimeout(resolve, 200));
           }
 
@@ -307,8 +308,7 @@ export function LauncherPane() {
             `Session bootstrap: call connect_agent with role="${roleParam}", agentId="${row.pane.title}", terminalId="${terminalId}", cli="${cli}", profileId="${profileId}", capabilities=${capabilityJson}${workspaceDir ? `, workingDir="${escapedWorkingDir}"` : ''}. ` +
             `Then keep worker metadata current with register_worker_capabilities when your availability changes.`;
 
-          const termId = row.pane.data?.terminalId ?? `term-${row.pane.id}`;
-          await invoke('write_to_pty', { id: termId, data: `${prompt}\r` });
+          await runtimeManager.writeBootstrapToTerminal(terminalId, `${prompt}\r`, 'LauncherPane.handleConnect');
         })
       );
 
@@ -428,10 +428,6 @@ export function LauncherPane() {
     });
   }
 
-  async function stagePrompts(mission: CompiledMission) {
-    await stageMissionPrompts(mission, workspaceDir, terminals);
-  }
-
   async function handleLaunch() {
     setBusy(true);
     setStatus(null);
@@ -472,13 +468,12 @@ export function LauncherPane() {
           throw new Error('Compiled mission has no start nodes with terminal bindings.');
         }
 
-        await stagePrompts(mission);
         setPendingLaunch({ missionId, mission, agents, startTerminalIds });
         setIsConfirming(true);
-        setStatus('Prompts staged. Verify each terminal, then click Confirm to execute.');
+        setStatus('Mission compiled. Review the plan, then click Confirm to launch through RuntimeManager.');
       } else {
         if (!pendingLaunch) {
-          throw new Error('No staged mission found. Re-stage prompts before confirming.');
+          throw new Error('No compiled mission found. Re-compile before confirming.');
         }
 
         // TS Orchestrator is the canonical runtime brain.

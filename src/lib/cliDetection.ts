@@ -1,4 +1,7 @@
-export type AgentCli = 'claude' | 'gemini' | 'opencode' | 'codex' | 'custom';
+import type { CliId } from './cliIdentity';
+import { normalizeCliId } from './cliIdentity';
+
+export type AgentCli = CliId;
 export type CliDetectionConfidence = 'low' | 'medium' | 'high';
 
 const ROLE_IDS = ['scout', 'coordinator', 'builder', 'tester', 'security', 'reviewer'] as const;
@@ -20,8 +23,7 @@ function normalizeToken(token: string): string {
 }
 
 export function normalizeCli(value: unknown): AgentCli | null {
-  if (value === 'claude' || value === 'gemini' || value === 'opencode' || value === 'codex' || value === 'custom') return value;
-  return null;
+  return normalizeCliId(value);
 }
 
 export function detectCliFromText(text: string | null | undefined): AgentCli | null {

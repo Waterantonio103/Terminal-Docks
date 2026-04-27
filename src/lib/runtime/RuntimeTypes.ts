@@ -20,6 +20,8 @@ export type RuntimeSessionState =
   | 'launching_cli'
   | 'awaiting_cli_ready'
   | 'registering_mcp'
+  | 'bootstrap_injecting'
+  | 'bootstrap_sent'
   | 'awaiting_mcp_ready'
   | 'ready'
   | 'injecting_task'
@@ -116,6 +118,21 @@ export type RuntimeManagerEvent =
   | { type: 'output_captured'; sessionId: string; nodeId: string; text: string }
   | { type: 'heartbeat'; sessionId: string; nodeId: string; at: number }
   | { type: 'artifact_published'; sessionId: string; nodeId: string; artifact: { id: string; kind: import('../workflow/WorkflowTypes.js').ArtifactKind; label: string; content?: string; path?: string; timestamp: number } };
+
+// ──────────────────────────────────────────────
+// Session Liveness Validation (Group 5)
+// ──────────────────────────────────────────────
+
+export type SessionLivenessStatus =
+  | 'reusable'
+  | 'stale'
+  | 'cli_mismatch'
+  | 'wrong_state';
+
+export interface SessionLivenessResult {
+  status: SessionLivenessStatus;
+  details: string;
+}
 
 // ──────────────────────────────────────────────
 // Health Check

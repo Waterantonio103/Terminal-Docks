@@ -2383,7 +2383,7 @@ function createMcpServer(getSessionId) {
           terminal: z.object({
             terminalId: z.string(),
             terminalTitle: z.string(),
-            cli: z.enum(['claude', 'gemini', 'opencode', 'codex']).optional(),
+            cli: z.enum(['claude', 'gemini', 'opencode', 'codex', 'custom', 'ollama', 'lmstudio']).optional(),
             paneId: z.string().optional(),
             reusedExisting: z.boolean().optional(),
           }),
@@ -2751,7 +2751,7 @@ function createMcpServer(getSessionId) {
       role: z.string().describe('Your assigned role (e.g. Coordinator, Scout, Builder, Reviewer)'),
       agentId: z.string().describe('A friendly name for your agent instance'),
       terminalId: z.string().optional().describe('Terminal pane ID in CometAI, if known'),
-      cli: z.enum(['claude', 'gemini', 'opencode', 'codex']).optional().describe('CLI running in that terminal'),
+      cli: z.enum(['claude', 'gemini', 'opencode', 'codex', 'custom', 'ollama', 'lmstudio']).optional().describe('CLI running in that terminal'),
       profileId: z.string().optional().describe('Optional worker profile label (for example "reviewer_profile")'),
       capabilities: z.array(z.union([
         z.enum(['planning', 'coding', 'testing', 'review', 'security', 'repo_analysis', 'shell_execution']),
@@ -2800,7 +2800,7 @@ function createMcpServer(getSessionId) {
       nodeId: z.string().min(1).describe('Graph node ID this adapter is responsible for'),
       missionId: z.string().min(1).describe('Active mission ID'),
       role: z.string().min(1).describe('Role this adapter is fulfilling (e.g. builder, reviewer)'),
-      cli: z.enum(['claude', 'gemini', 'opencode', 'codex', 'custom', 'generic']).describe('CLI type the adapter will drive'),
+      cli: z.enum(['claude', 'gemini', 'opencode', 'codex', 'custom', 'generic', 'ollama', 'lmstudio']).describe('CLI type the adapter will drive'),
       cwd: z.string().optional().describe('Working directory for the CLI process'),
     }
   }, async ({ sessionId, terminalId, nodeId, missionId, role, cli, cwd }) => {

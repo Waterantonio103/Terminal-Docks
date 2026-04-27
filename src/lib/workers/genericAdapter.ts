@@ -9,6 +9,13 @@ import type {
   WorkerSession,
 } from './types';
 
+/**
+ * @deprecated This legacy adapter does direct PTY writes outside RuntimeManager.
+ * Use RuntimeManager.createRuntimeForNode() + launchCli() instead.
+ * All launch, injection, and readiness should go through RuntimeManager.
+ * This file will be removed once the legacy worker system is fully deprecated.
+ */
+
 // Backwards-compatible adapter. Does not spawn a child process — it binds to
 // a PTY that some other code (Launcher / manual flow) already created, and
 // relays tasks through stdin exactly the way MissionControl used to.

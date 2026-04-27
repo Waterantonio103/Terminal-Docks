@@ -42,8 +42,21 @@ const TRANSITIONS: ReadonlyMap<NodeLifecycleState, ReadonlySet<NodeLifecycleStat
   ])],
 
   ['registering_mcp', new Set([
+    'bootstrap_injecting',
     'awaiting_mcp_ready',
     'injecting_task',
+    'failed',
+    'cancelled',
+  ])],
+
+  ['bootstrap_injecting', new Set([
+    'bootstrap_sent',
+    'failed',
+    'cancelled',
+  ])],
+
+  ['bootstrap_sent', new Set([
+    'awaiting_mcp_ready',
     'failed',
     'cancelled',
   ])],
@@ -103,6 +116,8 @@ const ACTIVE_STATES: ReadonlySet<NodeLifecycleState> = new Set([
   'launching_runtime',
   'awaiting_cli_ready',
   'registering_mcp',
+  'bootstrap_injecting',
+  'bootstrap_sent',
   'awaiting_mcp_ready',
   'injecting_task',
   'awaiting_ack',
@@ -193,6 +208,8 @@ const LIFECYCLE_ORDER: readonly NodeLifecycleState[] = [
   'launching_runtime',
   'awaiting_cli_ready',
   'registering_mcp',
+  'bootstrap_injecting',
+  'bootstrap_sent',
   'awaiting_mcp_ready',
   'injecting_task',
   'awaiting_ack',

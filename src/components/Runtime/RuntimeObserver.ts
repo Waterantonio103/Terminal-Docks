@@ -127,6 +127,8 @@ class RuntimeObserver {
       case 'launching_cli':
       case 'awaiting_cli_ready':
       case 'registering_mcp':
+      case 'bootstrap_injecting':
+      case 'bootstrap_sent':
       case 'awaiting_mcp_ready':
         return 'launching';
       case 'ready':

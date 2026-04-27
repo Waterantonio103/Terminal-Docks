@@ -58,7 +58,7 @@ export function TerminalPane({ pane, dragEndSeq }: { pane: Pane; dragEndSeq?: nu
     if (!terminalRef.current) return;
     const terminalElement = terminalRef.current;
 
-    const rootStyle  = getComputedStyle(document.documentElement);
+    const rootStyle  = getComputedStyle(terminalRef.current || document.documentElement);
     const bgColor    = rootStyle.getPropertyValue('--bg-app').trim()        || '#0c0c14';
     const fgColor    = rootStyle.getPropertyValue('--text-primary').trim()  || '#e2e4f0';
     const cursorColor = rootStyle.getPropertyValue('--accent-primary').trim() || '#7059f5';
@@ -335,7 +335,7 @@ export function TerminalPane({ pane, dragEndSeq }: { pane: Pane; dragEndSeq?: nu
   // Update terminal colors on theme change
   useEffect(() => {
     if (!terminalInstance.current) return;
-    const rootStyle = getComputedStyle(document.documentElement);
+    const rootStyle = getComputedStyle(terminalRef.current || document.documentElement);
     terminalInstance.current.options.theme = {
       background: rootStyle.getPropertyValue('--bg-app').trim() || '#0c0c14',
       foreground: rootStyle.getPropertyValue('--text-primary').trim() || '#e2e4f0',

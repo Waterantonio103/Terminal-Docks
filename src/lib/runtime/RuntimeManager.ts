@@ -22,6 +22,7 @@ import type {
   SendInputArgs,
   StopRuntimeArgs,
   ResolvePermissionArgs,
+  SessionLivenessResult,
 } from './RuntimeTypes.js';
 import { getCliAdapter } from './adapters/index.js';
 
@@ -53,8 +54,10 @@ import { emit } from '@tauri-apps/api/event';
 const CLI_LAUNCH_DELAY_MS = 500;
 const CLI_STARTUP_WAIT_MS = 2_000;
 const PASTE_SUBMIT_GAP_MS = 150;
+const PRE_CLEAR_SETTLE_MS = 300;
 const BOOTSTRAP_EVENT_TIMEOUT_MS = 8_000;
 const TASK_ACK_TIMEOUT_MS = 30_000;
+const BOOTSTRAP_INJECTION_TIMEOUT_MS = 10_000;
 
 // ──────────────────────────────────────────────
 // Listeners
@@ -107,8 +110,7 @@ class RuntimeManager {
           activationPayload: payload,
         });
 
-        // The legacy pipeline needed this wired.
-        this.wireMcpEvents(session.sessionId);
+        // wireMcpEvents is now called inside createRuntimeForNode.
         this.wirePtyEvents(payload.terminalId, session.sessionId);
 
         await this.launchCli(session.sessionId, payload);
@@ -185,6 +187,7 @@ class RuntimeManager {
 
     this.sessions.set(session.sessionId, session);
     this.sessionsByNode.set(`${args.missionId}:${args.nodeId}:${args.attempt}`, session.sessionId);
+    this.wireMcpEvents(session.sessionId);
 
     session.onStateChange((from: import('./RuntimeTypes.js').RuntimeSessionState, to: import('./RuntimeTypes.js').RuntimeSessionState) => {
       this.emit({
@@ -241,6 +244,10 @@ class RuntimeManager {
     const session = this.getSession(sessionId);
     if (!session) throw new Error(`No runtime session: ${sessionId}`);
 
+    console.log(
+      `[RuntimeManager] launchCli: sessionId="${sessionId}", nodeId="${session.nodeId}", cliId="${session.cliId}", missionId="${session.missionId}", attempt=${session.attempt}`,
+    );
+
     const activationPayload = externalPayload ?? this.buildActivationPayload(session);
     try {
       await this.runActivationPipeline(session, activationPayload);
@@ -263,6 +270,10 @@ class RuntimeManager {
   async sendTask(args: SendTaskArgs): Promise<void> {
     const session = this.getSession(args.sessionId);
     if (!session) throw new Error(`No runtime session: ${args.sessionId}`);
+
+    console.log(
+      `[RuntimeManager] sendTask: sessionId="${args.sessionId}", nodeId="${session.nodeId}", promptLength=${args.prompt.length}`,
+    );
 
     session.transitionTo('injecting_task');
 
@@ -295,7 +306,11 @@ class RuntimeManager {
       return;
     }
 
-    const { paste, submit } = adapter.buildActivationInput(signal);
+    const { preClear, paste, submit } = adapter.buildActivationInput(signal);
+    if (preClear) {
+      await writeToTerminal(session.terminalId, preClear);
+      await sleep(PRE_CLEAR_SETTLE_MS);
+    }
     await writeToTerminal(session.terminalId, paste);
     await sleep(PASTE_SUBMIT_GAP_MS);
     await writeToTerminal(session.terminalId, submit);
@@ -323,14 +338,37 @@ class RuntimeManager {
   }
 
   /**
+   * Write a raw bootstrap/connect prompt to a terminal by terminalId.
+   * This is the single gateway for Connect-mode prompt injection.
+   * All callers must use this instead of writing to the PTY directly.
+   */
+  async writeBootstrapToTerminal(terminalId: string, data: string, caller: string): Promise<void> {
+    console.log(
+      `[RuntimeManager] writeBootstrapToTerminal: caller="${caller}", terminalId="${terminalId}", dataLength=${data.length}`,
+    );
+
+    const sessions = this.getActiveSessions();
+    const matchingSession = sessions.find(s => s.terminalId === terminalId);
+    if (matchingSession) {
+      console.warn(
+        `[RuntimeManager] writeBootstrapToTerminal: terminal ${terminalId} already has active session ${matchingSession.sessionId} (state: ${matchingSession.state}). ` +
+        `This may indicate a duplicate prompt injection. Caller: ${caller}`,
+      );
+    }
+
+    await writeToTerminal(terminalId, data);
+  }
+
+  /**
    * Stop a runtime session. Destroys the PTY if interactive.
    */
   async stopRuntime(args: StopRuntimeArgs): Promise<void> {
     const session = this.getSession(args.sessionId);
     if (!session) return;
 
+    const alreadyTerminal = session.state === 'completed' || session.state === 'failed' || session.state === 'cancelled';
     try {
-      if (session.isTerminal) {
+      if (session.isTerminal && !alreadyTerminal) {
         await writeToTerminal(session.terminalId, '\x03');
         await sleep(200);
         await writeToTerminal(session.terminalId, '\x03');
@@ -377,6 +415,198 @@ class RuntimeManager {
       decision: args.decision,
     });
     this.notifySnapshot();
+  }
+
+  // ── Session Liveness Validation (Group 5) ────────────────────
+
+  async validateSessionForReuse(
+    sessionId: string,
+    expectedCliId: import('../workflow/WorkflowTypes.js').CliId,
+  ): Promise<SessionLivenessResult> {
+    const session = this.sessions.get(sessionId);
+    if (!session) {
+      return { status: 'stale', details: 'Session object no longer exists in RuntimeManager.' };
+    }
+
+    const terminalStates: import('./RuntimeTypes.js').RuntimeSessionState[] = [
+      'completed', 'failed', 'cancelled',
+    ];
+    if (terminalStates.includes(session.state)) {
+      return {
+        status: 'wrong_state',
+        details: `Session is in terminal state "${session.state}".`,
+      };
+    }
+
+    const midPipelineStates: import('./RuntimeTypes.js').RuntimeSessionState[] = [
+      'creating', 'launching_cli', 'awaiting_cli_ready', 'registering_mcp',
+      'bootstrap_injecting', 'bootstrap_sent', 'awaiting_mcp_ready',
+      'injecting_task', 'awaiting_ack',
+    ];
+    if (midPipelineStates.includes(session.state)) {
+      return {
+        status: 'wrong_state',
+        details: `Session is stuck mid-pipeline in state "${session.state}".`,
+      };
+    }
+
+    // A running or permission-blocked session means the agent is still active from a
+    // previous run that was not properly cleaned up. Stop and recreate instead of
+    // re-injecting into a session whose MCP connection may be gone.
+    if (session.state === 'running' || session.state === 'awaiting_permission') {
+      return {
+        status: 'wrong_state',
+        details: `Session is in active state "${session.state}" and was not cleaned up after the previous run.`,
+      };
+    }
+
+    if (session.cliId !== expectedCliId) {
+      return {
+        status: 'cli_mismatch',
+        details: `Session CLI is "${session.cliId}" but expected "${expectedCliId}".`,
+      };
+    }
+
+    if (session.isTerminal) {
+      try {
+        const alive = await isTerminalActive(session.terminalId);
+        if (!alive) {
+          return {
+            status: 'stale',
+            details: `Terminal "${session.terminalId}" is no longer active.`,
+          };
+        }
+      } catch {
+        return {
+          status: 'stale',
+          details: `Cannot verify liveness of terminal "${session.terminalId}".`,
+        };
+      }
+
+      try {
+        const output = await getRecentTerminalOutput(session.terminalId, 12_288);
+        if (output) {
+          const detected = detectCliFromTerminalOutput(output);
+          if (detected.cli && detected.cli !== session.cliId) {
+            return {
+              status: 'cli_mismatch',
+              details: `Terminal is running "${detected.cli}" instead of "${session.cliId}".`,
+            };
+          }
+        }
+      } catch {
+        // If we can't read output but the terminal is alive, proceed
+      }
+    }
+
+    return { status: 'reusable', details: 'Session is alive and CLI is ready.' };
+  }
+
+  /**
+   * Ensure a runtime is ready for a task. (Group 5)
+   * If a reusable session exists, it re-injects the task.
+   * If not, it stops the old session and creates/launches a new one.
+   */
+  async ensureRuntimeReadyForTask(args: CreateRuntimeArgs): Promise<RuntimeSession> {
+    const existing = this.getSessionForNode(args.missionId, args.nodeId, args.attempt);
+    if (existing) {
+      const validation = await this.validateSessionForReuse(existing.sessionId, args.cliId);
+      if (validation.status === 'reusable') {
+        console.log(`[RuntimeManager] Reusing session ${existing.sessionId} for node ${args.nodeId}`);
+        await this.reinjectTask(existing.sessionId);
+        return existing;
+      }
+
+      console.warn(
+        `[RuntimeManager] Existing session ${existing.sessionId} not reusable (${validation.status}: ${validation.details}), stopping and recreating.`
+      );
+      try {
+        await this.stopRuntime({
+          sessionId: existing.sessionId,
+          reason: `Session not reusable: ${validation.details}`,
+        });
+      } catch {
+        // ignore errors stopping stale session
+      }
+    }
+
+    const session = await this.createRuntimeForNode(args);
+    // wireMcpEvents is now called inside createRuntimeForNode.
+    this.wirePtyEvents(args.terminalId, session.sessionId);
+    await this.launchCli(session.sessionId, args.activationPayload);
+    return session;
+  }
+
+  async reinjectTask(sessionId: string): Promise<void> {
+    const session = this.sessions.get(sessionId);
+    if (!session) throw new Error(`No runtime session: ${sessionId}`);
+
+    console.log(
+      `[RuntimeManager] reinjectTask: sessionId="${sessionId}", nodeId="${session.nodeId}", cliId="${session.cliId}"`,
+    );
+
+    const activationPayload = this.buildActivationPayload(session);
+    const baseUrl = await getMcpBaseUrl();
+
+    const signal = buildNewTaskSignal({
+      missionId: session.missionId,
+      nodeId: session.nodeId,
+      roleId: session.role,
+      sessionId: session.sessionId,
+      agentId: session.agentId,
+      terminalId: session.terminalId,
+      activatedAt: Date.now(),
+      attempt: session.attempt,
+      payload: activationPayload.inputPayload ?? null,
+      runId: activationPayload.runId,
+      cliType: session.cliId,
+      executionMode: session.executionMode,
+      goal: activationPayload.goal,
+      workspaceDir: session.workspaceDir,
+      assignment: activationPayload.assignment,
+    }, baseUrl);
+
+    session.transitionTo('injecting_task');
+
+    if (session.isHeadless) {
+      await this.launchHeadless(session, activationPayload, signal, baseUrl);
+    } else {
+      await this.injectInteractiveTask(session, signal);
+    }
+
+    session.transitionTo('awaiting_ack');
+
+    try {
+      await this.waitForMcpState(
+        session.sessionId,
+        session.missionId,
+        session.nodeId,
+        session.attempt,
+        'activation:acked',
+        new Set(['activation_acked', 'running', 'completed', 'done']),
+        TASK_ACK_TIMEOUT_MS,
+      );
+
+      session.transitionTo('running');
+
+      await acknowledgeActivation({
+        missionId: session.missionId,
+        nodeId: session.nodeId,
+        attempt: session.attempt,
+        status: 'activation_acked',
+      });
+
+      this.emit({
+        type: 'task_acked',
+        sessionId: session.sessionId,
+        nodeId: session.nodeId,
+        attempt: session.attempt,
+      });
+    } catch {
+      throw new Error(
+        `Agent for CLI "${session.cliId}" on node "${session.nodeId}" did not ACK re-injected task within ${Math.round(TASK_ACK_TIMEOUT_MS / 1000)}s.`,
+      );
+    }
   }
 
   // ── Query Methods ──────────────────────────────────────────────
@@ -463,6 +693,21 @@ class RuntimeManager {
       if (event.type === 'agent:heartbeat') {
         session.updateHeartbeat(event.at);
         this.emit({ type: 'heartbeat', sessionId, nodeId: session.nodeId, at: event.at });
+      }
+
+      if (event.type === 'task:completed') {
+        const outcome = (event.outcome === 'success' || event.outcome === 'failure')
+          ? (event.outcome as 'success' | 'failure')
+          : 'success';
+        session.markCompleted();
+        this.emit({
+          type: 'session_completed',
+          sessionId,
+          nodeId: session.nodeId,
+          outcome,
+        });
+        this.cleanupSession(session);
+        return;
       }
 
       if (event.type === 'agent:artifact') {
@@ -634,6 +879,10 @@ class RuntimeManager {
           await sleep(CLI_LAUNCH_DELAY_MS);
           try {
             await writeToTerminal(session.terminalId, `${session.cliId}\r`);
+            useWorkspaceStore.getState().updatePaneDataByTerminalId(session.terminalId, {
+              cliSource: 'connect_agent',
+              cli: session.cliId,
+            });
           } catch {
             // PTY still not available — user can interact with the terminal manually
           }
@@ -683,18 +932,24 @@ class RuntimeManager {
       throw new Error('MCP server unavailable during activation handshake.');
     }
 
-    // 3. For interactive PTY: launch CLI in terminal (skip if already running)
-    if (session.isTerminal) {
+    const isExecStdin = session.adapter.execMode === 'exec_stdin';
+
+    // 3. For interactive PTY: launch CLI in terminal (skip if already running, or exec_stdin)
+    if (session.isTerminal && !isExecStdin) {
       session.transitionTo('awaiting_cli_ready');
       this.bindRuntimeToTerminalPane(session);
       const terminalReady = await this.waitForTerminalReady(session.terminalId, 5_000);
       if (!terminalReady) {
-        throw new Error(`Terminal ${session.terminalId} did not become active before CLI launch.`);
+        throw new Error(`Terminal ${session.terminalId} did not become active before CLI launch (state: awaiting_cli_ready, node: ${session.nodeId}).`);
       }
       if (await this.shouldLaunchCliInTerminal(session)) {
         await sleep(CLI_LAUNCH_DELAY_MS);
         await writeToTerminal(session.terminalId, `${session.cliId}\r`);
         await sleep(CLI_STARTUP_WAIT_MS);
+        useWorkspaceStore.getState().updatePaneDataByTerminalId(session.terminalId, {
+          cliSource: 'connect_agent',
+          cli: session.cliId,
+        });
       }
     }
 
@@ -728,21 +983,110 @@ class RuntimeManager {
       status: 'registered',
     });
 
-    if (session.isTerminal) {
-      const bootstrapPrompt = this.buildInteractiveBootstrapPrompt(
-        session,
-        activationPayload,
-        await getMcpBaseUrl(),
-      );
-      if (bootstrapPrompt) {
-        await writeToTerminal(session.terminalId, bootstrapPrompt);
-        await sleep(PASTE_SUBMIT_GAP_MS);
+    // 5. Inject bootstrap prompt
+    // exec_stdin path: build a combined bootstrap+task prompt and spawn `codex exec -`
+    // with the full text piped to stdin.  This avoids the interactive TUI readiness
+    // race entirely — no PTY write, no timing tricks needed.
+    if (isExecStdin) {
+      session.transitionTo('bootstrap_injecting');
+      try {
+        const execBaseUrl = await getMcpBaseUrl();
+        const bootstrapPart = this.buildExecStdinBootstrapPrompt(session, execBaseUrl);
+        const taskSignal = buildNewTaskSignal({
+          missionId: session.missionId,
+          nodeId: session.nodeId,
+          roleId: session.role,
+          sessionId: session.sessionId,
+          agentId: session.agentId,
+          terminalId: session.terminalId,
+          activatedAt: Date.now(),
+          attempt: session.attempt,
+          payload: activationPayload.inputPayload ?? null,
+          runId: activationPayload.runId,
+          cliType: session.cliId,
+          executionMode: session.executionMode,
+          goal: activationPayload.goal,
+          workspaceDir: session.workspaceDir,
+          assignment: activationPayload.assignment,
+        }, execBaseUrl);
+        const combinedPrompt = `${bootstrapPart}\n\n${taskSignal}`;
+        await this.launchHeadless(session, activationPayload, combinedPrompt, execBaseUrl);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        throw new Error(
+          `exec-stdin launch failed for CLI "${session.cliId}" on node "${session.nodeId}": ${msg}`,
+        );
       }
+      session.transitionTo('bootstrap_sent');
     }
 
-    // 5. Wait for agent:ready handshake
+    // PTY path: inject bootstrap prompt into interactive terminal (explicit state)
+    if (session.isTerminal && !isExecStdin) {
+      session.transitionTo('bootstrap_injecting');
+
+      let bootstrapPrompt: string | null = null;
+      try {
+        bootstrapPrompt = this.buildInteractiveBootstrapPrompt(
+          session,
+          activationPayload,
+          await getMcpBaseUrl(),
+        );
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        throw new Error(
+          `Bootstrap prompt build failed for CLI "${session.cliId}" on node "${session.nodeId}": ${msg}`,
+        );
+      }
+
+      if (bootstrapPrompt) {
+        try {
+          const promptBody = bootstrapPrompt.replace(/\r$/, '');
+          const { preClear, paste, submit } = session.adapter.buildActivationInput(promptBody);
+          const settleDelay = session.adapter.postReadySettleDelayMs ?? 0;
+
+          const injectResult = await Promise.race([
+            (async () => {
+              if (settleDelay > 0) await sleep(settleDelay);
+              if (preClear) {
+                await writeToTerminal(session.terminalId, preClear);
+                await sleep(PRE_CLEAR_SETTLE_MS);
+              }
+              await writeToTerminal(session.terminalId, paste);
+              await sleep(PASTE_SUBMIT_GAP_MS);
+              await writeToTerminal(session.terminalId, submit);
+              return true;
+            })(),
+            sleep(BOOTSTRAP_INJECTION_TIMEOUT_MS).then(() => false),
+          ]);
+
+          if (!injectResult) {
+            throw new Error(
+              `Bootstrap prompt injection timed out (${BOOTSTRAP_INJECTION_TIMEOUT_MS}ms) for CLI "${session.cliId}" on node "${session.nodeId}".`,
+            );
+          }
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          throw new Error(
+            `Bootstrap prompt injection failed for CLI "${session.cliId}" on node "${session.nodeId}": ${msg}`,
+          );
+        }
+      }
+
+      session.transitionTo('bootstrap_sent');
+    }
+
+    // 6. Wait for agent:ready handshake — only reached if bootstrap was injected (or sent) successfully
     session.transitionTo('awaiting_mcp_ready');
-    await mcpReadyPromise;
+
+    try {
+      await mcpReadyPromise;
+    } catch {
+      throw new Error(
+        `Timed out waiting for "${contract.handshakeEvent}" from CLI "${session.cliId}" on node "${session.nodeId}" (${BOOTSTRAP_EVENT_TIMEOUT_MS}ms). ` +
+        'The bootstrap prompt may not have been received or the agent failed to connect to MCP.',
+      );
+    }
+
     session.transitionTo('ready');
 
     await acknowledgeActivation({
@@ -752,7 +1096,7 @@ class RuntimeManager {
       status: 'ready',
     });
 
-    // 6. Build NEW_TASK signal
+    // 7. Build NEW_TASK signal
     const baseUrl = await getMcpBaseUrl();
     const signal = buildNewTaskSignal({
       missionId: session.missionId,
@@ -772,16 +1116,18 @@ class RuntimeManager {
       assignment: activationPayload.assignment,
     }, baseUrl);
 
-    // 7. Inject task
+    // 8. Inject task (exec_stdin path already delivered the task in the combined prompt)
     session.transitionTo('injecting_task');
 
-    if (session.isHeadless) {
-      await this.launchHeadless(session, activationPayload, signal, baseUrl);
-    } else {
-      await this.injectInteractiveTask(session, signal);
+    if (!isExecStdin) {
+      if (session.isHeadless) {
+        await this.launchHeadless(session, activationPayload, signal, baseUrl);
+      } else {
+        await this.injectInteractiveTask(session, signal);
+      }
     }
 
-    // 8. Wait for ACK
+    // 9. Wait for ACK
     session.transitionTo('awaiting_ack');
 
     try {
@@ -818,7 +1164,7 @@ class RuntimeManager {
       });
     } catch {
       throw new Error(
-        `Agent did not call get_task_details within ${Math.round(TASK_ACK_TIMEOUT_MS / 1000)}s. Check terminal for errors.`,
+        `Agent for CLI "${session.cliId}" on node "${session.nodeId}" did not call get_task_details within ${Math.round(TASK_ACK_TIMEOUT_MS / 1000)}s (state: awaiting_ack). Check terminal for errors.`,
       );
     }
   }
@@ -851,7 +1197,11 @@ class RuntimeManager {
     await sleep(CLI_STARTUP_WAIT_MS);
 
     const adapter = session.adapter;
-    const { paste, submit } = adapter.buildActivationInput(signal);
+    const { preClear, paste, submit } = adapter.buildActivationInput(signal);
+    if (preClear) {
+      await writeToTerminal(session.terminalId, preClear);
+      await sleep(PRE_CLEAR_SETTLE_MS);
+    }
     await writeToTerminal(session.terminalId, paste);
     await sleep(PASTE_SUBMIT_GAP_MS);
     await writeToTerminal(session.terminalId, submit);
@@ -862,6 +1212,22 @@ class RuntimeManager {
       nodeId: session.nodeId,
       attempt: session.attempt,
     });
+  }
+
+  private buildExecStdinBootstrapPrompt(
+    session: RuntimeSession,
+    mcpUrl: string,
+  ): string {
+    const role = session.role;
+    const profileId = session.profileId ?? role;
+    // Do NOT say "wait for NEW_TASK" — the task signal is appended directly below this
+    // in the combined prompt, so Codex should proceed immediately after connecting.
+    return (
+      `Connect to MCP before task activation. MCP URL: ${mcpUrl}. ` +
+      `Call connect_agent with role="${role}", agentId="${session.agentId}", terminalId="${session.terminalId}", ` +
+      `cli="${session.cliId}", profileId="${profileId}", missionId="${session.missionId}", nodeId="${session.nodeId}", attempt=${session.attempt}. ` +
+      `After connection, immediately proceed to execute the task described below and call get_task_details to receive your full assignment.`
+    );
   }
 
   private buildInteractiveBootstrapPrompt(
@@ -983,7 +1349,7 @@ class RuntimeManager {
           clearInterval(pollInterval);
           settled = true;
           unsub();
-          reject(new Error(`Timed out waiting for ${eventType} on ${sessionId}`));
+          reject(new Error(`Timed out waiting for ${eventType} on session ${sessionId} (node: ${nodeId}, timeout: ${timeoutMs}ms)`));
           return;
         }
 
@@ -1067,8 +1433,13 @@ class RuntimeManager {
     const state = useWorkspaceStore.getState();
     const allPanes = state.tabs.flatMap(t => t.panes);
     const pane = allPanes.find(p => p.data?.terminalId === session.terminalId);
-    const cliDetectedFromOutput = pane?.data?.cliSource === 'stdout' || pane?.data?.cliSource === 'connect_agent';
-    if (cliDetectedFromOutput) return false;
+
+    const paneCli = typeof pane?.data?.cli === 'string' ? pane.data.cli : null;
+    const paneCliSource = typeof pane?.data?.cliSource === 'string' ? pane.data.cliSource : null;
+
+    const isKnownRunning = (paneCliSource === 'stdout' || paneCliSource === 'connect_agent') && paneCli === session.cliId;
+    if (isKnownRunning) return false;
+
     if (this.hasDifferentLiveSessionOnTerminal(session)) return false;
 
     const recentOutput = await getRecentTerminalOutput(session.terminalId, 12_288);

@@ -16,6 +16,7 @@ import type {
   WorkflowNodeStatus,
 } from '../store/workspace.js';
 import { deriveExecutionLayers } from './graphUtils.js';
+import { normalizeCliId, supportsHeadless } from './cliIdentity.js';
 import agentsConfig from '../config/agents.js';
 
 type FlowNodeLike = Pick<Node, 'id' | 'type' | 'position' | 'parentId' | 'extent' | 'style'> & {
@@ -39,7 +40,7 @@ const AGENT_CLI_FALLBACK: WorkflowAgentCli = 'claude';
 const EXECUTION_MODE_FALLBACK: WorkflowExecutionMode = 'streaming_headless';
 const MODE_FALLBACK: WorkflowMode = 'build';
 const WORKER_CAPABILITY_IDS: WorkerCapabilityId[] = ['planning', 'coding', 'testing', 'review', 'security', 'repo_analysis', 'shell_execution'];
-const CORE_INSTRUCTION_BY_ROLE = new Map(
+const CORE_INSTRUCTION_BY_ROLE = new Map<string, string>(
   agentsConfig.agents.map(agent => [agent.id, agent.coreInstructions ?? ''])
 );
 
@@ -172,10 +173,7 @@ function normalizeExecutionMode(value: unknown): WorkflowExecutionMode {
 }
 
 function normalizeAgentCli(value: unknown): WorkflowAgentCli {
-  if (value === 'claude' || value === 'gemini' || value === 'opencode' || value === 'codex' || value === 'custom' || value === 'ollama' || value === 'lmstudio') {
-    return value;
-  }
-  return AGENT_CLI_FALLBACK;
+  return normalizeCliId(value) ?? AGENT_CLI_FALLBACK;
 }
 
 function getAuthoringMode(value: unknown): WorkflowAuthoringMode | undefined {
@@ -617,6 +615,13 @@ export function compileMission({
     const instructionOverride = asString(node.data?.instructionOverride) ?? '';
     const roleInstructions = instructionOverride.trim() || CORE_INSTRUCTION_BY_ROLE.get(roleId)?.trim() || '';
 
+    const cli = terminalClis[terminalId] ?? normalizeAgentCli(node.data?.cli);
+    let executionMode = normalizeExecutionMode(node.data?.executionMode);
+
+    if (executionMode !== 'interactive_pty' && !supportsHeadless(cli)) {
+      executionMode = 'interactive_pty';
+    }
+
     return {
       id: node.id,
       roleId,
@@ -627,8 +632,8 @@ export function compileMission({
       terminal: {
         terminalId,
         terminalTitle,
-        cli: terminalClis[terminalId] ?? normalizeAgentCli(node.data?.cli),
-        executionMode: normalizeExecutionMode(node.data?.executionMode),
+        cli,
+        executionMode,
         paneId: trimToUndefined(node.data?.paneId),
         reusedExisting: Boolean(node.data?.autoLinked),
       },

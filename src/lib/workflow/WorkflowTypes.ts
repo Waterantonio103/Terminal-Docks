@@ -25,17 +25,11 @@ export type WorkflowNodeKind =
 export type EdgeCondition = 'always' | 'on_success' | 'on_failure';
 
 // ──────────────────────────────────────────────
-// CLI Identifiers
+// CLI Identifiers — canonical source is cliIdentity.ts
 // ──────────────────────────────────────────────
 
-export type CliId =
-  | 'claude'
-  | 'codex'
-  | 'gemini'
-  | 'opencode'
-  | 'custom'
-  | 'ollama'
-  | 'lmstudio';
+export type { CliId } from '../cliIdentity.js';
+export { normalizeCliId, isValidCliId, CANONICAL_CLI_IDS, assertCliIdConsistency } from '../cliIdentity.js';
 
 // ──────────────────────────────────────────────
 // Execution Modes
@@ -105,6 +99,8 @@ export type NodeLifecycleState =
   | 'launching_runtime'
   | 'awaiting_cli_ready'
   | 'registering_mcp'
+  | 'bootstrap_injecting'
+  | 'bootstrap_sent'
   | 'awaiting_mcp_ready'
   | 'injecting_task'
   | 'awaiting_ack'
