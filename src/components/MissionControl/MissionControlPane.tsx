@@ -20,7 +20,6 @@ import {
   TerminalSquare,
   ArrowUpRight,
   AlertCircle,
-  RefreshCw,
 } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import { invoke } from '@tauri-apps/api/core';
@@ -328,11 +327,9 @@ function AgentBadge({
 function NodeCard({
   agent,
   onOpenTerminal,
-  onRetryNode,
 }: {
   agent: MissionAgent;
   onOpenTerminal: (agent: MissionAgent) => void;
-  onRetryNode?: (agent: MissionAgent) => void;
 }) {
   const role = agentsConfig.agents.find(entry => entry.id === agent.roleId);
   const history = agent.attemptHistory ?? [];
@@ -341,8 +338,6 @@ function NodeCard({
   const sessionId = agent.runtimeSessionId ?? '—';
   const sessionDisplay = sessionId === '—' ? sessionId : `${sessionId.slice(0, 26)}${sessionId.length > 26 ? '…' : ''}`;
   const heartbeatDisplay = agent.runtimeLastHeartbeatAt ? formatTime(agent.runtimeLastHeartbeatAt) : '—';
-
-  const canRetry = agent.status === 'failed' || agent.status === 'unbound' || agent.status === 'done' || agent.status === 'completed';
 
   return (
     <div className="border border-border-panel rounded-lg background-bg-panel overflow-hidden">
@@ -361,16 +356,6 @@ function NodeCard({
           </div>
         </div>
         <div className="flex items-center gap-1.5">
-          {onRetryNode && canRetry && (
-            <button
-              type="button"
-              onClick={() => onRetryNode(agent)}
-              className="flex items-center gap-1 px-2 py-1 rounded text-[10px] text-accent-primary hover:text-accent-secondary hover:background-bg-panel border border-accent-primary/30 transition-colors"
-            >
-              <RefreshCw size={11} />
-              Retry
-            </button>
-          )}
           <button
             type="button"
             onClick={() => onOpenTerminal(agent)}
@@ -754,31 +739,6 @@ export function MissionControlPane({ pane }: { pane: Pane }) {
           adapterStatus: shouldForceFailed ? 'disconnected' : target.status ?? null,
         });
       }
-
-      const attempt = typeof target.attempt === 'number' ? target.attempt : null;
-      const missionId = currentMissionId ?? null;
-      const nodeId = target.nodeId ?? null;
-      const sessionId = target.runtimeSessionId ?? null;
-
-      if (missionId && nodeId && attempt && attempt > 0) {
-        invoke('acknowledge_runtime_activation', {
-          missionId,
-          nodeId,
-          attempt,
-          status: 'disconnected',
-          reason,
-        }).catch(() => {});
-      }
-      if (sessionId) {
-        invoke('mcp_notify_agent', {
-          sessionId,
-          kind: 'runtime_disconnected',
-          missionId,
-          nodeId,
-          attempt: attempt && attempt > 0 ? attempt : null,
-          reason,
-        }).catch(() => {});
-      }
     }).then(fn => {
       unlistenExitFn = fn;
       if (unmounted) fn();
@@ -852,25 +812,6 @@ export function MissionControlPane({ pane }: { pane: Pane }) {
       
       inflightActivationsRef.current.delete(activationKey);
     };
-
-    // Discovery phase: check for any nodes already in 'activation_pending' for this mission.
-    // This solves the race condition where the backend emits activation requests 
-    // before the MissionControlPane has mounted its listeners.
-    if (currentMissionId && !unmounted) {
-      void (async () => {
-        try {
-          const pending = await invoke<RuntimeActivationPayload[]>('get_mission_activations', {
-            missionId: currentMissionId
-          });
-          for (const payload of pending) {
-            if (unmounted) break;
-            void processActivation(payload, currentMissionId, payload.nodeId, payload.attempt);
-          }
-        } catch (e) {
-          console.warn('[Activation] Failed to discover pending activations:', e);
-        }
-      })();
-    }
 
     listen<{
       mission_id: string;
@@ -948,25 +889,13 @@ export function MissionControlPane({ pane }: { pane: Pane }) {
       at: number;
     }>('agent-run-exit', (event) => {
       if (unmounted) return;
-      const { runId, missionId, nodeId, status, error } = event.payload;
+      const { runId, missionId, nodeId } = event.payload;
       if (currentMissionId && currentMissionId !== missionId) return;
 
       const target = readAgentsForPane(pane.id, agents).find(agent =>
         agent.nodeId === nodeId && agent.activeRunId === runId
       );
-      if (!target || !RUNTIME_ACTIVE_STATES.has(target.status)) return;
-      if (status === 'completed' && (target.runtimeCli === 'ollama' || target.runtimeCli === 'lmstudio' || target.runtimeCli === 'claude')) return;
-
-      const reason = status === 'completed'
-        ? 'process_exited_without_handoff'
-        : (error ?? status ?? 'Agent run exited before completing via MCP.');
-      invoke('acknowledge_runtime_activation', {
-        missionId,
-        nodeId,
-        attempt: target.attempt ?? 0,
-        status: 'failed',
-        reason,
-      }).catch(() => {});
+      if (!target) return;
     }).then(fn => {
       unlistenRunExitFn = fn;
       if (unmounted) fn();
@@ -1140,18 +1069,6 @@ export function MissionControlPane({ pane }: { pane: Pane }) {
     }
   }
 
-  async function retryNode(agent: MissionAgent) {
-    if (!currentMissionId || !agent.nodeId) return;
-    try {
-      await invoke('retry_mission_node', {
-        missionId: currentMissionId,
-        nodeId: agent.nodeId,
-      });
-    } catch (error) {
-      console.error('Failed to retry node:', error);
-    }
-  }
-
   return (
     <div className="flex flex-col h-full background-bg-panel overflow-hidden">
       <div className="shrink-0 px-3 py-2 border-b border-border-panel bg-bg-titlebar">
@@ -1288,7 +1205,6 @@ export function MissionControlPane({ pane }: { pane: Pane }) {
                 key={`${agent.nodeId ?? agent.terminalId}`}
                 agent={agent}
                 onOpenTerminal={openTerminal}
-                onRetryNode={retryNode}
               />
             ))
           )}

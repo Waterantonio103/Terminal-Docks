@@ -114,6 +114,42 @@ class RuntimeManager {
         console.error(`[RuntimeManager] Failed to launch CLI for ${node_id}:`, error);
       }
     });
+
+    // Acknowledge headless run exits that complete without going through MCP.
+    // Skipped for interactive CLIs (claude/ollama/lmstudio) which complete via MCP tools.
+    listen<{
+      runId: string;
+      missionId: string;
+      nodeId: string;
+      status: string;
+      exitCode?: number | null;
+      error?: string | null;
+      at: number;
+    }>('agent-run-exit', async (event) => {
+      const { missionId, nodeId, status, error } = event.payload;
+      const sessionKey = Array.from(this.sessionsByNode.entries()).find(
+        ([key]) => key.startsWith(`${missionId}:${nodeId}:`)
+      );
+      if (!sessionKey) return;
+      const session = this.sessions.get(sessionKey[1]);
+      if (!session) return;
+
+      const isInteractiveCli = session.cliId === 'claude' || session.cliId === 'ollama' || session.cliId === 'lmstudio';
+      if (status === 'completed' && isInteractiveCli) return;
+      if (session.state === 'completed' || session.state === 'failed') return;
+
+      const reason = status === 'completed'
+        ? 'process_exited_without_handoff'
+        : (error ?? status ?? 'Agent run exited before completing via MCP.');
+
+      await acknowledgeActivation({
+        missionId: session.missionId,
+        nodeId: session.nodeId,
+        attempt: session.attempt,
+        status: 'failed',
+        reason,
+      });
+    }).catch(console.error);
   }
 
   // ── Public API ──────────────────────────────────────────────────

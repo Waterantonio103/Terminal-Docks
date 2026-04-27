@@ -1673,6 +1673,30 @@ pub fn start_mission_graph(
     Ok(())
 }
 
+/// Seed a compiled mission into the shared SQLite database so MCP tools
+/// (complete_task, get_task_details, handoff_task) can find it, without
+/// emitting `workflow-runtime-activation-requested` or setting failure states.
+/// Used by the TS WorkflowOrchestrator path which handles activation itself.
+#[tauri::command]
+pub fn seed_mission_to_db(
+    app: AppHandle,
+    mission_id: String,
+    graph: CompiledMission,
+) -> Result<(), String> {
+    if graph.mission_id != mission_id {
+        return Err(format!(
+            "Mission ID mismatch: command received {}, payload contains {}",
+            mission_id, graph.mission_id
+        ));
+    }
+    persist_compiled_mission(&app, &graph, "active");
+    clear_runtime_sessions_for_mission(&app, &mission_id);
+    for node in &graph.nodes {
+        persist_node_runtime(&app, &mission_id, &node.id, &node.role_id, "idle", 0, None, None, None);
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub fn append_mission_patch(
     app: AppHandle,

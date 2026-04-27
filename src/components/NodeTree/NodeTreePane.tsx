@@ -917,6 +917,17 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
               applyOperator({ type: 'set_node_property', nodeId, key: 'paneId', value: existing.paneId });
             }
           }
+          const existingTerminal = openTerminals.find(t => t.id === resolvedTerminalId)!;
+          freshBindings.set(nodeId, {
+            id: resolvedTerminalId,
+            title: existingTerminal.title,
+            paneId: existingTerminal.paneId,
+            cli: SELECTABLE_WORKFLOW_CLIS.includes(data.cli as WorkflowAgentCli)
+              ? (data.cli as WorkflowAgentCli)
+              : (SUPPORTED_WORKFLOW_CLIS.has(String(existingTerminal.cli))
+                  ? existingTerminal.cli as WorkflowAgentCli
+                  : 'claude'),
+          });
           continue;
         }
 
@@ -1052,6 +1063,11 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
         mission,
       });
 
+      // Persist mission to shared SQLite so MCP tools (complete_task, get_task_details, etc.) can find it.
+      // Uses seed_mission_to_db (not start_mission_graph) to avoid the Rust engine emitting
+      // workflow-runtime-activation-requested, which would double-activate nodes alongside the TS orchestrator.
+      await invoke('seed_mission_to_db', { missionId, graph: mission });
+
       // TS Orchestrator is the canonical runtime brain.
       const { workflowOrchestrator } = await import('../../lib/workflow/WorkflowOrchestrator');
       const { compiledMissionToDefinition } = await import('../../lib/workflow/index');
@@ -1060,9 +1076,16 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
         { runId: missionId }
       );
 
+      const unsubFailures = workflowOrchestrator.subscribeForRun(missionId, (event) => {
+        if (event.type !== 'node_failed') return;
+        setValidationTone('error');
+        setValidationMessage(`Node ${event.nodeId} failed: ${event.error ?? 'activation pipeline error'}`);
+        unsubFailures.unsubscribe();
+      });
+
       setValidationTone('ok');
       setValidationMessage(
-        `Mission ${missionId.substring(0, 8)} registered. Mission Control will activate nodes automatically.`
+        `Mission ${missionId.substring(0, 8)} registered. Activating nodes…`
       );
     } catch (error) {
       setActiveMissionId(null);

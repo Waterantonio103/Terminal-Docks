@@ -62,6 +62,7 @@ pub fn run() {
             swarm::watch_directory,
             workflow_log::export_workflow_log,
             workflow_engine::start_mission_graph,
+            workflow_engine::seed_mission_to_db,
             workflow_engine::retry_mission_node,
             workflow_engine::append_mission_patch,
             workflow_engine::register_runtime_activation_dispatch,

@@ -1540,7 +1540,8 @@ export function executeHandoffTask(
     }), 'task_update');
   }
 
-  emitAgentEvent({
+  const handoffAt = Date.now();
+  const handoffEvent = {
     type: 'task:completed',
     sessionId: sid,
     missionId,
@@ -1548,9 +1549,21 @@ export function executeHandoffTask(
     attempt: fromAttempt,
     outcome: normalizedOutcome,
     targetNodeId: targetNodeId ?? null,
-    at: Date.now(),
+    at: handoffAt,
     payload: structuredCompletion,
-  });
+  };
+  emitAgentEvent(handoffEvent);
+
+  // Cross-emit on the pre-registered runtime session ID so the TS orchestrator's
+  // mcpBus subscriber (which uses the runtime session ID, not the transport UUID) fires.
+  if (missionId && fromNodeId && Number.isInteger(fromAttempt) && fromAttempt > 0) {
+    const runtimeSessionRow = db.prepare(
+      `SELECT session_id FROM agent_runtime_sessions WHERE mission_id = ? AND node_id = ? AND attempt = ? LIMIT 1`
+    ).get(missionId, fromNodeId, fromAttempt);
+    if (runtimeSessionRow && runtimeSessionRow.session_id !== sid) {
+      emitAgentEvent({ ...handoffEvent, sessionId: runtimeSessionRow.session_id });
+    }
+  }
 
   return { taskId, eventBody };
 }
@@ -1664,7 +1677,8 @@ export function executeCompleteTask(
     routed,
   }));
 
-  emitAgentEvent({
+  const completedAt = Date.now();
+  const completionEvent = {
     type: 'task:completed',
     sessionId: sid,
     missionId,
@@ -1675,8 +1689,19 @@ export function executeCompleteTask(
     filesChanged: structuredCompletion.filesChanged,
     artifactReferences: structuredCompletion.artifactReferences,
     logRef: completion.logRef,
-    at: Date.now(),
-  });
+    at: completedAt,
+  };
+  emitAgentEvent(completionEvent);
+
+  // The TS orchestrator subscribes via mcpBus using the pre-registered runtime session ID
+  // (e.g. "claude:abc:xyz"), but getSessionId() returns the MCP transport UUID. Cross-emit
+  // on the runtime session ID so the orchestrator's wireMcpForSession handler fires.
+  const runtimeSessionRow = db.prepare(
+    `SELECT session_id FROM agent_runtime_sessions WHERE mission_id = ? AND node_id = ? AND attempt = ? LIMIT 1`
+  ).get(missionId, nodeId, attempt);
+  if (runtimeSessionRow && runtimeSessionRow.session_id !== sid) {
+    emitAgentEvent({ ...completionEvent, sessionId: runtimeSessionRow.session_id });
+  }
 
   return makeToolText(JSON.stringify({
     status: 'completed',

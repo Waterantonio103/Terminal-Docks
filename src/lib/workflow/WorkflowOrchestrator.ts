@@ -479,7 +479,7 @@ export class WorkflowOrchestrator {
         terminalId: nodeDef.config.terminalId || '',
         paneId: nodeDef.config.paneId,
         workspaceDir: nodeDef.config.workspaceDir ?? null,
-        goal: (run.definition as any).task?.prompt || '',
+        goal: (run.definition.nodes.find(n => n.kind === 'task') as any)?.config?.prompt || '',
         legalTargets: getLegalTargetsForNode(run, nodeId) as any,
         upstreamPayloads: getIncomingHandoffs(run, nodeId),
       });
@@ -496,6 +496,12 @@ export class WorkflowOrchestrator {
       };
 
       attachRuntime(refreshedRun, nodeId, session);
+
+      // Wire MCP events now that the session is attached to the run (session_created fired
+      // before attachRuntime, so the earlier wireMcpForSession call in handleRuntimeManagerEvent
+      // couldn't find the run — we must wire it explicitly here).
+      this.wireMcpForSession(run.runId, result.sessionId);
+
       this.emit({
         type: 'runtime_attached',
         runId: run.runId,
@@ -504,6 +510,10 @@ export class WorkflowOrchestrator {
         terminalId: result.terminalId,
         timestamp: Date.now(),
       });
+
+      // Run the full activation pipeline: launch CLI, MCP handshake, inject task.
+      // createRuntimeForNode only registers the session — launchCli is required separately.
+      await this.runtimeManager!.launchCli(result.sessionId);
     } catch (err) {
       const refreshedRun = this.runs.get(run.runId);
       if (!refreshedRun) return;
