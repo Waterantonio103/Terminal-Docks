@@ -493,8 +493,11 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
       if (activeMissionId && event.payload.missionId !== activeMissionId) return;
       setRuntimeNodeState(event.payload.nodeId, 'launching', null);
     }).then(fn => {
-      unlistenActivation = fn;
-      if (unmounted) fn();
+      if (unmounted) {
+        fn();
+      } else {
+        unlistenActivation = fn;
+      }
     });
 
     listen<{
@@ -536,8 +539,11 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
         });
       }
     }).then(fn => {
-      unlistenUpdate = fn;
-      if (unmounted) fn();
+      if (unmounted) {
+        fn();
+      } else {
+        unlistenUpdate = fn;
+      }
     });
 
     listen<{
@@ -549,15 +555,27 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
       if (activeMissionId && event.payload.missionId !== activeMissionId) return;
       setRuntimeNodeState(event.payload.nodeId, 'failed', event.payload.message);
     }).then(fn => {
-      unlistenWarning = fn;
-      if (unmounted) fn();
+      if (unmounted) {
+        fn();
+      } else {
+        unlistenWarning = fn;
+      }
     });
 
     return () => {
       unmounted = true;
-      unlistenActivation?.();
-      unlistenUpdate?.();
-      unlistenWarning?.();
+      if (unlistenActivation) {
+        unlistenActivation();
+        unlistenActivation = undefined;
+      }
+      if (unlistenUpdate) {
+        unlistenUpdate();
+        unlistenUpdate = undefined;
+      }
+      if (unlistenWarning) {
+        unlistenWarning();
+        unlistenWarning = undefined;
+      }
     };
   }, [activeMissionId, registry, setRuntimeNodeState]);
 
@@ -588,7 +606,7 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
 
     return () => {
       unmounted = true;
-      unlistenAction?.();
+      if (unlistenAction) unlistenAction();
       Object.values(actionTimersRef.current).forEach(clearTimeout);
     };
   }, []);
@@ -821,8 +839,8 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
     });
     return () => {
       unmounted = true;
-      unlistenPtyOut?.();
-      unlistenAgentRunOutput?.();
+      if (unlistenPtyOut) unlistenPtyOut();
+      if (unlistenAgentRunOutput) unlistenAgentRunOutput();
     };
   }, [activeMissionId]);
 

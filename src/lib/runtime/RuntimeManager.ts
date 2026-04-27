@@ -28,6 +28,7 @@ import { getCliAdapter } from './adapters/index.js';
 import {
   checkMcpHealth,
   getMcpBaseUrl,
+  getRecentTerminalOutput,
   registerMcpSession,
   registerActivationDispatch,
   acknowledgeActivation,
@@ -41,6 +42,7 @@ import { buildNewTaskSignal } from '../missionRuntime.js';
 import { buildStartAgentRunRequest } from '../runtimeDispatcher.js';
 import { getRuntimeBootstrapContract, buildRuntimeBootstrapRegistrationRequest } from '../runtimeBootstrap.js';
 import { mcpBus } from '../workers/mcpEventBus.js';
+import { detectCliFromTerminalOutput } from '../cliDetection.js';
 import { useWorkspaceStore } from '../../store/workspace.js';
 import { emit } from '@tauri-apps/api/event';
 
@@ -499,13 +501,18 @@ class RuntimeManager {
   wirePtyEvents(terminalId: string, sessionId: string): () => void {
     let unlistenSpawn: (() => void) | undefined;
     let unlistenExit: (() => void) | undefined;
+    let disposed = false;
 
     listen<{ id: string }>('pty-spawned', event => {
       if (event.payload.id !== terminalId) return;
       const session = this.sessions.get(sessionId);
       if (!session) return;
     }).then(fn => {
-      unlistenSpawn = fn;
+      if (disposed) {
+        fn();
+      } else {
+        unlistenSpawn = fn;
+      }
     });
 
     listen<{ id: string; data: string }>('pty-data', event => {
@@ -541,11 +548,15 @@ class RuntimeManager {
         // Usually MCP tool 'complete_task' is the authority.
       }
     }).then(fn => {
-      const existing = this.ptyCleanupFns.get(sessionId);
-      this.ptyCleanupFns.set(sessionId, () => {
-        existing?.();
+      if (disposed) {
         fn();
-      });
+      } else {
+        const existing = this.ptyCleanupFns.get(sessionId);
+        this.ptyCleanupFns.set(sessionId, () => {
+          existing?.();
+          fn();
+        });
+      }
     });
 
     listen<{ id: string }>('pty-exit', async event => {
@@ -591,10 +602,15 @@ class RuntimeManager {
 
       this.cleanupSession(session);
     }).then(fn => {
-      unlistenExit = fn;
+      if (disposed) {
+        fn();
+      } else {
+        unlistenExit = fn;
+      }
     });
 
     return () => {
+      disposed = true;
       unlistenSpawn?.();
       unlistenExit?.();
     };
@@ -612,19 +628,9 @@ class RuntimeManager {
       session.transitionTo('launching_cli');
       if (session.isTerminal) {
         session.transitionTo('awaiting_cli_ready');
-        // Wait up to 5s for the PTY to spawn (the pane must be added before launchCli is called)
-        const ptyDeadline = Date.now() + 5_000;
-        while (!(await isTerminalActive(session.terminalId))) {
-          if (Date.now() >= ptyDeadline) break;
-          await sleep(100);
-        }
-        // Check if CLI is already running before writing the launch command
-        const storeState = useWorkspaceStore.getState();
-        const allPanes = storeState.tabs.flatMap(t => t.panes);
-        const pane = allPanes.find(p => p.data?.terminalId === session.terminalId);
-        const hasExistingRuntime = typeof pane?.data?.runtimeSessionId === 'string';
-        const cliDetectedFromOutput = pane?.data?.cliSource === 'stdout' || pane?.data?.cliSource === 'connect_agent';
-        if (!hasExistingRuntime && !cliDetectedFromOutput) {
+        this.bindRuntimeToTerminalPane(session);
+        const terminalReady = await this.waitForTerminalReady(session.terminalId, 5_000);
+        if (terminalReady && await this.shouldLaunchCliInTerminal(session)) {
           await sleep(CLI_LAUNCH_DELAY_MS);
           try {
             await writeToTerminal(session.terminalId, `${session.cliId}\r`);
@@ -680,12 +686,12 @@ class RuntimeManager {
     // 3. For interactive PTY: launch CLI in terminal (skip if already running)
     if (session.isTerminal) {
       session.transitionTo('awaiting_cli_ready');
-      const storeState = useWorkspaceStore.getState();
-      const allPanes = storeState.tabs.flatMap(t => t.panes);
-      const pane = allPanes.find(p => p.data?.terminalId === session.terminalId);
-      const hasExistingRuntime = typeof pane?.data?.runtimeSessionId === 'string';
-      const cliDetectedFromOutput = pane?.data?.cliSource === 'stdout' || pane?.data?.cliSource === 'connect_agent';
-      if (!hasExistingRuntime && !cliDetectedFromOutput) {
+      this.bindRuntimeToTerminalPane(session);
+      const terminalReady = await this.waitForTerminalReady(session.terminalId, 5_000);
+      if (!terminalReady) {
+        throw new Error(`Terminal ${session.terminalId} did not become active before CLI launch.`);
+      }
+      if (await this.shouldLaunchCliInTerminal(session)) {
         await sleep(CLI_LAUNCH_DELAY_MS);
         await writeToTerminal(session.terminalId, `${session.cliId}\r`);
         await sleep(CLI_STARTUP_WAIT_MS);
@@ -1017,6 +1023,64 @@ class RuntimeManager {
       }
     }
     return {};
+  }
+
+  private bindRuntimeToTerminalPane(session: RuntimeSession): void {
+    useWorkspaceStore.getState().updatePaneDataByTerminalId(session.terminalId, {
+      runtimeSessionId: session.sessionId,
+      nodeId: session.nodeId,
+      roleId: session.role,
+      cli: session.cliId,
+    });
+  }
+
+  private async waitForTerminalReady(terminalId: string, timeoutMs: number): Promise<boolean> {
+    const deadline = Date.now() + timeoutMs;
+    while (!(await isTerminalActive(terminalId))) {
+      if (Date.now() >= deadline) return false;
+      await sleep(100);
+    }
+    return true;
+  }
+
+  private hasDifferentLiveSessionOnTerminal(current: RuntimeSession): boolean {
+    const state = useWorkspaceStore.getState();
+    const allPanes = state.tabs.flatMap(t => t.panes);
+    const pane = allPanes.find(p => p.data?.terminalId === current.terminalId);
+    const paneSessionId = typeof pane?.data?.runtimeSessionId === 'string' ? pane.data.runtimeSessionId : null;
+    if (paneSessionId && paneSessionId !== current.sessionId && this.sessions.has(paneSessionId)) {
+      return true;
+    }
+
+    for (const binding of Object.values(state.nodeRuntimeBindings)) {
+      if (!binding || binding.terminalId !== current.terminalId) continue;
+      const sessionId = binding.runtimeSessionId;
+      if (typeof sessionId !== 'string') continue;
+      if (sessionId !== current.sessionId && this.sessions.has(sessionId)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private async shouldLaunchCliInTerminal(session: RuntimeSession): Promise<boolean> {
+    const state = useWorkspaceStore.getState();
+    const allPanes = state.tabs.flatMap(t => t.panes);
+    const pane = allPanes.find(p => p.data?.terminalId === session.terminalId);
+    const cliDetectedFromOutput = pane?.data?.cliSource === 'stdout' || pane?.data?.cliSource === 'connect_agent';
+    if (cliDetectedFromOutput) return false;
+    if (this.hasDifferentLiveSessionOnTerminal(session)) return false;
+
+    const recentOutput = await getRecentTerminalOutput(session.terminalId, 12_288);
+    if (!recentOutput) return true;
+
+    const ready = session.adapter.detectReady(recentOutput);
+    if (ready.ready) return false;
+
+    const detected = detectCliFromTerminalOutput(recentOutput);
+    if (detected.cli && detected.cli === session.cliId) return false;
+
+    return true;
   }
 
   private cleanupSession(session: RuntimeSession): void {

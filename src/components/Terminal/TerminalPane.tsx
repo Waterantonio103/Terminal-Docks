@@ -247,7 +247,10 @@ export function TerminalPane({ pane, dragEndSeq }: { pane: Pane; dragEndSeq?: nu
             const nodeId = latestPane?.data?.nodeId as string | undefined;
             const hasStoreBinding = nodeId
               ? Boolean(storeState.nodeRuntimeBindings[nodeId]?.runtimeSessionId)
-              : false;
+              : Object.values(storeState.nodeRuntimeBindings).some(binding =>
+                  binding?.terminalId === terminalId &&
+                  typeof binding.runtimeSessionId === 'string'
+                );
             const cliAlreadyRunning = latestPane?.data?.cliSource === 'stdout' || latestPane?.data?.cliSource === 'connect_agent';
             if (!hasPaneSessionId && !hasStoreBinding && !cliAlreadyRunning) {
               console.log(`[TerminalPane] Auto-launching CLI: ${command}`);

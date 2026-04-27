@@ -693,8 +693,11 @@ export function MissionControlPane({ pane }: { pane: Pane }) {
         });
       }
     }).then(fn => {
-      unlistenSpawnFn = fn;
-      if (unmounted) fn();
+      if (unmounted) {
+        fn();
+      } else {
+        unlistenSpawnFn = fn;
+      }
     });
 
     listen<{ id: string }>('pty-exit', async (event) => {
@@ -740,14 +743,23 @@ export function MissionControlPane({ pane }: { pane: Pane }) {
         });
       }
     }).then(fn => {
-      unlistenExitFn = fn;
-      if (unmounted) fn();
+      if (unmounted) {
+        fn();
+      } else {
+        unlistenExitFn = fn;
+      }
     });
 
     return () => {
       unmounted = true;
-      unlistenSpawnFn?.();
-      unlistenExitFn?.();
+      if (unlistenSpawnFn) {
+        unlistenSpawnFn();
+        unlistenSpawnFn = undefined;
+      }
+      if (unlistenExitFn) {
+        unlistenExitFn();
+        unlistenExitFn = undefined;
+      }
     };
   }, [agents, currentMissionId, pane.id, setNodeRuntimeBinding, updatePaneData]);
 
@@ -827,8 +839,11 @@ export function MissionControlPane({ pane }: { pane: Pane }) {
       logToAgent(pane.id, nodeId, `Activation request BROADCAST received. Attempt: ${attempt}`);
       void processActivation(payload, missionId, nodeId, attempt);
     }).then(fn => {
-      unlistenActivationFn = fn;
-      if (unmounted) fn();
+      if (unmounted) {
+        fn();
+      } else {
+        unlistenActivationFn = fn;
+      }
     });
 
     listen<{
@@ -992,17 +1007,35 @@ export function MissionControlPane({ pane }: { pane: Pane }) {
         }
       }
     }).then(fn => {
-      unlistenUpdateFn = fn;
-      if (unmounted) fn();
+      if (unmounted) {
+        fn();
+      } else {
+        unlistenUpdateFn = fn;
+      }
     });
 
     return () => {
       unmounted = true;
-      unlistenActivationFn?.();
-      unlistenUpdateFn?.();
-      unlistenWarningFn?.();
-      unlistenRunOutputFn?.();
-      unlistenRunExitFn?.();
+      if (unlistenActivationFn) {
+        unlistenActivationFn();
+        unlistenActivationFn = undefined;
+      }
+      if (unlistenUpdateFn) {
+        unlistenUpdateFn();
+        unlistenUpdateFn = undefined;
+      }
+      if (unlistenWarningFn) {
+        unlistenWarningFn();
+        unlistenWarningFn = undefined;
+      }
+      if (unlistenRunOutputFn) {
+        unlistenRunOutputFn();
+        unlistenRunOutputFn = undefined;
+      }
+      if (unlistenRunExitFn) {
+        unlistenRunExitFn();
+        unlistenRunExitFn = undefined;
+      }
     };
   }, [agents, currentMissionId, pane.id, setNodeRuntimeBinding, updatePaneData]);
 
