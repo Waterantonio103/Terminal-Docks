@@ -79,6 +79,7 @@ export const opencodeAdapter: CliAdapter = {
   },
 
   buildActivationInput(signal: string): { paste: string; submit: string } {
-    return { paste: signal, submit: '\r' };
+    const flat = signal.replace(/\r?\n/g, ' ').replace(/\s{2,}/g, ' ').trim();
+    return { paste: flat, submit: '\r' };
   },
 };

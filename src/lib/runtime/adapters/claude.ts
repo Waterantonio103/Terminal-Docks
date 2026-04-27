@@ -134,8 +134,10 @@ export const claudeAdapter: CliAdapter = {
   },
 
   buildActivationInput(signal: string): { paste: string; submit: string } {
+    // Collapse newlines to spaces — \n in PTY input is treated as Enter on Windows
+    const flat = signal.replace(/\r?\n/g, ' ').replace(/\s{2,}/g, ' ').trim();
     return {
-      paste: `\x15\x1b[200~${signal}\x1b[201~`,
+      paste: `\x15\x1b[200~${flat}\x1b[201~`,
       submit: '\r',
     };
   },

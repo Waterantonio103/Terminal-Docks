@@ -65,7 +65,8 @@
       "Bash(chmod +x /c/Users/james/bin/claude-stats)",
       "Bash(claude-stats *)",
       "PowerShell(claude-stats *)",
-      "Bash('C:\\\\Users\\\\james\\\\AppData\\\\Local\\\\Programs\\\\Python\\\\Python310\\\\python.exe' -c ' *)"
+      "Bash('C:\\\\Users\\\\james\\\\AppData\\\\Local\\\\Programs\\\\Python\\\\Python310\\\\python.exe' -c ' *)",
+      "Bash(grep *)"
     ]
   }
 }
