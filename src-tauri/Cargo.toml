@@ -28,7 +28,7 @@ rusqlite = { version = "0.39.0", features = ["bundled"] }
 tauri-plugin-shell = "2.3.5"
 tauri-plugin-clipboard-manager = "2"
 tauri-plugin-dialog = "2"
-ureq = "2"
+ureq = { version = "2", features = ["json"] }
 uuid = { version = "1.23.1", features = ["v4"] }
 notify = "6"
 

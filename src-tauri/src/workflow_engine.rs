@@ -2066,6 +2066,19 @@ pub fn register_runtime_activation_dispatch(
         "[Mission {}] Runtime dispatch registered: node={}, attempt={}, session={}, agent={}, terminal={}",
         mission_id, node_id, attempt, session_id, agent_id, terminal_id
     );
+    // Ensure agent_runtime_sessions row exists so get_runtime_activation polling works
+    // regardless of whether the mission was started via seed_mission_to_db or start_mission_graph.
+    persist_runtime_session(
+        &app,
+        &session_id,
+        &agent_id,
+        &mission_id,
+        &node_id,
+        attempt,
+        &terminal_id,
+        "",
+        "adapter_starting",
+    );
     acknowledge_runtime_activation(
         app,
         mission_id,

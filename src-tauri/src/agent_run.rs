@@ -336,8 +336,7 @@ fn mcp_internal_push(app: &AppHandle, body: serde_json::Value) -> Result<serde_j
     }
     let response = ureq::post("http://localhost:3741/internal/push")
         .set("x-td-push-token", &token)
-        .set("Content-Type", "application/json")
-        .send_string(&body.to_string())
+        .send_json(body)
         .map_err(|error| format!("MCP internal push failed: {error}"))?;
     let status = response.status();
     let text = response.into_string().unwrap_or_default();

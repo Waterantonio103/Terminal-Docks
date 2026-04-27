@@ -1,4 +1,4 @@
 {
-  "url": "http://localhost:3741/mcp",
-  "port": 3741
+  "url": "http://127.0.0.1:3745/mcp",
+  "port": 3745
 }

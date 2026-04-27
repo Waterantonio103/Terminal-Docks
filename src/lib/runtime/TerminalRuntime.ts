@@ -145,10 +145,15 @@ export interface McpRegistrationRequest {
 }
 
 export async function registerMcpSession(request: McpRegistrationRequest): Promise<{ ok: boolean; message?: string; error?: string }> {
-  const result = await invoke<{ ok?: boolean; message?: string; error?: string }>('mcp_register_runtime_session', {
-    payload: request,
-  });
-  return { ok: result.ok ?? false, message: result.message, error: result.error };
+  try {
+    const result = await invoke<{ ok?: boolean; message?: string; error?: string }>('mcp_register_runtime_session', {
+      payload: request,
+    });
+    return { ok: result.ok ?? false, message: result.message, error: result.error };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { ok: false, error: msg };
+  }
 }
 
 // ──────────────────────────────────────────────

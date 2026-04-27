@@ -420,7 +420,6 @@ interface WorkspaceState {
   createMissionTab: (taskDescription: string, agents: MissionAgent[]) => void;
   clearPanes: () => void;
   setWorkspaceDir: (dir: string | null) => void;
-  setTheme: (theme: ThemeType) => void;
   saveLayout: (name: string) => void;
   loadLayout: (id: string) => void;
   deleteLayout: (id: string) => void;
@@ -770,7 +769,6 @@ export const useWorkspaceStore = create<WorkspaceState>()(
       clearPanes: () => set((state) => withActivePanes(state, () => [])),
 
       setWorkspaceDir: (dir) => set({ workspaceDir: typeof dir === 'string' ? dir.replace(/\0/g, '').trim() : dir }),
-      setTheme: (theme) => set({ theme }),
 
       saveLayout: (name) => set((state) => {
         const panes = selectActivePanes(state);

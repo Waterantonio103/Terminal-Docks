@@ -1,6 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
-import { notifyTaskCompleted } from './workers/bootstrap';
-import type { WorkerAdapter, WorkerSession } from './workers/types';
+import { notifyTaskCompleted } from './workers/bootstrap.js';
+import type { WorkerAdapter, WorkerSession } from './workers/types.js';
 
 async function captureTerminalOutput(terminalId: string): Promise<string> {
   try {
@@ -314,7 +314,7 @@ export function attachExitDetector(
     attempt: number;
   }
 ): () => void {
-  return adapter.streamOutput(session, async (ev) => {
+  return adapter.streamOutput(session, async (ev: any) => {
     if (ev.kind === 'process-exit') {
       try {
         const finalOutput = await captureTerminalOutput(session.terminalId);
@@ -337,3 +337,4 @@ export function attachExitDetector(
     }
   });
 }
+

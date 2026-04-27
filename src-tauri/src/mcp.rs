@@ -364,6 +364,32 @@ fn load_or_generate_auth_token(app: &AppHandle) -> String {
     token
 }
 
+fn load_or_generate_push_token(app: &AppHandle) -> String {
+    let token_path = app
+        .path()
+        .app_local_data_dir()
+        .ok()
+        .map(|d| d.join("mcp_push.token"));
+
+    if let Some(ref path) = token_path {
+        if let Ok(token) = fs::read_to_string(path) {
+            let t = token.trim().to_string();
+            if !t.is_empty() {
+                return t;
+            }
+        }
+    }
+
+    let token = generate_push_token();
+    if let Some(path) = token_path {
+        if let Some(parent) = path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let _ = fs::write(&path, &token);
+    }
+    token
+}
+
 pub fn init_mcp_server(app: &AppHandle) -> Result<(), String> {
     {
         let state = app.state::<McpState>();
@@ -399,7 +425,7 @@ pub fn init_mcp_server(app: &AppHandle) -> Result<(), String> {
         state.db_path.clone()
     };
 
-    let push_token = generate_push_token();
+    let push_token = load_or_generate_push_token(app);
     // auth_token persists across restarts so already-running Claude instances keep working
     let auth_token = load_or_generate_auth_token(app);
     {
@@ -707,8 +733,7 @@ pub fn mcp_register_runtime_session(
     let url = format!("http://localhost:{}/internal/push", PORT);
     match ureq::post(&url)
         .set("x-td-push-token", &token)
-        .set("Content-Type", "application/json")
-        .send_string(&body.to_string())
+        .send_json(body)
     {
         Ok(response) => {
             let status = response.status();
@@ -716,6 +741,10 @@ pub fn mcp_register_runtime_session(
             let parsed: serde_json::Value = serde_json::from_str(&text)
                 .unwrap_or(serde_json::json!({ "status": status, "raw": text }));
             Ok(parsed)
+        }
+        Err(ureq::Error::Status(code, response)) => {
+            let body = response.into_string().unwrap_or_default();
+            Err(format!("mcp_register_runtime_session failed with HTTP {}: {}", code, body))
         }
         Err(error) => Err(format!("mcp_register_runtime_session failed: {}", error)),
     }
@@ -779,8 +808,7 @@ pub fn mcp_notify_agent(
     let url = format!("http://localhost:{}/internal/push", PORT);
     match ureq::post(&url)
         .set("x-td-push-token", &token)
-        .set("Content-Type", "application/json")
-        .send_string(&body.to_string())
+        .send_json(body)
     {
         Ok(response) => {
             let status = response.status();
@@ -788,6 +816,10 @@ pub fn mcp_notify_agent(
             let parsed: serde_json::Value = serde_json::from_str(&text)
                 .unwrap_or(serde_json::json!({ "status": status, "raw": text }));
             Ok(parsed)
+        }
+        Err(ureq::Error::Status(code, response)) => {
+            let body = response.into_string().unwrap_or_default();
+            Err(format!("mcp_notify_agent failed with HTTP {}: {}", code, body))
         }
         Err(error) => Err(format!("mcp_notify_agent failed: {}", error)),
     }
