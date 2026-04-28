@@ -1,4 +1,6 @@
-# Multi-Agent Workflow Improvement Plan
+# Multi-Agent Workflow Improvement Plan (macOS Version)
+
+> **Note:** This is the macOS dedicated version of the Terminal Docks improvement plan.
 
 This document outlines a three-phase plan to drastically improve the multi-agent workflow architecture of Terminal Docks. The goal is to evolve the current basic explicit/event-based workflow (relying on string matching and manual task picking) into a robust, deterministic, and highly efficient orchestration system designed specifically for local development codebases. 
 

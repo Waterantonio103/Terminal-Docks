@@ -378,6 +378,13 @@ export interface CustomThemeColors {
   '--syntax-comment'?: string;
 }
 
+export interface ThemePreset {
+  id: string;
+  name: string;
+  baseTheme: ThemeType;
+  colors: CustomThemeColors;
+}
+
 interface WorkspaceState {
   tabs: WorkspaceTab[];
   activeTabId: string;
@@ -390,6 +397,8 @@ interface WorkspaceState {
   theme: ThemeType;
   showSettings: boolean;
   customTheme: CustomThemeColors;
+  themePresets: ThemePreset[];
+  activePresetId: string | null;
   savedLayouts: SavedLayout[];
   messages: McpMessage[];
   results: ResultEntry[];
@@ -408,6 +417,10 @@ interface WorkspaceState {
   setTheme: (theme: ThemeType) => void;
   setCustomThemeColor: (key: keyof CustomThemeColors, value: string) => void;
   resetCustomTheme: () => void;
+  saveThemePreset: (name: string) => void;
+  deleteThemePreset: (id: string) => void;
+  applyThemePreset: (id: string | null) => void;
+  renameThemePreset: (id: string, name: string) => void;
   addPane: (type: PaneType, title: string, data?: any) => void;
   addPaneAt: (type: PaneType, title: string, index: number, data?: any) => void;
   removePane: (id: string) => void;
@@ -479,6 +492,8 @@ export const useWorkspaceStore = create<WorkspaceState>()(
       theme: getInitialTheme(),
       showSettings: false,
       customTheme: {},
+      themePresets: [],
+      activePresetId: null,
       savedLayouts: [],
       messages: [],
       results: [],
@@ -507,10 +522,87 @@ export const useWorkspaceStore = create<WorkspaceState>()(
       }),
       setShowSettings: (open) => set({ showSettings: open }),
       setTheme: (theme) => set({ theme }),
-      setCustomThemeColor: (key, value) => set((s) => ({
-        customTheme: { ...s.customTheme, [key]: value }
+      setCustomThemeColor: (key, value) => set((s) => {
+        const nextCustom = { ...s.customTheme, [key]: value };
+        
+        // If we are changing colors and don't have an active preset, 
+        // or the custom theme was previously empty, we automatically create one.
+        if (!s.activePresetId || Object.keys(s.customTheme).length === 0) {
+          const newId = generateId();
+          
+          // Capture ALL current computed theme colors to ensure the preset is "full"
+          // We'll try to read them from the document properties
+          const allColors: CustomThemeColors = { ...nextCustom };
+          const colorVars = [
+            '--bg-app', '--bg-titlebar', '--bg-panel', '--bg-surface', '--bg-surface-hover', '--accent-primary', '--accent-subtle', '--text-primary',
+            '--border-panel', '--border-divider',
+            '--syntax-keyword', '--syntax-string', '--syntax-function', '--syntax-variable', '--syntax-number', '--syntax-comment'
+          ];
+          
+          const el = document.documentElement;
+          const style = getComputedStyle(el);
+          colorVars.forEach(v => {
+            if (!allColors[v as keyof CustomThemeColors]) {
+              const val = style.getPropertyValue(v).trim();
+              if (val) allColors[v as keyof CustomThemeColors] = val;
+            }
+          });
+
+          const newPreset: ThemePreset = {
+            id: newId,
+            name: `Preset ${s.themePresets.length + 1}`,
+            baseTheme: s.theme,
+            colors: allColors
+          };
+          return {
+            customTheme: nextCustom,
+            themePresets: [...s.themePresets, newPreset],
+            activePresetId: newId
+          };
+        }
+
+        // If we have an active preset, update its colors too so they stay in sync
+        const nextPresets = s.themePresets.map(p => 
+          p.id === s.activePresetId ? { ...p, colors: { ...p.colors, [key]: value } } : p
+        );
+
+        return { 
+          customTheme: nextCustom,
+          themePresets: nextPresets
+        };
+      }),
+      resetCustomTheme: () => set({ customTheme: {}, activePresetId: null }),
+      saveThemePreset: (name) => set((s) => {
+        const id = generateId();
+        const newPreset: ThemePreset = {
+          id,
+          name,
+          baseTheme: s.theme,
+          colors: { ...s.customTheme }
+        };
+        return {
+          themePresets: [...s.themePresets, newPreset],
+          activePresetId: id
+        };
+      }),
+      deleteThemePreset: (id) => set((s) => ({
+        themePresets: s.themePresets.filter(p => p.id !== id),
+        activePresetId: s.activePresetId === id ? null : s.activePresetId,
+        customTheme: s.activePresetId === id ? {} : s.customTheme
       })),
-      resetCustomTheme: () => set({ customTheme: {} }),
+      applyThemePreset: (id) => set((s) => {
+        if (!id) return { customTheme: {}, activePresetId: null };
+        const preset = s.themePresets.find(p => p.id === id);
+        if (!preset) return s;
+        return {
+          customTheme: { ...preset.colors },
+          theme: preset.baseTheme,
+          activePresetId: id
+        };
+      }),
+      renameThemePreset: (id, name) => set((s) => ({
+        themePresets: s.themePresets.map(p => p.id === id ? { ...p, name } : p)
+      })),
 
       addMessage: (msg) => set((s) => ({ messages: [...s.messages, msg].slice(-500) })),
       addResult: (result) => set((s) => ({ results: [...s.results, result].slice(-200) })),
@@ -973,6 +1065,9 @@ export const useWorkspaceStore = create<WorkspaceState>()(
         appMode: state.appMode,
         workspaceDir: state.workspaceDir,
         theme: state.theme,
+        customTheme: state.customTheme,
+        themePresets: state.themePresets,
+        activePresetId: state.activePresetId,
         savedLayouts: state.savedLayouts,
         results: state.results.slice(-100),
         agentInstructions: state.agentInstructions,

@@ -4,7 +4,7 @@
 
 A fully local, subscription-free **Agentic Development Environment** — a desktop app that combines a multi-pane terminal workspace, AI agent orchestration, a task board, and a built-in code editor in one native window. Inspired by Starlink (cometmind.ai) but runs 100% offline with no accounts, no API keys to a hosted service, and no telemetry.
 
-**Compatibility:** The app must always be Windows and Mac compatible (excepting platform-specific installer outputs like .exe and .dmg).
+**Compatibility:** This is the macOS dedicated version (macOS only; no Windows compatibility required) 
 
 ## Tech Stack
 
@@ -139,3 +139,8 @@ CometAI/
 └── agents.md               # Agent orchestration design
 ```
 
+
+## macOS Interaction Patterns
+
+- **Viewport Navigation:** Left-click and drag on the background to pan the viewport (node graph and runtime nodes).
+- **Multi-Node Selection:** Use `Shift + Click` to select multiple nodes. Box-drag selection is disabled in favor of this pattern.

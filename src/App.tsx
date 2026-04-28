@@ -28,8 +28,25 @@ function CustomThemeInjector() {
   const css = useMemo(() => {
     const entries = Object.entries(customTheme);
     if (entries.length === 0) return '';
-    const rules = entries.map(([key, value]) => `${key}: ${value} !important;`).join('\n');
-    return `:root { ${rules} }`;
+    
+    const baseRules = entries.map(([key, value]) => `${key}: ${value} !important;`);
+    
+    // Derive missing UI variables that components might use
+    // If we have --bg-app but not --bg-titlebar, derive it.
+    if (customTheme['--bg-app'] && !customTheme['--bg-titlebar']) {
+      baseRules.push(`--bg-titlebar: ${customTheme['--bg-app']} !important;`);
+    }
+    if (customTheme['--bg-panel'] && !customTheme['--border-panel']) {
+      // Use panel bg as a base for border if missing
+      baseRules.push(`--border-panel: ${customTheme['--bg-panel']} !important;`);
+    }
+    if (customTheme['--accent-primary'] && !customTheme['--accent-hover']) {
+      baseRules.push(`--accent-hover: ${customTheme['--accent-primary']} !important;`);
+    }
+
+    const rules = baseRules.join('\n');
+    // We apply to both :root and any theme class to ensure it wins specificity
+    return `:root, [class*="theme-"] { ${rules} }`;
   }, [customTheme]);
 
   if (!css) return null;

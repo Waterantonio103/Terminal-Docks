@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { X, Palette, Monitor, RotateCcw, Check, Sun, Moon, Sparkles, ChevronDown } from 'lucide-react';
-import { useWorkspaceStore, ThemeType, CustomThemeColors } from '../../store/workspace';
+import { X, Palette, Monitor, RotateCcw, Check, Sun, Moon, Sparkles, ChevronDown, Trash2, Edit2, Save } from 'lucide-react';
+import { useWorkspaceStore, ThemeType, CustomThemeColors, ThemePreset } from '../../store/workspace';
 import { ColorPicker } from '../ColorPicker/ColorPicker';
 
 const THEMES_DARK: { value: ThemeType; label: string }[] = [
@@ -73,8 +73,13 @@ function parseColorToHex(color: string): string {
 }
 
 export function SettingsOverlay() {
-  const { theme, setTheme, setShowSettings, customTheme, setCustomThemeColor, resetCustomTheme } = useWorkspaceStore();
+  const { 
+    theme, setTheme, setShowSettings, customTheme, setCustomThemeColor, resetCustomTheme,
+    themePresets, activePresetId, applyThemePreset, deleteThemePreset, renameThemePreset
+  } = useWorkspaceStore();
   const [activePicker, setActivePicker] = useState<keyof CustomThemeColors | null>(null);
+  const [editingPresetId, setEditingPresetId] = useState<string | null>(null);
+  const [editingPresetName, setEditingPresetName] = useState('');
   const pickerRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const [, setTick] = useState(0);
@@ -98,6 +103,20 @@ export function SettingsOverlay() {
       document.removeEventListener('mousedown', handleClickOutside);
     };
   }, [activePicker]);
+
+  const handleStartRename = (e: React.MouseEvent, preset: ThemePreset) => {
+    e.stopPropagation();
+    setEditingPresetId(preset.id);
+    setEditingPresetName(preset.name);
+  };
+
+  const handleSaveRename = (e?: React.FormEvent) => {
+    e?.preventDefault();
+    if (editingPresetId && editingPresetName.trim()) {
+      renameThemePreset(editingPresetId, editingPresetName.trim());
+    }
+    setEditingPresetId(null);
+  };
 
   const renderColorCard = (v: { label: string; var: keyof CustomThemeColors }) => {
     // Attempt to read the variable from the actual themed wrapper or document root
@@ -171,26 +190,99 @@ export function SettingsOverlay() {
           <section className="space-y-8">
             <div className="flex items-center gap-2 border-b border-border-panel pb-2">
               <Sparkles size={16} className="text-text-muted" />
-              <h2 className="text-xs font-bold uppercase text-text-secondary">Preset Library</h2>
+              <h2 className="text-xs font-bold uppercase text-text-secondary">Theme Library</h2>
             </div>
             
             <div className="grid grid-cols-1 lg:grid-cols-4 gap-12">
-               {/* Dark Themes */}
+               {/* Built-in Themes */}
                <div className="lg:col-span-3 space-y-8">
+                  {/* User Presets */}
+                  {themePresets.length > 0 && (
+                    <div className="animate-in fade-in slide-in-from-top-4 duration-500">
+                      <div className="flex items-center gap-2 mb-4">
+                         <Palette size={12} className="text-accent-primary" />
+                         <h3 className="text-[10px] font-bold text-text-muted uppercase tracking-wider">User Presets</h3>
+                      </div>
+                      <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-2">
+                        {themePresets.map(p => (
+                          <div
+                            key={p.id}
+                            onClick={() => applyThemePreset(p.id)}
+                            className={`group flex flex-col p-2.5 rounded-xl border transition-all cursor-pointer relative ${activePresetId === p.id ? 'bg-accent-primary/10 border-accent-primary shadow-sm' : 'background-bg-panel border-border-panel hover:border-text-muted hover:bg-bg-surface/30'}`}
+                          >
+                            <div className="flex items-center justify-between gap-2 min-h-[20px]">
+                              {editingPresetId === p.id ? (
+                                <form onSubmit={handleSaveRename} className="flex-1 flex items-center gap-1" onClick={e => e.stopPropagation()}>
+                                  <input 
+                                    autoFocus
+                                    className="bg-bg-surface border border-accent-primary rounded px-1.5 py-0.5 text-[11px] w-full outline-none text-text-primary"
+                                    value={editingPresetName}
+                                    onChange={e => setEditingPresetName(e.target.value)}
+                                    onBlur={() => handleSaveRename()}
+                                  />
+                                </form>
+                              ) : (
+                                <span className={`text-[11px] font-medium truncate flex-1 ${activePresetId === p.id ? 'text-accent-primary font-bold' : 'text-text-secondary'}`}>{p.name}</span>
+                              )}
+                              <div className="flex items-center gap-0.5 shrink-0 opacity-0 group-hover:opacity-100 transition-opacity">
+                                <button 
+                                  onClick={(e) => handleStartRename(e, p)}
+                                  className="p-1 hover:bg-bg-surface rounded text-text-muted hover:text-text-primary transition-colors"
+                                  title="Rename preset"
+                                >
+                                  <Edit2 size={10} />
+                                </button>
+                                <button 
+                                  onClick={(e) => { e.stopPropagation(); deleteThemePreset(p.id); }}
+                                  className="p-1 hover:bg-red-400/10 rounded text-text-muted hover:text-red-400 transition-colors"
+                                  title="Delete preset"
+                                >
+                                  <Trash2 size={10} />
+                                </button>
+                              </div>
+                            </div>
+                            <div className="flex gap-1 mt-3">
+                              {/* Show a curated selection of colors for the preview dots */}
+                              {['--bg-app', '--accent-primary', '--syntax-keyword', '--syntax-string', '--syntax-function'].map((varName) => {
+                                const color = p.colors[varName as keyof CustomThemeColors];
+                                if (!color) return null;
+                                return (
+                                  <div 
+                                    key={varName} 
+                                    className="w-2.5 h-2.5 rounded-full border border-white/5 shadow-inner" 
+                                    style={{ backgroundColor: color }} 
+                                    title={varName}
+                                  />
+                                );
+                              })}
+                            </div>
+                            {activePresetId === p.id && (
+                              <div className="absolute top-1 right-1">
+                                <div className="bg-accent-primary rounded-full p-0.5 shadow-lg shadow-accent-primary/20">
+                                  <Check size={8} className="text-white" />
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
                   <div>
                     <div className="flex items-center gap-2 mb-4">
                        <Moon size={12} className="text-blue-400" />
-                       <h3 className="text-[10px] font-bold text-text-muted uppercase tracking-wider">Dark Presets</h3>
+                       <h3 className="text-[10px] font-bold text-text-muted uppercase tracking-wider">Dark Foundations</h3>
                     </div>
                     <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-2">
                       {THEMES_DARK.map(t => (
                         <button
                           key={t.value}
-                          onClick={() => setTheme(t.value)}
-                          className={`flex items-center justify-between px-3 py-2 rounded-lg border text-[11px] transition-all ${theme === t.value ? 'bg-accent-primary/10 border-accent-primary text-accent-primary font-bold shadow-sm' : 'background-bg-panel border-border-panel text-text-muted hover:border-text-muted hover:text-text-secondary'}`}
+                          onClick={() => { applyThemePreset(null); setTheme(t.value); }}
+                          className={`flex items-center justify-between px-3 py-2.5 rounded-xl border text-[11px] transition-all ${theme === t.value && !activePresetId ? 'bg-accent-primary/10 border-accent-primary text-accent-primary font-bold shadow-sm' : 'background-bg-panel border-border-panel text-text-muted hover:border-text-muted hover:text-text-secondary hover:bg-bg-surface/30'}`}
                         >
                           <span className="truncate">{t.label}</span>
-                          {theme === t.value && <Check size={12} />}
+                          {theme === t.value && !activePresetId && <Check size={12} />}
                         </button>
                       ))}
                     </div>
@@ -199,17 +291,17 @@ export function SettingsOverlay() {
                   <div>
                     <div className="flex items-center gap-2 mb-4">
                        <Sun size={12} className="text-yellow-500" />
-                       <h3 className="text-[10px] font-bold text-text-muted uppercase tracking-wider">Light Presets</h3>
+                       <h3 className="text-[10px] font-bold text-text-muted uppercase tracking-wider">Light Foundations</h3>
                     </div>
                     <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-2">
                       {THEMES_LIGHT.map(t => (
                         <button
                           key={t.value}
-                          onClick={() => setTheme(t.value)}
-                          className={`flex items-center justify-between px-3 py-2 rounded-lg border text-[11px] transition-all ${theme === t.value ? 'bg-accent-primary/10 border-accent-primary text-accent-primary font-bold shadow-sm' : 'background-bg-panel border-border-panel text-text-muted hover:border-text-muted hover:text-text-secondary'}`}
+                          onClick={() => { applyThemePreset(null); setTheme(t.value); }}
+                          className={`flex items-center justify-between px-3 py-2.5 rounded-xl border text-[11px] transition-all ${theme === t.value && !activePresetId ? 'bg-accent-primary/10 border-accent-primary text-accent-primary font-bold shadow-sm' : 'background-bg-panel border-border-panel text-text-muted hover:border-text-muted hover:text-text-secondary hover:bg-bg-surface/30'}`}
                         >
                           <span className="truncate">{t.label}</span>
-                          {theme === t.value && <Check size={12} />}
+                          {theme === t.value && !activePresetId && <Check size={12} />}
                         </button>
                       ))}
                     </div>
@@ -219,16 +311,27 @@ export function SettingsOverlay() {
                {/* Active Status Card */}
                <div className="space-y-4">
                   <div className="background-bg-panel border border-border-panel rounded-2xl p-8 flex flex-col justify-center items-center text-center space-y-4 shadow-xl sticky top-8">
-                     <div className={`w-20 h-20 rounded-3xl shadow-2xl flex items-center justify-center theme-${theme} background-bg-app border border-border-panel transform hover:scale-105 transition-transform`}>
+                     <div className={`w-20 h-20 rounded-3xl shadow-2xl flex items-center justify-center theme-${theme} background-bg-app border border-border-panel transform hover:scale-105 transition-transform duration-500`}>
                         <div className="w-10 h-10 rounded-xl bg-accent-primary animate-pulse" />
                      </div>
                      <div>
-                       <h3 className="text-sm font-bold text-text-primary">{[...THEMES_DARK, ...THEMES_LIGHT].find(t => t.value === theme)?.label}</h3>
-                       <p className="text-[10px] text-text-muted mt-2 uppercase tracking-widest font-medium">Currently Active</p>
+                       {activePresetId ? (
+                         <>
+                           <h3 className="text-sm font-bold text-text-primary">{themePresets.find(p => p.id === activePresetId)?.name}</h3>
+                           <p className="text-[10px] text-accent-primary mt-2 uppercase tracking-widest font-bold">Custom Preset Active</p>
+                         </>
+                       ) : (
+                         <>
+                           <h3 className="text-sm font-bold text-text-primary">{[...THEMES_DARK, ...THEMES_LIGHT].find(t => t.value === theme)?.label}</h3>
+                           <p className="text-[10px] text-text-muted mt-2 uppercase tracking-widest font-medium">Built-in Active</p>
+                         </>
+                       )}
                      </div>
                      <div className="w-full h-px bg-border-divider mt-2" />
                      <p className="text-[10px] text-text-muted opacity-60 leading-relaxed">
-                        Select a preset to reset your custom overrides or use it as a foundation for the engine below.
+                        {activePresetId 
+                          ? "You are currently editing this custom preset. Changes are saved automatically."
+                          : "Adjust colors below to automatically fork this foundation into a new custom preset."}
                      </p>
                   </div>
                </div>
@@ -247,7 +350,7 @@ export function SettingsOverlay() {
                 className="flex items-center gap-1.5 px-3 py-1 text-[10px] uppercase font-bold text-red-400 hover:bg-red-400/10 rounded-md transition-colors"
               >
                 <RotateCcw size={12} />
-                Reset Overrides
+                Reset To Foundation
               </button>
             </div>
 

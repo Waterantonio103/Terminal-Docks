@@ -33,8 +33,9 @@ interface RuntimeEdge {
 type CanvasInteraction =
   | { kind: 'idle' }
   | { kind: 'panning'; pointerOrigin: Point; panOrigin: Point }
-  | { kind: 'dragging_node'; nodeKey: string; pointerOrigin: Point; nodeOrigin: Point }
+  | { kind: 'dragging_nodes'; pointerOrigin: Point; nodeOrigins: Record<string, Point> }
   | { kind: 'resizing_node'; nodeKey: string; corner: ResizeCorner; pointerOrigin: Point; startRect: RuntimeNodeLayout };
+
 
 const DEFAULT_NODE_WIDTH = 460;
 const DEFAULT_NODE_HEIGHT = 430;
@@ -97,6 +98,7 @@ export function RuntimeView() {
   const [zoom, setZoom] = useState(() => _sessionZoom);
   const [interaction, setInteraction] = useState<CanvasInteraction>({ kind: 'idle' });
   const [nodeLayouts, setNodeLayouts] = useState<Record<string, RuntimeNodeLayout>>(() => ({ ..._sessionLayouts }));
+  const [selectedNodeKeys, setSelectedNodeKeys] = useState<Set<string>>(new Set());
   const canvasRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -153,14 +155,15 @@ export function RuntimeView() {
       const rect = canvasRef.current.getBoundingClientRect();
       const screenPoint = pointFromMouse(event.clientX, event.clientY, rect);
 
-      if (event.button === 1 || (event.button === 0 && event.altKey)) {
-        event.preventDefault();
-        setInteraction({ kind: 'panning', pointerOrigin: screenPoint, panOrigin: pan });
-        return;
-      }
-
-      if (event.button === 0 && (event.target === canvasRef.current || (event.target as HTMLElement).dataset?.runtimeCanvas !== undefined)) {
-        setInteraction({ kind: 'panning', pointerOrigin: screenPoint, panOrigin: pan });
+      // Left-click on background now pans (macOS style), or Middle-click/Alt+Left
+      if (event.button === 1 || event.button === 0 || (event.button === 0 && event.altKey)) {
+        if (event.target === canvasRef.current || (event.target as HTMLElement).dataset?.runtimeCanvas !== undefined) {
+          setInteraction({ kind: 'panning', pointerOrigin: screenPoint, panOrigin: pan });
+          // Click background to clear selection if not shifting
+          if (!event.shiftKey) {
+            setSelectedNodeKeys(new Set());
+          }
+        }
       }
     },
     [pan]
@@ -172,15 +175,36 @@ export function RuntimeView() {
       if (!canvasRef.current) return;
       const rect = canvasRef.current.getBoundingClientRect();
       const screenPoint = pointFromMouse(event.clientX, event.clientY, rect);
-      const layout = nodeLayouts[nodeKey] ?? { x: 0, y: 0, width: DEFAULT_NODE_WIDTH, height: DEFAULT_NODE_HEIGHT };
+      
+      let nextSelection: Set<string>;
+      if (event.shiftKey) {
+        // Shift+Click: toggle node in selection
+        nextSelection = new Set(selectedNodeKeys);
+        if (nextSelection.has(nodeKey)) {
+          nextSelection.delete(nodeKey);
+        } else {
+          nextSelection.add(nodeKey);
+        }
+      } else {
+        // Normal click: select node (if not already part of multi-selection)
+        nextSelection = selectedNodeKeys.has(nodeKey) ? new Set(selectedNodeKeys) : new Set([nodeKey]);
+      }
+      
+      setSelectedNodeKeys(nextSelection);
+
+      const nodeOrigins: Record<string, Point> = {};
+      nextSelection.forEach(key => {
+        const layout = nodeLayouts[key] ?? { x: 0, y: 0, width: DEFAULT_NODE_WIDTH, height: DEFAULT_NODE_HEIGHT };
+        nodeOrigins[key] = { x: layout.x, y: layout.y };
+      });
+
       setInteraction({
-        kind: 'dragging_node',
-        nodeKey,
+        kind: 'dragging_nodes',
         pointerOrigin: screenPoint,
-        nodeOrigin: { x: layout.x, y: layout.y },
+        nodeOrigins,
       });
     },
-    [nodeLayouts]
+    [nodeLayouts, selectedNodeKeys]
   );
 
   const startNodeResize = useCallback(
@@ -218,18 +242,21 @@ export function RuntimeView() {
         return;
       }
 
-      if (interaction.kind === 'dragging_node') {
+      if (interaction.kind === 'dragging_nodes') {
         const dx = (screenPoint.x - interaction.pointerOrigin.x) / zoom;
         const dy = (screenPoint.y - interaction.pointerOrigin.y) / zoom;
-        const nodeKey = interaction.nodeKey;
-        persistLayouts(prev => ({
-          ...prev,
-          [nodeKey]: {
-            ...prev[nodeKey],
-            x: interaction.nodeOrigin.x + dx,
-            y: interaction.nodeOrigin.y + dy,
-          },
-        }));
+        
+        persistLayouts(prev => {
+          const next = { ...prev };
+          Object.entries(interaction.nodeOrigins).forEach(([nodeKey, origin]) => {
+            next[nodeKey] = {
+              ...(next[nodeKey] ?? { x: 0, y: 0, width: DEFAULT_NODE_WIDTH, height: DEFAULT_NODE_HEIGHT }),
+              x: origin.x + dx,
+              y: origin.y + dy,
+            };
+          });
+          return next;
+        });
         return;
       }
 
@@ -483,20 +510,21 @@ export function RuntimeView() {
               const status = session.status ?? 'idle';
               const isActive = ACTIVE_STATUSES.has(status);
               const layout = nodeLayouts[runtimeNode.key] || { x: 0, y: 0, width: DEFAULT_NODE_WIDTH, height: DEFAULT_NODE_HEIGHT };
-              const isDragging = interaction.kind === 'dragging_node' && interaction.nodeKey === runtimeNode.key;
+              const isSelected = selectedNodeKeys.has(runtimeNode.key);
+              const isDragging = interaction.kind === 'dragging_nodes' && runtimeNode.key in interaction.nodeOrigins;
 
               return (
                 <div
                   key={runtimeNode.key}
                   className={`absolute rounded-lg border background-bg-panel overflow-hidden flex flex-col shadow-lg transition-shadow ${
                     isActive ? 'border-accent-primary/50 shadow-accent-primary/5' : 'border-border-panel'
-                  } ${isDragging ? 'shadow-2xl ring-2 ring-accent-primary/30' : ''}`}
+                  } ${isSelected ? 'ring-2 ring-accent-primary shadow-xl' : ''} ${isDragging ? 'shadow-2xl ring-2 ring-accent-primary/30 z-30' : ''}`}
                   style={{
                     left: layout.x,
                     top: layout.y,
                     width: layout.width,
                     height: layout.height,
-                    zIndex: isDragging ? 20 : 10,
+                    zIndex: isDragging ? 30 : isSelected ? 20 : 10,
                   }}
                 >
                   <div

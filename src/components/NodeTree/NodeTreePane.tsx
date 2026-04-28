@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { DotTunnelBackground } from '../shared/DotTunnelBackground';
-import { ArrowUpRight, ChevronLeft, Play, Plus, RefreshCw, ScanSearch, Sparkles, Trash2, Workflow, X } from 'lucide-react';
+import { ArrowUpRight, ChevronLeft, FolderOpen, Play, Plus, RefreshCw, ScanSearch, Sparkles, Trash2, Workflow, X } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
 import { emit, listen } from '@tauri-apps/api/event';
+import { open } from '@tauri-apps/plugin-dialog';
 import agentsConfig from '../../config/agents';
 import { compileMission, validateGraph } from '../../lib/graphCompiler';
 import { generateId } from '../../lib/graphUtils';
@@ -724,6 +725,21 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
     [activeMissionId, activeTree.nodes, addPane, applyOperator, setNodeTerminalBinding, workspaceDir]
   );
 
+  const handleWorkspaceDirBrowse = useCallback(async (nodeId: string) => {
+    try {
+      const selected = await open({
+        directory: true,
+        multiple: false,
+        title: 'Select Workspace Directory',
+      });
+      if (typeof selected === 'string') {
+        applyOperator({ type: 'set_node_property', nodeId, key: 'workspaceDir', value: selected });
+      }
+    } catch (error) {
+      console.error('Failed to open directory picker:', error);
+    }
+  }, [applyOperator]);
+
   const handleCliChange = useCallback(async (nodeId: string, newCli: WorkflowAgentCli) => {
     applyOperator({ type: 'set_node_property', nodeId, key: 'cli', value: newCli });
 
@@ -1417,24 +1433,24 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
         return;
       }
 
-      if (event.button === 1 || event.altKey) {
-        setInteraction({ kind: 'panning', pointerOrigin: screenPoint, panOrigin: view.pan });
-        return;
+      // Left-click on background now pans (macOS style), or Middle-click/Alt+Left
+      if (event.button === 1 || event.altKey || event.button === 0) {
+        const clickedNode = findNodeAtWorld(worldPoint);
+        if (!clickedNode) {
+          setInteraction({ kind: 'panning', pointerOrigin: screenPoint, panOrigin: view.pan });
+          // Click background to clear selection if not shifting
+          if (!event.shiftKey) {
+            applyOperator({ type: 'set_selection', nodeIds: [], linkIds: [], activeNodeId: undefined });
+          }
+          return;
+        }
       }
 
       if (event.button !== 0) {
         return;
       }
-
-      const clickedNode = findNodeAtWorld(worldPoint);
-      if (clickedNode) {
-        return;
-      }
-
-      applyOperator({ type: 'set_selection', nodeIds: [], linkIds: [], activeNodeId: undefined });
-      setInteraction({ kind: 'box_select', worldOrigin: worldPoint, worldCurrent: worldPoint });
     },
-    [applyOperator, findNodeAtWorld, view.pan, view.zoom]
+    [findNodeAtWorld, view.pan, view.zoom]
   );
 
   const onCanvasContextMenu = useCallback(
@@ -1678,7 +1694,20 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
       }
       const rect = canvasRef.current.getBoundingClientRect();
       const point = pointFromMouse(event.clientX, event.clientY, rect);
-      const nextSelection = selectedNodeIds.has(node.id) ? [...selectedNodeIds] : [node.id];
+
+      let nextSelection: string[];
+      if (event.shiftKey) {
+        // Shift+Click: toggle node in selection
+        if (selectedNodeIds.has(node.id)) {
+          nextSelection = Array.from(selectedNodeIds).filter(id => id !== node.id);
+        } else {
+          nextSelection = [...selectedNodeIds, node.id];
+        }
+      } else {
+        // Normal click: select node (if not already part of multi-selection)
+        nextSelection = selectedNodeIds.has(node.id) ? Array.from(selectedNodeIds) : [node.id];
+      }
+
       applyOperator({ type: 'set_selection', nodeIds: nextSelection, linkIds: [], activeNodeId: node.id });
       const nodeOrigins = Object.fromEntries(nextSelection.map(nodeId => [nodeId, activeTree.nodes[nodeId]?.location ?? node.location]));
       setInteraction({ kind: 'dragging_nodes', pointerOrigin: point, nodeOrigins });
@@ -1985,12 +2014,21 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
                           <option value="build">Build</option>
                           <option value="edit">Edit</option>
                         </select>
-                        <input
-                          value={String(materializedNode.node.properties.workspaceDir ?? workspaceDir ?? '')}
-                          onChange={event => applyOperator({ type: 'set_node_property', nodeId: materializedNode.node.id, key: 'workspaceDir', value: event.target.value })}
-                          placeholder="Workspace dir"
-                          className="background-bg-surface border border-border-panel rounded-lg px-2 py-1.5 text-[11px]"
-                        />
+                        <div className="relative group/dir">
+                          <input
+                            value={String(materializedNode.node.properties.workspaceDir ?? workspaceDir ?? '')}
+                            onChange={event => applyOperator({ type: 'set_node_property', nodeId: materializedNode.node.id, key: 'workspaceDir', value: event.target.value })}
+                            placeholder="Workspace dir"
+                            className="w-full background-bg-surface border border-border-panel rounded-lg px-2 py-1.5 text-[11px] pr-7"
+                          />
+                          <button
+                            onClick={() => handleWorkspaceDirBrowse(materializedNode.node.id)}
+                            className="absolute right-1.5 top-1/2 -translate-y-1/2 text-text-muted hover:text-accent-primary transition-colors cursor-pointer"
+                            title="Browse directory"
+                          >
+                            <FolderOpen size={12} />
+                          </button>
+                        </div>
                       </div>
                     </div>
                   )}
