@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import { X, Palette, Monitor, RotateCcw, Check, Sun, Moon, Sparkles, ChevronDown } from 'lucide-react';
 import { useWorkspaceStore, ThemeType, CustomThemeColors } from '../../store/workspace';
 import { ColorPicker } from '../ColorPicker/ColorPicker';

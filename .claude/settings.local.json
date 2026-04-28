@@ -66,7 +66,14 @@
       "Bash(claude-stats *)",
       "PowerShell(claude-stats *)",
       "Bash('C:\\\\Users\\\\james\\\\AppData\\\\Local\\\\Programs\\\\Python\\\\Python310\\\\python.exe' -c ' *)",
-      "Bash(grep *)"
+      "Bash(grep *)",
+      "Bash(claude *)",
+      "Bash(gemini *)",
+      "Bash(python3 -m json.tool)",
+      "Bash(opencode --help)",
+      "Bash(codex --help)",
+      "Bash(opencode models *)",
+      "Bash(codex *)"
     ]
   }
 }

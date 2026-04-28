@@ -39,6 +39,8 @@ export class RuntimeSession {
   readonly upstreamPayloads?: import('../workflow/WorkflowRun.js').HandoffRecord[];
   readonly createdAt: number;
   readonly adapter: CliAdapter;
+  readonly model: string;
+  readonly yolo: boolean;
 
   private _state: RuntimeSessionState;
   private _lastHeartbeatAt?: number;
@@ -65,6 +67,8 @@ export class RuntimeSession {
       goal?: string;
       legalTargets?: import('../workflow/WorkflowTypes.js').LegalTarget[];
       upstreamPayloads?: import('../workflow/WorkflowRun.js').HandoffRecord[];
+      model?: string | null;
+      yolo?: boolean;
     },
   ) {
     this.sessionId = generateSessionId(adapter.id);
@@ -83,6 +87,8 @@ export class RuntimeSession {
     this.goal = args.goal;
     this.legalTargets = args.legalTargets;
     this.upstreamPayloads = args.upstreamPayloads;
+    this.model = args.model ?? '';
+    this.yolo = args.yolo ?? false;
     this.createdAt = Date.now();
     this._state = 'creating';
   }

@@ -21,9 +21,9 @@ import type { MaterializedNode, NodeInstance, Point2D } from '../../lib/node-sys
 import { detectRoleForPane } from '../../lib/cliDetection';
 import { runtimeManager } from '../../lib/runtime/RuntimeManager';
 import { supportsHeadless } from '../../lib/cliIdentity';
-type NodeOutcome = 'success' | 'failure';
 import { useWorkspaceStore, type MissionAgent, type Pane, type ResultEntry, type WorkflowAgentCli, type WorkflowExecutionMode, type WorkflowGraph } from '../../store/workspace';
 import { detectRuntimeAction } from '../../lib/runtimeActivity';
+import { getModelsForCli, hasModelListSupport, invalidateModelCache } from '../../lib/modelDetection';
 
 type ValidationTone = 'idle' | 'ok' | 'error';
 type ResizeEdge = 'n' | 's' | 'e' | 'w' | 'ne' | 'nw' | 'se' | 'sw';
@@ -256,6 +256,8 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
   const [runtimeOutputByNodeId, setRuntimeOutputByNodeId] = useState<Record<string, string>>({});
   const [actionByNodeId, setActionByNodeId] = useState<Record<string, string>>({});
   const actionTimersRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
+  const [detectedModels, setDetectedModels] = useState<Map<WorkflowAgentCli, string[]>>(new Map());
+  const [loadingModels, setLoadingModels] = useState<Set<WorkflowAgentCli>>(new Set());
 
   const registry = useMemo(() => createWorkflowNodeRegistry(), []);
   const [state, setState] = useState<NodeDocumentState>(() => legacyGraphToNodeDocument(graph));
@@ -684,6 +686,8 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
           executionMode,
           terminalId,
           workspaceDir: workspaceDir || null,
+          model: String(node?.properties.model ?? '') || null,
+          yolo: Boolean(node?.properties.yolo),
         });
 
         // For interactive PTY, add the pane first so the PTY can spawn before
@@ -1136,35 +1140,6 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
       setValidationMessage(error instanceof Error ? error.message : String(error));
     }
   }, [registry, state.document, workspaceDir, graph.id, openTerminals, tabs, addPane, applyOperator, setNodeTerminalBinding]);
-
-  const markNodeComplete = useCallback(
-    async (nodeId: string, outcome: NodeOutcome) => {
-      if (!activeMissionRef.current) {
-        setValidationTone('error');
-        setValidationMessage('No active mission. Run the graph first.');
-        return;
-      }
-      try {
-        const node = activeMissionRef.current.nodes.find(n => n.id === nodeId);
-        let summary = '';
-        if (node?.terminal.terminalId) {
-          try {
-            const raw = await invoke<string>('get_pty_recent_output', { id: node.terminal.terminalId, maxBytes: 16384 });
-            summary = stripAnsi(raw).slice(-2000);
-          } catch { /* ignore read errors */ }
-        }
-        applyOperator({ type: 'set_node_property', nodeId, key: 'lastOutputSummary', value: summary });
-        applyOperator({ type: 'set_node_property', nodeId, key: 'lastOutcome', value: outcome });
-        applyOperator({ type: 'set_node_property', nodeId, key: 'status', value: outcome === 'success' ? 'completed' : 'failed' });
-        setValidationTone('ok');
-        setValidationMessage(`Node ${nodeId.substring(0, 8)} marked ${outcome}. Graph routing is handled by the agent via MCP complete_task.`);
-      } catch (error) {
-        setValidationTone('error');
-        setValidationMessage(error instanceof Error ? error.message : String(error));
-      }
-    },
-    [applyOperator],
-  );
 
   const viewRuntimeMapping = useCallback(() => {
     try {
@@ -1733,6 +1708,15 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
     [applyOperator, materializedById]
   );
 
+  const triggerModelDetection = useCallback((cli: WorkflowAgentCli) => {
+    if (!hasModelListSupport(cli)) return;
+    setLoadingModels(prev => { const s = new Set(prev); s.add(cli); return s; });
+    getModelsForCli(cli).then(models => {
+      setDetectedModels(prev => new Map(prev).set(cli, models));
+      setLoadingModels(prev => { const s = new Set(prev); s.delete(cli); return s; });
+    });
+  }, []);
+
   const inspectedNode = inspectorNodeId ? activeTree.nodes[inspectorNodeId] : null;
   const inspectedRuntimeAgent = inspectorNodeId ? missionAgentByNodeId.get(inspectorNodeId) : undefined;
   const inspectedTerminalId = String(inspectedNode?.properties.terminalId ?? inspectedRuntimeAgent?.terminalId ?? '').trim();
@@ -1744,6 +1728,17 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
   const inspectorOutput = inspectorNodeId
     ? (inspectedUsesPty ? (runtimeOutputByTerminalId[inspectedTerminalId] ?? '') : (runtimeOutputByNodeId[inspectorNodeId] ?? ''))
     : '';
+
+  const inspectedCli = (SELECTABLE_WORKFLOW_CLIS.includes(String(inspectedNode?.properties.cli ?? '') as WorkflowAgentCli)
+    ? String(inspectedNode?.properties.cli ?? 'claude')
+    : 'claude') as WorkflowAgentCli;
+
+  useEffect(() => {
+    if (!inspectorNodeId) return;
+    if (!detectedModels.has(inspectedCli) && !loadingModels.has(inspectedCli)) {
+      triggerModelDetection(inspectedCli);
+    }
+  }, [inspectorNodeId, inspectedCli, detectedModels, loadingModels, triggerModelDetection]);
 
   return (
     <div className="h-full w-full background-bg-app text-text-primary flex flex-col">
@@ -2022,6 +2017,75 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
                           ))}
                         </select>
                       </div>
+                      {(() => {
+                        const activeCli = (SELECTABLE_WORKFLOW_CLIS.includes(String(materializedNode.node.properties.cli ?? runtimeCli) as WorkflowAgentCli)
+                          ? String(materializedNode.node.properties.cli ?? runtimeCli)
+                          : 'claude') as WorkflowAgentCli;
+                        const isSupported = hasModelListSupport(activeCli);
+                        const modelList = detectedModels.get(activeCli);
+                        const isLoading = loadingModels.has(activeCli);
+                        const currentModel = String(materializedNode.node.properties.model ?? '');
+                        const isYolo = Boolean(materializedNode.node.properties.yolo);
+                        return (
+                          <div className="grid gap-2" style={{ gridTemplateColumns: '1fr auto' }}>
+                            {isSupported ? (
+                              <div className="flex gap-1 min-w-0">
+                                <select
+                                  value={currentModel}
+                                  disabled={isLoading}
+                                  onChange={event => applyOperator({ type: 'set_node_property', nodeId: materializedNode.node.id, key: 'model', value: event.target.value })}
+                                  className="flex-1 min-w-0 background-bg-surface border border-border-panel rounded-lg px-2 py-1.5 text-[11px] text-text-secondary disabled:opacity-60"
+                                  title="Model (empty = CLI default)"
+                                >
+                                  {isLoading ? (
+                                    <option value="">Loading...</option>
+                                  ) : (
+                                    <>
+                                      <option value="">default</option>
+                                      {(modelList ?? []).map(m => <option key={m} value={m}>{m}</option>)}
+                                    </>
+                                  )}
+                                </select>
+                                <button
+                                  type="button"
+                                  disabled={isLoading}
+                                  onClick={() => { invalidateModelCache(activeCli); triggerModelDetection(activeCli); }}
+                                  className="shrink-0 flex items-center justify-center border border-border-panel background-bg-surface rounded-lg p-1.5 text-text-muted hover:text-text-primary disabled:opacity-40"
+                                  title="Refresh model list"
+                                >
+                                  <RefreshCw size={10} className={isLoading ? 'animate-spin' : ''} />
+                                </button>
+                              </div>
+                            ) : (
+                              <input
+                                value={currentModel}
+                                onChange={event => applyOperator({ type: 'set_node_property', nodeId: materializedNode.node.id, key: 'model', value: event.target.value })}
+                                placeholder="Model (optional)"
+                                className="min-w-0 background-bg-surface border border-border-panel rounded-lg px-2 py-1.5 text-[11px] text-text-secondary"
+                              />
+                            )}
+                            <button
+                              type="button"
+                              onClick={() => applyOperator({ type: 'set_node_property', nodeId: materializedNode.node.id, key: 'yolo', value: !isYolo })}
+                              className={`flex shrink-0 items-center gap-1 rounded-lg border px-2 py-1.5 text-[11px] transition-colors ${
+                                isYolo
+                                  ? 'border-red-500/50 bg-red-500/10 text-red-300 hover:bg-red-500/20'
+                                  : 'border-border-panel background-bg-surface text-text-muted hover:text-text-primary'
+                              }`}
+                              title="Yolo mode — skip permission prompts at CLI startup"
+                            >
+                              <span className={`inline-flex items-center rounded border px-1 text-[9px] font-semibold tracking-wide leading-none h-[16px] ${
+                                isYolo
+                                  ? 'border-red-500/50 bg-red-500/20 text-red-300'
+                                  : 'border-border-panel bg-transparent text-text-muted'
+                              }`}>
+                                YOLO
+                              </span>
+                              <span className="leading-none">{isYolo ? 'ON' : 'OFF'}</span>
+                            </button>
+                          </div>
+                        );
+                      })()}
                       <div className="grid grid-cols-2 gap-2 text-[10px]">
                         <div className={`rounded border px-2 py-1.5 ${workflowStatusTone(runtimeStatus, 'graph')}`}>
                           <div className="uppercase tracking-wide opacity-70">Status</div>
@@ -2051,7 +2115,7 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
                           </div>
                         </div>
                       )}
-                      <div className="grid grid-cols-3 gap-2">
+                      <div className="grid grid-cols-2 gap-2">
                         <select
                           value={SELECTABLE_EXECUTION_MODES.includes(materializedNode.node.properties.executionMode as WorkflowExecutionMode)
                             ? String(materializedNode.node.properties.executionMode)
@@ -2080,24 +2144,6 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
                         >
                           <Plus size={11} />
                           New Runtime
-                        </button>
-                        <button
-                          type="button"
-                          disabled={!activeMissionId}
-                          onClick={() => void markNodeComplete(materializedNode.node.id, 'success')}
-                          className="flex items-center justify-center gap-1 rounded border border-emerald-500/50 px-2 py-1.5 text-[10px] text-emerald-300 hover:bg-emerald-500/10 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-                          title="Capture current terminal output as this node's result and activate downstream nodes"
-                        >
-                          ✓ Mark Complete
-                        </button>
-                        <button
-                          type="button"
-                          disabled={!activeMissionId}
-                          onClick={() => void markNodeComplete(materializedNode.node.id, 'failure')}
-                          className="flex items-center justify-center gap-1 rounded border border-red-500/50 px-2 py-1.5 text-[10px] text-red-300 hover:bg-red-500/10 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-                          title="Mark as failed and route to on_failure edges"
-                        >
-                          ✕ Mark Failed
                         </button>
                       </div>
                       {typeof materializedNode.node.properties.lastOutputSummary === 'string' &&

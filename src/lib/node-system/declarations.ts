@@ -164,6 +164,8 @@ export function createWorkflowNodeRegistry() {
       presetId: '',
       runVersion: 1,
       adaptiveSeed: false,
+      model: '',    // empty = use CLI default
+      yolo: false,
     }),
     declare: (_context, builder) => {
       builder.addInput('in', 'In', 'flow');

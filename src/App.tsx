@@ -8,7 +8,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { homeDir } from '@tauri-apps/api/path';
 import { Window } from '@tauri-apps/api/window';
-import { PanelLeft, TerminalSquare, FileCode2, KanbanSquare, Activity, Palette, Plus, Rocket, Monitor, Minus, Square, X, Network, FolderTree, LayoutGrid, Maximize, Settings } from 'lucide-react';
+import { PanelLeft, TerminalSquare, FileCode2, KanbanSquare, Activity, Plus, Rocket, Monitor, Minus, Square, X, Network, FolderTree, LayoutGrid, Maximize, Settings } from 'lucide-react';
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { detectRoleFromText, normalizeCli } from './lib/cliDetection';
 import { refreshCliDetectionForTerminals } from './lib/terminalCliRuntime';
@@ -68,18 +68,16 @@ function App() {
   const addMessage      = useWorkspaceStore((s) => s.addMessage);
   const addResult       = useWorkspaceStore((s) => s.addResult);
   const setTasks        = useWorkspaceStore((s) => s.setTasks);
-  const updatePaneDataByTerminalId = useWorkspaceStore((s) => s.updatePaneDataByTerminalId);
-  const updatePaneData = useWorkspaceStore((s) => s.updatePaneData);
-  const workspaceDir    = useWorkspaceStore((s) => s.workspaceDir);
+   const updatePaneDataByTerminalId = useWorkspaceStore((s) => s.updatePaneDataByTerminalId);
+   const workspaceDir    = useWorkspaceStore((s) => s.workspaceDir);
   const setWorkspaceDir = useWorkspaceStore((s) => s.setWorkspaceDir);
   const globalGraph     = useWorkspaceStore((s) => s.globalGraph);
   const setGlobalGraph  = useWorkspaceStore((s) => s.setGlobalGraph);
-  const nodeRuntimeBindings = useWorkspaceStore((s) => s.nodeRuntimeBindings);
+
   const layoutMode   = useWorkspaceStore((s) => s.layoutMode);
   const setLayoutMode = useWorkspaceStore((s) => s.setLayoutMode);
-  const showSettings = useWorkspaceStore((s) => s.showSettings);
-  const setShowSettings = useWorkspaceStore((s) => s.setShowSettings);
-  const modeLabel = MODE_OPTIONS.find(mode => mode.id === appMode)?.label ?? 'Workflow';
+   const showSettings = useWorkspaceStore((s) => s.showSettings);
+   const modeLabel = MODE_OPTIONS.find(mode => mode.id === appMode)?.label ?? 'Workflow';
 
   useEffect(() => {
     if (!workspaceDir) {
@@ -134,7 +132,7 @@ function App() {
     invoke<DbTask[]>('get_tasks').then(setTasks).catch(() => {});
   }, []);
 
-  const [draggingNew, setDraggingNew] = useState<{ type: PaneType; x: number; y: number; label?: string; data?: any } | null>(null);
+   const [draggingNew] = useState<{ type: PaneType; x: number; y: number; label?: string; data?: any } | null>(null);
 
   useEffect(() => {
     const unlisten = listen<McpMessage>('mcp-message', (event) => {

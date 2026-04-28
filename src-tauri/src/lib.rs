@@ -7,6 +7,7 @@ pub mod workflow;
 pub mod workflow_engine;
 pub mod workflow_log;
 pub mod workspace;
+pub mod model_detection;
 
 #[tauri::command]
 fn greet(name: &str) -> String {
@@ -79,6 +80,7 @@ pub fn run() {
             workspace::workspace_copy,
             workspace::workspace_move,
             workspace::workspace_search,
+            model_detection::detect_models,
         ])
         .setup(|app| {
             db::init_db(app.handle()).expect("Failed to init db");

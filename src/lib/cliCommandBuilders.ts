@@ -19,6 +19,8 @@ export interface CliCommandBuilderOptions {
   localHttpUrl?: string | null;
   localHttpModel?: string | null;
   localHttpApiKey?: string | null;
+  model?: string | null;
+  yolo?: boolean;
 }
 
 function baseEnv(payload: RuntimeActivationPayload, mcpUrl?: string | null): Record<string, string> {
@@ -125,14 +127,13 @@ export function buildCliRunCommand(
       codexEnv.CODEX_HOME = '.terminal-docks\\codex-home';
     }
 
-    // On Windows, `codex` is installed as `codex.cmd` (an npm shim) which
-    // Command::new("codex") cannot find — it only resolves .exe.  Route through
-    // cmd.exe so the shell resolves the .cmd extension and handles the < stdin
-    // redirect (Rust's Command does not pipe stdin for us).
-    // The prompt is pre-written to {promptPath} by the Rust backend before spawn.
+    // NOTE: --ask-for-approval and --sandbox are GLOBAL flags and must precede `exec`.
+    // We currently use shell redirection for stdin due to Windows cmd.exe shim.
+    // TODO: Replace with true stdin piping without shell dependency.
+    const execCmd = `codex --ask-for-approval never --sandbox workspace-write exec --json --skip-git-repo-check - < "{promptPath}"`;
     return {
       command: 'cmd',
-      args: ['/c', 'codex exec --json --skip-git-repo-check -a never - < "{promptPath}"'],
+      args: ['/c', execCmd],
       env: codexEnv,
       promptDelivery: 'arg_file',
     };
@@ -147,4 +148,22 @@ export function materializePromptArgs(command: CliRunCommand, prompt: string): C
     ...command,
     args: command.args.map(arg => arg.split('{prompt}').join(prompt)),
   };
+}
+
+export function buildPtyLaunchCommand(cliId: string, options: { model?: string | null; yolo?: boolean }): string {
+  const cli = normalizeCliId(cliId);
+  const parts: string[] = [cliId];
+
+  const supportsModelFlag = cli === 'claude' || cli === 'opencode' || cli === 'gemini' || cli === 'codex';
+  if (options.model && supportsModelFlag) {
+    parts.push('--model', options.model);
+  }
+
+  if (options.yolo) {
+    if (cli === 'claude') parts.push('--dangerously-skip-permissions');
+    else if (cli === 'opencode' || cli === 'gemini') parts.push('--yolo');
+    // codex: PTY mode doesn't have a yolo equivalent; keep interactive
+  }
+
+  return parts.join(' ');
 }

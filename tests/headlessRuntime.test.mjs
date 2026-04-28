@@ -78,7 +78,7 @@ run('codex headless command uses stdin prompt file and safe defaults', () => {
   assert.equal(command.command, 'cmd');
   assert.equal(command.promptDelivery, 'arg_file');
   assert.equal(command.args[0], '/c');
-  assert.match(command.args[1] ?? '', /codex exec --json --skip-git-repo-check -a never - < "\{promptPath\}"/);
+  assert.match(command.args[1] ?? '', /codex --ask-for-approval never --sandbox workspace-write exec --json --skip-git-repo-check - < "\{promptPath\}"/);
   assert.equal(command.env.CODEX_HOME, '.terminal-docks\\codex-home');
 });
 

@@ -41,6 +41,7 @@ import {
 } from './TerminalRuntime.js';
 import { buildNewTaskSignal } from '../missionRuntime.js';
 import { buildStartAgentRunRequest } from '../runtimeDispatcher.js';
+import { buildPtyLaunchCommand } from '../cliCommandBuilders.js';
 import { getRuntimeBootstrapContract, buildRuntimeBootstrapRegistrationRequest } from '../runtimeBootstrap.js';
 import { mcpBus } from '../workers/mcpEventBus.js';
 import { detectCliFromTerminalOutput } from '../cliDetection.js';
@@ -183,6 +184,8 @@ class RuntimeManager {
       goal: args.goal ?? undefined,
       legalTargets: args.legalTargets,
       upstreamPayloads: args.upstreamPayloads,
+      model: args.model,
+      yolo: args.yolo,
     });
 
     this.sessions.set(session.sessionId, session);
@@ -878,7 +881,8 @@ class RuntimeManager {
         if (terminalReady && await this.shouldLaunchCliInTerminal(session)) {
           await sleep(CLI_LAUNCH_DELAY_MS);
           try {
-            await writeToTerminal(session.terminalId, `${session.cliId}\r`);
+            const launchCmd = buildPtyLaunchCommand(session.cliId, { model: session.model, yolo: session.yolo });
+            await writeToTerminal(session.terminalId, `${launchCmd}\r`);
             useWorkspaceStore.getState().updatePaneDataByTerminalId(session.terminalId, {
               cliSource: 'connect_agent',
               cli: session.cliId,
@@ -944,7 +948,8 @@ class RuntimeManager {
       }
       if (await this.shouldLaunchCliInTerminal(session)) {
         await sleep(CLI_LAUNCH_DELAY_MS);
-        await writeToTerminal(session.terminalId, `${session.cliId}\r`);
+        const launchCmd = buildPtyLaunchCommand(session.cliId, { model: session.model, yolo: session.yolo });
+        await writeToTerminal(session.terminalId, `${launchCmd}\r`);
         await sleep(CLI_STARTUP_WAIT_MS);
         useWorkspaceStore.getState().updatePaneDataByTerminalId(session.terminalId, {
           cliSource: 'connect_agent',
@@ -1179,6 +1184,8 @@ class RuntimeManager {
     const { request, error } = buildStartAgentRunRequest(activationPayload, signal, {
       ...terminalConfig,
       mcpUrl,
+      model: session.model || null,
+      yolo: session.yolo,
     });
 
     if (!request || error) {

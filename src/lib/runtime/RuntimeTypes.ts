@@ -54,6 +54,8 @@ export interface CreateRuntimeArgs {
   runId?: string | null;
   activationPayload?: RuntimeActivationPayload;
   capabilities?: Array<{ id: string; level?: number; verifiedBy?: string }> | null;
+  model?: string | null;
+  yolo?: boolean;
 }
 
 // ──────────────────────────────────────────────
