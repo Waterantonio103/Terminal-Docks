@@ -54,9 +54,11 @@ export const codexAdapter: CliAdapter = {
       };
     }
 
+    const args: string[] = [];
+    if (context.model?.trim()) args.push('--model', context.model.trim());
     return {
       command: 'codex',
-      args: [],
+      args,
       env,
       promptDelivery: 'interactive_pty',
     };

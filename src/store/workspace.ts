@@ -69,6 +69,8 @@ export interface WorkflowNode {
     terminalTitle?: string;
     paneId?: string;
     cli?: WorkflowAgentCli;
+    model?: string;
+    yolo?: boolean;
     executionMode?: WorkflowExecutionMode;
     autoLinked?: boolean;
     authoringMode?: WorkflowAuthoringMode;
@@ -110,6 +112,8 @@ export interface CompiledMissionTerminalBinding {
   terminalId: string;
   terminalTitle: string;
   cli: WorkflowAgentCli;
+  model?: string;
+  yolo?: boolean;
   executionMode: WorkflowExecutionMode;
   paneId?: string;
   reusedExisting: boolean;
@@ -186,6 +190,7 @@ export interface MissionAgent {
   attemptHistory?: MissionAttemptRecord[];
   nodeId?: string;
   cli?: WorkflowAgentCli; // Added to track intended CLI in MissionControl
+  model?: string | null;
   runtimeSessionId?: string | null;
   runtimeCli?: WorkflowAgentCli | null;
   executionMode?: WorkflowExecutionMode | null;

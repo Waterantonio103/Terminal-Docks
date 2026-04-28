@@ -66,8 +66,14 @@ pub struct StartAgentRunRequest {
     pub args: Vec<String>,
     #[serde(default)]
     pub env: HashMap<String, String>,
+    #[serde(default = "default_prompt_delivery")]
+    pub prompt_delivery: String,
     pub prompt: String,
     pub timeout_ms: Option<u64>,
+}
+
+fn default_prompt_delivery() -> String {
+    "arg_file".to_string()
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -143,7 +149,11 @@ fn run_root(app: &AppHandle, cwd: Option<&str>) -> Result<PathBuf, String> {
         .join("runs"))
 }
 
-fn run_paths(app: &AppHandle, run_id: &str, cwd: Option<&str>) -> Result<(PathBuf, PathBuf, PathBuf, PathBuf), String> {
+fn run_paths(
+    app: &AppHandle,
+    run_id: &str,
+    cwd: Option<&str>,
+) -> Result<(PathBuf, PathBuf, PathBuf, PathBuf), String> {
     let dir = run_root(app, cwd)?.join(sanitize_path_segment(run_id));
     fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     Ok((
@@ -155,9 +165,11 @@ fn run_paths(app: &AppHandle, run_id: &str, cwd: Option<&str>) -> Result<(PathBu
 }
 
 fn replace_placeholders(value: &str, replacements: &HashMap<&str, String>) -> String {
-    replacements.iter().fold(value.to_string(), |acc, (key, replacement)| {
-        acc.replace(&format!("{{{key}}}"), replacement)
-    })
+    replacements
+        .iter()
+        .fold(value.to_string(), |acc, (key, replacement)| {
+            acc.replace(&format!("{{{key}}}"), replacement)
+        })
 }
 
 fn home_dir() -> Option<PathBuf> {
@@ -172,7 +184,11 @@ fn seed_codex_auth_if_needed(cli: &str, env: &HashMap<String, String>) -> Result
         return Ok(());
     }
 
-    let codex_home = match env.get("CODEX_HOME").map(|value| value.trim()).filter(|value| !value.is_empty()) {
+    let codex_home = match env
+        .get("CODEX_HOME")
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+    {
         Some(path) => PathBuf::from(path),
         None => return Ok(()),
     };
@@ -203,11 +219,7 @@ fn seed_codex_auth_if_needed(cli: &str, env: &HashMap<String, String>) -> Result
     Ok(())
 }
 
-fn normalize_codex_home_env(
-    cli: &str,
-    cwd: Option<&str>,
-    env: &mut HashMap<String, String>,
-) {
+fn normalize_codex_home_env(cli: &str, cwd: Option<&str>, env: &mut HashMap<String, String>) {
     if !cli.eq_ignore_ascii_case("codex") {
         return;
     }
@@ -249,9 +261,16 @@ fn with_runtime_env(request: &StartAgentRunRequest, prompt_path: &str) -> HashMa
     env.insert("TD_NODE_ID".to_string(), request.node_id.clone());
     env.insert("TD_ATTEMPT".to_string(), request.attempt.to_string());
     env.insert("TD_RUN_ID".to_string(), request.run_id.clone());
-    env.insert("TD_EXECUTION_MODE".to_string(), request.execution_mode.clone());
+    env.insert(
+        "TD_EXECUTION_MODE".to_string(),
+        request.execution_mode.clone(),
+    );
     env.insert("TD_PROMPT_PATH".to_string(), prompt_path.to_string());
-    if let Some(cwd) = request.cwd.as_ref().filter(|value| !value.trim().is_empty()) {
+    if let Some(cwd) = request
+        .cwd
+        .as_ref()
+        .filter(|value| !value.trim().is_empty())
+    {
         env.insert("TD_WORKSPACE".to_string(), cwd.clone());
     }
     env
@@ -338,8 +357,16 @@ fn update_run_status(
         .lock()
         .map_err(|_| "Failed to lock database".to_string())?;
     let conn = db_lock.as_ref().ok_or("Database not initialized")?;
-    let started_sql = if started { "CURRENT_TIMESTAMP" } else { "started_at" };
-    let completed_sql = if completed { "CURRENT_TIMESTAMP" } else { "completed_at" };
+    let started_sql = if started {
+        "CURRENT_TIMESTAMP"
+    } else {
+        "started_at"
+    };
+    let completed_sql = if completed {
+        "CURRENT_TIMESTAMP"
+    } else {
+        "completed_at"
+    };
     let sql = format!(
         "UPDATE agent_runs
          SET status = ?1, exit_code = ?2, error = ?3,
@@ -381,7 +408,14 @@ fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<AgentRunRecord> {
     })
 }
 
-fn emit_status(app: &AppHandle, run_id: &str, mission_id: &str, node_id: &str, status: &str, error: Option<String>) {
+fn emit_status(
+    app: &AppHandle,
+    run_id: &str,
+    mission_id: &str,
+    node_id: &str,
+    status: &str,
+    error: Option<String>,
+) {
     let _ = app.emit(
         "agent-run-status",
         AgentRunStatusEvent {
@@ -395,7 +429,14 @@ fn emit_status(app: &AppHandle, run_id: &str, mission_id: &str, node_id: &str, s
     );
 }
 
-fn emit_output(app: &AppHandle, run_id: &str, mission_id: &str, node_id: &str, stream: &str, chunk: String) {
+fn emit_output(
+    app: &AppHandle,
+    run_id: &str,
+    mission_id: &str,
+    node_id: &str,
+    stream: &str,
+    chunk: String,
+) {
     let _ = app.emit(
         "agent-run-output",
         AgentRunOutputEvent {
@@ -432,7 +473,10 @@ fn emit_exit(
     );
 }
 
-fn mcp_internal_push(app: &AppHandle, body: serde_json::Value) -> Result<serde_json::Value, String> {
+fn mcp_internal_push(
+    app: &AppHandle,
+    body: serde_json::Value,
+) -> Result<serde_json::Value, String> {
     let state = app.state::<crate::mcp::McpState>();
     let token = state.internal_push_token.lock().unwrap().clone();
     if token.is_empty() {
@@ -470,19 +514,27 @@ fn summarize_completion_output(content: &str, fallback: &str) -> String {
     if content.trim().is_empty() {
         fallback.to_string()
     } else {
-        content.trim().lines().take(8).collect::<Vec<_>>().join("\n")
+        content
+            .trim()
+            .lines()
+            .take(8)
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 }
 
 fn acknowledge_headless_runtime(app: &AppHandle, payload: &StartAgentRunRequest) {
-    let _ = mcp_internal_push(app, serde_json::json!({
-        "type": "runtime_task_acked",
-        "sessionId": payload.session_id,
-        "missionId": payload.mission_id,
-        "nodeId": payload.node_id,
-        "attempt": payload.attempt,
-        "taskSeq": payload.attempt,
-    }));
+    let _ = mcp_internal_push(
+        app,
+        serde_json::json!({
+            "type": "runtime_task_acked",
+            "sessionId": payload.session_id,
+            "missionId": payload.mission_id,
+            "nodeId": payload.node_id,
+            "attempt": payload.attempt,
+            "taskSeq": payload.attempt,
+        }),
+    );
     let _ = crate::workflow_engine::acknowledge_runtime_activation(
         app.clone(),
         payload.mission_id.clone(),
@@ -511,28 +563,48 @@ fn publish_cli_stdout_completion(
     stdout_path: &PathBuf,
 ) -> Result<(), String> {
     let content = fs::read_to_string(stdout_path).unwrap_or_default();
-    let summary = summarize_completion_output(&content, "CLI runtime completed without text output.");
-    mcp_internal_push(app, serde_json::json!({
-        "type": "runtime_task_completed",
-        "sessionId": session_id,
-        "missionId": mission_id,
-        "nodeId": node_id,
-        "attempt": attempt,
-        "outcome": "success",
-        "title": "CLI runtime completed",
-        "summary": summary,
-        "rawOutput": content,
-        "logRef": run_id,
-        "filesChanged": [],
-        "artifactReferences": [],
-        "downstreamPayload": {
-            "status": "success",
+    let summary =
+        summarize_completion_output(&content, "CLI runtime completed without text output.");
+    mcp_internal_push(
+        app,
+        serde_json::json!({
+            "type": "runtime_task_completed",
+            "sessionId": session_id,
+            "missionId": mission_id,
+            "nodeId": node_id,
+            "attempt": attempt,
+            "outcome": "success",
+            "title": "CLI runtime completed",
             "summary": summary,
             "rawOutput": content,
             "logRef": run_id,
-        },
-    }))?;
+            "filesChanged": [],
+            "artifactReferences": [],
+            "downstreamPayload": {
+                "status": "success",
+                "summary": summary,
+                "rawOutput": content,
+                "logRef": run_id,
+            },
+        }),
+    )?;
     Ok(())
+}
+
+fn stdout_has_codex_turn_completed(stdout_path: &PathBuf) -> bool {
+    let content = fs::read_to_string(stdout_path).unwrap_or_default();
+    content.lines().any(|line| {
+        serde_json::from_str::<serde_json::Value>(line)
+            .ok()
+            .and_then(|value| {
+                value
+                    .get("type")
+                    .and_then(|kind| kind.as_str())
+                    .map(str::to_string)
+            })
+            .map(|kind| kind == "turn.completed")
+            .unwrap_or(false)
+    })
 }
 
 fn start_local_http_run(
@@ -543,17 +615,27 @@ fn start_local_http_run(
     stderr_path: PathBuf,
 ) -> Result<AgentRunRecord, String> {
     update_run_status(&app, &payload.run_id, "running", None, None, true, false)?;
-    emit_status(&app, &payload.run_id, &payload.mission_id, &payload.node_id, "running", None);
+    emit_status(
+        &app,
+        &payload.run_id,
+        &payload.mission_id,
+        &payload.node_id,
+        "running",
+        None,
+    );
 
     thread::spawn(move || {
-        let _ = mcp_internal_push(&app, serde_json::json!({
-            "type": "runtime_task_acked",
-            "sessionId": payload.session_id,
-            "missionId": payload.mission_id,
-            "nodeId": payload.node_id,
-            "attempt": payload.attempt,
-            "taskSeq": payload.attempt,
-        }));
+        let _ = mcp_internal_push(
+            &app,
+            serde_json::json!({
+                "type": "runtime_task_acked",
+                "sessionId": payload.session_id,
+                "missionId": payload.mission_id,
+                "nodeId": payload.node_id,
+                "attempt": payload.attempt,
+                "taskSeq": payload.attempt,
+            }),
+        );
         let _ = crate::workflow_engine::acknowledge_runtime_activation(
             app.clone(),
             payload.mission_id.clone(),
@@ -602,29 +684,52 @@ fn start_local_http_run(
         match request.send_string(&request_body.to_string()) {
             Ok(response) => {
                 let raw = response.into_string().unwrap_or_default();
-                let parsed = serde_json::from_str::<serde_json::Value>(&raw).unwrap_or(serde_json::Value::String(raw.clone()));
+                let parsed = serde_json::from_str::<serde_json::Value>(&raw)
+                    .unwrap_or(serde_json::Value::String(raw.clone()));
                 let content = extract_openai_compatible_text(&parsed);
-                let summary = summarize_completion_output(&content, "Local HTTP runtime completed without text output.");
+                let summary = summarize_completion_output(
+                    &content,
+                    "Local HTTP runtime completed without text output.",
+                );
                 let _ = fs::write(&stdout_path, &content);
-                emit_output(&app, &payload.run_id, &payload.mission_id, &payload.node_id, "stdout", content.clone());
-                let completion = mcp_internal_push(&app, serde_json::json!({
-                    "type": "runtime_task_completed",
-                    "sessionId": payload.session_id,
-                    "missionId": payload.mission_id,
-                    "nodeId": payload.node_id,
-                    "attempt": payload.attempt,
-                    "outcome": "success",
-                    "title": "Local HTTP runtime completed",
-                    "summary": summary,
-                    "rawOutput": content,
-                    "logRef": payload.run_id,
-                    "filesChanged": [],
-                    "artifactReferences": [],
-                    "downstreamPayload": parsed,
-                }));
+                emit_output(
+                    &app,
+                    &payload.run_id,
+                    &payload.mission_id,
+                    &payload.node_id,
+                    "stdout",
+                    content.clone(),
+                );
+                let completion = mcp_internal_push(
+                    &app,
+                    serde_json::json!({
+                        "type": "runtime_task_completed",
+                        "sessionId": payload.session_id,
+                        "missionId": payload.mission_id,
+                        "nodeId": payload.node_id,
+                        "attempt": payload.attempt,
+                        "outcome": "success",
+                        "title": "Local HTTP runtime completed",
+                        "summary": summary,
+                        "rawOutput": content,
+                        "logRef": payload.run_id,
+                        "filesChanged": [],
+                        "artifactReferences": [],
+                        "downstreamPayload": parsed,
+                    }),
+                );
                 match completion {
                     Ok(_) => {
-                        update_run_status(&app, &payload.run_id, "completed", Some(0), None, false, true).ok();
+                        update_run_status(
+                            &app,
+                            &payload.run_id,
+                            "completed",
+                            Some(0),
+                            None,
+                            false,
+                            true,
+                        )
+                        .ok();
                         let _ = app.emit(
                             "agent-run-exit",
                             AgentRunExitEvent {
@@ -640,17 +745,56 @@ fn start_local_http_run(
                     }
                     Err(error) => {
                         let _ = fs::write(&stderr_path, &error);
-                        update_run_status(&app, &payload.run_id, "failed", None, Some(&error), false, true).ok();
-                        emit_status(&app, &payload.run_id, &payload.mission_id, &payload.node_id, "failed", Some(error));
+                        update_run_status(
+                            &app,
+                            &payload.run_id,
+                            "failed",
+                            None,
+                            Some(&error),
+                            false,
+                            true,
+                        )
+                        .ok();
+                        emit_status(
+                            &app,
+                            &payload.run_id,
+                            &payload.mission_id,
+                            &payload.node_id,
+                            "failed",
+                            Some(error),
+                        );
                     }
                 }
             }
             Err(error) => {
                 let message = format!("Local HTTP runtime failed: {error}");
                 let _ = fs::write(&stderr_path, &message);
-                emit_output(&app, &payload.run_id, &payload.mission_id, &payload.node_id, "stderr", message.clone());
-                update_run_status(&app, &payload.run_id, "failed", None, Some(&message), false, true).ok();
-                emit_status(&app, &payload.run_id, &payload.mission_id, &payload.node_id, "failed", Some(message.clone()));
+                emit_output(
+                    &app,
+                    &payload.run_id,
+                    &payload.mission_id,
+                    &payload.node_id,
+                    "stderr",
+                    message.clone(),
+                );
+                update_run_status(
+                    &app,
+                    &payload.run_id,
+                    "failed",
+                    None,
+                    Some(&message),
+                    false,
+                    true,
+                )
+                .ok();
+                emit_status(
+                    &app,
+                    &payload.run_id,
+                    &payload.mission_id,
+                    &payload.node_id,
+                    "failed",
+                    Some(message.clone()),
+                );
                 let _ = app.emit(
                     "agent-run-exit",
                     AgentRunExitEvent {
@@ -682,8 +826,16 @@ fn stream_reader(
     transcript_path: PathBuf,
 ) {
     thread::spawn(move || {
-        let mut log = OpenOptions::new().create(true).append(true).open(log_path).ok();
-        let mut transcript = OpenOptions::new().create(true).append(true).open(transcript_path).ok();
+        let mut log = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(log_path)
+            .ok();
+        let mut transcript = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(transcript_path)
+            .ok();
         let mut buf = [0u8; 4096];
         loop {
             match reader.read(&mut buf) {
@@ -729,10 +881,41 @@ pub fn start_agent_run(
 ) -> Result<AgentRunRecord, String> {
     if payload.command.trim().is_empty() {
         let error = "Headless command is empty.".to_string();
-        update_run_status(&app, &payload.run_id, "failed", None, Some(&error), false, true).ok();
-        emit_status(&app, &payload.run_id, &payload.mission_id, &payload.node_id, "failed", Some(error.clone()));
-        emit_output(&app, &payload.run_id, &payload.mission_id, &payload.node_id, "stderr", error.clone());
-        emit_exit(&app, &payload.run_id, &payload.mission_id, &payload.node_id, "failed", None, Some(error.clone()));
+        update_run_status(
+            &app,
+            &payload.run_id,
+            "failed",
+            None,
+            Some(&error),
+            false,
+            true,
+        )
+        .ok();
+        emit_status(
+            &app,
+            &payload.run_id,
+            &payload.mission_id,
+            &payload.node_id,
+            "failed",
+            Some(error.clone()),
+        );
+        emit_output(
+            &app,
+            &payload.run_id,
+            &payload.mission_id,
+            &payload.node_id,
+            "stderr",
+            error.clone(),
+        );
+        emit_exit(
+            &app,
+            &payload.run_id,
+            &payload.mission_id,
+            &payload.node_id,
+            "failed",
+            None,
+            Some(error.clone()),
+        );
         return Err(error);
     }
 
@@ -766,10 +949,41 @@ pub fn start_agent_run(
 
     if let Err(error) = seed_codex_auth_if_needed(&payload.cli, &env) {
         let message = format!("Failed preparing Codex auth state: {error}");
-        update_run_status(&app, &payload.run_id, "failed", None, Some(&message), false, true).ok();
-        emit_status(&app, &payload.run_id, &payload.mission_id, &payload.node_id, "failed", Some(message.clone()));
-        emit_output(&app, &payload.run_id, &payload.mission_id, &payload.node_id, "stderr", message.clone());
-        emit_exit(&app, &payload.run_id, &payload.mission_id, &payload.node_id, "failed", None, Some(message.clone()));
+        update_run_status(
+            &app,
+            &payload.run_id,
+            "failed",
+            None,
+            Some(&message),
+            false,
+            true,
+        )
+        .ok();
+        emit_status(
+            &app,
+            &payload.run_id,
+            &payload.mission_id,
+            &payload.node_id,
+            "failed",
+            Some(message.clone()),
+        );
+        emit_output(
+            &app,
+            &payload.run_id,
+            &payload.mission_id,
+            &payload.node_id,
+            "stderr",
+            message.clone(),
+        );
+        emit_exit(
+            &app,
+            &payload.run_id,
+            &payload.mission_id,
+            &payload.node_id,
+            "failed",
+            None,
+            Some(message.clone()),
+        );
         return Err(message);
     }
 
@@ -797,7 +1011,14 @@ pub fn start_agent_run(
         error: None,
     };
     persist_agent_run(&app, &record)?;
-    emit_status(&app, &payload.run_id, &payload.mission_id, &payload.node_id, "starting", None);
+    emit_status(
+        &app,
+        &payload.run_id,
+        &payload.mission_id,
+        &payload.node_id,
+        "starting",
+        None,
+    );
 
     if command == LOCAL_HTTP_COMMAND {
         return start_local_http_run(app, payload, record, stdout_path, stderr_path);
@@ -805,8 +1026,17 @@ pub fn start_agent_run(
 
     let mut command_builder = Command::new(&command);
     command_builder.args(&args);
-    command_builder.stdout(Stdio::piped()).stderr(Stdio::piped());
-    if let Some(cwd) = payload.cwd.as_ref().filter(|value| !value.trim().is_empty()) {
+    command_builder
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if payload.prompt_delivery == "stdin" {
+        command_builder.stdin(Stdio::piped());
+    }
+    if let Some(cwd) = payload
+        .cwd
+        .as_ref()
+        .filter(|value| !value.trim().is_empty())
+    {
         command_builder.current_dir(cwd);
     }
     for (key, value) in &env {
@@ -816,14 +1046,62 @@ pub fn start_agent_run(
     let mut child = match command_builder.spawn() {
         Ok(child) => child,
         Err(error) => {
-            let message = format!("CLI launch failed: {error}");
-            update_run_status(&app, &payload.run_id, "failed", None, Some(&message), false, true).ok();
-            emit_status(&app, &payload.run_id, &payload.mission_id, &payload.node_id, "failed", Some(message.clone()));
-            emit_output(&app, &payload.run_id, &payload.mission_id, &payload.node_id, "stderr", message.clone());
-            emit_exit(&app, &payload.run_id, &payload.mission_id, &payload.node_id, "failed", None, Some(message.clone()));
+            let message = if error.kind() == std::io::ErrorKind::NotFound {
+                format!(
+                    "CLI launch failed: program not found. Make sure '{}' is installed and available in your PATH.",
+                    command
+                )
+            } else {
+                format!("CLI launch failed: {error}")
+            };
+            update_run_status(
+                &app,
+                &payload.run_id,
+                "failed",
+                None,
+                Some(&message),
+                false,
+                true,
+            )
+            .ok();
+            emit_status(
+                &app,
+                &payload.run_id,
+                &payload.mission_id,
+                &payload.node_id,
+                "failed",
+                Some(message.clone()),
+            );
+            emit_output(
+                &app,
+                &payload.run_id,
+                &payload.mission_id,
+                &payload.node_id,
+                "stderr",
+                message.clone(),
+            );
+            emit_exit(
+                &app,
+                &payload.run_id,
+                &payload.mission_id,
+                &payload.node_id,
+                "failed",
+                None,
+                Some(message.clone()),
+            );
             return Err(message);
         }
     };
+
+    if payload.prompt_delivery == "stdin" {
+        if let Some(mut stdin) = child.stdin.take() {
+            let prompt = payload.prompt.clone();
+            thread::spawn(move || {
+                let _ = stdin.write_all(prompt.as_bytes());
+                let _ = stdin.flush();
+            });
+        }
+    }
 
     if let Some(stdout) = child.stdout.take() {
         stream_reader(
@@ -852,12 +1130,22 @@ pub fn start_agent_run(
 
     let child_ref = Arc::new(Mutex::new(child));
     {
-        let mut children = state.children.lock().map_err(|_| "Failed to lock agent runs".to_string())?;
+        let mut children = state
+            .children
+            .lock()
+            .map_err(|_| "Failed to lock agent runs".to_string())?;
         children.insert(payload.run_id.clone(), child_ref.clone());
     }
 
     update_run_status(&app, &payload.run_id, "running", None, None, true, false)?;
-    emit_status(&app, &payload.run_id, &payload.mission_id, &payload.node_id, "running", None);
+    emit_status(
+        &app,
+        &payload.run_id,
+        &payload.mission_id,
+        &payload.node_id,
+        "running",
+        None,
+    );
     if payload.execution_mode == "headless" || payload.execution_mode == "streaming_headless" {
         acknowledge_headless_runtime(&app, &payload);
     }
@@ -884,7 +1172,8 @@ pub fn start_agent_run(
                         map.remove(&run_id);
                     }
                     let error = "run_timed_out".to_string();
-                    update_run_status(&app, &run_id, "timed_out", None, Some(&error), false, true).ok();
+                    update_run_status(&app, &run_id, "timed_out", None, Some(&error), false, true)
+                        .ok();
                     let _ = app.emit(
                         "agent-run-exit",
                         AgentRunExitEvent {
@@ -918,15 +1207,23 @@ pub fn start_agent_run(
                         return;
                     }
                     let exit_code = status.code();
-                    let final_status = if status.success() { "completed" } else { "failed" };
-                    let error = if status.success() {
+                    let codex_completed = cli == "codex"
+                        && stdout_has_codex_turn_completed(&stdout_path_for_completion);
+                    let final_status = if status.success() || codex_completed {
+                        "completed"
+                    } else {
+                        "failed"
+                    };
+                    let error = if status.success() || codex_completed {
                         None
                     } else {
                         Some(format!("Process exited with status {status}."))
                     };
-                    if status.success()
-                        && cli == "claude"
-                        && (execution_mode == "headless" || execution_mode == "streaming_headless")
+                    if (status.success() || codex_completed)
+                        && ((cli == "claude"
+                            && (execution_mode == "headless"
+                                || execution_mode == "streaming_headless"))
+                            || cli == "codex")
                     {
                         let _ = publish_cli_stdout_completion(
                             &app,
@@ -938,7 +1235,16 @@ pub fn start_agent_run(
                             &stdout_path_for_completion,
                         );
                     }
-                    update_run_status(&app, &run_id, final_status, exit_code, error.as_deref(), false, true).ok();
+                    update_run_status(
+                        &app,
+                        &run_id,
+                        final_status,
+                        exit_code,
+                        error.as_deref(),
+                        false,
+                        true,
+                    )
+                    .ok();
                     let _ = app.emit(
                         "agent-run-exit",
                         AgentRunExitEvent {
@@ -963,7 +1269,8 @@ pub fn start_agent_run(
                         return;
                     }
                     let message = error.to_string();
-                    update_run_status(&app, &run_id, "failed", None, Some(&message), false, true).ok();
+                    update_run_status(&app, &run_id, "failed", None, Some(&message), false, true)
+                        .ok();
                     let _ = app.emit(
                         "agent-run-exit",
                         AgentRunExitEvent {
@@ -1006,13 +1313,24 @@ pub fn cancel_agent_run(
         child.kill().map_err(|e| e.to_string())?;
     }
     let message = reason.unwrap_or_else(|| "cancelled_by_user".to_string());
-    update_run_status(&app, &run_id, "cancelled", None, Some(&message), false, true)?;
+    update_run_status(
+        &app,
+        &run_id,
+        "cancelled",
+        None,
+        Some(&message),
+        false,
+        true,
+    )?;
     emit_status(&app, &run_id, "", "", "cancelled", Some(message));
     Ok(())
 }
 
 #[tauri::command]
-pub fn get_agent_run(state: State<'_, DbState>, run_id: String) -> Result<Option<AgentRunRecord>, String> {
+pub fn get_agent_run(
+    state: State<'_, DbState>,
+    run_id: String,
+) -> Result<Option<AgentRunRecord>, String> {
     let db_lock = state
         .db
         .lock()
@@ -1043,7 +1361,8 @@ pub fn list_agent_runs(
         .lock()
         .map_err(|_| "Failed to lock database".to_string())?;
     let conn = db_lock.as_ref().ok_or("Database not initialized")?;
-    let sql = "SELECT run_id, mission_id, node_id, attempt, session_id, agent_id, cli, execution_mode,
+    let sql =
+        "SELECT run_id, mission_id, node_id, attempt, session_id, agent_id, cli, execution_mode,
                       cwd, command, args_json, env_json, prompt_path, stdout_path, stderr_path,
                       transcript_path, status, exit_code, error,
                       datetime(started_at, 'localtime'), datetime(completed_at, 'localtime')

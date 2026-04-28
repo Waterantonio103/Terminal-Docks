@@ -1,8 +1,8 @@
+use notify::{Config, Event, RecommendedWatcher, RecursiveMode, Watcher};
+use std::path::Path;
+use std::sync::Mutex;
 use tauri::AppHandle;
 use tauri::Emitter;
-use notify::{Config, Event, RecommendedWatcher, RecursiveMode, Watcher};
-use std::sync::Mutex;
-use std::path::Path;
 
 pub struct WatcherState(pub Mutex<Option<RecommendedWatcher>>);
 

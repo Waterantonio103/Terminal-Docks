@@ -100,6 +100,7 @@ export interface NodeActivationContext {
   nodeId: string;
   roleId: string;
   cliId: string;
+  modelId: string | null;
   executionMode: string;
   workspaceDir: string | null;
   legalTargets: WorkflowEdgeDefinition[];
@@ -468,6 +469,8 @@ export class WorkflowOrchestrator {
         terminalId: nodeDef.config.terminalId || '',
         paneId: nodeDef.config.paneId,
         workspaceDir: nodeDef.config.workspaceDir ?? null,
+        modelId: nodeDef.config.model ?? null,
+        yolo: nodeDef.config.yolo ?? false,
         goal: (run.definition.nodes.find(n => n.kind === 'task') as any)?.config?.prompt || '',
         legalTargets: getLegalTargetsForNode(run, nodeId) as any,
         upstreamPayloads: getIncomingHandoffs(run, nodeId),
@@ -1025,6 +1028,7 @@ export class WorkflowOrchestrator {
       nodeId,
       roleId: nodeDef.roleId,
       cliId: nodeDef.config.cli ?? 'claude',
+      modelId: nodeDef.config.model ?? null,
       executionMode: nodeDef.config.executionMode ?? 'interactive_pty',
       workspaceDir: nodeDef.config.workspaceDir ?? null,
       legalTargets,

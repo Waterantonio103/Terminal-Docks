@@ -47,9 +47,12 @@ export const geminiAdapter: CliAdapter = {
       };
     }
 
+    const args: string[] = [];
+    if (context.model?.trim()) args.push('--model', context.model.trim());
+    if (context.yolo) args.push('--yolo');
     return {
       command: 'gemini',
-      args: [],
+      args,
       env,
       promptDelivery: 'interactive_pty',
     };

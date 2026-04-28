@@ -45,6 +45,8 @@ export interface LaunchContext {
   workspaceDir: string | null;
   mcpUrl: string;
   executionMode: 'headless' | 'streaming_headless' | 'interactive_pty';
+  model?: string | null;
+  yolo?: boolean;
   envOverrides?: Record<string, string>;
 }
 

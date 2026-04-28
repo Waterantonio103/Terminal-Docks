@@ -1,13 +1,13 @@
-pub mod db;
 pub mod agent_run;
-pub mod pty;
+pub mod db;
 pub mod mcp;
+pub mod model_detection;
+pub mod pty;
 pub mod swarm;
 pub mod workflow;
 pub mod workflow_engine;
 pub mod workflow_log;
 pub mod workspace;
-pub mod model_detection;
 
 #[tauri::command]
 fn greet(name: &str) -> String {
@@ -81,6 +81,8 @@ pub fn run() {
             workspace::workspace_move,
             workspace::workspace_search,
             model_detection::detect_models,
+            model_detection::discover_models,
+            model_detection::discover_cli_models,
         ])
         .setup(|app| {
             db::init_db(app.handle()).expect("Failed to init db");
@@ -112,20 +114,17 @@ fn reveal_in_explorer(path: String) {
     #[cfg(target_os = "macos")]
     {
         use std::process::Command;
-        Command::new("open")
-            .arg("-R")
-            .arg(path)
-            .spawn()
-            .ok();
+        Command::new("open").arg("-R").arg(path).spawn().ok();
     }
     #[cfg(target_os = "linux")]
     {
         use std::process::Command;
         let p = std::path::Path::new(&path);
-        let dir = if p.is_dir() { p } else { p.parent().unwrap_or(std::path::Path::new("/")) };
-        Command::new("xdg-open")
-            .arg(dir)
-            .spawn()
-            .ok();
+        let dir = if p.is_dir() {
+            p
+        } else {
+            p.parent().unwrap_or(std::path::Path::new("/"))
+        };
+        Command::new("xdg-open").arg(dir).spawn().ok();
     }
 }

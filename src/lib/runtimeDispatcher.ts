@@ -18,6 +18,7 @@ export interface StartAgentRunRequest {
   command: string;
   args: string[];
   env: Record<string, string>;
+  promptDelivery: string;
   prompt: string;
   timeoutMs?: number;
 }
@@ -63,6 +64,7 @@ export function buildStartAgentRunRequest(
       command: replaceKnown(command.command),
       args: command.args.map(replaceKnown),
       env: Object.fromEntries(Object.entries(command.env).map(([key, value]) => [key, replaceKnown(String(value))])),
+      promptDelivery: command.promptDelivery,
       prompt,
     },
     error: null,

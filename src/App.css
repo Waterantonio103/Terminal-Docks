@@ -689,6 +689,16 @@ body {
 }
 .animate-pulse-subtle { animation: pulse-subtle 2s cubic-bezier(0.4, 0, 0.6, 1) infinite; }
 
+@keyframes yolo-gradient-shift {
+  from { background-position: 0% 50%; }
+  to { background-position: -200% 50%; }
+}
+.yolo-gradient {
+  background: linear-gradient(90deg, #ff0080, #ff8c00, #40e0d0, #8a2be2, #ff0080, #ff8c00, #40e0d0, #8a2be2, #ff0080);
+  background-size: 200% 100%;
+  animation: yolo-gradient-shift 1.8s linear infinite;
+}
+
 @keyframes fade-in {
   from { opacity: 0; transform: translateY(-4px); }
   to { opacity: 1; transform: translateY(0); }
@@ -814,4 +824,45 @@ body {
   --syntax-variable: #f8f8f2;
   --syntax-comment: #6272a4;
   --syntax-number: #bd93f9;
+}
+
+/* ── Model Discovery Loading Animations ──────────────────── */
+
+@keyframes defaultDotPulse {
+  0%, 100% { opacity: 0.3; transform: translateY(0); }
+  50% { opacity: 1; transform: translateY(-2px); }
+}
+
+.default-loading-dot {
+  animation: defaultDotPulse 1s ease-in-out infinite;
+}
+
+@keyframes codexBlink {
+  0%, 100% { opacity: 0.35; }
+  50% { opacity: 1; }
+}
+
+.codex-blink-dot {
+  animation: codexBlink 1.2s ease-in-out infinite;
+}
+
+@keyframes codexCursorBlink {
+  0%, 49% { opacity: 1; }
+  50%, 100% { opacity: 0; }
+}
+
+.codex-blink-cursor {
+  animation: codexCursorBlink 700ms step-end infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .default-loading-dot {
+    animation: none !important;
+    opacity: 0.8;
+  }
+
+  .codex-blink-dot,
+  .codex-blink-cursor {
+    animation: none !important;
+  }
 }

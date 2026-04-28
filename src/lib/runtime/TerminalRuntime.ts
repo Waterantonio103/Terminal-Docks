@@ -213,6 +213,7 @@ export interface HeadlessRunRequest {
   command: string;
   args: string[];
   env: Record<string, string>;
+  promptDelivery?: string;
   prompt: string;
   timeoutMs?: number;
 }

@@ -43,6 +43,8 @@ export interface WorkflowNodeDefinition {
     readonly workspaceDir?: string;
     readonly instructionOverride?: string;
     readonly cli?: CliId;
+    readonly model?: string;
+    readonly yolo?: boolean;
     readonly executionMode?: ExecutionMode;
     readonly authoringMode?: AuthoringMode;
     readonly presetId?: string | null;
@@ -192,6 +194,8 @@ export function compiledMissionToDefinition(
         capabilities: node.capabilities,
         requirements: node.requirements,
         cli: node.terminal.cli,
+        model: node.terminal.model,
+        yolo: node.terminal.yolo,
         executionMode: node.terminal.executionMode,
         terminalId: node.terminal.terminalId,
         paneId: node.terminal.paneId,

@@ -1,7 +1,10 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { DotTunnelBackground } from '../shared/DotTunnelBackground';
-import { ArrowUpRight, ChevronLeft, Play, Plus, RefreshCw, ScanSearch, Sparkles, Trash2, Workflow, X } from 'lucide-react';
+import { ModelDiscoveryLoading } from '../models/ModelDiscoveryLoading';
+import { AgentActionBadge } from '../models/AgentActionBadge';
+import { ArrowUpRight, ChevronDown, ChevronLeft, Play, Plus, RefreshCw, ScanSearch, Sparkles, Trash2, Workflow, X } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
+import { openUrl } from '@tauri-apps/plugin-opener';
 import { emit, listen } from '@tauri-apps/api/event';
 import agentsConfig from '../../config/agents';
 import { compileMission, validateGraph } from '../../lib/graphCompiler';
@@ -22,8 +25,8 @@ import { detectRoleForPane } from '../../lib/cliDetection';
 import { runtimeManager } from '../../lib/runtime/RuntimeManager';
 import { supportsHeadless } from '../../lib/cliIdentity';
 import { useWorkspaceStore, type MissionAgent, type Pane, type ResultEntry, type WorkflowAgentCli, type WorkflowExecutionMode, type WorkflowGraph } from '../../store/workspace';
-import { detectRuntimeAction } from '../../lib/runtimeActivity';
-import { getModelsForCli, hasModelListSupport, invalidateModelCache } from '../../lib/modelDetection';
+import { discoverModelsForCli, supportsModelDiscovery } from '../../lib/models/modelDiscoveryService';
+import type { CliId, CliModel, ModelDiscoveryResult } from '../../lib/models/modelTypes';
 
 type ValidationTone = 'idle' | 'ok' | 'error';
 type ResizeEdge = 'n' | 's' | 'e' | 'w' | 'ne' | 'nw' | 'se' | 'sw';
@@ -63,8 +66,12 @@ const SUPPORTED_WORKFLOW_CLIS = new Set(['claude', 'gemini', 'opencode', 'codex'
 const SELECTABLE_WORKFLOW_CLIS: WorkflowAgentCli[] = ['claude', 'codex', 'gemini', 'opencode', 'custom', 'ollama', 'lmstudio'];
 const SELECTABLE_EXECUTION_MODES: WorkflowExecutionMode[] = ['streaming_headless', 'headless', 'interactive_pty'];
 const MAX_RUNTIME_SNIPPET_BYTES = 3072;
-const MAX_ACTIVITY_SUMMARY_LENGTH = 180;
-const WORKING_STATUSES = new Set(['activated', 'activation_acked', 'running', 'handoff_pending', 'waiting']);
+const MODEL_DOC_URLS: Record<string, string | null> = {
+  claude: 'https://code.claude.com/docs/en/model-config',
+  gemini: 'https://ai.google.dev/gemini-api/docs/models',
+  codex: 'https://developers.openai.com/codex/models',
+  opencode: null,
+};
 const ARTIFACT_PATH_REGEX = /\b(?:\.{0,2}\/)?[a-zA-Z0-9_\-./]+\.(?:ts|tsx|js|jsx|mjs|cjs|rs|md|json|yaml|yml|toml|css|scss|html|sh|py|go|java|kt|swift|sql)\b/g;
 
 function clampZoom(nextZoom: number) {
@@ -182,17 +189,25 @@ function stripAnsi(raw: string): string {
     .join('\n');
 }
 
-function summarizeActivity(raw: string | undefined | null, maxLen = MAX_ACTIVITY_SUMMARY_LENGTH): string {
-  const normalized = stripAnsi(raw ?? '').replace(/\s+/g, ' ').trim();
-  if (!normalized) return 'No runtime output yet.';
-  if (normalized.length <= maxLen) return normalized;
-  return `${normalized.slice(0, Math.max(1, maxLen - 1))}…`;
-}
 
 function shortId(value: string | null | undefined, max = 26): string {
   if (!value) return '—';
   if (value.length <= max) return value;
   return `${value.slice(0, max)}…`;
+}
+
+
+
+function groupModelsByProvider(models: CliModel[]): Array<{ provider: string; models: CliModel[] }> {
+  const groups = new Map<string, CliModel[]>();
+  for (const model of models) {
+    if (model.source === 'default' || model.source === 'custom') continue;
+    const provider = model.provider ?? (model.id.includes('/') ? model.id.split('/')[0] : 'Discovered');
+    const current = groups.get(provider) ?? [];
+    current.push(model);
+    groups.set(provider, current);
+  }
+  return Array.from(groups.entries()).map(([provider, groupedModels]) => ({ provider, models: groupedModels }));
 }
 
 function decodePtyChunk(data: number[]): string {
@@ -254,10 +269,11 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
   const [inspectorError, setInspectorError] = useState<string | null>(null);
   const [runtimeOutputByTerminalId, setRuntimeOutputByTerminalId] = useState<Record<string, string>>({});
   const [runtimeOutputByNodeId, setRuntimeOutputByNodeId] = useState<Record<string, string>>({});
-  const [actionByNodeId, setActionByNodeId] = useState<Record<string, string>>({});
-  const actionTimersRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
-  const [detectedModels, setDetectedModels] = useState<Map<WorkflowAgentCli, string[]>>(new Map());
+  const [detectedModels, setDetectedModels] = useState<Map<CliId, ModelDiscoveryResult>>(new Map());
   const [loadingModels, setLoadingModels] = useState<Set<WorkflowAgentCli>>(new Set());
+  const [customModelNodeIds, setCustomModelNodeIds] = useState<Set<string>>(new Set());
+  const [modelDropdownOpen, setModelDropdownOpen] = useState(false);
+  const modelDropdownRef = useRef<HTMLDivElement>(null);
 
   const registry = useMemo(() => createWorkflowNodeRegistry(), []);
   const [state, setState] = useState<NodeDocumentState>(() => legacyGraphToNodeDocument(graph));
@@ -512,11 +528,8 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
       action?: string;
     }>('workflow-node-update', event => {
       if (unmounted) return;
-      const { id, status, reason, attempt, outcome, action } = event.payload;
+      const { id, status, reason, attempt, outcome } = event.payload;
       setRuntimeNodeState(id, status, reason ?? null);
-      if (action) {
-        setActionByNodeId(previous => ({ ...previous, [id]: action }));
-      }
       if (typeof attempt === 'number') {
         setState(previous => {
           const tree = previous.document.trees[getActiveTreeId(previous.editor)];
@@ -582,37 +595,6 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
     };
   }, [activeMissionId, registry, setRuntimeNodeState]);
 
-  useEffect(() => {
-    let unlistenAction: (() => void) | undefined;
-    let unmounted = false;
-
-    listen<{
-      nodeId: string;
-      terminalId?: string;
-      action: string;
-    }>('workflow-node-action', event => {
-      if (unmounted) return;
-      const nodeId = event.payload.nodeId;
-      setActionByNodeId(previous => ({
-        ...previous,
-        [nodeId]: event.payload.action || 'Working...',
-      }));
-      // Clear the action after 3 s of no new output — the CLI is idle at its prompt
-      clearTimeout(actionTimersRef.current[nodeId]);
-      actionTimersRef.current[nodeId] = setTimeout(() => {
-        setActionByNodeId(previous => ({ ...previous, [nodeId]: '' }));
-      }, 3000);
-    }).then(fn => {
-      unlistenAction = fn;
-      if (unmounted) fn();
-    });
-
-    return () => {
-      unmounted = true;
-      if (unlistenAction) unlistenAction();
-      Object.values(actionTimersRef.current).forEach(clearTimeout);
-    };
-  }, []);
 
   const openTerminalById = useCallback((terminalId: string) => {
     const stateSnapshot = useWorkspaceStore.getState();
@@ -730,6 +712,12 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
 
   const handleCliChange = useCallback(async (nodeId: string, newCli: WorkflowAgentCli) => {
     applyOperator({ type: 'set_node_property', nodeId, key: 'cli', value: newCli });
+    applyOperator({ type: 'set_node_property', nodeId, key: 'model', value: '' });
+    setCustomModelNodeIds(prev => {
+      const next = new Set(prev);
+      next.delete(nodeId);
+      return next;
+    });
 
     // Force interactive PTY if headless is unsupported for the new CLI
     if (!supportsHeadless(newCli)) {
@@ -791,7 +779,7 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
     // the update so we never miss due to a stale terminalId lookup.
     // Clear cliSource so shouldLaunchCliInTerminal doesn't skip launching the new CLI.
     const newTerminalId = generateId();
-    storeState.updatePaneData(boundPane.id, { terminalId: newTerminalId, cli: newCli, cliSource: undefined });
+    storeState.updatePaneData(boundPane.id, { terminalId: newTerminalId, cli: newCli, model: '', cliSource: undefined });
     storeState.setNodeRuntimeBinding(nodeId, { terminalId: newTerminalId, runtimeSessionId: null, adapterStatus: null });
     applyOperator({ type: 'set_node_property', nodeId, key: 'terminalId', value: newTerminalId });
     setNodeTerminalBinding(nodeId, newTerminalId);
@@ -1708,14 +1696,26 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
     [applyOperator, materializedById]
   );
 
-  const triggerModelDetection = useCallback((cli: WorkflowAgentCli) => {
-    if (!hasModelListSupport(cli)) return;
+  const triggerModelDetection = useCallback((cli: WorkflowAgentCli, refresh = false) => {
+    if (!supportsModelDiscovery(cli)) return;
     setLoadingModels(prev => { const s = new Set(prev); s.add(cli); return s; });
-    getModelsForCli(cli).then(models => {
-      setDetectedModels(prev => new Map(prev).set(cli, models));
+    const minDelay = new Promise<void>(resolve => setTimeout(resolve, 2000));
+    const discovery = discoverModelsForCli(cli, { refresh, workspaceDir }).then(result => {
+      setDetectedModels(prev => new Map(prev).set(cli, result));
+    }).catch(error => {
+      const result: ModelDiscoveryResult = {
+        cli,
+        models: [],
+        attempts: [],
+        errors: [error instanceof Error ? error.message : String(error)],
+        fetchedAt: new Date().toISOString(),
+      };
+      setDetectedModels(prev => new Map(prev).set(cli, result));
+    });
+    Promise.all([discovery, minDelay]).finally(() => {
       setLoadingModels(prev => { const s = new Set(prev); s.delete(cli); return s; });
     });
-  }, []);
+  }, [workspaceDir]);
 
   const inspectedNode = inspectorNodeId ? activeTree.nodes[inspectorNodeId] : null;
   const inspectedRuntimeAgent = inspectorNodeId ? missionAgentByNodeId.get(inspectorNodeId) : undefined;
@@ -1735,10 +1735,21 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
 
   useEffect(() => {
     if (!inspectorNodeId) return;
-    if (!detectedModels.has(inspectedCli) && !loadingModels.has(inspectedCli)) {
+    if (supportsModelDiscovery(inspectedCli) && !detectedModels.has(inspectedCli) && !loadingModels.has(inspectedCli)) {
       triggerModelDetection(inspectedCli);
     }
   }, [inspectorNodeId, inspectedCli, detectedModels, loadingModels, triggerModelDetection]);
+
+  useEffect(() => {
+    if (!modelDropdownOpen) return;
+    const handler = (e: MouseEvent) => {
+      if (modelDropdownRef.current && !modelDropdownRef.current.contains(e.target as Node)) {
+        setModelDropdownOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [modelDropdownOpen]);
 
   return (
     <div className="h-full w-full background-bg-app text-text-primary flex flex-col">
@@ -1882,18 +1893,6 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
               'claude'
             ).trim();
             const runtimeSessionId = String(runtimeAgent?.runtimeSessionId ?? runtimeBinding?.runtimeSessionId ?? '').trim();
-            const executionMode = SELECTABLE_EXECUTION_MODES.includes(materializedNode.node.properties.executionMode as WorkflowExecutionMode)
-              ? materializedNode.node.properties.executionMode as WorkflowExecutionMode
-              : 'streaming_headless';
-            const usesPtyRuntime = executionMode === 'interactive_pty';
-            const runtimeOutput = usesPtyRuntime
-              ? (runtimeOutputByTerminalId[terminalId] ?? '')
-              : (runtimeOutputByNodeId[materializedNode.node.id] ?? '');
-            const runtimeSummary = summarizeActivity(
-              runtimeOutput ||
-              (runtimeAgent?.lastPayload ?? null)
-            );
-            const currentAction = actionByNodeId[materializedNode.node.id] || (WORKING_STATUSES.has(runtimeStatus) ? detectRuntimeAction(runtimeSummary) : '—');
             const artifactHints = artifactHintsByNodeId.get(materializedNode.node.id) ?? [];
             return (
               <div
@@ -2021,62 +2020,154 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
                         const activeCli = (SELECTABLE_WORKFLOW_CLIS.includes(String(materializedNode.node.properties.cli ?? runtimeCli) as WorkflowAgentCli)
                           ? String(materializedNode.node.properties.cli ?? runtimeCli)
                           : 'claude') as WorkflowAgentCli;
-                        const isSupported = hasModelListSupport(activeCli);
-                        const modelList = detectedModels.get(activeCli);
+                        const isSupported = supportsModelDiscovery(activeCli);
+                        const modelResult = isSupported ? detectedModels.get(activeCli) : undefined;
+                        const discoveredModels = modelResult?.models ?? [];
+                        const groupedModels = groupModelsByProvider(discoveredModels);
                         const isLoading = loadingModels.has(activeCli);
                         const currentModel = String(materializedNode.node.properties.model ?? '');
+                        const discoveredIds = new Set(discoveredModels.map(model => model.id));
+                        const hasDiscoveryResult = Boolean(modelResult);
+                        const isCustomOpen = hasDiscoveryResult && (customModelNodeIds.has(materializedNode.node.id) || Boolean(currentModel && !discoveredIds.has(currentModel)));
                         const isYolo = Boolean(materializedNode.node.properties.yolo);
                         return (
                           <div className="grid gap-2" style={{ gridTemplateColumns: '1fr auto' }}>
                             {isSupported ? (
-                              <div className="flex gap-1 min-w-0">
-                                <select
-                                  value={currentModel}
-                                  disabled={isLoading}
-                                  onChange={event => applyOperator({ type: 'set_node_property', nodeId: materializedNode.node.id, key: 'model', value: event.target.value })}
-                                  className="flex-1 min-w-0 background-bg-surface border border-border-panel rounded-lg px-2 py-1.5 text-[11px] text-text-secondary disabled:opacity-60"
-                                  title="Model (empty = CLI default)"
-                                >
-                                  {isLoading ? (
-                                    <option value="">Loading...</option>
-                                  ) : (
-                                    <>
-                                      <option value="">default</option>
-                                      {(modelList ?? []).map(m => <option key={m} value={m}>{m}</option>)}
-                                    </>
+                              <div className="min-w-0 space-y-1">
+                                <div className="relative" ref={modelDropdownRef}>
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      const opening = !modelDropdownOpen;
+                                      setModelDropdownOpen(opening);
+                                      if (opening && !isLoading && !modelResult) {
+                                        triggerModelDetection(activeCli, false);
+                                      }
+                                    }}
+                                    className="w-full min-w-0 background-bg-surface border border-border-panel rounded-lg px-2 py-1.5 text-[11px] text-text-secondary flex items-center justify-between"
+                                  >
+                                    <span className="truncate">{currentModel || 'MODEL'}</span>
+                                    <ChevronDown size={10} className="text-text-muted" />
+                                  </button>
+                                  {modelDropdownOpen && (
+                                    <div className="absolute z-50 left-0 right-0 top-full mt-1 background-bg-surface border border-border-panel rounded-lg shadow-lg max-h-60 overflow-y-auto py-1" onWheel={e => e.stopPropagation()}>
+                                      <button
+                                        type="button"
+                                        className={`w-full text-left px-2 py-1.5 text-[11px] hover:bg-white/5 ${currentModel === '' ? 'text-accent-primary' : 'text-text-secondary'}`}
+                                        onClick={() => {
+                                          setCustomModelNodeIds(prev => { const next = new Set(prev); next.delete(materializedNode.node.id); return next; });
+                                          applyOperator({ type: 'set_node_property', nodeId: materializedNode.node.id, key: 'model', value: '' });
+                                          setModelDropdownOpen(false);
+                                        }}
+                                      >
+                                        Default model
+                                      </button>
+                                      {isLoading && (
+                                        <ModelDiscoveryLoading cli={activeCli} phase="searching" />
+                                      )}
+                                      {!isLoading && modelResult && groupedModels.map(group => (
+                                        <div key={group.provider}>
+                                          <div className="px-2 py-1 text-[9px] uppercase tracking-wider text-text-muted">{group.provider}</div>
+                                          {group.models.map(model => (
+                                            <button
+                                              key={model.id}
+                                              type="button"
+                                              className={`w-full text-left px-3 py-1 text-[11px] hover:bg-white/5 ${currentModel === model.id ? 'text-accent-primary' : 'text-text-secondary'}`}
+                                              onClick={() => {
+                                                setCustomModelNodeIds(prev => { const next = new Set(prev); next.delete(materializedNode.node.id); return next; });
+                                                applyOperator({ type: 'set_node_property', nodeId: materializedNode.node.id, key: 'model', value: model.id });
+                                                setModelDropdownOpen(false);
+                                              }}
+                                            >
+                                              {model.label}
+                                            </button>
+                                          ))}
+                                        </div>
+                                      ))}
+                                      {!isLoading && modelResult && discoveredModels.length === 0 && (
+                                        <div className="px-2 py-1.5 text-[10px] text-text-muted">No models discovered</div>
+                                      )}
+                                      {modelResult && (
+                                        <button
+                                          type="button"
+                                          className="w-full text-left px-2 py-1.5 text-[11px] hover:bg-white/5 text-text-muted border-t border-border-panel/50 mt-1"
+                                          onClick={() => {
+                                            setCustomModelNodeIds(prev => new Set(prev).add(materializedNode.node.id));
+                                            setModelDropdownOpen(false);
+                                          }}
+                                        >
+                                          Custom model ID...
+                                        </button>
+                                      )}
+                                    </div>
                                   )}
-                                </select>
-                                <button
-                                  type="button"
-                                  disabled={isLoading}
-                                  onClick={() => { invalidateModelCache(activeCli); triggerModelDetection(activeCli); }}
-                                  className="shrink-0 flex items-center justify-center border border-border-panel background-bg-surface rounded-lg p-1.5 text-text-muted hover:text-text-primary disabled:opacity-40"
-                                  title="Refresh model list"
-                                >
-                                  <RefreshCw size={10} className={isLoading ? 'animate-spin' : ''} />
-                                </button>
+                                </div>
+                                {isCustomOpen && (
+                                  <div className="group relative">
+                                    <input
+                                      value={currentModel}
+                                      onChange={event => applyOperator({ type: 'set_node_property', nodeId: materializedNode.node.id, key: 'model', value: event.target.value })}
+                                      placeholder="model name"
+                                      className="w-full min-w-0 background-bg-surface border border-border-panel rounded-lg px-2 py-1.5 text-[11px] text-text-secondary"
+                                    />
+                                    <div className="absolute left-0 top-full z-50 pt-1 opacity-0 pointer-events-none group-hover:opacity-100 group-hover:pointer-events-auto">
+                                      <div className="whitespace-nowrap rounded border border-border-panel background-bg-panel px-2.5 py-1.5 text-[10px] text-text-secondary shadow-lg">
+                                        {MODEL_DOC_URLS[activeCli] ? (
+                                          <>Available models: <button type="button" onClick={() => openUrl(MODEL_DOC_URLS[activeCli]!)} className="text-accent-primary underline underline-offset-2 cursor-pointer">{MODEL_DOC_URLS[activeCli]!.replace('https://', '')}</button></>
+                                        ) : activeCli === 'opencode' ? (
+                                          'Check with provider for specific model names'
+                                        ) : (
+                                          'Enter a model ID supported by the CLI'
+                                        )}
+                                      </div>
+                                    </div>
+                                  </div>
+                                )}
+                                {discoveredModels.length === 0 && (modelResult?.warnings?.length || modelResult?.errors?.length) ? (
+                                  <div className="text-[9px] leading-snug text-amber-200/90">
+                                    {[...(modelResult.warnings ?? []), ...(modelResult.errors ?? [])][0]}
+                                  </div>
+                                ) : null}
                               </div>
                             ) : (
-                              <input
-                                value={currentModel}
-                                onChange={event => applyOperator({ type: 'set_node_property', nodeId: materializedNode.node.id, key: 'model', value: event.target.value })}
-                                placeholder="Model (optional)"
-                                className="min-w-0 background-bg-surface border border-border-panel rounded-lg px-2 py-1.5 text-[11px] text-text-secondary"
-                              />
+                              <div className="group relative">
+                                <input
+                                  value={currentModel}
+                                  onChange={event => applyOperator({ type: 'set_node_property', nodeId: materializedNode.node.id, key: 'model', value: event.target.value })}
+                                  placeholder="model name"
+                                  className="w-full min-w-0 background-bg-surface border border-border-panel rounded-lg px-2 py-1.5 text-[11px] text-text-secondary"
+                                />
+                                <div className="absolute left-0 top-full z-50 pt-1 opacity-0 pointer-events-none group-hover:opacity-100 group-hover:pointer-events-auto">
+                                  <div className="whitespace-nowrap rounded border border-border-panel background-bg-panel px-2.5 py-1.5 text-[10px] text-text-secondary shadow-lg">
+                                    {(() => {
+                                      const cli = String(materializedNode.node.properties.cli ?? runtimeCli).toLowerCase().replace(/[_-]/g, '');
+                                      const norm = cli === 'claude' || cli === 'claudecode' ? 'claude'
+                                        : cli === 'gemini' ? 'gemini'
+                                        : cli === 'codex' ? 'codex'
+                                        : cli === 'opencode' ? 'opencode' : '';
+                                      if (MODEL_DOC_URLS[norm]) {
+                                        return <>Available models: <button type="button" onClick={() => openUrl(MODEL_DOC_URLS[norm]!)} className="text-accent-primary underline underline-offset-2 cursor-pointer">{MODEL_DOC_URLS[norm]!.replace('https://', '')}</button></>;
+                                      }
+                                      if (norm === 'opencode') return 'Check with provider for specific model names';
+                                      return 'Enter a model ID supported by the CLI';
+                                    })()}
+                                  </div>
+                                </div>
+                              </div>
                             )}
                             <button
                               type="button"
                               onClick={() => applyOperator({ type: 'set_node_property', nodeId: materializedNode.node.id, key: 'yolo', value: !isYolo })}
                               className={`flex shrink-0 items-center gap-1 rounded-lg border px-2 py-1.5 text-[11px] transition-colors ${
                                 isYolo
-                                  ? 'border-red-500/50 bg-red-500/10 text-red-300 hover:bg-red-500/20'
+                                  ? 'border-white/20 text-white hover:opacity-90 yolo-gradient'
                                   : 'border-border-panel background-bg-surface text-text-muted hover:text-text-primary'
                               }`}
                               title="Yolo mode — skip permission prompts at CLI startup"
                             >
                               <span className={`inline-flex items-center rounded border px-1 text-[9px] font-semibold tracking-wide leading-none h-[16px] ${
                                 isYolo
-                                  ? 'border-red-500/50 bg-red-500/20 text-red-300'
+                                  ? 'border-white/30 bg-white/10 text-white'
                                   : 'border-border-panel bg-transparent text-text-muted'
                               }`}>
                                 YOLO
@@ -2093,7 +2184,7 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
                         </div>
                         <div className="rounded border border-border-panel background-bg-surface px-2 py-1.5">
                           <div className="uppercase tracking-wide text-text-muted">Action</div>
-                          <div className="text-text-primary truncate">{currentAction}</div>
+                          <AgentActionBadge cli={runtimeCli} status={runtimeStatus} />
                         </div>
                       </div>
                       <div className="rounded border border-border-panel background-bg-surface px-2 py-1.5 text-[10px]">

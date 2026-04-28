@@ -224,6 +224,8 @@ export function nodeDocumentToWorkflowGraph(
         paneId: String(node.properties.paneId ?? ''),
         cli:
           normalizeCliId(node.properties.cli) ?? 'claude',
+        model: String(node.properties.model ?? ''),
+        yolo: Boolean(node.properties.yolo),
         executionMode:
           node.properties.executionMode === 'headless' ||
           node.properties.executionMode === 'interactive_pty'
@@ -258,6 +260,8 @@ export function nodeDocumentToWorkflowGraph(
       delete workflowNode.config?.terminalTitle;
       delete workflowNode.config?.paneId;
       delete workflowNode.config?.cli;
+      delete workflowNode.config?.model;
+      delete workflowNode.config?.yolo;
       delete workflowNode.config?.executionMode;
       delete workflowNode.config?.autoLinked;
     }
@@ -310,6 +314,8 @@ export function nodeDocumentToFlowGraph(
         terminalTitle: node.config?.terminalTitle,
         paneId: node.config?.paneId,
         cli: node.config?.cli ?? 'claude',
+        model: node.config?.model ?? '',
+        yolo: node.config?.yolo ?? false,
         executionMode: node.config?.executionMode ?? 'streaming_headless',
         autoLinked: node.config?.autoLinked,
         authoringMode: node.config?.authoringMode ?? 'graph',

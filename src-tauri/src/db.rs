@@ -190,7 +190,10 @@ pub fn init_db(app: &AppHandle) -> Result<(), String> {
     )
     .map_err(|e| e.to_string())?;
 
-    if let Err(e) = conn.execute("ALTER TABLE agent_runtime_sessions ADD COLUMN run_id TEXT", ()) {
+    if let Err(e) = conn.execute(
+        "ALTER TABLE agent_runtime_sessions ADD COLUMN run_id TEXT",
+        (),
+    ) {
         let s = e.to_string();
         if !s.contains("duplicate column") {
             return Err(s);
@@ -379,8 +382,11 @@ pub fn update_task_status(
     let conn = db_lock.as_ref().ok_or("Database not initialized")?;
 
     if let Some(agent) = agent_id {
-        conn.execute("UPDATE tasks SET status = ?1, agent_id = ?2 WHERE id = ?3", (&status, &agent, &id))
-            .map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE tasks SET status = ?1, agent_id = ?2 WHERE id = ?3",
+            (&status, &agent, &id),
+        )
+        .map_err(|e| e.to_string())?;
     } else {
         conn.execute("UPDATE tasks SET status = ?1 WHERE id = ?2", (&status, &id))
             .map_err(|e| e.to_string())?;
@@ -402,8 +408,13 @@ pub fn lock_file(
     let conn = db_lock.as_ref().ok_or("Database not initialized")?;
 
     // Check if locked by someone else
-    let mut stmt = conn.prepare("SELECT agent_id FROM file_locks WHERE file_path = ?1").map_err(|e| e.to_string())?;
-    let current_lock_agent: Option<String> = stmt.query_row([&file_path], |row| row.get(0)).optional().map_err(|e| e.to_string())?;
+    let mut stmt = conn
+        .prepare("SELECT agent_id FROM file_locks WHERE file_path = ?1")
+        .map_err(|e| e.to_string())?;
+    let current_lock_agent: Option<String> = stmt
+        .query_row([&file_path], |row| row.get(0))
+        .optional()
+        .map_err(|e| e.to_string())?;
 
     if let Some(current_agent) = current_lock_agent {
         if current_agent != agent_id {
@@ -450,7 +461,9 @@ pub fn get_file_locks(state: State<'_, DbState>) -> Result<Vec<FileLock>, String
         .map_err(|_| "Failed to lock database".to_string())?;
     let conn = db_lock.as_ref().ok_or("Database not initialized")?;
 
-    let mut stmt = conn.prepare("SELECT file_path, agent_id, datetime(locked_at, 'localtime') FROM file_locks").map_err(|e| e.to_string())?;
+    let mut stmt = conn
+        .prepare("SELECT file_path, agent_id, datetime(locked_at, 'localtime') FROM file_locks")
+        .map_err(|e| e.to_string())?;
     let lock_iter = stmt
         .query_map([], |row| {
             Ok(FileLock {
@@ -495,33 +508,47 @@ pub fn save_session_event(
     content: Option<String>,
     state: State<'_, DbState>,
 ) -> Result<(), String> {
-    let db_lock = state.db.lock().map_err(|_| "Failed to lock database".to_string())?;
+    let db_lock = state
+        .db
+        .lock()
+        .map_err(|_| "Failed to lock database".to_string())?;
     let conn = db_lock.as_ref().ok_or("Database not initialized")?;
     conn.execute(
         "INSERT INTO session_log (session_id, event_type, content) VALUES (?1, ?2, ?3)",
         (&session_id, &event_type, &content),
-    ).map_err(|e| e.to_string())?;
+    )
+    .map_err(|e| e.to_string())?;
     Ok(())
 }
 
 #[tauri::command]
-pub fn get_session_history(limit: Option<i64>, state: State<'_, DbState>) -> Result<Vec<SessionEvent>, String> {
-    let db_lock = state.db.lock().map_err(|_| "Failed to lock database".to_string())?;
+pub fn get_session_history(
+    limit: Option<i64>,
+    state: State<'_, DbState>,
+) -> Result<Vec<SessionEvent>, String> {
+    let db_lock = state
+        .db
+        .lock()
+        .map_err(|_| "Failed to lock database".to_string())?;
     let conn = db_lock.as_ref().ok_or("Database not initialized")?;
     let lim = limit.unwrap_or(50);
-    let mut stmt = conn.prepare(
-        "SELECT id, session_id, event_type, content, datetime(created_at, 'localtime') \
-         FROM session_log ORDER BY id DESC LIMIT ?1"
-    ).map_err(|e| e.to_string())?;
-    let iter = stmt.query_map([lim], |row| {
-        Ok(SessionEvent {
-            id: row.get(0)?,
-            session_id: row.get(1)?,
-            event_type: row.get(2)?,
-            content: row.get(3)?,
-            created_at: row.get(4)?,
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, session_id, event_type, content, datetime(created_at, 'localtime') \
+         FROM session_log ORDER BY id DESC LIMIT ?1",
+        )
+        .map_err(|e| e.to_string())?;
+    let iter = stmt
+        .query_map([lim], |row| {
+            Ok(SessionEvent {
+                id: row.get(0)?,
+                session_id: row.get(1)?,
+                event_type: row.get(2)?,
+                content: row.get(3)?,
+                created_at: row.get(4)?,
+            })
         })
-    }).map_err(|e| e.to_string())?;
+        .map_err(|e| e.to_string())?;
     let mut events: Vec<SessionEvent> = iter.filter_map(|e| e.ok()).collect();
     events.reverse();
     Ok(events)

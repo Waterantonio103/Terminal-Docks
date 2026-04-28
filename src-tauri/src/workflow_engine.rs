@@ -368,7 +368,10 @@ fn is_active_runtime_status(status: &str) -> bool {
 }
 
 fn is_terminal_runtime_status(status: &str) -> bool {
-    matches!(status, "completed" | "done" | "failed" | "unbound" | "disconnected")
+    matches!(
+        status,
+        "completed" | "done" | "failed" | "unbound" | "disconnected"
+    )
 }
 
 fn cli_type_label(cli: &crate::workflow::WorkflowAgentCli) -> &'static str {
@@ -535,7 +538,10 @@ fn build_runtime_assignment_payload(
     }
 }
 
-fn mission_node<'a>(mission: &'a CompiledMission, node_id: &str) -> Option<&'a crate::workflow::CompiledMissionNode> {
+fn mission_node<'a>(
+    mission: &'a CompiledMission,
+    node_id: &str,
+) -> Option<&'a crate::workflow::CompiledMissionNode> {
     mission.nodes.iter().find(|node| node.id == node_id)
 }
 
@@ -559,7 +565,12 @@ fn emit_node_status(
     );
 }
 
-fn emit_runtime_warning(app: &AppHandle, mission_id: &str, node_id: &str, message: impl Into<String>) {
+fn emit_runtime_warning(
+    app: &AppHandle,
+    mission_id: &str,
+    node_id: &str,
+    message: impl Into<String>,
+) {
     let _ = app.emit(
         "workflow-runtime-warning",
         RuntimeWarningEvent {
@@ -712,10 +723,7 @@ fn persist_runtime_session(
     );
 }
 
-fn persist_initial_agent_run(
-    app: &AppHandle,
-    payload: &RuntimeActivationPayload,
-) {
+fn persist_initial_agent_run(app: &AppHandle, payload: &RuntimeActivationPayload) {
     let mut env = HashMap::new();
     env.insert("TD_SESSION_ID".to_string(), payload.session_id.clone());
     env.insert("TD_AGENT_ID".to_string(), payload.agent_id.clone());
@@ -723,7 +731,10 @@ fn persist_initial_agent_run(
     env.insert("TD_NODE_ID".to_string(), payload.node_id.clone());
     env.insert("TD_ATTEMPT".to_string(), payload.attempt.to_string());
     env.insert("TD_RUN_ID".to_string(), payload.run_id.clone());
-    env.insert("TD_EXECUTION_MODE".to_string(), execution_mode_label(&payload.execution_mode).to_string());
+    env.insert(
+        "TD_EXECUTION_MODE".to_string(),
+        execution_mode_label(&payload.execution_mode).to_string(),
+    );
     if let Some(workspace) = payload.workspace_dir.as_ref() {
         env.insert("TD_WORKSPACE".to_string(), workspace.clone());
     }
@@ -804,7 +815,13 @@ fn clear_runtime_sessions_for_mission(app: &AppHandle, mission_id: &str) {
 
 // Records a pending task activation in task_pushes so MCP tools can surface it
 // as a pending activation before the runtime adapter acknowledges.
-fn persist_task_push(app: &AppHandle, session_id: &str, mission_id: &str, node_id: &str, attempt: u32) {
+fn persist_task_push(
+    app: &AppHandle,
+    session_id: &str,
+    mission_id: &str,
+    node_id: &str,
+    attempt: u32,
+) {
     let state = app.state::<DbState>();
     let db_lock = match state.db.lock() {
         Ok(lock) => lock,
@@ -821,7 +838,13 @@ fn persist_task_push(app: &AppHandle, session_id: &str, mission_id: &str, node_i
 }
 
 // Marks a task push as acknowledged when the runtime adapter confirms receipt.
-fn ack_task_push_db(app: &AppHandle, session_id: &str, mission_id: &str, node_id: &str, attempt: u32) {
+fn ack_task_push_db(
+    app: &AppHandle,
+    session_id: &str,
+    mission_id: &str,
+    node_id: &str,
+    attempt: u32,
+) {
     let state = app.state::<DbState>();
     let db_lock = match state.db.lock() {
         Ok(lock) => lock,
@@ -856,7 +879,12 @@ fn persist_mission_timeline_event(
     let _ = conn.execute(
         "INSERT INTO mission_timeline (mission_id, event_type, payload, run_version, created_at)
          VALUES (?1, ?2, ?3, ?4, CURRENT_TIMESTAMP)",
-        params![mission_id, event_type, payload, run_version.map(|v| v as i64)],
+        params![
+            mission_id,
+            event_type,
+            payload,
+            run_version.map(|v| v as i64)
+        ],
     );
 }
 
@@ -898,7 +926,11 @@ fn relevant_parent_ids_for_wave(
         .collect()
 }
 
-fn is_node_ready_for_wave(active_mission: &ActiveMission, target_node_id: &str, wave_id: &str) -> bool {
+fn is_node_ready_for_wave(
+    active_mission: &ActiveMission,
+    target_node_id: &str,
+    wave_id: &str,
+) -> bool {
     let key = (target_node_id.to_string(), wave_id.to_string());
     let Some(pending) = active_mission.pending_activations.get(&key) else {
         return false;
@@ -912,7 +944,11 @@ fn is_node_ready_for_wave(active_mission: &ActiveMission, target_node_id: &str, 
     !relevant_parents.is_empty() && relevant_parents == pending.activated_from
 }
 
-fn next_wave_id(active_mission: &ActiveMission, from_node_id: &str, target_node_id: &str) -> String {
+fn next_wave_id(
+    active_mission: &ActiveMission,
+    from_node_id: &str,
+    target_node_id: &str,
+) -> String {
     let current_wave = active_mission
         .node_waves
         .get(from_node_id)
@@ -924,7 +960,11 @@ fn next_wave_id(active_mission: &ActiveMission, from_node_id: &str, target_node_
 
     if let (Some(from), Some(to)) = (from_layer, target_layer) {
         if to <= from {
-            let attempt = active_mission.node_attempts.get(from_node_id).copied().unwrap_or(0);
+            let attempt = active_mission
+                .node_attempts
+                .get(from_node_id)
+                .copied()
+                .unwrap_or(0);
             return format!("retry:{from_node_id}:{attempt}");
         }
     }
@@ -940,7 +980,12 @@ fn schedule_activation_timeout(app: &AppHandle, mission_id: String, node_id: Str
     });
 }
 
-fn timeout_runtime_activation(app: &AppHandle, mission_id: String, node_id: String, attempt: u32) -> bool {
+fn timeout_runtime_activation(
+    app: &AppHandle,
+    mission_id: String,
+    node_id: String,
+    attempt: u32,
+) -> bool {
     let (role_id, current_wave_id, input_payload, reason, run_version) = {
         let state = app.state::<WorkflowState>();
         let mut missions = state.active_missions.lock().unwrap();
@@ -1062,7 +1107,11 @@ fn request_node_activation_locked(
         active_mission
             .node_failure_reasons
             .insert(node_id.to_string(), reason.clone());
-        let attempt = active_mission.node_attempts.get(node_id).copied().unwrap_or(0);
+        let attempt = active_mission
+            .node_attempts
+            .get(node_id)
+            .copied()
+            .unwrap_or(0);
         println!(
             "[Mission {}] Activation SKIPPED (unbound): node={} role={} — no terminal bound; attach a terminal to run this node",
             mission_id, node_id, role_id
@@ -1148,20 +1197,20 @@ fn request_node_activation_locked(
     };
 
     if let Some(payload) = input_payload.as_ref() {
-        active_mission.node_input_payloads.insert(node_id.to_string(), payload.clone());
+        active_mission
+            .node_input_payloads
+            .insert(node_id.to_string(), payload.clone());
     }
 
-    active_mission
-        .pending_runtime_activations
-        .insert(
-            (node_id.to_string(), attempt),
-            PendingRuntimeActivation {
-                status: "activation_pending".to_string(),
-                reason: None,
-                deadline_at: activated_at.saturating_add(ACTIVATION_TIMEOUT_MS),
-                payload: payload.clone(),
-            },
-        );
+    active_mission.pending_runtime_activations.insert(
+        (node_id.to_string(), attempt),
+        PendingRuntimeActivation {
+            status: "activation_pending".to_string(),
+            reason: None,
+            deadline_at: activated_at.saturating_add(ACTIVATION_TIMEOUT_MS),
+            payload: payload.clone(),
+        },
+    );
     active_mission
         .node_statuses
         .insert(node_id.to_string(), "activation_pending".to_string());
@@ -1202,7 +1251,14 @@ fn request_node_activation_locked(
     // activation record — not the Tauri event, not the PTY prompt injection.
     persist_task_push(app, &session_id, mission_id, node_id, attempt);
     persist_initial_agent_run(app, &payload);
-    emit_node_status(app, node_id, "activation_pending", Some(attempt), None, None);
+    emit_node_status(
+        app,
+        node_id,
+        "activation_pending",
+        Some(attempt),
+        None,
+        None,
+    );
 
     let _ = app.emit(
         "workflow-runtime-activation-requested",
@@ -1240,7 +1296,11 @@ fn get_start_node_ids(mission: &CompiledMission) -> Vec<String> {
         .collect()
 }
 
-fn apply_append_patch(active_mission: &mut ActiveMission, run_version: u32, patch: &MissionGraphPatch) -> Result<MissionPatchResult, String> {
+fn apply_append_patch(
+    active_mission: &mut ActiveMission,
+    run_version: u32,
+    patch: &MissionGraphPatch,
+) -> Result<MissionPatchResult, String> {
     let current_version = active_mission.mission.metadata.run_version.unwrap_or(1);
     if run_version != current_version {
         return Err(format!(
@@ -1305,7 +1365,10 @@ fn apply_append_patch(active_mission: &mut ActiveMission, run_version: u32, patc
             .node_statuses
             .entry(node.id.clone())
             .or_insert_with(|| initial.to_string());
-        active_mission.node_attempts.entry(node.id.clone()).or_insert(0);
+        active_mission
+            .node_attempts
+            .entry(node.id.clone())
+            .or_insert(0);
     }
 
     Ok(MissionPatchResult {
@@ -1337,7 +1400,8 @@ pub fn start_mission(app: &AppHandle, mut mission: CompiledMission) {
             "unbound"
         } else {
             "terminal_started"
-        }.to_string();
+        }
+        .to_string();
         if initial_status == "unbound" {
             node_failure_reasons.insert(
                 node.id.clone(),
@@ -1367,7 +1431,11 @@ pub fn start_mission(app: &AppHandle, mut mission: CompiledMission) {
         );
     }
 
-    let unbound_count = mission.nodes.iter().filter(|n| n.terminal.terminal_id.trim().is_empty()).count();
+    let unbound_count = mission
+        .nodes
+        .iter()
+        .filter(|n| n.terminal.terminal_id.trim().is_empty())
+        .count();
     println!(
         "[Mission {}] Started: total_nodes={} start_nodes={} unbound={} run_version={}",
         mission_id,
@@ -1418,7 +1486,11 @@ pub fn start_mission(app: &AppHandle, mut mission: CompiledMission) {
 pub fn handle_handoff(app: &AppHandle, mission_id: &str, handoff: HandoffEvent) {
     println!(
         "[Mission {}] Received handoff: from={:?}, target={:?}, attempt={:?}, outcome={:?}",
-        mission_id, handoff.from_node_id, handoff.target_node_id, handoff.from_attempt, handoff.outcome
+        mission_id,
+        handoff.from_node_id,
+        handoff.target_node_id,
+        handoff.from_attempt,
+        handoff.outcome
     );
     let Some(from_id) = handoff.from_node_id.clone() else {
         return;
@@ -1437,7 +1509,11 @@ pub fn handle_handoff(app: &AppHandle, mission_id: &str, handoff: HandoffEvent) 
         return;
     }
 
-    let from_attempt = active_mission.node_attempts.get(&from_id).copied().unwrap_or(0);
+    let from_attempt = active_mission
+        .node_attempts
+        .get(&from_id)
+        .copied()
+        .unwrap_or(0);
     let Some(from_attempt_from_event) = handoff.from_attempt else {
         emit_runtime_warning(
             app,
@@ -1542,7 +1618,9 @@ pub fn handle_handoff(app: &AppHandle, mission_id: &str, handoff: HandoffEvent) 
         .insert(from_id.clone(), outcome.clone());
     active_mission.node_failure_reasons.remove(&from_id);
 
-    if let Some(role_id) = mission_node(&active_mission.mission, &from_id).map(|node| node.role_id.clone()) {
+    if let Some(role_id) =
+        mission_node(&active_mission.mission, &from_id).map(|node| node.role_id.clone())
+    {
         persist_node_runtime(
             app,
             mission_id,
@@ -1618,7 +1696,11 @@ pub fn handle_handoff(app: &AppHandle, mission_id: &str, handoff: HandoffEvent) 
         return;
     }
 
-    let target_attempt = active_mission.node_attempts.get(&target_id).copied().unwrap_or(0);
+    let target_attempt = active_mission
+        .node_attempts
+        .get(&target_id)
+        .copied()
+        .unwrap_or(0);
     let current_status = active_mission
         .node_statuses
         .get(&target_id)
@@ -1633,7 +1715,9 @@ pub fn handle_handoff(app: &AppHandle, mission_id: &str, handoff: HandoffEvent) 
             .node_waves
             .insert(target_id.clone(), wave_id.clone());
 
-        if let Some(role_id) = mission_node(&active_mission.mission, &target_id).map(|node| node.role_id.clone()) {
+        if let Some(role_id) =
+            mission_node(&active_mission.mission, &target_id).map(|node| node.role_id.clone())
+        {
             persist_node_runtime(
                 app,
                 mission_id,
@@ -1692,7 +1776,17 @@ pub fn seed_mission_to_db(
     persist_compiled_mission(&app, &graph, "active");
     clear_runtime_sessions_for_mission(&app, &mission_id);
     for node in &graph.nodes {
-        persist_node_runtime(&app, &mission_id, &node.id, &node.role_id, "idle", 0, None, None, None);
+        persist_node_runtime(
+            &app,
+            &mission_id,
+            &node.id,
+            &node.role_id,
+            "idle",
+            0,
+            None,
+            None,
+            None,
+        );
     }
     Ok(())
 }
@@ -1854,7 +1948,17 @@ pub fn acknowledge_runtime_activation(
                 "activated" => "activation_acked",
                 other => other,
             };
-            persist_node_runtime(&app, &mission_id, &node_id, "", normalized, attempt, None, None, None);
+            persist_node_runtime(
+                &app,
+                &mission_id,
+                &node_id,
+                "",
+                normalized,
+                attempt,
+                None,
+                None,
+                None,
+            );
             mark_runtime_session_status(&app, &mission_id, &node_id, attempt, normalized);
             emit_node_status(&app, &node_id, normalized, Some(attempt), None, reason);
             return Ok(());
@@ -1874,7 +1978,11 @@ pub fn acknowledge_runtime_activation(
             .map(|node| node.role_id.clone())
             .ok_or_else(|| format!("Node {} is not part of mission {}.", node_id, mission_id))?;
 
-        let current_attempt = active_mission.node_attempts.get(&node_id).copied().unwrap_or(0);
+        let current_attempt = active_mission
+            .node_attempts
+            .get(&node_id)
+            .copied()
+            .unwrap_or(0);
         if current_attempt != attempt {
             return Err(format!(
                 "Activation attempt mismatch for {}/{}: got {}, current {}.",
@@ -1893,7 +2001,8 @@ pub fn acknowledge_runtime_activation(
         };
 
         match normalized_status {
-            "adapter_starting" | "mcp_connecting" | "registered" | "ready" | "activation_pending" => {
+            "adapter_starting" | "mcp_connecting" | "registered" | "ready"
+            | "activation_pending" => {
                 let pending = active_mission
                     .pending_runtime_activations
                     .get_mut(&key)
@@ -1978,8 +2087,9 @@ pub fn acknowledge_runtime_activation(
                 if let Some(pending) = pending {
                     last_payload = pending.payload.input_payload;
                 }
-                let resolved_reason =
-                    next_reason.unwrap_or_else(|| "Runtime disconnected before completing activation.".to_string());
+                let resolved_reason = next_reason.unwrap_or_else(|| {
+                    "Runtime disconnected before completing activation.".to_string()
+                });
                 next_reason = Some(resolved_reason.clone());
                 active_mission
                     .node_statuses
@@ -2168,7 +2278,8 @@ pub fn get_runtime_activation(
                             .or_else(|| active_mission.node_failure_reasons.get(&node_id).cloned());
                         value.activation_payload = serde_json::to_string(&pending.payload).ok();
                     } else {
-                        value.status_reason = active_mission.node_failure_reasons.get(&node_id).cloned();
+                        value.status_reason =
+                            active_mission.node_failure_reasons.get(&node_id).cloned();
                     }
                 }
             }
@@ -2211,9 +2322,17 @@ mod tests {
             metadata: CompiledMissionMetadata {
                 compiled_at: 1,
                 source_graph_id: "graph-1".to_string(),
-                start_node_ids: vec!["builder".to_string(), "tester".to_string(), "security".to_string()],
+                start_node_ids: vec![
+                    "builder".to_string(),
+                    "tester".to_string(),
+                    "security".to_string(),
+                ],
                 execution_layers: vec![
-                    vec!["builder".to_string(), "tester".to_string(), "security".to_string()],
+                    vec![
+                        "builder".to_string(),
+                        "tester".to_string(),
+                        "security".to_string(),
+                    ],
                     vec!["reviewer".to_string()],
                 ],
                 authoring_mode: Some(crate::workflow::WorkflowAuthoringMode::Preset),
@@ -2432,7 +2551,9 @@ mod tests {
             .node_statuses
             .insert("source".to_string(), "done".to_string());
         mission.node_attempts.insert("source".to_string(), 1);
-        mission.node_waves.insert("source".to_string(), wave.clone());
+        mission
+            .node_waves
+            .insert("source".to_string(), wave.clone());
         mission
             .node_last_outcomes
             .insert("source".to_string(), NodeOutcome::Success);
@@ -2545,7 +2666,8 @@ mod tests {
             edges: vec![],
         };
 
-        let error = apply_append_patch(&mut mission, 99, &patch).expect_err("patch should reject stale runVersion");
+        let error = apply_append_patch(&mut mission, 99, &patch)
+            .expect_err("patch should reject stale runVersion");
         assert!(error.contains("Stale adaptive patch"));
     }
 

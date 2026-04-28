@@ -36,17 +36,22 @@ export const claudeAdapter: CliAdapter = {
     };
 
     if (context.executionMode === 'headless' || context.executionMode === 'streaming_headless') {
+      const args = ['--print', '{prompt}'];
+      if (context.model?.trim()) args.unshift('--model', context.model.trim());
       return {
         command: 'claude',
-        args: ['--print', '{prompt}'],
+        args,
         env,
         promptDelivery: 'arg_text',
       };
     }
 
+    const args: string[] = [];
+    if (context.model?.trim()) args.push('--model', context.model.trim());
+    if (context.yolo) args.push('--dangerously-skip-permissions');
     return {
       command: 'claude',
-      args: [],
+      args,
       env,
       promptDelivery: 'interactive_pty',
     };

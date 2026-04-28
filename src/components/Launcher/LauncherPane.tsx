@@ -128,6 +128,8 @@ function workflowGraphToFlowGraph(options: {
         terminalId,
         terminalTitle,
         paneId,
+        cli: node.config?.cli ?? picked?.cli ?? 'claude',
+        model: node.config?.model ?? '',
         executionMode: node.config?.executionMode ?? 'interactive_pty',
         autoLinked: Boolean(node.config?.autoLinked ?? picked),
       },
@@ -185,6 +187,7 @@ function buildAdaptiveSeedFlowGraph(options: {
         terminalId: coordinator.pane.data?.terminalId ?? `term-${coordinator.pane.id}`,
         terminalTitle: coordinator.pane.title,
         paneId: coordinator.pane.id,
+        model: (coordinator.pane.data?.model as string | undefined) ?? '',
         executionMode: (coordinator.pane.data?.executionMode as WorkflowExecutionMode | undefined) ?? 'interactive_pty',
         autoLinked: true,
       },
@@ -345,7 +348,7 @@ export function LauncherPane() {
         }
       }
 
-      const bindingByRole: Record<string, { terminalId: string; terminalTitle: string; paneId?: string; cli?: AgentCli | null; executionMode?: WorkflowExecutionMode }> = {};
+      const bindingByRole: Record<string, { terminalId: string; terminalTitle: string; paneId?: string; cli?: AgentCli | null; model?: string; executionMode?: WorkflowExecutionMode }> = {};
       for (const node of preset.nodes) {
         const picked = pools.take(node.roleId);
         if (!picked) continue;
@@ -354,6 +357,7 @@ export function LauncherPane() {
           terminalTitle: picked.pane.title,
           paneId: picked.pane.id,
           cli: picked.cli,
+          model: (picked.pane.data?.model as string | undefined) ?? '',
           executionMode: (picked.pane.data?.executionMode as WorkflowExecutionMode | undefined) ?? 'interactive_pty',
         };
       }
@@ -448,6 +452,7 @@ export function LauncherPane() {
           attemptHistory: [],
           nodeId: node.id,
           runtimeCli: node.terminal.cli,
+          model: node.terminal.model ?? null,
           executionMode: node.terminal.executionMode,
           activeRunId: null,
           runtimeSessionId: null,

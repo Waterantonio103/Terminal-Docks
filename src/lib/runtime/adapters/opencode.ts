@@ -46,15 +46,24 @@ export const opencodeAdapter: CliAdapter = {
       };
     }
 
+    const args: string[] = [];
+    if (context.model?.trim()) args.push('--model', context.model.trim());
+    // --yolo is only valid for `opencode run`, not the default TUI mode.
+    // Passing it to the top-level command causes opencode to print help and exit.
     return {
       command: 'opencode',
-      args: [],
+      args,
       env,
       promptDelivery: 'interactive_pty',
     };
   },
 
   detectReady(output: string): ReadyDetectionResult {
+    // If the shell prompt is visible after the banner it means opencode exited (e.g. unknown flag).
+    if (SHELL_PROMPT_RE.test(output.split('\n').slice(-3).join('\n'))) {
+      return { ready: false, confidence: 'low', detail: 'Shell prompt visible — opencode may have exited' };
+    }
+
     if (BANNER_RE.test(output)) {
       if (PROMPT_RE.test(output) || READY_KEYWORDS_RE.test(output)) {
         return { ready: true, confidence: 'high', detail: 'OpenCode banner and prompt detected' };
@@ -64,10 +73,6 @@ export const opencodeAdapter: CliAdapter = {
 
     if (PROMPT_RE.test(output) || READY_KEYWORDS_RE.test(output)) {
       return { ready: true, confidence: 'medium', detail: 'OpenCode prompt indicator detected' };
-    }
-
-    if (SHELL_PROMPT_RE.test(output)) {
-      return { ready: false, confidence: 'low', detail: 'Shell prompt visible — CLI may have exited' };
     }
 
     return { ready: false, confidence: 'low' };

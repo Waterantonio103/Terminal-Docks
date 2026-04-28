@@ -73,13 +73,19 @@ run('runtime dispatcher materializes non-path variables and keeps promptPath for
   assert.equal(request.prompt, 'hello');
 });
 
-run('codex headless command uses stdin prompt file and safe defaults', () => {
+run('codex headless command uses true stdin and global flags before exec', () => {
   const command = buildCliRunCommand(payload({ cliType: 'codex' }));
-  assert.equal(command.command, 'cmd');
-  assert.equal(command.promptDelivery, 'arg_file');
-  assert.equal(command.args[0], '/c');
-  assert.match(command.args[1] ?? '', /codex --ask-for-approval never --sandbox workspace-write exec --json --skip-git-repo-check - < "\{promptPath\}"/);
-  assert.equal(command.env.CODEX_HOME, '.terminal-docks\\codex-home');
+  assert.equal(command.command, 'codex');
+  assert.equal(command.promptDelivery, 'stdin');
+  assert.deepEqual(command.args, ['--ask-for-approval', 'never', '--sandbox', 'workspace-write', 'exec', '--json', '--skip-git-repo-check', '-']);
+  assert.equal(command.env.CODEX_HOME, undefined);
+});
+
+run('codex selected model is placed before exec', () => {
+  const command = buildCliRunCommand(payload({ cliType: 'codex' }), { model: 'gpt-5.3-codex' });
+  assert.equal(command.command, 'codex');
+  assert.deepEqual(command.args.slice(0, 4), ['--model', 'gpt-5.3-codex', '--ask-for-approval', 'never']);
+  assert.ok(command.args.indexOf('--model') < command.args.indexOf('exec'));
 });
 
 run('local HTTP runtimes share the headless adapter request path', () => {

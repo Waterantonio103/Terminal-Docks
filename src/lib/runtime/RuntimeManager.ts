@@ -108,6 +108,7 @@ class RuntimeManager {
           goal: payload.goal,
           inputPayload: payload.inputPayload,
           runId: payload.runId,
+          modelId: payload.modelId ?? null,
           activationPayload: payload,
         });
 
@@ -139,8 +140,8 @@ class RuntimeManager {
       const session = this.sessions.get(sessionKey[1]);
       if (!session) return;
 
-      const isInteractiveCli = session.cliId === 'claude' || session.cliId === 'ollama' || session.cliId === 'lmstudio';
-      if (status === 'completed' && isInteractiveCli) return;
+      const isMcpCompletingCli = session.cliId === 'claude' || session.cliId === 'codex' || session.cliId === 'ollama' || session.cliId === 'lmstudio';
+      if (status === 'completed' && isMcpCompletingCli) return;
       if (session.state === 'completed' || session.state === 'failed') return;
 
       const reason = status === 'completed'
@@ -184,7 +185,7 @@ class RuntimeManager {
       goal: args.goal ?? undefined,
       legalTargets: args.legalTargets,
       upstreamPayloads: args.upstreamPayloads,
-      model: args.model,
+      model: args.modelId ?? args.model,
       yolo: args.yolo,
     });
 
@@ -294,6 +295,8 @@ class RuntimeManager {
         workspaceDir: session.workspaceDir,
         mcpUrl: await getMcpBaseUrl(),
         executionMode: session.executionMode,
+        model: session.model || null,
+        yolo: session.yolo,
       });
 
       if (launchCommand.promptDelivery === 'unsupported') {
@@ -563,6 +566,7 @@ class RuntimeManager {
       payload: activationPayload.inputPayload ?? null,
       runId: activationPayload.runId,
       cliType: session.cliId,
+      modelId: session.model || null,
       executionMode: session.executionMode,
       goal: activationPayload.goal,
       workspaceDir: session.workspaceDir,
@@ -886,6 +890,7 @@ class RuntimeManager {
             useWorkspaceStore.getState().updatePaneDataByTerminalId(session.terminalId, {
               cliSource: 'connect_agent',
               cli: session.cliId,
+              model: session.model,
             });
           } catch {
             // PTY still not available — user can interact with the terminal manually
@@ -954,6 +959,7 @@ class RuntimeManager {
         useWorkspaceStore.getState().updatePaneDataByTerminalId(session.terminalId, {
           cliSource: 'connect_agent',
           cli: session.cliId,
+          model: session.model,
         });
       }
     }
@@ -1009,6 +1015,7 @@ class RuntimeManager {
           payload: activationPayload.inputPayload ?? null,
           runId: activationPayload.runId,
           cliType: session.cliId,
+          modelId: session.model || null,
           executionMode: session.executionMode,
           goal: activationPayload.goal,
           workspaceDir: session.workspaceDir,
@@ -1115,6 +1122,7 @@ class RuntimeManager {
       payload: activationPayload.inputPayload ?? null,
       runId: activationPayload.runId,
       cliType: session.cliId,
+      modelId: session.model || null,
       executionMode: session.executionMode,
       goal: activationPayload.goal,
       workspaceDir: session.workspaceDir,
@@ -1305,6 +1313,7 @@ class RuntimeManager {
       profileId: session.profileId,
       capabilities: null,
       cliType: session.cliId,
+      modelId: session.model || null,
       executionMode: session.executionMode,
       terminalId: session.terminalId,
       paneId: session.paneId ?? null,
@@ -1404,6 +1413,7 @@ class RuntimeManager {
       nodeId: session.nodeId,
       roleId: session.role,
       cli: session.cliId,
+      model: session.model,
     });
   }
 
@@ -1467,6 +1477,14 @@ class RuntimeManager {
       ptyCleanup();
       this.ptyCleanupFns.delete(session.sessionId);
     }
+
+    // Reset pane's cliSource so the next run on the same terminal re-evaluates
+    // whether the CLI is still running. Without this, `shouldLaunchCliInTerminal`
+    // sees 'connect_agent' from the previous run and skips the relaunch.
+    if (session.terminalId) {
+      useWorkspaceStore.getState().updatePaneDataByTerminalId(session.terminalId, { cliSource: undefined });
+    }
+
     this.sessions.delete(session.sessionId);
     const nodeKey = `${session.missionId}:${session.nodeId}:${session.attempt}`;
     if (this.sessionsByNode.get(nodeKey) === session.sessionId) {

@@ -5,7 +5,7 @@ use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
-use tauri::{AppHandle, Emitter, State, Manager};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 const RECENT_OUTPUT_CAPACITY: usize = 16384;
 const PERMISSION_EXCERPT_LIMIT: usize = 500;
@@ -202,27 +202,53 @@ fn looks_like_permission_prompt(cli: &str, lower: &str) -> bool {
     let cli_match = match cli {
         "codex" => {
             ((has_choice || lower.contains("?") || lower.contains("requires approval"))
-                && contains_any(lower, &["allow", "approve", "do you want to", "requires approval"])
-                && contains_any(lower, &["command", "shell", "exec", "execute", "run", "network", "retry", "edit", "write", "patch"]))
+                && contains_any(
+                    lower,
+                    &["allow", "approve", "do you want to", "requires approval"],
+                )
+                && contains_any(
+                    lower,
+                    &[
+                        "command", "shell", "exec", "execute", "run", "network", "retry", "edit",
+                        "write", "patch",
+                    ],
+                ))
                 || lower.contains("requires approval")
         }
         "claude" => {
-            (lower.contains("permission") && contains_any(lower, &["use", "run", "execute", "edit", "write", "tool"]))
+            (lower.contains("permission")
+                && contains_any(lower, &["use", "run", "execute", "edit", "write", "tool"]))
                 || lower.contains("do you want to proceed")
                 || (lower.contains("allow") && lower.contains("tool"))
         }
         "gemini" => {
             contains_any(lower, &["confirm", "proceed", "allow"])
-                && contains_any(lower, &["command", "tool", "edit", "write", "execute", "run"])
+                && contains_any(
+                    lower,
+                    &["command", "tool", "edit", "write", "execute", "run"],
+                )
         }
         "generic" | "custom" | "opencode" => {
-            contains_any(lower, &["permission", "approve", "allow", "confirm", "proceed"])
-                && (has_choice || contains_any(lower, &["command", "tool", "edit", "write", "execute", "run", "network", "retry"]))
+            contains_any(
+                lower,
+                &["permission", "approve", "allow", "confirm", "proceed"],
+            ) && (has_choice
+                || contains_any(
+                    lower,
+                    &[
+                        "command", "tool", "edit", "write", "execute", "run", "network", "retry",
+                    ],
+                ))
         }
         _ => false,
     };
 
-    cli_match || (has_choice && contains_any(lower, &["permission", "approve", "allow", "confirm", "proceed"]))
+    cli_match
+        || (has_choice
+            && contains_any(
+                lower,
+                &["permission", "approve", "allow", "confirm", "proceed"],
+            ))
 }
 
 pub fn classify_permission_prompt(raw: &str, cli: &str) -> Option<PermissionClassification> {
@@ -238,16 +264,30 @@ pub fn classify_permission_prompt(raw: &str, cli: &str) -> Option<PermissionClas
 
     let (permission_type, label) = if contains_any(
         &lower,
-        &["network", "internet", "download", "fetch", "registry", "http://", "https://"],
+        &[
+            "network", "internet", "download", "fetch", "registry", "http://", "https://",
+        ],
     ) {
         ("network_access", "Network access")
     } else if contains_any(&lower, &["retry", "try again", "rerun"]) {
         ("command_retry", "Command retry")
-    } else if contains_any(&lower, &["edit", "write", "modify", "file", "patch", "save"]) {
+    } else if contains_any(
+        &lower,
+        &["edit", "write", "modify", "file", "patch", "save"],
+    ) {
         ("file_edit", "File edit")
     } else if contains_any(
         &lower,
-        &["shell", "command", "bash", "powershell", "cmd.exe", "execute", "exec", "run"],
+        &[
+            "shell",
+            "command",
+            "bash",
+            "powershell",
+            "cmd.exe",
+            "execute",
+            "exec",
+            "run",
+        ],
     ) {
         ("shell", "Shell execution")
     } else {
@@ -387,10 +427,13 @@ fn expire_terminal_permissions(app: &AppHandle, state: &PtyState, terminal_id: &
     {
         let mut requests = state.permission_requests.lock().unwrap();
         for request in requests.values_mut() {
-            if request.terminal_id == terminal_id && request.state == PermissionRequestState::Pending {
+            if request.terminal_id == terminal_id
+                && request.state == PermissionRequestState::Pending
+            {
                 request.state = PermissionRequestState::Expired;
                 request.resolved_at = Some(unix_millis_now());
-                request.error = Some("PTY exited before a permission decision was handled.".to_string());
+                request.error =
+                    Some("PTY exited before a permission decision was handled.".to_string());
                 expired.push(request.clone());
             }
         }
@@ -815,11 +858,19 @@ pub fn register_pty_runtime_metadata(
             terminal_id,
             node_id: node_id.and_then(|value| {
                 let trimmed = value.trim().to_string();
-                if trimmed.is_empty() { None } else { Some(trimmed) }
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed)
+                }
             }),
             runtime_session_id: runtime_session_id.and_then(|value| {
                 let trimmed = value.trim().to_string();
-                if trimmed.is_empty() { None } else { Some(trimmed) }
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed)
+                }
             }),
             cli: Some(normalize_cli(cli.as_deref())),
         },
@@ -842,9 +893,7 @@ pub fn list_active_permission_requests(
 }
 
 #[tauri::command]
-pub fn list_permission_audit_entries(
-    state: State<'_, PtyState>,
-) -> Vec<PermissionAuditEntry> {
+pub fn list_permission_audit_entries(state: State<'_, PtyState>) -> Vec<PermissionAuditEntry> {
     state.permission_audit.lock().unwrap().clone()
 }
 
@@ -939,9 +988,15 @@ mod tests {
 
     #[test]
     fn adapter_decisions_are_cli_specific_and_explicit() {
-        assert_eq!(permission_decision_input("codex", "approve").unwrap(), "y\r");
+        assert_eq!(
+            permission_decision_input("codex", "approve").unwrap(),
+            "y\r"
+        );
         assert_eq!(permission_decision_input("claude", "deny").unwrap(), "n\r");
-        assert_eq!(permission_decision_input("gemini", "approve").unwrap(), "y\r");
+        assert_eq!(
+            permission_decision_input("gemini", "approve").unwrap(),
+            "y\r"
+        );
         assert!(permission_decision_input("ollama", "approve").is_err());
         assert!(permission_decision_input("codex", "maybe").is_err());
     }
@@ -976,7 +1031,9 @@ mod tests {
         {
             let mut requests = state.permission_requests.lock().unwrap();
             for request in requests.values_mut() {
-                if request.terminal_id == "term-a" && request.state == PermissionRequestState::Pending {
+                if request.terminal_id == "term-a"
+                    && request.state == PermissionRequestState::Pending
+                {
                     request.state = PermissionRequestState::Expired;
                     expired.push(request.clone());
                 }

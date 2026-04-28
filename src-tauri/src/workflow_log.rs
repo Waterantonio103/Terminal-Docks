@@ -37,7 +37,14 @@ fn build_markdown(
     pipeline_names: &[String],
     results: &[ResultExport],
     events: &[(String, String, Option<String>, String)],
-    tasks: &[(i64, String, Option<String>, String, Option<String>, Option<i64>)],
+    tasks: &[(
+        i64,
+        String,
+        Option<String>,
+        String,
+        Option<String>,
+        Option<i64>,
+    )],
     permission_audit: &[PermissionAuditEntry],
 ) -> String {
     let mut md = String::with_capacity(8192);
@@ -49,9 +56,15 @@ fn build_markdown(
 
     // ── How to use ────────────────────────────────────────────────────────────
     md.push_str("## HOW TO USE THIS FILE\n\n");
-    md.push_str("This is a self-contained workflow log from a Terminal Docks multi-agent session.\n");
-    md.push_str("Attach this file + your codebase to any AI (Claude Code, Claude.ai, ChatGPT, Gemini…).\n");
-    md.push_str("No extra prompt needed — the analysis instructions are at the bottom of this file.\n\n");
+    md.push_str(
+        "This is a self-contained workflow log from a Terminal Docks multi-agent session.\n",
+    );
+    md.push_str(
+        "Attach this file + your codebase to any AI (Claude Code, Claude.ai, ChatGPT, Gemini…).\n",
+    );
+    md.push_str(
+        "No extra prompt needed — the analysis instructions are at the bottom of this file.\n\n",
+    );
     md.push_str("**Quick start:**\n");
     md.push_str("```\n");
     md.push_str("# Claude Code CLI\n");
@@ -71,7 +84,10 @@ fn build_markdown(
         md.push_str("| Agent | Role | Final Status |\n");
         md.push_str("|-------|------|--------------|\n");
         for a in agents {
-            md.push_str(&format!("| {} | {} | {} |\n", a.title, a.role_name, a.status));
+            md.push_str(&format!(
+                "| {} | {} | {} |\n",
+                a.title, a.role_name, a.status
+            ));
         }
         md.push('\n');
     }
@@ -88,7 +104,11 @@ fn build_markdown(
     if !events.is_empty() {
         md.push_str("## SESSION TIMELINE\n\n");
         for (sid, event_type, content, created_at) in events {
-            let short_sid = if sid.len() >= 8 { &sid[..8] } else { sid.as_str() };
+            let short_sid = if sid.len() >= 8 {
+                &sid[..8]
+            } else {
+                sid.as_str()
+            };
             let content_str = content.as_deref().unwrap_or("");
             md.push_str(&format!(
                 "- `{}` **{}** (session `{}…`)",
@@ -112,7 +132,12 @@ fn build_markdown(
         for (id, title, desc, status, agent_id, parent_id) in tasks {
             task_map.insert(
                 *id,
-                (title.as_str(), desc.as_deref(), status.as_str(), agent_id.as_deref()),
+                (
+                    title.as_str(),
+                    desc.as_deref(),
+                    status.as_str(),
+                    agent_id.as_deref(),
+                ),
             );
             match parent_id {
                 Some(pid) => children.entry(*pid).or_default().push(*id),
@@ -129,8 +154,10 @@ fn build_markdown(
             if let Some((title, desc, status, agent_id)) = task_map.get(&id) {
                 let indent = "  ".repeat(depth);
                 let agent_str = agent_id.map(|a| format!(" `{}`", a)).unwrap_or_default();
-                md.push_str(&format!("{}- **{}** — _{}_{}",
-                    indent, title, status, agent_str));
+                md.push_str(&format!(
+                    "{}- **{}** — _{}_{}",
+                    indent, title, status, agent_str
+                ));
                 if let Some(d) = desc {
                     if !d.is_empty() {
                         md.push_str(&format!("\n{}  > {}", indent, d));
@@ -163,10 +190,7 @@ fn build_markdown(
             };
             let node = entry.node_id.as_deref().unwrap_or("runtime-only");
             let decision = entry.decision.as_deref().unwrap_or("");
-            let excerpt = entry
-                .prompt_excerpt
-                .replace('|', "\\|")
-                .replace('\n', " ");
+            let excerpt = entry.prompt_excerpt.replace('|', "\\|").replace('\n', " ");
             md.push_str(&format!(
                 "| {} | `{}` | {} | {} | {:?} | {} | {} | {} |\n",
                 format_millis_utc(entry.timestamp),
@@ -260,7 +284,9 @@ pub fn export_workflow_log(
             .map_err(|e| e.to_string())?;
         let mut rows = Vec::new();
         for r in iter {
-            if let Ok(v) = r { rows.push(v); }
+            if let Ok(v) = r {
+                rows.push(v);
+            }
         }
         rows
     };
@@ -288,7 +314,9 @@ pub fn export_workflow_log(
             .map_err(|e| e.to_string())?;
         let mut rows = Vec::new();
         for r in iter {
-            if let Ok(v) = r { rows.push(v); }
+            if let Ok(v) = r {
+                rows.push(v);
+            }
         }
         rows
     };

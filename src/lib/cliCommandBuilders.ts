@@ -111,31 +111,30 @@ export function buildCliRunCommand(
   }
 
   if (cli === 'claude') {
+    const args = ['--print', '{prompt}'];
+    if (options.model?.trim()) {
+      args.unshift('--model', options.model.trim());
+    }
     return {
       command: 'claude',
-      args: ['--print', '{prompt}'],
+      args,
       env,
       promptDelivery: 'arg_text',
     };
   }
 
   if (cli === 'codex') {
-    const codexEnv = { ...env };
-    // Use a workspace-local Codex home by default to avoid profile ACL issues
-    // (common on Windows when spawning from desktop app runtimes).
-    if (!codexEnv.CODEX_HOME) {
-      codexEnv.CODEX_HOME = '.terminal-docks\\codex-home';
+    const args: string[] = [];
+    if (options.model?.trim()) {
+      args.push('--model', options.model.trim());
     }
+    args.push('--ask-for-approval', 'never', '--sandbox', 'workspace-write', 'exec', '--json', '--skip-git-repo-check', '-');
 
-    // NOTE: --ask-for-approval and --sandbox are GLOBAL flags and must precede `exec`.
-    // We currently use shell redirection for stdin due to Windows cmd.exe shim.
-    // TODO: Replace with true stdin piping without shell dependency.
-    const execCmd = `codex --ask-for-approval never --sandbox workspace-write exec --json --skip-git-repo-check - < "{promptPath}"`;
     return {
-      command: 'cmd',
-      args: ['/c', execCmd],
-      env: codexEnv,
-      promptDelivery: 'arg_file',
+      command: 'codex',
+      args,
+      env,
+      promptDelivery: 'stdin',
     };
   }
 
@@ -161,7 +160,8 @@ export function buildPtyLaunchCommand(cliId: string, options: { model?: string |
 
   if (options.yolo) {
     if (cli === 'claude') parts.push('--dangerously-skip-permissions');
-    else if (cli === 'opencode' || cli === 'gemini') parts.push('--yolo');
+    else if (cli === 'gemini') parts.push('--yolo');
+    // opencode: --yolo is only valid for `opencode run`, not the default TUI mode.
     // codex: PTY mode doesn't have a yolo equivalent; keep interactive
   }
 

@@ -22,6 +22,7 @@ export interface WorkflowNodeTriggeredPayload {
   payload?: string | null;
   runId?: string;
   cliType?: string;
+  modelId?: string | null;
   executionMode?: 'headless' | 'streaming_headless' | 'interactive_pty';
   goal?: string;
   workspaceDir?: string | null;
@@ -88,6 +89,7 @@ export interface RuntimeActivationPayload {
     verifiedBy?: string;
   }> | null;
   cliType: string;
+  modelId?: string | null;
   executionMode: 'headless' | 'streaming_headless' | 'interactive_pty';
   terminalId: string;
   paneId?: string | null;
@@ -117,6 +119,7 @@ export interface NewTaskSignalPayload {
   handoffPayloadPreview: string | null;
   runId?: string;
   cliType?: string;
+  modelId?: string | null;
   executionMode?: 'headless' | 'streaming_headless' | 'interactive_pty';
   goal?: string;
   workspaceDir?: string | null;
@@ -206,6 +209,7 @@ export function buildNewTaskSignal(payload: WorkflowNodeTriggeredPayload, mcpUrl
     handoffPayloadPreview: payloadPreview,
     runId: payload.runId,
     cliType: payload.cliType,
+    modelId: payload.modelId ?? null,
     executionMode: payload.executionMode,
     goal: payload.goal,
     workspaceDir: payload.workspaceDir ?? null,

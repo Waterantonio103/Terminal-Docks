@@ -24,6 +24,7 @@ interface TerminalBindingLike {
   terminalTitle: string;
   paneId?: string;
   cli?: WorkflowAgentCli | null;
+  model?: string | null;
   executionMode?: WorkflowExecutionMode | null;
 }
 
@@ -138,6 +139,8 @@ export function buildPresetFlowGraph(options: {
           terminalId: binding?.terminalId ?? '',
           terminalTitle: binding?.terminalTitle ?? '',
           paneId: binding?.paneId ?? '',
+          cli: binding?.cli ?? 'claude',
+          model: binding?.model ?? '',
           executionMode: binding?.executionMode ?? 'interactive_pty',
           autoLinked: true,
         },
