@@ -11,7 +11,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { invoke } from '@tauri-apps/api/core';
+import {  invoke  } from '../../lib/desktopApi';
 import {
   runtimeObserver,
   type LiveRuntimeSession,
@@ -71,7 +71,7 @@ export function useRuntimeObserver(): {
 } {
   const emit = useCallback(async (event: string, payload: unknown) => {
     try {
-      const { emit: tauriEmit } = await import('@tauri-apps/api/event');
+      const { emit: tauriEmit } = await import('../../lib/desktopApi');
       await tauriEmit(event, payload);
     } catch {}
   }, []);

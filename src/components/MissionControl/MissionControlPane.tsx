@@ -22,8 +22,8 @@ import {
   AlertCircle,
 } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
-import { invoke } from '@tauri-apps/api/core';
-import { emit, listen } from '@tauri-apps/api/event';
+import {  invoke  } from '../../lib/desktopApi';
+import {  emit, listen  } from '../../lib/desktopApi';
 import {
   
   summarizeHandoffPayload,

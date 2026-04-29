@@ -4,10 +4,10 @@ import { QuickOpen } from './components/QuickOpen/QuickOpen';
 import { NodeTreePane } from './components/NodeTree/NodeTreePane';
 import { RuntimeView } from './components/Runtime/RuntimeView';
 import { useWorkspaceStore, PaneType, McpMessage, DbTask, type AppMode } from './store/workspace';
-import { invoke } from '@tauri-apps/api/core';
-import { listen } from '@tauri-apps/api/event';
-import { homeDir } from '@tauri-apps/api/path';
-import { Window } from '@tauri-apps/api/window';
+import {  invoke  } from './lib/desktopApi';
+import {  listen  } from './lib/desktopApi';
+import {  homeDir  } from './lib/desktopApi';
+import {  Window  } from './lib/desktopApi';
 import { PanelLeft, TerminalSquare, FileCode2, KanbanSquare, Activity, Palette, Plus, Rocket, Monitor, Minus, Square, X, Network, FolderTree, LayoutGrid, Maximize, Settings } from 'lucide-react';
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { detectRoleFromText, normalizeCli } from './lib/cliDetection';
@@ -217,9 +217,9 @@ function App() {
           <PanelLeft size={16} className={sidebarOpen ? "text-accent-primary" : "text-text-muted"} />
         </div>
 
-        <div className="flex-1 flex justify-center items-center gap-1 h-full relative z-10" data-tauri-drag-region>
+        <div className="flex-1 flex justify-center items-center gap-1 h-full relative z-10" style={{ WebkitAppRegion: 'drag' } as any}>
           {appMode === 'workspace' ? (
-            <div className="flex items-center gap-1 bg-bg-surface border border-border-panel rounded-lg px-1 py-0.5" data-tauri-no-drag>
+            <div className="flex items-center gap-1 bg-bg-surface border border-border-panel rounded-lg px-1 py-0.5" style={{ WebkitAppRegion: 'no-drag' } as any}>
               <button onClick={() => setLayoutMode('grid')} className={`flex items-center gap-1.5 text-[10px] uppercase font-bold px-2.5 py-1 rounded-md transition-all ${layoutMode === 'grid' ? 'bg-accent-primary text-white shadow-sm' : 'text-text-muted hover:text-text-primary hover:bg-bg-surface-hover'}`}><LayoutGrid size={12} /><span>Panels</span></button>
               <button onClick={() => setLayoutMode('tabs')} className={`flex items-center gap-1.5 text-[10px] uppercase font-bold px-2.5 py-1 rounded-md transition-all ${layoutMode === 'tabs' ? 'bg-accent-primary text-white shadow-sm' : 'text-text-muted hover:text-text-primary hover:bg-bg-surface-hover'}`}><Maximize size={12} /><span>Tabs</span></button>
             </div>
@@ -231,8 +231,8 @@ function App() {
           )}
         </div>
 
-        <div className="flex items-center gap-3 shrink-0 relative z-10" data-tauri-drag-region>
-          <div className="flex items-center bg-bg-surface border border-border-panel rounded-md h-6 px-1 mr-2" data-tauri-no-drag>
+        <div className="flex items-center gap-3 shrink-0 relative z-10" style={{ WebkitAppRegion: 'drag' } as any}>
+          <div className="flex items-center bg-bg-surface border border-border-panel rounded-md h-6 px-1 mr-2" style={{ WebkitAppRegion: 'no-drag' } as any}>
             <button onClick={() => appWindow?.minimize()} className="w-6 h-full flex items-center justify-center text-text-muted hover:text-text-primary hover:bg-bg-panel rounded transition-colors"><Minus size={12} /></button>
             <button onClick={() => appWindow?.toggleMaximize()} className="w-6 h-full flex items-center justify-center text-text-muted hover:text-text-primary hover:bg-bg-panel rounded transition-colors"><Square size={10} /></button>
             <button onClick={() => appWindow?.close()} className="w-6 h-full flex items-center justify-center text-text-muted hover:text-red-400 hover:bg-red-400/10 rounded transition-colors"><X size={12} /></button>
@@ -247,7 +247,7 @@ function App() {
           {appMode === 'workflow' ? <NodeTreePane graph={globalGraph} onGraphChange={setGlobalGraph} /> : appMode === 'runtime' ? <RuntimeView /> : (
             <>
               {layoutMode === 'grid' && (
-                <div className="flex items-center h-8 bg-bg-titlebar border-b border-border-panel px-2 gap-0.5 overflow-x-auto shrink-0 select-none relative" data-tauri-drag-region>
+                <div className="flex items-center h-8 bg-bg-titlebar border-b border-border-panel px-2 gap-0.5 overflow-x-auto shrink-0 select-none relative" style={{ WebkitAppRegion: 'drag' } as any}>
                   {tabs.map((tab) => (
                     <div key={tab.id} onClick={() => switchTab(tab.id)} onDoubleClick={() => { setEditingTabId(tab.id); setEditingTabName(tab.name); }} className={`group flex items-center h-6 px-3 gap-2 rounded-t-md text-[11px] font-medium transition-all cursor-pointer min-w-[80px] max-w-[160px] border-x border-t relative ${activeTabId === tab.id ? 'bg-bg-panel text-text-primary border-border-panel z-10 -mb-[1px]' : 'bg-transparent text-text-muted border-transparent hover:bg-bg-surface/50'}`}>
                       <div className="w-1.5 h-1.5 rounded-full shrink-0" style={{ backgroundColor: tab.color }} />
@@ -333,3 +333,4 @@ function ModeRail() {
 }
 
 export default App;
+ App;

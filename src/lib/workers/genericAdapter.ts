@@ -1,4 +1,4 @@
-import { invoke } from '@tauri-apps/api/core';
+import {  invoke  } from '../desktopApi';
 import { registry } from './registry';
 import { mcpBus } from './mcpEventBus';
 import { newSessionId } from './bootstrap';

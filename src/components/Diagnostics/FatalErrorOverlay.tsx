@@ -1,5 +1,5 @@
 import { useMemo } from 'react';
-import { writeText } from '@tauri-apps/plugin-clipboard-manager';
+import {  writeText  } from '../../lib/desktopApi';
 import type { FatalErrorReport } from '../../lib/diagnostics';
 
 export function FatalErrorOverlay(props: { report: FatalErrorReport; onDismiss: () => void }) {

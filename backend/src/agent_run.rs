@@ -9,7 +9,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tauri::{AppHandle, Emitter, Manager, State};
+
 
 pub struct AgentRunState {
     children: Arc<Mutex<HashMap<String, Arc<Mutex<Child>>>>>,
@@ -129,21 +129,17 @@ fn sanitize_path_segment(value: &str) -> String {
     }
 }
 
-fn run_root(app: &AppHandle, cwd: Option<&str>) -> Result<PathBuf, String> {
+fn run_root(app: &crate::AppState, cwd: Option<&str>) -> Result<PathBuf, String> {
     if let Some(cwd) = cwd {
         let trimmed = cwd.trim();
         if !trimmed.is_empty() {
             return Ok(PathBuf::from(trimmed).join(".terminal-docks").join("runs"));
         }
     }
-    Ok(app
-        .path()
-        .app_local_data_dir()
-        .map_err(|e| e.to_string())?
-        .join("runs"))
+    Ok(std::env::current_dir().unwrap().join(".mcp").join("runs"))
 }
 
-fn run_paths(app: &AppHandle, run_id: &str, cwd: Option<&str>) -> Result<(PathBuf, PathBuf, PathBuf, PathBuf), String> {
+fn run_paths(app: &crate::AppState, run_id: &str, cwd: Option<&str>) -> Result<(PathBuf, PathBuf, PathBuf, PathBuf), String> {
     let dir = run_root(app, cwd)?.join(sanitize_path_segment(run_id));
     fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     Ok((
@@ -257,7 +253,7 @@ fn with_runtime_env(request: &StartAgentRunRequest, prompt_path: &str) -> HashMa
     env
 }
 
-pub fn persist_agent_run(app: &AppHandle, record: &AgentRunRecord) -> Result<(), String> {
+pub fn persist_agent_run(app: &crate::AppState, record: &AgentRunRecord) -> Result<(), String> {
     let state = app.state::<DbState>();
     let db_lock = state
         .db
@@ -324,7 +320,7 @@ pub fn persist_agent_run(app: &AppHandle, record: &AgentRunRecord) -> Result<(),
 }
 
 fn update_run_status(
-    app: &AppHandle,
+    app: &crate::AppState,
     run_id: &str,
     status: &str,
     exit_code: Option<i32>,
@@ -381,10 +377,9 @@ fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<AgentRunRecord> {
     })
 }
 
-fn emit_status(app: &AppHandle, run_id: &str, mission_id: &str, node_id: &str, status: &str, error: Option<String>) {
-    let _ = app.emit(
-        "agent-run-status",
-        AgentRunStatusEvent {
+fn emit_status(app: &crate::AppState, run_id: &str, mission_id: &str, node_id: &str, status: &str, error: Option<String>) {
+    let _ = crate::emit_event(
+        "agent-run-status", &AgentRunStatusEvent {
             run_id: run_id.to_string(),
             mission_id: mission_id.to_string(),
             node_id: node_id.to_string(),
@@ -395,10 +390,9 @@ fn emit_status(app: &AppHandle, run_id: &str, mission_id: &str, node_id: &str, s
     );
 }
 
-fn emit_output(app: &AppHandle, run_id: &str, mission_id: &str, node_id: &str, stream: &str, chunk: String) {
-    let _ = app.emit(
-        "agent-run-output",
-        AgentRunOutputEvent {
+fn emit_output(app: &crate::AppState, run_id: &str, mission_id: &str, node_id: &str, stream: &str, chunk: String) {
+    let _ = crate::emit_event(
+        "agent-run-output", &AgentRunOutputEvent {
             run_id: run_id.to_string(),
             mission_id: mission_id.to_string(),
             node_id: node_id.to_string(),
@@ -410,7 +404,7 @@ fn emit_output(app: &AppHandle, run_id: &str, mission_id: &str, node_id: &str, s
 }
 
 fn emit_exit(
-    app: &AppHandle,
+    app: &crate::AppState,
     run_id: &str,
     mission_id: &str,
     node_id: &str,
@@ -418,9 +412,8 @@ fn emit_exit(
     exit_code: Option<i32>,
     error: Option<String>,
 ) {
-    let _ = app.emit(
-        "agent-run-exit",
-        AgentRunExitEvent {
+    let _ = crate::emit_event(
+        "agent-run-exit", &AgentRunExitEvent {
             run_id: run_id.to_string(),
             mission_id: mission_id.to_string(),
             node_id: node_id.to_string(),
@@ -432,7 +425,7 @@ fn emit_exit(
     );
 }
 
-fn mcp_internal_push(app: &AppHandle, body: serde_json::Value) -> Result<serde_json::Value, String> {
+fn mcp_internal_push(app: &crate::AppState, body: serde_json::Value) -> Result<serde_json::Value, String> {
     let state = app.state::<crate::mcp::McpState>();
     let token = state.internal_push_token.lock().unwrap().clone();
     if token.is_empty() {
@@ -474,7 +467,7 @@ fn summarize_completion_output(content: &str, fallback: &str) -> String {
     }
 }
 
-fn acknowledge_headless_runtime(app: &AppHandle, payload: &StartAgentRunRequest) {
+fn acknowledge_headless_runtime(app: &crate::AppState, payload: &StartAgentRunRequest) {
     let _ = mcp_internal_push(app, serde_json::json!({
         "type": "runtime_task_acked",
         "sessionId": payload.session_id,
@@ -502,7 +495,7 @@ fn acknowledge_headless_runtime(app: &AppHandle, payload: &StartAgentRunRequest)
 }
 
 fn publish_cli_stdout_completion(
-    app: &AppHandle,
+    app: &crate::AppState,
     session_id: &str,
     mission_id: &str,
     node_id: &str,
@@ -536,7 +529,7 @@ fn publish_cli_stdout_completion(
 }
 
 fn start_local_http_run(
-    app: AppHandle,
+    app: crate::AppState,
     payload: StartAgentRunRequest,
     mut record: AgentRunRecord,
     stdout_path: PathBuf,
@@ -625,9 +618,8 @@ fn start_local_http_run(
                 match completion {
                     Ok(_) => {
                         update_run_status(&app, &payload.run_id, "completed", Some(0), None, false, true).ok();
-                        let _ = app.emit(
-                            "agent-run-exit",
-                            AgentRunExitEvent {
+                        let _ = crate::emit_event(
+                            "agent-run-exit", &AgentRunExitEvent {
                                 run_id: payload.run_id,
                                 mission_id: payload.mission_id,
                                 node_id: payload.node_id,
@@ -651,9 +643,8 @@ fn start_local_http_run(
                 emit_output(&app, &payload.run_id, &payload.mission_id, &payload.node_id, "stderr", message.clone());
                 update_run_status(&app, &payload.run_id, "failed", None, Some(&message), false, true).ok();
                 emit_status(&app, &payload.run_id, &payload.mission_id, &payload.node_id, "failed", Some(message.clone()));
-                let _ = app.emit(
-                    "agent-run-exit",
-                    AgentRunExitEvent {
+                let _ = crate::emit_event(
+                    "agent-run-exit", &AgentRunExitEvent {
                         run_id: payload.run_id,
                         mission_id: payload.mission_id,
                         node_id: payload.node_id,
@@ -672,7 +663,7 @@ fn start_local_http_run(
 }
 
 fn stream_reader(
-    app: AppHandle,
+    app: crate::AppState,
     run_id: String,
     mission_id: String,
     node_id: String,
@@ -703,9 +694,8 @@ fn stream_reader(
                         .to_string();
                         let _ = writeln!(file, "{line}");
                     }
-                    let _ = app.emit(
-                        "agent-run-output",
-                        AgentRunOutputEvent {
+                    let _ = crate::emit_event(
+                        "agent-run-output", &AgentRunOutputEvent {
                             run_id: run_id.clone(),
                             mission_id: mission_id.clone(),
                             node_id: node_id.clone(),
@@ -721,10 +711,9 @@ fn stream_reader(
     });
 }
 
-#[tauri::command]
 pub fn start_agent_run(
-    app: AppHandle,
-    state: State<'_, AgentRunState>,
+    app: crate::AppState,
+    state: &AgentRunState,
     payload: StartAgentRunRequest,
 ) -> Result<AgentRunRecord, String> {
     if payload.command.trim().is_empty() {
@@ -885,9 +874,8 @@ pub fn start_agent_run(
                     }
                     let error = "run_timed_out".to_string();
                     update_run_status(&app, &run_id, "timed_out", None, Some(&error), false, true).ok();
-                    let _ = app.emit(
-                        "agent-run-exit",
-                        AgentRunExitEvent {
+                    let _ = crate::emit_event(
+                        "agent-run-exit", &AgentRunExitEvent {
                             run_id,
                             mission_id,
                             node_id,
@@ -939,9 +927,8 @@ pub fn start_agent_run(
                         );
                     }
                     update_run_status(&app, &run_id, final_status, exit_code, error.as_deref(), false, true).ok();
-                    let _ = app.emit(
-                        "agent-run-exit",
-                        AgentRunExitEvent {
+                    let _ = crate::emit_event(
+                        "agent-run-exit", &AgentRunExitEvent {
                             run_id,
                             mission_id,
                             node_id,
@@ -964,9 +951,8 @@ pub fn start_agent_run(
                     }
                     let message = error.to_string();
                     update_run_status(&app, &run_id, "failed", None, Some(&message), false, true).ok();
-                    let _ = app.emit(
-                        "agent-run-exit",
-                        AgentRunExitEvent {
+                    let _ = crate::emit_event(
+                        "agent-run-exit", &AgentRunExitEvent {
                             run_id,
                             mission_id,
                             node_id,
@@ -987,10 +973,9 @@ pub fn start_agent_run(
     Ok(running)
 }
 
-#[tauri::command]
 pub fn cancel_agent_run(
-    app: AppHandle,
-    state: State<'_, AgentRunState>,
+    app: crate::AppState,
+    state: &AgentRunState,
     run_id: String,
     reason: Option<String>,
 ) -> Result<(), String> {
@@ -1011,8 +996,7 @@ pub fn cancel_agent_run(
     Ok(())
 }
 
-#[tauri::command]
-pub fn get_agent_run(state: State<'_, DbState>, run_id: String) -> Result<Option<AgentRunRecord>, String> {
+pub fn get_agent_run(state: &DbState, run_id: String) -> Result<Option<AgentRunRecord>, String> {
     let db_lock = state
         .db
         .lock()
@@ -1033,9 +1017,8 @@ pub fn get_agent_run(state: State<'_, DbState>, run_id: String) -> Result<Option
     result
 }
 
-#[tauri::command]
 pub fn list_agent_runs(
-    state: State<'_, DbState>,
+    state: &DbState,
     mission_id: Option<String>,
 ) -> Result<Vec<AgentRunRecord>, String> {
     let db_lock = state

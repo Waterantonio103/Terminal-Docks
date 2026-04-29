@@ -2,7 +2,7 @@ use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::sync::Mutex;
-use tauri::{AppHandle, Manager, State};
+
 
 pub struct DbState {
     pub db: Mutex<Option<Connection>>,
@@ -39,8 +39,8 @@ pub struct SessionEvent {
     pub created_at: String,
 }
 
-pub fn init_db(app: &AppHandle) -> Result<(), String> {
-    let app_dir = app.path().app_local_data_dir().map_err(|e| e.to_string())?;
+pub fn init_db() -> Result<DbState, String> {
+    let app_dir = std::env::current_dir().unwrap().join(".mcp");
 
     if !app_dir.exists() {
         fs::create_dir_all(&app_dir).map_err(|e| e.to_string())?;
@@ -280,16 +280,13 @@ pub fn init_db(app: &AppHandle) -> Result<(), String> {
     )
     .map_err(|e| e.to_string())?;
 
-    app.manage(DbState {
+    Ok(DbState {
         db: Mutex::new(Some(conn)),
         db_path: db_path_str,
-    });
-
-    Ok(())
+    })
 }
 
-#[tauri::command]
-pub fn get_tasks(state: State<'_, DbState>) -> Result<Vec<Task>, String> {
+pub fn get_tasks(state: &DbState) -> Result<Vec<Task>, String> {
     let db_lock = state
         .db
         .lock()
@@ -322,13 +319,12 @@ pub fn get_tasks(state: State<'_, DbState>) -> Result<Vec<Task>, String> {
     Ok(tasks)
 }
 
-#[tauri::command]
 pub fn add_task(
     title: String,
     description: Option<String>,
     parent_id: Option<i64>,
     agent_id: Option<String>,
-    state: State<'_, DbState>,
+    state: &DbState,
 ) -> Result<Task, String> {
     let db_lock = state
         .db
@@ -365,12 +361,11 @@ pub fn add_task(
     Ok(task)
 }
 
-#[tauri::command]
 pub fn update_task_status(
     id: i64,
     status: String,
     agent_id: Option<String>,
-    state: State<'_, DbState>,
+    state: &DbState,
 ) -> Result<(), String> {
     let db_lock = state
         .db
@@ -389,11 +384,10 @@ pub fn update_task_status(
     Ok(())
 }
 
-#[tauri::command]
 pub fn lock_file(
     file_path: String,
     agent_id: String,
-    state: State<'_, DbState>,
+    state: &DbState,
 ) -> Result<(), String> {
     let db_lock = state
         .db
@@ -421,11 +415,10 @@ pub fn lock_file(
     Ok(())
 }
 
-#[tauri::command]
 pub fn unlock_file(
     file_path: String,
     agent_id: String,
-    state: State<'_, DbState>,
+    state: &DbState,
 ) -> Result<(), String> {
     let db_lock = state
         .db
@@ -442,8 +435,7 @@ pub fn unlock_file(
     Ok(())
 }
 
-#[tauri::command]
-pub fn get_file_locks(state: State<'_, DbState>) -> Result<Vec<FileLock>, String> {
+pub fn get_file_locks(state: &DbState) -> Result<Vec<FileLock>, String> {
     let db_lock = state
         .db
         .lock()
@@ -469,8 +461,7 @@ pub fn get_file_locks(state: State<'_, DbState>) -> Result<Vec<FileLock>, String
     Ok(locks)
 }
 
-#[tauri::command]
-pub fn delete_task(id: i64, state: State<'_, DbState>) -> Result<(), String> {
+pub fn delete_task(id: i64, state: &DbState) -> Result<(), String> {
     let db_lock = state
         .db
         .lock()
@@ -483,17 +474,15 @@ pub fn delete_task(id: i64, state: State<'_, DbState>) -> Result<(), String> {
     Ok(())
 }
 
-#[tauri::command]
-pub fn get_db_path(state: State<'_, DbState>) -> String {
+pub fn get_db_path(state: &DbState) -> String {
     state.db_path.clone()
 }
 
-#[tauri::command]
 pub fn save_session_event(
     session_id: String,
     event_type: String,
     content: Option<String>,
-    state: State<'_, DbState>,
+    state: &DbState,
 ) -> Result<(), String> {
     let db_lock = state.db.lock().map_err(|_| "Failed to lock database".to_string())?;
     let conn = db_lock.as_ref().ok_or("Database not initialized")?;
@@ -504,8 +493,7 @@ pub fn save_session_event(
     Ok(())
 }
 
-#[tauri::command]
-pub fn get_session_history(limit: Option<i64>, state: State<'_, DbState>) -> Result<Vec<SessionEvent>, String> {
+pub fn get_session_history(limit: Option<i64>, state: &DbState) -> Result<Vec<SessionEvent>, String> {
     let db_lock = state.db.lock().map_err(|_| "Failed to lock database".to_string())?;
     let conn = db_lock.as_ref().ok_or("Database not initialized")?;
     let lim = limit.unwrap_or(50);

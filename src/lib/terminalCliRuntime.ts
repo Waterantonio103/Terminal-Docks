@@ -1,4 +1,4 @@
-import { invoke } from '@tauri-apps/api/core';
+import {  invoke  } from './desktopApi';
 import type { Pane } from '../store/workspace';
 import { detectCliFromTerminalOutput, normalizeCli, type AgentCli } from './cliDetection';
 

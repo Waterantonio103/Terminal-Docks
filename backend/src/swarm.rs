@@ -1,5 +1,5 @@
-use tauri::AppHandle;
-use tauri::Emitter;
+
+
 use notify::{Config, Event, RecommendedWatcher, RecursiveMode, Watcher};
 use std::sync::Mutex;
 use std::path::Path;
@@ -12,19 +12,17 @@ impl WatcherState {
     }
 }
 
-pub fn init_swarm_watcher(_app: &AppHandle) -> Result<(), String> {
+pub fn init_swarm_watcher(_app: &crate::AppState) -> Result<(), String> {
     Ok(())
 }
 
-#[tauri::command]
 pub fn get_swarm_status() -> Result<String, String> {
     Ok("Active".to_string())
 }
 
-#[tauri::command]
 pub fn watch_directory(
-    app: AppHandle,
-    state: tauri::State<WatcherState>,
+    app: crate::AppState,
+    state: &WatcherState,
     path: String,
 ) -> Result<(), String> {
     let app_clone = app.clone();
@@ -48,7 +46,7 @@ pub fn watch_directory(
                                 }
                             })
                             .unwrap_or_default();
-                        let _ = app_clone.emit("fs-change", changed_dir);
+                        let _ = crate::emit_event("fs-change", &changed_dir);
                     }
                     _ => {}
                 }

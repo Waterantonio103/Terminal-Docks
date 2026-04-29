@@ -8,7 +8,7 @@
  * Phase 4 — Wave 3 / Agent B
  */
 
-import { invoke } from '@tauri-apps/api/core';
+import {  invoke  } from '../desktopApi';
 
 // ──────────────────────────────────────────────
 // PTY Lifecycle

@@ -1,8 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
-use tauri::{AppHandle, Manager, State};
-use tauri_plugin_dialog::{DialogExt, FilePath};
+
+
 
 use crate::db::DbState;
 use crate::pty::{PermissionAuditEntry, PtyState};
@@ -226,17 +226,16 @@ fn build_markdown(
     md
 }
 
-#[tauri::command]
 pub fn export_workflow_log(
-    app: AppHandle,
+    app: crate::AppState,
     task_description: String,
     generated_at: String,
     file_ts: String,
     agents: Vec<AgentExport>,
     pipeline_names: Vec<String>,
     results: Vec<ResultExport>,
-    state: State<'_, DbState>,
-    pty_state: State<'_, PtyState>,
+    state: &DbState,
+    pty_state: &PtyState,
 ) -> Result<String, String> {
     let events = {
         let db_lock = state.db.lock().map_err(|_| "DB lock failed")?;
@@ -315,22 +314,7 @@ pub fn export_workflow_log(
 
     let filename = format!("workflow_log_{}_{}.md", file_ts, slug);
 
-    let mut dialog = app
-        .dialog()
-        .file()
-        .add_filter("Markdown", &["md"])
-        .set_file_name(&filename);
-
-    if let Ok(docs_dir) = app.path().document_dir() {
-        dialog = dialog.set_directory(docs_dir);
-    }
-
-    let chosen = dialog.blocking_save_file();
-
-    let file_path = match chosen {
-        Some(FilePath::Path(p)) => p,
-        _ => return Ok(String::new()),
-    };
+    let file_path = std::env::current_dir().unwrap().join(".mcp").join(filename);
 
     if let Some(parent) = file_path.parent() {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;

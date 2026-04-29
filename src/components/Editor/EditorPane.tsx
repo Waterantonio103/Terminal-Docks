@@ -1,10 +1,10 @@
 import React, { useState, useEffect, useRef } from 'react';
 import CodeMirror from '@uiw/react-codemirror';
 import { javascript } from '@codemirror/lang-javascript';
-import { open } from '@tauri-apps/plugin-dialog';
+import {  open  } from '../../lib/desktopApi';
 import { FolderOpen } from 'lucide-react';
 import { Pane, useWorkspaceStore } from '../../store/workspace';
-import { invoke } from '@tauri-apps/api/core';
+import {  invoke  } from '../../lib/desktopApi';
 import { HighlightStyle, syntaxHighlighting } from "@codemirror/language";
 import { tags } from "@lezer/highlight";
 

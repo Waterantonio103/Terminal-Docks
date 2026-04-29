@@ -1,4 +1,4 @@
-import { invoke } from '@tauri-apps/api/core';
+import {  invoke  } from './desktopApi';
 import { notifyTaskCompleted } from './workers/bootstrap.js';
 import type { WorkerAdapter, WorkerSession } from './workers/types.js';
 

@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { Search, FileCode2, X } from 'lucide-react';
 import { useWorkspaceStore } from '../../store/workspace';
-import { invoke } from '@tauri-apps/api/core';
+import {  invoke  } from '../../lib/desktopApi';
 
 interface DirEntry {
   name: string;

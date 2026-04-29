@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { invoke } from '@tauri-apps/api/core';
+import {  invoke  } from '../../lib/desktopApi';
 import { AlertCircle, Cpu, GitBranch, Hammer, Plug, Rocket, TerminalSquare, Wand2, Wrench } from 'lucide-react';
 import {
   Pane,

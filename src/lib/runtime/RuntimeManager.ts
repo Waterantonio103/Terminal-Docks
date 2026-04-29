@@ -12,7 +12,7 @@
  * Phase 4 — Wave 3 / Agent B
  */
 
-import { listen } from '@tauri-apps/api/event';
+import {  listen  } from '../desktopApi';
 import { RuntimeSession } from './RuntimeSession.js';
 import type {
   CreateRuntimeArgs,
@@ -45,7 +45,7 @@ import { getRuntimeBootstrapContract, buildRuntimeBootstrapRegistrationRequest }
 import { mcpBus } from '../workers/mcpEventBus.js';
 import { detectCliFromTerminalOutput } from '../cliDetection.js';
 import { useWorkspaceStore } from '../../store/workspace.js';
-import { emit } from '@tauri-apps/api/event';
+import {  emit  } from '../desktopApi';
 
 // ──────────────────────────────────────────────
 // Constants
@@ -1354,7 +1354,7 @@ class RuntimeManager {
         }
 
         try {
-          const { invoke } = await import('@tauri-apps/api/core');
+          const { invoke } = await import('../desktopApi');
           type ActivationRecord = { status?: string };
           const record = await invoke<ActivationRecord | null>('get_runtime_activation', {
             missionId,

@@ -1,9 +1,9 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useWorkspaceStore } from '../../store/workspace';
-import { open } from '@tauri-apps/plugin-dialog';
+import {  open  } from '../../lib/desktopApi';
 import { Folder, File as FileIcon, ChevronRight, ChevronDown, Lock, FilePlus, FolderPlus, Trash2, Edit2, Copy, Scissors, Clipboard, ExternalLink, Search, FileText } from 'lucide-react';
-import { invoke } from '@tauri-apps/api/core';
-import { writeText } from '@tauri-apps/plugin-clipboard-manager';
+import {  invoke  } from '../../lib/desktopApi';
+import {  writeText  } from '../../lib/desktopApi';
 
 interface DirEntry {
   name: string;

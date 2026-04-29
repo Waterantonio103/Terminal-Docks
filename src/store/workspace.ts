@@ -772,7 +772,7 @@ export const useWorkspaceStore = create<WorkspaceState>()(
         const panes = selectActivePanes(state);
         const pane = panes.find(p => p.id === id);
         if (pane?.type === 'terminal' && pane.data?.terminalId) {
-          import('@tauri-apps/api/core').then(({ invoke }) => {
+          import('../lib/desktopApi').then(({ invoke }) => {
             invoke('destroy_pty', { id: pane.data?.terminalId }).catch(console.error);
           });
         }
@@ -915,7 +915,7 @@ export const useWorkspaceStore = create<WorkspaceState>()(
         if (tab) {
           tab.panes.forEach(pane => {
             if (pane.type === 'terminal' && pane.data?.terminalId) {
-              import('@tauri-apps/api/core').then(({ invoke }) => {
+              import('../lib/desktopApi').then(({ invoke }) => {
                 invoke('destroy_pty', { id: pane.data?.terminalId }).catch(console.error);
               });
             }

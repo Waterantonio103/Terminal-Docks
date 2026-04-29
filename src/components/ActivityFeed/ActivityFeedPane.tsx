@@ -1,6 +1,6 @@
 import { useEffect, useState, useRef } from 'react';
-import { listen } from '@tauri-apps/api/event';
-import { invoke } from '@tauri-apps/api/core';
+import {  listen  } from '../../lib/desktopApi';
+import {  invoke  } from '../../lib/desktopApi';
 import { Activity, Wifi, Users, Lock } from 'lucide-react';
 import { useWorkspaceStore, McpMessage } from '../../store/workspace';
 

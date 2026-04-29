@@ -5,7 +5,7 @@ use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
-use tauri::{AppHandle, Emitter, State, Manager};
+
 
 const RECENT_OUTPUT_CAPACITY: usize = 16384;
 const PERMISSION_EXCERPT_LIMIT: usize = 500;
@@ -128,7 +128,7 @@ pub struct PermissionAuditEntry {
     pub error: Option<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct PermissionClassification {
     pub permission_type: String,
     pub label: String,
@@ -305,12 +305,12 @@ fn audit_permission(state: &PtyState, request: &WorkflowPermissionRequest, actor
     }
 }
 
-fn emit_permission_update(app: &AppHandle, request: &WorkflowPermissionRequest) {
-    let _ = app.emit("workflow-permission-updated", request.clone());
+fn emit_permission_update(app: &crate::AppState, request: &WorkflowPermissionRequest) {
+    let _ = crate::emit_event("workflow-permission-updated", &request.clone());
 }
 
 fn maybe_emit_permission_request(
-    app: &AppHandle,
+    app: &crate::AppState,
     state: &PtyState,
     terminal_id: &str,
     chunk: &str,
@@ -378,10 +378,10 @@ fn maybe_emit_permission_request(
         .unwrap()
         .insert(request.id.clone(), request.clone());
     audit_permission(state, &request, "backend");
-    let _ = app.emit("workflow-permission-requested", request);
+    let _ = crate::emit_event("workflow-permission-requested", &request);
 }
 
-fn expire_terminal_permissions(app: &AppHandle, state: &PtyState, terminal_id: &str) {
+fn expire_terminal_permissions(app: &crate::AppState, state: &PtyState, terminal_id: &str) {
     state.terminal_metadata.lock().unwrap().remove(terminal_id);
     let mut expired = Vec::new();
     {
@@ -401,10 +401,9 @@ fn expire_terminal_permissions(app: &AppHandle, state: &PtyState, terminal_id: &
     }
 }
 
-#[tauri::command]
 pub fn spawn_pty(
-    app: AppHandle,
-    state: State<'_, PtyState>,
+    app: crate::AppState,
+    state: &PtyState,
     id: String,
     rows: u16,
     cols: u16,
@@ -439,7 +438,7 @@ pub fn spawn_pty(
     // Phase 1: Inject MCP auto-connection config
     cmd.env("TD_SESSION_ID", &id);
     let mcp_state = app.state::<crate::mcp::McpState>();
-    let mcp_url = crate::mcp::get_mcp_url(mcp_state);
+    let mcp_url = crate::mcp::get_mcp_url(&mcp_state);
     cmd.env("TD_MCP_URL", mcp_url);
 
     if !cfg!(target_os = "windows") {
@@ -491,9 +490,8 @@ pub fn spawn_pty(
                     }
                     let pty_state = app.state::<PtyState>();
                     maybe_emit_permission_request(&app, &pty_state, &id, &chunk);
-                    let _ = app.emit(
-                        "pty-out",
-                        Payload {
+                    let _ = crate::emit_event(
+                        "pty-out", &Payload {
                             id: id.clone(),
                             data,
                         },
@@ -520,17 +518,16 @@ pub fn spawn_pty(
         if child_exited {
             let pty_state = app.state::<PtyState>();
             expire_terminal_permissions(&app, &pty_state, &id);
-            let _ = app.emit("pty-exit", PtyExitPayload { id });
+            let _ = crate::emit_event("pty-exit", &PtyExitPayload { id });
         }
     });
 
     Ok(true)
 }
 
-#[tauri::command]
 pub fn spawn_pty_with_command(
-    app: AppHandle,
-    state: State<'_, PtyState>,
+    app: crate::AppState,
+    state: &PtyState,
     id: String,
     rows: u16,
     cols: u16,
@@ -561,7 +558,7 @@ pub fn spawn_pty_with_command(
     // Phase 1: Inject MCP auto-connection config
     cmd.env("TD_SESSION_ID", &id);
     let mcp_state = app.state::<crate::mcp::McpState>();
-    let mcp_url = crate::mcp::get_mcp_url(mcp_state);
+    let mcp_url = crate::mcp::get_mcp_url(&mcp_state);
     cmd.env("TD_MCP_URL", mcp_url);
 
     for arg in &args {
@@ -616,9 +613,8 @@ pub fn spawn_pty_with_command(
                     }
                     let pty_state = app.state::<PtyState>();
                     maybe_emit_permission_request(&app, &pty_state, &id, &chunk);
-                    let _ = app.emit(
-                        "pty-out",
-                        Payload {
+                    let _ = crate::emit_event(
+                        "pty-out", &Payload {
                             id: id.clone(),
                             data,
                         },
@@ -642,16 +638,15 @@ pub fn spawn_pty_with_command(
         if child_exited {
             let pty_state = app.state::<PtyState>();
             expire_terminal_permissions(&app, &pty_state, &id);
-            let _ = app.emit("pty-exit", PtyExitPayload { id });
+            let _ = crate::emit_event("pty-exit", &PtyExitPayload { id });
         }
     });
 
     Ok(true)
 }
 
-#[tauri::command]
 pub fn get_pty_recent_output(
-    state: State<'_, PtyState>,
+    state: &PtyState,
     id: String,
     max_bytes: Option<usize>,
 ) -> Result<String, String> {
@@ -668,8 +663,7 @@ pub fn get_pty_recent_output(
     Ok(String::from_utf8_lossy(&bytes).to_string())
 }
 
-#[tauri::command]
-pub fn is_pty_active(state: State<'_, PtyState>, id: String) -> bool {
+pub fn is_pty_active(state: &PtyState, id: String) -> bool {
     let mut ptys = state.ptys.lock().unwrap();
     if let Some(instance) = ptys.get_mut(&id) {
         // Check if the child process is still alive by trying to wait without blocking
@@ -682,8 +676,7 @@ pub fn is_pty_active(state: State<'_, PtyState>, id: String) -> bool {
     }
 }
 
-#[tauri::command]
-pub fn write_to_pty(state: State<'_, PtyState>, id: String, data: String) -> Result<(), String> {
+pub fn write_to_pty(state: &PtyState, id: String, data: String) -> Result<(), String> {
     let mut ptys = state.ptys.lock().unwrap();
     if let Some(instance) = ptys.get_mut(&id) {
         let bytes = data.as_bytes();
@@ -706,10 +699,9 @@ pub fn write_to_pty(state: State<'_, PtyState>, id: String, data: String) -> Res
     }
 }
 
-#[tauri::command]
 pub fn handle_workflow_permission_decision(
-    app: AppHandle,
-    state: State<'_, PtyState>,
+    app: crate::AppState,
+    state: &PtyState,
     request_id: String,
     decision: String,
 ) -> Result<(), String> {
@@ -798,9 +790,8 @@ pub fn handle_workflow_permission_decision(
     }
 }
 
-#[tauri::command]
 pub fn register_pty_runtime_metadata(
-    state: State<'_, PtyState>,
+    state: &PtyState,
     terminal_id: String,
     node_id: Option<String>,
     runtime_session_id: Option<String>,
@@ -827,9 +818,8 @@ pub fn register_pty_runtime_metadata(
     Ok(())
 }
 
-#[tauri::command]
 pub fn list_active_permission_requests(
-    state: State<'_, PtyState>,
+    state: &PtyState,
 ) -> Vec<WorkflowPermissionRequest> {
     state
         .permission_requests
@@ -841,16 +831,14 @@ pub fn list_active_permission_requests(
         .collect()
 }
 
-#[tauri::command]
 pub fn list_permission_audit_entries(
-    state: State<'_, PtyState>,
+    state: &PtyState,
 ) -> Vec<PermissionAuditEntry> {
     state.permission_audit.lock().unwrap().clone()
 }
 
-#[tauri::command]
 pub fn resize_pty(
-    state: State<'_, PtyState>,
+    state: &PtyState,
     id: String,
     rows: u16,
     cols: u16,
@@ -867,8 +855,7 @@ pub fn resize_pty(
     Ok(())
 }
 
-#[tauri::command]
-pub fn destroy_pty(app: AppHandle, state: State<'_, PtyState>, id: String) -> Result<(), String> {
+pub fn destroy_pty(app: crate::AppState, state: &PtyState, id: String) -> Result<(), String> {
     let mut ptys = state.ptys.lock().unwrap();
     if let Some(mut instance) = ptys.remove(&id) {
         let _ = instance.child.kill();
@@ -878,7 +865,7 @@ pub fn destroy_pty(app: AppHandle, state: State<'_, PtyState>, id: String) -> Re
     Ok(())
 }
 
-pub fn kill_all_ptys(app: &AppHandle) {
+pub fn kill_all_ptys(app: &crate::AppState) {
     let state = app.state::<PtyState>();
     let mut ptys = state.ptys.lock().unwrap();
     for (_, mut instance) in ptys.drain() {

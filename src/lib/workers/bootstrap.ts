@@ -1,4 +1,4 @@
-import { invoke } from '@tauri-apps/api/core';
+import {  invoke  } from '../desktopApi';
 
 export function newSessionId(prefix = 'ws'): string {
   const rand = Math.random().toString(36).slice(2, 10);

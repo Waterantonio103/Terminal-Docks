@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import {  invoke  } from '../../lib/desktopApi';
 import { Plus, Trash2, Play } from "lucide-react";
 import { useWorkspaceStore } from "../../store/workspace";
 import agentConfig from "../../config/agents";
@@ -40,7 +40,7 @@ export function TaskBoardPane() {
     fetchTasks();
 
     let unlisten: (() => void) | undefined;
-    import('@tauri-apps/api/event').then(({ listen }) => {
+    import('../../lib/desktopApi').then(({ listen }) => {
       listen('mcp-message', (event: any) => {
         if (event.payload?.type === 'task_update') {
           fetchTasks();

@@ -6,7 +6,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tauri::{AppHandle, Emitter, Manager};
+
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -540,16 +540,15 @@ fn mission_node<'a>(mission: &'a CompiledMission, node_id: &str) -> Option<&'a c
 }
 
 fn emit_node_status(
-    app: &AppHandle,
+    app: &crate::AppState,
     node_id: &str,
     status: &str,
     attempt: Option<u32>,
     outcome: Option<NodeOutcome>,
     reason: Option<String>,
 ) {
-    let _ = app.emit(
-        "workflow-node-update",
-        NodeStatusEvent {
+    let _ = crate::emit_event(
+        "workflow-node-update", &NodeStatusEvent {
             id: node_id.to_string(),
             status: status.to_string(),
             attempt,
@@ -559,10 +558,9 @@ fn emit_node_status(
     );
 }
 
-fn emit_runtime_warning(app: &AppHandle, mission_id: &str, node_id: &str, message: impl Into<String>) {
-    let _ = app.emit(
-        "workflow-runtime-warning",
-        RuntimeWarningEvent {
+fn emit_runtime_warning(app: &crate::AppState, mission_id: &str, node_id: &str, message: impl Into<String>) {
+    let _ = crate::emit_event(
+        "workflow-runtime-warning", &RuntimeWarningEvent {
             mission_id: mission_id.to_string(),
             node_id: node_id.to_string(),
             message: message.into(),
@@ -589,7 +587,7 @@ fn runtime_agent_run_id(mission_id: &str, node_id: &str, attempt: u32) -> String
     format!("run:{mission_id}:{node_id}:{attempt}")
 }
 
-fn persist_compiled_mission(app: &AppHandle, mission: &CompiledMission, status: &str) {
+fn persist_compiled_mission(app: &crate::AppState, mission: &CompiledMission, status: &str) {
     let serialized = match serde_json::to_string(mission) {
         Ok(value) => value,
         Err(_) => return,
@@ -617,7 +615,7 @@ fn persist_compiled_mission(app: &AppHandle, mission: &CompiledMission, status: 
 }
 
 fn persist_node_runtime(
-    app: &AppHandle,
+    app: &crate::AppState,
     mission_id: &str,
     node_id: &str,
     role_id: &str,
@@ -667,7 +665,7 @@ fn persist_node_runtime(
 }
 
 fn persist_runtime_session(
-    app: &AppHandle,
+    app: &crate::AppState,
     session_id: &str,
     agent_id: &str,
     mission_id: &str,
@@ -713,7 +711,7 @@ fn persist_runtime_session(
 }
 
 fn persist_initial_agent_run(
-    app: &AppHandle,
+    app: &crate::AppState,
     payload: &RuntimeActivationPayload,
 ) {
     let mut env = HashMap::new();
@@ -755,7 +753,7 @@ fn persist_initial_agent_run(
 }
 
 fn mark_runtime_session_status(
-    app: &AppHandle,
+    app: &crate::AppState,
     mission_id: &str,
     node_id: &str,
     attempt: u32,
@@ -778,7 +776,7 @@ fn mark_runtime_session_status(
     );
 }
 
-fn clear_runtime_sessions_for_mission(app: &AppHandle, mission_id: &str) {
+fn clear_runtime_sessions_for_mission(app: &crate::AppState, mission_id: &str) {
     let state = app.state::<DbState>();
     let db_lock = match state.db.lock() {
         Ok(lock) => lock,
@@ -804,7 +802,7 @@ fn clear_runtime_sessions_for_mission(app: &AppHandle, mission_id: &str) {
 
 // Records a pending task activation in task_pushes so MCP tools can surface it
 // as a pending activation before the runtime adapter acknowledges.
-fn persist_task_push(app: &AppHandle, session_id: &str, mission_id: &str, node_id: &str, attempt: u32) {
+fn persist_task_push(app: &crate::AppState, session_id: &str, mission_id: &str, node_id: &str, attempt: u32) {
     let state = app.state::<DbState>();
     let db_lock = match state.db.lock() {
         Ok(lock) => lock,
@@ -821,7 +819,7 @@ fn persist_task_push(app: &AppHandle, session_id: &str, mission_id: &str, node_i
 }
 
 // Marks a task push as acknowledged when the runtime adapter confirms receipt.
-fn ack_task_push_db(app: &AppHandle, session_id: &str, mission_id: &str, node_id: &str, attempt: u32) {
+fn ack_task_push_db(app: &crate::AppState, session_id: &str, mission_id: &str, node_id: &str, attempt: u32) {
     let state = app.state::<DbState>();
     let db_lock = match state.db.lock() {
         Ok(lock) => lock,
@@ -838,7 +836,7 @@ fn ack_task_push_db(app: &AppHandle, session_id: &str, mission_id: &str, node_id
 }
 
 fn persist_mission_timeline_event(
-    app: &AppHandle,
+    app: &crate::AppState,
     mission_id: &str,
     event_type: &str,
     payload: Option<&str>,
@@ -932,7 +930,7 @@ fn next_wave_id(active_mission: &ActiveMission, from_node_id: &str, target_node_
     current_wave
 }
 
-fn schedule_activation_timeout(app: &AppHandle, mission_id: String, node_id: String, attempt: u32) {
+fn schedule_activation_timeout(app: &crate::AppState, mission_id: String, node_id: String, attempt: u32) {
     let app_handle = app.clone();
     thread::spawn(move || {
         thread::sleep(Duration::from_millis(ACTIVATION_TIMEOUT_MS));
@@ -940,7 +938,7 @@ fn schedule_activation_timeout(app: &AppHandle, mission_id: String, node_id: Str
     });
 }
 
-fn timeout_runtime_activation(app: &AppHandle, mission_id: String, node_id: String, attempt: u32) -> bool {
+fn timeout_runtime_activation(app: &crate::AppState, mission_id: String, node_id: String, attempt: u32) -> bool {
     let (role_id, current_wave_id, input_payload, reason, run_version) = {
         let state = app.state::<WorkflowState>();
         let mut missions = state.active_missions.lock().unwrap();
@@ -1030,7 +1028,7 @@ fn timeout_runtime_activation(app: &AppHandle, mission_id: String, node_id: Stri
 }
 
 fn request_node_activation_locked(
-    app: &AppHandle,
+    app: &crate::AppState,
     mission_id: &str,
     active_mission: &mut ActiveMission,
     node_id: &str,
@@ -1204,9 +1202,8 @@ fn request_node_activation_locked(
     persist_initial_agent_run(app, &payload);
     emit_node_status(app, node_id, "activation_pending", Some(attempt), None, None);
 
-    let _ = app.emit(
-        "workflow-runtime-activation-requested",
-        RuntimeActivationRequestedEvent {
+    let _ = crate::emit_event(
+        "workflow-runtime-activation-requested", &RuntimeActivationRequestedEvent {
             mission_id: mission_id.to_string(),
             node_id: node_id.to_string(),
             attempt,
@@ -1317,7 +1314,7 @@ fn apply_append_patch(active_mission: &mut ActiveMission, run_version: u32, patc
     })
 }
 
-pub fn start_mission(app: &AppHandle, mut mission: CompiledMission) {
+pub fn start_mission(app: &crate::AppState, mut mission: CompiledMission) {
     if mission.metadata.run_version.is_none() {
         mission.metadata.run_version = Some(1);
     }
@@ -1415,7 +1412,7 @@ pub fn start_mission(app: &AppHandle, mut mission: CompiledMission) {
     persist_mission_timeline_event(app, &mission_id, "mission_started", None, Some(run_version));
 }
 
-pub fn handle_handoff(app: &AppHandle, mission_id: &str, handoff: HandoffEvent) {
+pub fn handle_handoff(app: &crate::AppState, mission_id: &str, handoff: HandoffEvent) {
     println!(
         "[Mission {}] Received handoff: from={:?}, target={:?}, attempt={:?}, outcome={:?}",
         mission_id, handoff.from_node_id, handoff.target_node_id, handoff.from_attempt, handoff.outcome
@@ -1657,9 +1654,8 @@ pub fn handle_handoff(app: &AppHandle, mission_id: &str, handoff: HandoffEvent) 
     }
 }
 
-#[tauri::command]
 pub fn start_mission_graph(
-    app: AppHandle,
+    app: crate::AppState,
     mission_id: String,
     graph: CompiledMission,
 ) -> Result<(), String> {
@@ -1677,9 +1673,8 @@ pub fn start_mission_graph(
 /// (complete_task, get_task_details, handoff_task) can find it, without
 /// emitting `workflow-runtime-activation-requested` or setting failure states.
 /// Used by the TS WorkflowOrchestrator path which handles activation itself.
-#[tauri::command]
 pub fn seed_mission_to_db(
-    app: AppHandle,
+    app: crate::AppState,
     mission_id: String,
     graph: CompiledMission,
 ) -> Result<(), String> {
@@ -1697,9 +1692,8 @@ pub fn seed_mission_to_db(
     Ok(())
 }
 
-#[tauri::command]
 pub fn append_mission_patch(
-    app: AppHandle,
+    app: crate::AppState,
     mission_id: String,
     run_version: u32,
     patch: MissionGraphPatch,
@@ -1758,9 +1752,8 @@ pub fn append_mission_patch(
         Some(result.run_version),
     );
 
-    let _ = app.emit(
-        "workflow-mission-patched",
-        MissionPatchedEvent {
+    let _ = crate::emit_event(
+        "workflow-mission-patched", &MissionPatchedEvent {
             mission_id: mission_id.clone(),
             previous_run_version: result.previous_run_version,
             run_version: result.run_version,
@@ -1772,9 +1765,8 @@ pub fn append_mission_patch(
     Ok(result)
 }
 
-#[tauri::command]
 pub fn retry_mission_node(
-    app: AppHandle,
+    app: crate::AppState,
     mission_id: String,
     node_id: String,
 ) -> Result<(), String> {
@@ -1821,9 +1813,8 @@ pub fn retry_mission_node(
     Ok(())
 }
 
-#[tauri::command]
 pub fn acknowledge_runtime_activation(
-    app: AppHandle,
+    app: crate::AppState,
     mission_id: String,
     node_id: String,
     attempt: u32,
@@ -2051,9 +2042,8 @@ pub fn acknowledge_runtime_activation(
     Ok(())
 }
 
-#[tauri::command]
 pub fn register_runtime_activation_dispatch(
-    app: AppHandle,
+    app: crate::AppState,
     mission_id: String,
     node_id: String,
     attempt: u32,
@@ -2089,9 +2079,8 @@ pub fn register_runtime_activation_dispatch(
     )
 }
 
-#[tauri::command]
 pub fn get_mission_activations(
-    app: AppHandle,
+    app: crate::AppState,
     mission_id: String,
 ) -> Result<Vec<RuntimeActivationPayload>, String> {
     let state = app.state::<WorkflowState>();
@@ -2109,9 +2098,8 @@ pub fn get_mission_activations(
     Ok(payloads)
 }
 
-#[tauri::command]
 pub fn get_runtime_activation(
-    app: AppHandle,
+    app: crate::AppState,
     mission_id: String,
     node_id: String,
     attempt: u32,

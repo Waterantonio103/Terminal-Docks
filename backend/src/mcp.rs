@@ -5,7 +5,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
-use tauri::{AppHandle, Emitter, Manager};
+
 
 #[derive(Clone, serde::Serialize)]
 pub struct CliRegistrationResult {
@@ -261,7 +261,7 @@ fn is_desktop_available(name: &str) -> bool {
     p.parent().map(|p| p.exists()).unwrap_or(false)
 }
 
-fn register_with_ai_clis(app_handle: &AppHandle, mcp_url: &str) {
+fn register_with_ai_clis(app_handle: &crate::AppState, mcp_url: &str) {
     let registrations: Vec<(&str, Box<dyn Fn(&str) -> CliRegistrationResult>)> = vec![
         ("claude",         Box::new(register_claude)),
         ("gemini",         Box::new(register_gemini)),
@@ -287,7 +287,7 @@ fn register_with_ai_clis(app_handle: &AppHandle, mcp_url: &str) {
 
         let result = register_fn(mcp_url);
         println!("[mcp] CLI registration: {} — {}", result.cli, result.message);
-        let _ = app_handle.emit("mcp-cli-registered", result);
+        let _ = crate::emit_event("mcp-cli-registered", &result);
     }
 }
 
@@ -338,12 +338,8 @@ const PORT: u16 = 3741;
 
 /// Load the persisted auth token, or generate and save a new one.
 /// Persisting across restarts means already-running Claude instances keep working.
-fn load_or_generate_auth_token(app: &AppHandle) -> String {
-    let token_path = app
-        .path()
-        .app_local_data_dir()
-        .ok()
-        .map(|d| d.join("mcp_auth.token"));
+fn load_or_generate_auth_token(app: &crate::AppState) -> String {
+    let token_path = Some(std::env::current_dir().unwrap().join(".mcp").join("mcp_auth.token"));
 
     if let Some(ref path) = token_path {
         if let Ok(token) = fs::read_to_string(path) {
@@ -364,12 +360,8 @@ fn load_or_generate_auth_token(app: &AppHandle) -> String {
     token
 }
 
-fn load_or_generate_push_token(app: &AppHandle) -> String {
-    let token_path = app
-        .path()
-        .app_local_data_dir()
-        .ok()
-        .map(|d| d.join("mcp_push.token"));
+fn load_or_generate_push_token(app: &crate::AppState) -> String {
+    let token_path = Some(std::env::current_dir().unwrap().join(".mcp").join("mcp_push.token"));
 
     if let Some(ref path) = token_path {
         if let Ok(token) = fs::read_to_string(path) {
@@ -390,7 +382,7 @@ fn load_or_generate_push_token(app: &AppHandle) -> String {
     token
 }
 
-pub fn init_mcp_server(app: &AppHandle) -> Result<(), String> {
+pub fn init_mcp_server(app: &crate::AppState) -> Result<(), String> {
     {
         let state = app.state::<McpState>();
         let guard = state.process.lock().unwrap();
@@ -485,9 +477,8 @@ pub fn init_mcp_server(app: &AppHandle) -> Result<(), String> {
             Ok(r) => r,
             Err(e) => {
                 eprintln!("[mcp] SSE connection failed: {}. Retrying in {}ms…", e, sse_backoff_ms);
-                let _ = app_handle.emit(
-                    "workflow-runtime-warning",
-                    serde_json::json!({
+                let _ = crate::emit_event(
+                    "workflow-runtime-warning", &serde_json::json!({
                         "missionId": "system",
                         "nodeId": "bridge",
                         "message": format!("SSE bridge disconnected: {}. Reconnecting…", e),
@@ -540,9 +531,8 @@ pub fn init_mcp_server(app: &AppHandle) -> Result<(), String> {
                                     invalid_reasons.join(", ")
                                 );
                                 eprintln!("[mcp] {}", reason);
-                                let _ = app_handle.emit(
-                                    "workflow-runtime-warning",
-                                    serde_json::json!({
+                                let _ = crate::emit_event(
+                                    "workflow-runtime-warning", &serde_json::json!({
                                         "missionId": mission_for_diag,
                                         "nodeId": node_for_diag,
                                         "message": reason,
@@ -556,9 +546,8 @@ pub fn init_mcp_server(app: &AppHandle) -> Result<(), String> {
                             } else {
                                 let reason = "Rejected handoff envelope: failed to parse payload.";
                                 eprintln!("[mcp] {}", reason);
-                                let _ = app_handle.emit(
-                                    "workflow-runtime-warning",
-                                    serde_json::json!({
+                                let _ = crate::emit_event(
+                                    "workflow-runtime-warning", &serde_json::json!({
                                         "missionId": mission_for_diag,
                                         "nodeId": node_for_diag,
                                         "message": reason,
@@ -598,9 +587,8 @@ pub fn init_mcp_server(app: &AppHandle) -> Result<(), String> {
                                     invalid_reasons.join(", ")
                                 );
                                 eprintln!("[mcp] {}", reason);
-                                let _ = app_handle.emit(
-                                    "workflow-runtime-warning",
-                                    serde_json::json!({
+                                let _ = crate::emit_event(
+                                    "workflow-runtime-warning", &serde_json::json!({
                                         "missionId": mission_for_diag,
                                         "nodeId": "adaptive",
                                         "message": reason,
@@ -618,9 +606,8 @@ pub fn init_mcp_server(app: &AppHandle) -> Result<(), String> {
                                             version as u32,
                                             patch_payload,
                                         ) {
-                                            let _ = app_handle.emit(
-                                                "workflow-runtime-warning",
-                                                serde_json::json!({
+                                            let _ = crate::emit_event(
+                                                "workflow-runtime-warning", &serde_json::json!({
                                                     "missionId": mid,
                                                     "nodeId": "adaptive",
                                                     "message": format!("Adaptive patch rejected by scheduler: {}", error),
@@ -629,9 +616,8 @@ pub fn init_mcp_server(app: &AppHandle) -> Result<(), String> {
                                         }
                                     }
                                     Err(error) => {
-                                        let _ = app_handle.emit(
-                                            "workflow-runtime-warning",
-                                            serde_json::json!({
+                                        let _ = crate::emit_event(
+                                            "workflow-runtime-warning", &serde_json::json!({
                                                 "missionId": mid,
                                                 "nodeId": "adaptive",
                                                 "message": format!("Adaptive patch parse error: {}", error),
@@ -642,15 +628,14 @@ pub fn init_mcp_server(app: &AppHandle) -> Result<(), String> {
                             }
                         }
                     }
-                    let _ = app_handle.emit("mcp-message", msg);
+                    let _ = crate::emit_event("mcp-message", &msg);
                 }
             }
         }
         // Event loop ended — SSE stream was closed or dropped. Reconnect.
         eprintln!("[mcp] SSE stream ended. Reconnecting in {}ms…", sse_backoff_ms);
-        let _ = app_handle.emit(
-            "workflow-runtime-warning",
-            serde_json::json!({
+        let _ = crate::emit_event(
+            "workflow-runtime-warning", &serde_json::json!({
                 "missionId": "system",
                 "nodeId": "bridge",
                 "message": "SSE bridge stream ended unexpectedly. Reconnecting…",
@@ -664,7 +649,7 @@ pub fn init_mcp_server(app: &AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-pub fn kill_mcp_server(app: &AppHandle) {
+pub fn kill_mcp_server(app: &crate::AppState) {
     let state = app.state::<McpState>();
     let mut guard = state.process.lock().unwrap();
     if let Some(mut child) = guard.take() {
@@ -672,13 +657,11 @@ pub fn kill_mcp_server(app: &AppHandle) {
     }
 }
 
-#[tauri::command]
-pub fn get_mcp_url(state: tauri::State<'_, McpState>) -> String {
+pub fn get_mcp_url(state: &McpState) -> String {
     let token = state.auth_token.lock().unwrap().clone();
     format!("http://127.0.0.1:{}/mcp?token={}", PORT, token)
 }
 
-#[tauri::command]
 pub fn get_mcp_base_url() -> String {
     format!("http://127.0.0.1:{}", PORT)
 }
@@ -702,9 +685,8 @@ pub struct RuntimeBootstrapRequest {
     pub execution_mode: Option<String>,
 }
 
-#[tauri::command]
 pub fn mcp_register_runtime_session(
-    state: tauri::State<'_, McpState>,
+    state: &McpState,
     payload: RuntimeBootstrapRequest,
 ) -> Result<serde_json::Value, String> {
     let token = state.internal_push_token.lock().unwrap().clone();
@@ -752,9 +734,8 @@ pub fn mcp_register_runtime_session(
 
 /// Privileged notification from the Rust process to the MCP server.
 /// Carries the push token as a loopback secret; renderer code never sees it.
-#[tauri::command]
 pub fn mcp_notify_agent(
-    state: tauri::State<'_, McpState>,
+    state: &McpState,
     session_id: String,
     kind: String,
     mission_id: Option<String>,

@@ -1,4 +1,4 @@
-import { invoke } from '@tauri-apps/api/core';
+import {  invoke  } from '../desktopApi';
 import { registry } from './registry';
 import type { McpServerEvent } from './types';
 import { useWorkspaceStore, type MissionArtifact } from '../../store/workspace';

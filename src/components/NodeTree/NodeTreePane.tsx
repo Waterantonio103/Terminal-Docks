@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { DotTunnelBackground } from '../shared/DotTunnelBackground';
 import { ArrowUpRight, ChevronLeft, FolderOpen, Play, Plus, RefreshCw, ScanSearch, Sparkles, Trash2, Workflow, X } from 'lucide-react';
-import { invoke } from '@tauri-apps/api/core';
-import { emit, listen } from '@tauri-apps/api/event';
-import { open } from '@tauri-apps/plugin-dialog';
+import {  invoke  } from '../../lib/desktopApi';
+import {  emit, listen  } from '../../lib/desktopApi';
+import {  open  } from '../../lib/desktopApi';
 import agentsConfig from '../../config/agents';
 import { compileMission, validateGraph } from '../../lib/graphCompiler';
 import { generateId } from '../../lib/graphUtils';

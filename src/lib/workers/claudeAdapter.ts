@@ -1,5 +1,5 @@
-import { invoke } from '@tauri-apps/api/core';
-import { listen } from '@tauri-apps/api/event';
+import {  invoke  } from '../desktopApi';
+import {  listen  } from '../desktopApi';
 import { registry } from './registry';
 import { mcpBus, waitForMcpEvent } from './mcpEventBus';
 import {
