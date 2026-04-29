@@ -128,7 +128,12 @@ export function buildCliRunCommand(
     if (options.model?.trim()) {
       args.push('--model', options.model.trim());
     }
-    args.push('--ask-for-approval', 'never', '--sandbox', 'workspace-write', 'exec', '--json', '--skip-git-repo-check', '-');
+    if (options.yolo) {
+      args.push('--dangerously-bypass-approvals-and-sandbox');
+    } else {
+      args.push('--ask-for-approval', 'never', '--sandbox', 'workspace-write');
+    }
+    args.push('exec', '--json', '--skip-git-repo-check', '-');
 
     return {
       command: 'codex',
@@ -161,8 +166,10 @@ export function buildPtyLaunchCommand(cliId: string, options: { model?: string |
   if (options.yolo) {
     if (cli === 'claude') parts.push('--dangerously-skip-permissions');
     else if (cli === 'gemini') parts.push('--yolo');
+    else if (cli === 'codex') parts.push('--dangerously-bypass-approvals-and-sandbox');
     // opencode: --yolo is only valid for `opencode run`, not the default TUI mode.
-    // codex: PTY mode doesn't have a yolo equivalent; keep interactive
+  } else if (cli === 'codex') {
+    parts.push('--ask-for-approval', 'never', '--sandbox', 'workspace-write');
   }
 
   return parts.join(' ');

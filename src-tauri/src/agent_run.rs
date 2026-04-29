@@ -104,8 +104,17 @@ struct AgentRunExitEvent {
     run_id: String,
     mission_id: String,
     node_id: String,
+    cli: Option<String>,
     status: String,
     exit_code: Option<i32>,
+    command: Option<String>,
+    args: Option<Vec<String>>,
+    prompt_delivery: Option<String>,
+    stdout_path: Option<String>,
+    stderr_path: Option<String>,
+    stdout_preview: Option<String>,
+    stderr_preview: Option<String>,
+    stdout_turn_completed: bool,
     error: Option<String>,
     at: u64,
 }
@@ -465,8 +474,17 @@ fn emit_exit(
             run_id: run_id.to_string(),
             mission_id: mission_id.to_string(),
             node_id: node_id.to_string(),
+            cli: None,
             status: status.to_string(),
             exit_code,
+            command: None,
+            args: None,
+            prompt_delivery: None,
+            stdout_path: None,
+            stderr_path: None,
+            stdout_preview: None,
+            stderr_preview: None,
+            stdout_turn_completed: false,
             error,
             at: unix_millis_now(),
         },
@@ -607,6 +625,23 @@ fn stdout_has_codex_turn_completed(stdout_path: &PathBuf) -> bool {
     })
 }
 
+fn read_preview(path: &PathBuf, limit: usize) -> Option<String> {
+    let content = fs::read_to_string(path).ok()?;
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let chars: Vec<char> = trimmed.chars().collect();
+    let preview = if chars.len() <= limit {
+        trimmed.to_string()
+    } else {
+        chars[chars.len().saturating_sub(limit)..]
+            .iter()
+            .collect::<String>()
+    };
+    Some(preview)
+}
+
 fn start_local_http_run(
     app: AppHandle,
     payload: StartAgentRunRequest,
@@ -736,8 +771,17 @@ fn start_local_http_run(
                                 run_id: payload.run_id,
                                 mission_id: payload.mission_id,
                                 node_id: payload.node_id,
+                                cli: Some(payload.cli),
                                 status: "completed".to_string(),
                                 exit_code: Some(0),
+                                command: None,
+                                args: None,
+                                prompt_delivery: Some(payload.prompt_delivery),
+                                stdout_path: Some(stdout_path.to_string_lossy().to_string()),
+                                stderr_path: Some(stderr_path.to_string_lossy().to_string()),
+                                stdout_preview: read_preview(&stdout_path, 1200),
+                                stderr_preview: read_preview(&stderr_path, 1200),
+                                stdout_turn_completed: false,
                                 error: None,
                                 at: unix_millis_now(),
                             },
@@ -801,8 +845,17 @@ fn start_local_http_run(
                         run_id: payload.run_id,
                         mission_id: payload.mission_id,
                         node_id: payload.node_id,
+                        cli: Some(payload.cli),
                         status: "failed".to_string(),
                         exit_code: None,
+                        command: None,
+                        args: None,
+                        prompt_delivery: Some(payload.prompt_delivery),
+                        stdout_path: Some(stdout_path.to_string_lossy().to_string()),
+                        stderr_path: Some(stderr_path.to_string_lossy().to_string()),
+                        stdout_preview: read_preview(&stdout_path, 1200),
+                        stderr_preview: read_preview(&stderr_path, 1200),
+                        stdout_turn_completed: false,
                         error: Some(message),
                         at: unix_millis_now(),
                     },
@@ -1019,6 +1072,20 @@ pub fn start_agent_run(
         "starting",
         None,
     );
+    emit_output(
+        &app,
+        &payload.run_id,
+        &payload.mission_id,
+        &payload.node_id,
+        "stdout",
+        format!(
+            "[agent-run] launch cli={} command={} args={} promptDelivery={}",
+            payload.cli,
+            command,
+            serde_json::to_string(&args).unwrap_or_else(|_| "[]".to_string()),
+            payload.prompt_delivery
+        ),
+    );
 
     if command == LOCAL_HTTP_COMMAND {
         return start_local_http_run(app, payload, record, stdout_path, stderr_path);
@@ -1099,50 +1166,50 @@ pub fn start_agent_run(
                     return Err(message);
                 }
             } else {
-            let message = if error.kind() == std::io::ErrorKind::NotFound {
-                format!(
+                let message = if error.kind() == std::io::ErrorKind::NotFound {
+                    format!(
                     "CLI launch failed: program not found. Make sure '{}' is installed and available in your PATH.",
                     command
                 )
-            } else {
-                format!("CLI launch failed: {error}")
-            };
-            update_run_status(
-                &app,
-                &payload.run_id,
-                "failed",
-                None,
-                Some(&message),
-                false,
-                true,
-            )
-            .ok();
-            emit_status(
-                &app,
-                &payload.run_id,
-                &payload.mission_id,
-                &payload.node_id,
-                "failed",
-                Some(message.clone()),
-            );
-            emit_output(
-                &app,
-                &payload.run_id,
-                &payload.mission_id,
-                &payload.node_id,
-                "stderr",
-                message.clone(),
-            );
-            emit_exit(
-                &app,
-                &payload.run_id,
-                &payload.mission_id,
-                &payload.node_id,
-                "failed",
-                None,
-                Some(message.clone()),
-            );
-            return Err(message);
+                } else {
+                    format!("CLI launch failed: {error}")
+                };
+                update_run_status(
+                    &app,
+                    &payload.run_id,
+                    "failed",
+                    None,
+                    Some(&message),
+                    false,
+                    true,
+                )
+                .ok();
+                emit_status(
+                    &app,
+                    &payload.run_id,
+                    &payload.mission_id,
+                    &payload.node_id,
+                    "failed",
+                    Some(message.clone()),
+                );
+                emit_output(
+                    &app,
+                    &payload.run_id,
+                    &payload.mission_id,
+                    &payload.node_id,
+                    "stderr",
+                    message.clone(),
+                );
+                emit_exit(
+                    &app,
+                    &payload.run_id,
+                    &payload.mission_id,
+                    &payload.node_id,
+                    "failed",
+                    None,
+                    Some(message.clone()),
+                );
+                return Err(message);
             }
         }
     };
@@ -1150,10 +1217,52 @@ pub fn start_agent_run(
     if payload.prompt_delivery == "stdin" {
         if let Some(mut stdin) = child.stdin.take() {
             let prompt = payload.prompt.clone();
+            let app_handle = app.clone();
+            let run_id = payload.run_id.clone();
+            let mission_id = payload.mission_id.clone();
+            let node_id = payload.node_id.clone();
             thread::spawn(move || {
-                let _ = stdin.write_all(prompt.as_bytes());
-                let _ = stdin.flush();
+                let prompt_len = prompt.as_bytes().len();
+                match stdin.write_all(prompt.as_bytes()) {
+                    Ok(()) => {
+                        let _ = stdin.flush();
+                        drop(stdin);
+                        emit_output(
+                            &app_handle,
+                            &run_id,
+                            &mission_id,
+                            &node_id,
+                            "stdout",
+                            format!(
+                                "[agent-run] prompt delivery=stdin bytes={} write=ok closed=true",
+                                prompt_len
+                            ),
+                        );
+                    }
+                    Err(error) => {
+                        emit_output(
+                            &app_handle,
+                            &run_id,
+                            &mission_id,
+                            &node_id,
+                            "stderr",
+                            format!(
+                                "[agent-run] prompt delivery=stdin bytes={} write=error message={}",
+                                prompt_len, error
+                            ),
+                        );
+                    }
+                }
             });
+        } else {
+            emit_output(
+                &app,
+                &payload.run_id,
+                &payload.mission_id,
+                &payload.node_id,
+                "stderr",
+                "[agent-run] prompt delivery=stdin stdin_handle_missing=true".to_string(),
+            );
         }
     }
 
@@ -1211,7 +1320,13 @@ pub fn start_agent_run(
     let attempt = payload.attempt;
     let cli = payload.cli.clone();
     let execution_mode = payload.execution_mode.clone();
+    let command_for_exit = command.clone();
+    let args_for_exit = args.clone();
+    let prompt_delivery_for_exit = payload.prompt_delivery.clone();
+    let stdout_path_string = stdout_path.to_string_lossy().to_string();
+    let stderr_path_string = stderr_path.to_string_lossy().to_string();
     let stdout_path_for_completion = stdout_path.clone();
+    let stderr_path_for_completion = stderr_path.clone();
     let timeout_ms = payload.timeout_ms;
     let children = state.children.clone();
     thread::spawn(move || {
@@ -1234,8 +1349,17 @@ pub fn start_agent_run(
                             run_id,
                             mission_id,
                             node_id,
+                            cli: Some(cli.clone()),
                             status: "timed_out".to_string(),
                             exit_code: None,
+                            command: Some(command_for_exit.clone()),
+                            args: Some(args_for_exit.clone()),
+                            prompt_delivery: Some(prompt_delivery_for_exit.clone()),
+                            stdout_path: Some(stdout_path_string.clone()),
+                            stderr_path: Some(stderr_path_string.clone()),
+                            stdout_preview: read_preview(&stdout_path_for_completion, 1200),
+                            stderr_preview: read_preview(&stderr_path_for_completion, 1200),
+                            stdout_turn_completed: false,
                             error: Some(error),
                             at: unix_millis_now(),
                         },
@@ -1263,6 +1387,8 @@ pub fn start_agent_run(
                     let exit_code = status.code();
                     let codex_completed = cli == "codex"
                         && stdout_has_codex_turn_completed(&stdout_path_for_completion);
+                    let stdout_preview = read_preview(&stdout_path_for_completion, 1200);
+                    let stderr_preview = read_preview(&stderr_path_for_completion, 1200);
                     let final_status = if status.success() || codex_completed {
                         "completed"
                     } else {
@@ -1305,8 +1431,17 @@ pub fn start_agent_run(
                             run_id,
                             mission_id,
                             node_id,
+                            cli: Some(cli.clone()),
                             status: final_status.to_string(),
                             exit_code,
+                            command: Some(command_for_exit.clone()),
+                            args: Some(args_for_exit.clone()),
+                            prompt_delivery: Some(prompt_delivery_for_exit.clone()),
+                            stdout_path: Some(stdout_path_string.clone()),
+                            stderr_path: Some(stderr_path_string.clone()),
+                            stdout_preview,
+                            stderr_preview,
+                            stdout_turn_completed: codex_completed,
                             error,
                             at: unix_millis_now(),
                         },
@@ -1331,8 +1466,17 @@ pub fn start_agent_run(
                             run_id,
                             mission_id,
                             node_id,
+                            cli: Some(cli.clone()),
                             status: "failed".to_string(),
                             exit_code: None,
+                            command: Some(command_for_exit.clone()),
+                            args: Some(args_for_exit.clone()),
+                            prompt_delivery: Some(prompt_delivery_for_exit.clone()),
+                            stdout_path: Some(stdout_path_string.clone()),
+                            stderr_path: Some(stderr_path_string.clone()),
+                            stdout_preview: read_preview(&stdout_path_for_completion, 1200),
+                            stderr_preview: read_preview(&stderr_path_for_completion, 1200),
+                            stdout_turn_completed: false,
                             error: Some(message),
                             at: unix_millis_now(),
                         },

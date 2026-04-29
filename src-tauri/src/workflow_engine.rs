@@ -125,6 +125,10 @@ pub struct RuntimeActivationPayload {
     pub profile_id: Option<String>,
     pub capabilities: Option<Vec<crate::workflow::WorkerCapability>>,
     pub cli_type: String,
+    #[serde(default)]
+    pub model_id: Option<String>,
+    #[serde(default)]
+    pub yolo: bool,
     pub execution_mode: WorkflowExecutionMode,
     pub terminal_id: String,
     pub pane_id: Option<String>,
@@ -1170,6 +1174,8 @@ fn request_node_activation_locked(
         profile_id: node.profile_id.clone(),
         capabilities: node.capabilities.clone(),
         cli_type: terminal_cli.clone(),
+        model_id: node.terminal.model.clone(),
+        yolo: node.terminal.yolo.unwrap_or(false),
         execution_mode,
         terminal_id: terminal_id.clone(),
         pane_id: node.terminal.pane_id.clone(),
@@ -2303,6 +2309,8 @@ mod tests {
             terminal_id: format!("term-{title}"),
             terminal_title: title.to_string(),
             cli: WorkflowAgentCli::Claude,
+            model: None,
+            yolo: None,
             execution_mode: crate::workflow::WorkflowExecutionMode::InteractivePty,
             pane_id: None,
             reused_existing: true,

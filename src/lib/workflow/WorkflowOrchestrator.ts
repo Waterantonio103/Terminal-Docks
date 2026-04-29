@@ -71,7 +71,10 @@ export interface RuntimeManagerPort {
 
   launchCli(sessionId: string, externalPayload?: unknown): Promise<void>;
 
-  validateSessionForReuse(sessionId: string, expectedCliId: string): Promise<import('../runtime/RuntimeTypes.js').SessionLivenessResult>;
+  validateSessionForReuse(
+    sessionId: string,
+    expected: import('../runtime/RuntimeTypes.js').RuntimeReuseExpectation,
+  ): Promise<import('../runtime/RuntimeTypes.js').SessionLivenessResult>;
 
   ensureRuntimeReadyForTask(args: import('../runtime/RuntimeTypes.js').CreateRuntimeArgs): Promise<import('../runtime/RuntimeSession.js').RuntimeSession>;
 
@@ -101,6 +104,7 @@ export interface NodeActivationContext {
   roleId: string;
   cliId: string;
   modelId: string | null;
+  yolo: boolean;
   executionMode: string;
   workspaceDir: string | null;
   legalTargets: WorkflowEdgeDefinition[];
@@ -1029,6 +1033,7 @@ export class WorkflowOrchestrator {
       roleId: nodeDef.roleId,
       cliId: nodeDef.config.cli ?? 'claude',
       modelId: nodeDef.config.model ?? null,
+      yolo: nodeDef.config.yolo ?? false,
       executionMode: nodeDef.config.executionMode ?? 'interactive_pty',
       workspaceDir: nodeDef.config.workspaceDir ?? null,
       legalTargets,

@@ -59,6 +59,14 @@ export interface CreateRuntimeArgs {
   yolo?: boolean;
 }
 
+export interface RuntimeReuseExpectation {
+  cliId: CliId;
+  model?: string | null;
+  yolo?: boolean;
+  executionMode?: ExecutionMode;
+  workspaceDir?: string | null;
+}
+
 // ──────────────────────────────────────────────
 // Runtime Session Descriptor
 // ──────────────────────────────────────────────
@@ -130,6 +138,10 @@ export type SessionLivenessStatus =
   | 'reusable'
   | 'stale'
   | 'cli_mismatch'
+  | 'model_mismatch'
+  | 'yolo_mismatch'
+  | 'execution_mode_mismatch'
+  | 'workspace_mismatch'
   | 'wrong_state';
 
 export interface SessionLivenessResult {

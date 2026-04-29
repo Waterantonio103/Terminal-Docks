@@ -68,6 +68,10 @@ pub struct CompiledMissionTerminalBinding {
     pub terminal_id: String,
     pub terminal_title: String,
     pub cli: WorkflowAgentCli,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub yolo: Option<bool>,
     #[serde(default = "default_execution_mode")]
     pub execution_mode: WorkflowExecutionMode,
     pub pane_id: Option<String>,

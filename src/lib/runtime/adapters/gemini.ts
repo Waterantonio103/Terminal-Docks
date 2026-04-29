@@ -20,6 +20,11 @@ const PERMISSION_RE = /(?:allow|deny|approve|reject|permission|grant|trust|alway
 const COMPLETION_RE = /(?:task completed|finished|done|exit code\s+0)/i;
 const FAILURE_RE = /(?:error:|failed|exception|exit code\s+[1-9])/i;
 const GEMINI_INPUT_HINT_RE = /\b(type|enter|input|paste|write)\b.*\b(prompt|message|query|input)\b/i;
+const GEMINI_PROMPT_MARKER_RE = /(?:gemini[^\n]{0,80}(?:>|\uff1e|❯|Input:|Prompt:))|(?:^|\n)\s*(?:>|\uff1e|❯|Input:|Prompt:)\s*(?:$|\n)|(?:type|enter|input|paste|write)\b.*\b(prompt|message|query|input)\b/i;
+
+function logGeminiReady(message: string): void {
+  console.debug(`[gemini-ready] ${message}`);
+}
 
 export const geminiAdapter: CliAdapter = {
   id: 'gemini',
@@ -62,17 +67,26 @@ export const geminiAdapter: CliAdapter = {
   detectReady(output: string): ReadyDetectionResult {
     const tail = output.split('\n').slice(-3).join('\n');
     if (SHELL_PROMPT_RE.test(tail) && !BANNER_RE.test(output)) {
+      logGeminiReady('rejected reason=shell_prompt_only');
       return { ready: false, confidence: 'low', detail: 'Shell prompt only — Gemini not confirmed' };
     }
 
     if (BANNER_RE.test(output)) {
       if (PROMPT_BAR_RE.test(output) || READY_KEYWORDS_RE.test(output) || GEMINI_INPUT_HINT_RE.test(output)) {
+        logGeminiReady('accepted reason=banner_and_prompt');
         return { ready: true, confidence: 'high', detail: 'Gemini banner and input prompt detected' };
       }
       // Banner alone is not enough, wait for prompt
+      logGeminiReady('waiting reason=banner_without_prompt');
       return { ready: false, confidence: 'low', detail: 'Gemini banner detected, waiting for prompt' };
     }
 
+    if (GEMINI_PROMPT_MARKER_RE.test(output)) {
+      logGeminiReady('accepted reason=gemini_prompt_marker');
+      return { ready: true, confidence: 'medium', detail: 'Gemini-specific prompt marker detected' };
+    }
+
+    logGeminiReady('waiting reason=no_gemini_marker');
     return { ready: false, confidence: 'low' };
   },
 

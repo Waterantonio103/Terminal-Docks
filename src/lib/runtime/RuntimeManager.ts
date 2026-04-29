@@ -23,6 +23,7 @@ import type {
   StopRuntimeArgs,
   ResolvePermissionArgs,
   SessionLivenessResult,
+  RuntimeReuseExpectation,
 } from './RuntimeTypes.js';
 import { getCliAdapter } from './adapters/index.js';
 
@@ -68,6 +69,17 @@ const BOOTSTRAP_INJECTION_TIMEOUT_MS = 10_000;
 type ManagerListener = (event: RuntimeManagerEvent) => void;
 type SnapshotListener = (snapshot: RuntimeManagerSnapshot) => void;
 
+function normalizeModelForReuse(value: string | null | undefined): string | null {
+  const trimmed = typeof value === 'string' ? value.trim() : '';
+  return trimmed || null;
+}
+
+function previewText(value: string | null | undefined, limit = 280): string | null {
+  const trimmed = typeof value === 'string' ? value.trim() : '';
+  if (!trimmed) return null;
+  return trimmed.length <= limit ? trimmed : `${trimmed.slice(0, limit)}...`;
+}
+
 // ──────────────────────────────────────────────
 // RuntimeManager
 // ──────────────────────────────────────────────
@@ -89,7 +101,7 @@ class RuntimeManager {
       node_id: string;
       attempt: number;
       status: string;
-      payload: import('../missionRuntime.js').RuntimeActivationPayload;
+      payload: import('../missionRuntime.js').RuntimeActivationPayload & { yolo?: boolean };
     }>('workflow-runtime-activation-requested', async (event) => {
       const { mission_id, node_id, attempt, payload } = event.payload;
 
@@ -110,6 +122,7 @@ class RuntimeManager {
           inputPayload: payload.inputPayload,
           runId: payload.runId,
           modelId: payload.modelId ?? null,
+          yolo: Boolean(payload.yolo),
           activationPayload: payload,
         });
 
@@ -128,12 +141,21 @@ class RuntimeManager {
       runId: string;
       missionId: string;
       nodeId: string;
+      cli?: string;
       status: string;
       exitCode?: number | null;
+      command?: string;
+      args?: string[];
+      promptDelivery?: string;
+      stdoutPath?: string | null;
+      stderrPath?: string | null;
+      stdoutPreview?: string | null;
+      stderrPreview?: string | null;
+      stdoutTurnCompleted?: boolean;
       error?: string | null;
       at: number;
     }>('agent-run-exit', async (event) => {
-      const { missionId, nodeId, status, error } = event.payload;
+      const { missionId, nodeId, status, error, exitCode, command, args, promptDelivery, stdoutPreview, stderrPreview, stdoutTurnCompleted } = event.payload;
       const sessionKey = Array.from(this.sessionsByNode.entries()).find(
         ([key]) => key.startsWith(`${missionId}:${nodeId}:`)
       );
@@ -141,13 +163,33 @@ class RuntimeManager {
       const session = this.sessions.get(sessionKey[1]);
       if (!session) return;
 
-      const isMcpCompletingCli = session.cliId === 'claude' || session.cliId === 'codex' || session.cliId === 'ollama' || session.cliId === 'lmstudio';
+      const isMcpCompletingCli = session.cliId === 'claude' || session.cliId === 'ollama' || session.cliId === 'lmstudio';
       if (status === 'completed' && isMcpCompletingCli) return;
+      if (status === 'completed' && session.cliId === 'codex') {
+        console.log(
+          `[runtime] codex completed via process exit cli=${session.cliId} model=${session.model || '<default>'} yolo=${session.yolo} exitCode=${exitCode ?? 'null'} turnCompleted=${Boolean(stdoutTurnCompleted)}`,
+        );
+        return;
+      }
       if (session.state === 'completed' || session.state === 'failed') return;
 
       const reason = status === 'completed'
-        ? 'process_exited_without_handoff'
-        : (error ?? status ?? 'Agent run exited before completing via MCP.');
+        ? `Process exited before MCP handoff. cli=${session.cliId} model=${session.model || '<default>'} yolo=${session.yolo} command=${command ?? session.cliId} ${(args ?? []).join(' ')}`.trim()
+        : [
+            `${session.cliId} exited with code ${exitCode ?? 'unknown'}.`,
+            `Model: ${session.model || '<default>'}.`,
+            `YOLO: ${session.yolo}.`,
+            `Prompt delivery: ${promptDelivery ?? 'unknown'}.`,
+            `Command: ${[command ?? session.cliId, ...(args ?? [])].join(' ')}`.trim(),
+            stdoutTurnCompleted ? 'stdout contained turn.completed.' : null,
+            error ? `Error: ${error}` : null,
+            stderrPreview ? `stderr preview: ${previewText(stderrPreview)}` : null,
+            stdoutPreview ? `stdout preview: ${previewText(stdoutPreview)}` : null,
+          ]
+            .filter(Boolean)
+            .join(' ');
+
+      console.warn(`[runtime] headless exit failed ${reason}`);
 
       await acknowledgeActivation({
         missionId: session.missionId,
@@ -170,6 +212,10 @@ class RuntimeManager {
     if (!adapter) {
       throw new Error(`No CLI adapter registered for "${args.cliId}"`);
     }
+
+    console.log(
+      `[runtime] create cli=${args.cliId} model=${normalizeModelForReuse(args.modelId ?? args.model) ?? '<default>'} yolo=${Boolean(args.yolo)} executionMode=${args.executionMode} workspace=${args.workspaceDir ?? '<none>'}`,
+    );
 
     const session = new RuntimeSession(adapter, {
       missionId: args.missionId,
@@ -428,7 +474,7 @@ class RuntimeManager {
 
   async validateSessionForReuse(
     sessionId: string,
-    expectedCliId: import('../workflow/WorkflowTypes.js').CliId,
+    expected: RuntimeReuseExpectation,
   ): Promise<SessionLivenessResult> {
     const session = this.sessions.get(sessionId);
     if (!session) {
@@ -467,10 +513,40 @@ class RuntimeManager {
       };
     }
 
-    if (session.cliId !== expectedCliId) {
+    if (session.cliId !== expected.cliId) {
       return {
         status: 'cli_mismatch',
-        details: `Session CLI is "${session.cliId}" but expected "${expectedCliId}".`,
+        details: `Session CLI is "${session.cliId}" but expected "${expected.cliId}".`,
+      };
+    }
+
+    const currentModel = normalizeModelForReuse(session.model);
+    const expectedModel = normalizeModelForReuse(expected.model);
+    if (currentModel !== expectedModel) {
+      return {
+        status: 'model_mismatch',
+        details: `Session model is "${currentModel ?? '<default>'}" but expected "${expectedModel ?? '<default>'}".`,
+      };
+    }
+
+    if (Boolean(session.yolo) !== Boolean(expected.yolo)) {
+      return {
+        status: 'yolo_mismatch',
+        details: `Session yolo is "${Boolean(session.yolo)}" but expected "${Boolean(expected.yolo)}".`,
+      };
+    }
+
+    if (expected.executionMode && session.executionMode !== expected.executionMode) {
+      return {
+        status: 'execution_mode_mismatch',
+        details: `Session execution mode is "${session.executionMode}" but expected "${expected.executionMode}".`,
+      };
+    }
+
+    if ((session.workspaceDir ?? null) !== (expected.workspaceDir ?? null)) {
+      return {
+        status: 'workspace_mismatch',
+        details: `Session workspace is "${session.workspaceDir ?? '<none>'}" but expected "${expected.workspaceDir ?? '<none>'}".`,
       };
     }
 
@@ -517,11 +593,33 @@ class RuntimeManager {
   async ensureRuntimeReadyForTask(args: CreateRuntimeArgs): Promise<RuntimeSession> {
     const existing = this.getSessionForNode(args.missionId, args.nodeId, args.attempt);
     if (existing) {
-      const validation = await this.validateSessionForReuse(existing.sessionId, args.cliId);
+      const validation = await this.validateSessionForReuse(existing.sessionId, {
+        cliId: args.cliId,
+        model: args.modelId ?? args.model ?? null,
+        yolo: args.yolo,
+        executionMode: args.executionMode,
+        workspaceDir: args.workspaceDir ?? null,
+      });
       if (validation.status === 'reusable') {
-        console.log(`[RuntimeManager] Reusing session ${existing.sessionId} for node ${args.nodeId}`);
+        console.log(
+          `[runtime] reuse accepted cli=${existing.cliId} model=${normalizeModelForReuse(existing.model) ?? '<default>'} yolo=${existing.yolo} session=${existing.sessionId}`,
+        );
         await this.reinjectTask(existing.sessionId);
         return existing;
+      }
+
+      if (validation.status === 'model_mismatch') {
+        console.warn(
+          `[runtime] reuse rejected reason=model_mismatch old=${normalizeModelForReuse(existing.model) ?? '<default>'} new=${normalizeModelForReuse(args.modelId ?? args.model) ?? '<default>'}`,
+        );
+      } else if (validation.status === 'yolo_mismatch') {
+        console.warn(
+          `[runtime] reuse rejected reason=yolo_mismatch old=${existing.yolo} new=${Boolean(args.yolo)}`,
+        );
+      } else if (validation.status === 'cli_mismatch') {
+        console.warn(`[runtime] reuse rejected reason=cli_mismatch old=${existing.cliId} new=${args.cliId}`);
+      } else {
+        console.warn(`[runtime] reuse rejected reason=${validation.status} details=${validation.details}`);
       }
 
       console.warn(
@@ -534,6 +632,24 @@ class RuntimeManager {
         });
       } catch {
         // ignore errors stopping stale session
+      }
+    }
+
+    const conflictingSessions = Array.from(this.sessions.values()).filter(session =>
+      session.terminalId === args.terminalId ||
+      (session.missionId === args.missionId && session.nodeId === args.nodeId),
+    );
+    for (const conflict of conflictingSessions) {
+      console.warn(
+        `[runtime] stopping conflicting session session=${conflict.sessionId} cli=${conflict.cliId} model=${normalizeModelForReuse(conflict.model) ?? '<default>'} yolo=${conflict.yolo} terminal=${conflict.terminalId}`,
+      );
+      try {
+        await this.stopRuntime({
+          sessionId: conflict.sessionId,
+          reason: `Conflicting runtime replaced by cli=${args.cliId} model=${normalizeModelForReuse(args.modelId ?? args.model) ?? '<default>'} yolo=${Boolean(args.yolo)}`,
+        });
+      } catch {
+        // ignore best-effort cleanup failures
       }
     }
 
@@ -568,6 +684,7 @@ class RuntimeManager {
       runId: activationPayload.runId,
       cliType: session.cliId,
       modelId: session.model || null,
+      yolo: session.yolo,
       executionMode: session.executionMode,
       goal: activationPayload.goal,
       workspaceDir: session.workspaceDir,
@@ -956,6 +1073,7 @@ class RuntimeManager {
       if (await this.shouldLaunchCliInTerminal(session)) {
         await sleep(CLI_LAUNCH_DELAY_MS);
         const launchCmd = buildPtyLaunchCommand(session.cliId, { model: session.model, yolo: session.yolo });
+        console.log(`[runtime] launch command=${launchCmd}`);
         await writeToTerminal(session.terminalId, `${launchCmd}\r`);
         await sleep(CLI_STARTUP_WAIT_MS);
         launchedCli = true;
@@ -1026,6 +1144,7 @@ class RuntimeManager {
           runId: activationPayload.runId,
           cliType: session.cliId,
           modelId: session.model || null,
+          yolo: session.yolo,
           executionMode: session.executionMode,
           goal: activationPayload.goal,
           workspaceDir: session.workspaceDir,
@@ -1133,6 +1252,7 @@ class RuntimeManager {
       runId: activationPayload.runId,
       cliType: session.cliId,
       modelId: session.model || null,
+      yolo: session.yolo,
       executionMode: session.executionMode,
       goal: activationPayload.goal,
       workspaceDir: session.workspaceDir,
@@ -1211,7 +1331,7 @@ class RuntimeManager {
     }
 
     console.log(
-      `[RuntimeManager] startHeadlessRun: cli="${session.cliId}", command="${request.command}", args=${JSON.stringify(request.args)}, mode="${request.executionMode}"`,
+      `[runtime] launch command=${request.command} args=${JSON.stringify(request.args)} cli=${session.cliId} model=${session.model || '<default>'} yolo=${session.yolo} promptDelivery=${request.promptDelivery} mode=${request.executionMode}`,
     );
     await startHeadlessRun(request as import('./TerminalRuntime.js').HeadlessRunRequest);
   }
@@ -1327,6 +1447,7 @@ class RuntimeManager {
       capabilities: null,
       cliType: session.cliId,
       modelId: session.model || null,
+      yolo: session.yolo,
       executionMode: session.executionMode,
       terminalId: session.terminalId,
       paneId: session.paneId ?? null,
@@ -1441,14 +1562,20 @@ class RuntimeManager {
 
   private async waitForCliReady(session: RuntimeSession, timeoutMs: number): Promise<boolean> {
     const deadline = Date.now() + timeoutMs;
+    let lastDetail: string | null = null;
     while (Date.now() < deadline) {
       const output = await getRecentTerminalOutput(session.terminalId, 12_288);
       if (output) {
         const ready = session.adapter.detectReady(output);
+        if (ready.detail && ready.detail !== lastDetail) {
+          console.log(`[runtime] cli-ready cli=${session.cliId} ready=${ready.ready} detail="${ready.detail}"`);
+          lastDetail = ready.detail;
+        }
         if (ready.ready) return true;
       }
       await sleep(200);
     }
+    console.warn(`[runtime] cli-ready timeout cli=${session.cliId} lastDetail="${lastDetail ?? 'none'}" timeoutMs=${timeoutMs}`);
     return false;
   }
 

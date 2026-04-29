@@ -934,6 +934,10 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
         if (node.type !== 'workflow.agent' && node.type !== 'agent') continue;
         const nodeId = String(node.id);
         const data = node.data as Record<string, unknown>;
+        const selectedCli: WorkflowAgentCli = SELECTABLE_WORKFLOW_CLIS.includes(data.cli as WorkflowAgentCli)
+          ? (data.cli as WorkflowAgentCli)
+          : 'claude';
+        const role = String(data.roleId ?? 'agent');
 
         // Force interactive PTY so each agent node owns a real terminal.
         applyOperator({ type: 'set_node_property', nodeId, key: 'executionMode', value: 'interactive_pty' });
@@ -943,7 +947,11 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
         const currentTerminalId = typeof data.terminalId === 'string' ? data.terminalId : '';
         const storedTerminalId = storedBindings[nodeId];
         const resolvedTerminalId = currentTerminalId || storedTerminalId;
-        if (resolvedTerminalId && openTerminals.some(t => t.id === resolvedTerminalId)) {
+        const openResolvedTerminal = resolvedTerminalId
+          ? openTerminals.find(t => t.id === resolvedTerminalId)
+          : null;
+        const canReuseResolvedTerminal = openResolvedTerminal && openResolvedTerminal.cli === selectedCli;
+        if (canReuseResolvedTerminal) {
           if (!currentTerminalId && storedTerminalId) {
             applyOperator({ type: 'set_node_property', nodeId, key: 'terminalId', value: storedTerminalId });
             const existing = openTerminals.find(t => t.id === storedTerminalId);
@@ -952,37 +960,30 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
               applyOperator({ type: 'set_node_property', nodeId, key: 'paneId', value: existing.paneId });
             }
           }
-          const existingTerminal = openTerminals.find(t => t.id === resolvedTerminalId)!;
+          const existingTerminal = openResolvedTerminal!;
           freshBindings.set(nodeId, {
             id: resolvedTerminalId,
             title: existingTerminal.title,
             paneId: existingTerminal.paneId,
-            cli: SELECTABLE_WORKFLOW_CLIS.includes(data.cli as WorkflowAgentCli)
-              ? (data.cli as WorkflowAgentCli)
-              : (SUPPORTED_WORKFLOW_CLIS.has(String(existingTerminal.cli))
-                  ? existingTerminal.cli as WorkflowAgentCli
-                  : 'claude'),
+            cli: selectedCli,
           });
           continue;
         }
-
-        const selectedCli: WorkflowAgentCli = SELECTABLE_WORKFLOW_CLIS.includes(data.cli as WorkflowAgentCli)
-          ? (data.cli as WorkflowAgentCli)
-          : 'claude';
-        const role = String(data.roleId ?? 'agent');
+        if (openResolvedTerminal && openResolvedTerminal.cli !== selectedCli) {
+          console.log(
+            `[runWorkflow] rebinding node=${nodeId} terminal=${resolvedTerminalId} oldCli=${openResolvedTerminal.cli ?? '<unknown>'} newCli=${selectedCli}`,
+          );
+        }
 
         // Re-attach persisted binding if the terminal pane is still open
         const persistedId = storedBindings[nodeId];
         if (persistedId) {
           const existing = openTerminals.find(t => t.id === persistedId);
-          if (existing) {
+          if (existing && existing.cli === selectedCli) {
             applyOperator({ type: 'set_node_property', nodeId, key: 'terminalId', value: persistedId });
             applyOperator({ type: 'set_node_property', nodeId, key: 'terminalTitle', value: existing.title });
             applyOperator({ type: 'set_node_property', nodeId, key: 'paneId', value: existing.paneId });
-            const cli = SELECTABLE_WORKFLOW_CLIS.includes(data.cli as WorkflowAgentCli)
-              ? data.cli as WorkflowAgentCli
-              : (SUPPORTED_WORKFLOW_CLIS.has(String(existing.cli)) ? existing.cli as WorkflowAgentCli : 'claude');
-            freshBindings.set(nodeId, { id: persistedId, title: existing.title, paneId: existing.paneId, cli });
+            freshBindings.set(nodeId, { id: persistedId, title: existing.title, paneId: existing.paneId, cli: selectedCli });
             continue;
           }
         }
@@ -1029,9 +1030,9 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
           .filter(terminal => terminal.cli && SUPPORTED_WORKFLOW_CLIS.has(terminal.cli))
           .map(terminal => [terminal.id, terminal.cli as WorkflowAgentCli])
       );
-      // Freshly spawned terminals carry the node-selected CLI before stdout detection has output.
+      // Freshly staged bindings must win over any stale openTerminals snapshot.
       for (const [, binding] of freshBindings) {
-        if (!terminalClis[binding.id]) terminalClis[binding.id] = binding.cli;
+        terminalClis[binding.id] = binding.cli;
       }
       const mission = compileMission({
         missionId,
