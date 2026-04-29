@@ -154,6 +154,52 @@ export function materializePromptArgs(command: CliRunCommand, prompt: string): C
   };
 }
 
+export type ShellKind = 'windows' | 'powershell' | 'cmd' | 'unix';
+
+/**
+ * Build a shell command that pipes a prompt file into `codex exec -` via the visible PTY.
+ * Global flags (--model, --ask-for-approval, YOLO) must appear BEFORE `exec`.
+ */
+export function buildCodexVisibleExecCommand({
+  promptPath,
+  model,
+  yolo,
+  shellKind = 'windows',
+}: {
+  promptPath: string;
+  model?: string | null;
+  yolo?: boolean;
+  shellKind?: ShellKind;
+}): string {
+  const codexParts: string[] = ['codex'];
+  if (model?.trim()) codexParts.push('--model', model.trim());
+  if (yolo) {
+    codexParts.push('--dangerously-bypass-approvals-and-sandbox');
+  } else {
+    codexParts.push('--ask-for-approval', 'never', '--sandbox', 'workspace-write');
+  }
+  codexParts.push('exec', '--json', '--skip-git-repo-check', '-');
+  const codexCmd = codexParts.join(' ');
+
+  if (shellKind === 'windows') {
+    const cmdPath = promptPath.replace(/"/g, '');
+    const inner = `type "${cmdPath}" | ${codexCmd}`;
+    return `cmd /d /s /c "${inner}"`;
+  }
+  if (shellKind === 'powershell') {
+    // Single-quoted path: backslashes are literal in PowerShell single-quoted strings
+    const psPath = promptPath.replace(/'/g, "''");
+    return `Get-Content -Raw '${psPath}' | ${codexCmd}`;
+  }
+  if (shellKind === 'cmd') {
+    const cmdPath = promptPath.replace(/"/g, '');
+    return `type "${cmdPath}" | ${codexCmd}`;
+  }
+  // Unix bash/zsh
+  const unixPath = promptPath.replace(/'/g, "'\\''");
+  return `cat '${unixPath}' | ${codexCmd}`;
+}
+
 export function buildPtyLaunchCommand(cliId: string, options: { model?: string | null; yolo?: boolean }): string {
   const cli = normalizeCliId(cliId);
   const parts: string[] = [cliId];

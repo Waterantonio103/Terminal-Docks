@@ -13,8 +13,8 @@ import type {
 } from './CliAdapter';
 
 const BANNER_RE = /\bcodex\b/i;
-const PROMPT_RE = /(?:>|\uff1e|❯|Input:|Prompt:|\$)\s*$/m;
-const SHELL_PROMPT_RE = /(?:\$|>|#)\s*$/m;
+const PROMPT_RE = /(?:\uff1e|❯|Input:|Prompt:)\s*$/m;
+const SHELL_PROMPT_RE = /(?:[A-Za-z]:\\.*>|(?:\$|>|#))\s*$/m;
 const READY_KEYWORDS_RE = /\b(ready|listening|connected|type|enter)\b/i;
 const PERMISSION_RE = /(?:allow|deny|approve|reject|permission|grant|trust)/i;
 const COMPLETION_RE = /(?:task completed|finished|done|exit code\s+0)/i;
@@ -24,13 +24,9 @@ export const codexAdapter: CliAdapter = {
   id: 'codex',
   label: 'Codex',
 
-  // Codex's interactive TUI has an input-readiness race that causes PTY
-  // injection to truncate the first ~80–120 bytes regardless of settle delay.
-  // Use exec_stdin so the full prompt is piped to stdin of `codex exec -`.
-  execMode: 'exec_stdin',
-
-  // Retained as a fallback if ever used in interactive PTY mode directly.
-  postReadySettleDelayMs: 800,
+  // Use the standard interactive PTY launch path. Codex needs a stricter
+  // ready gate plus a quieter post-launch injection window than the other CLIs.
+  postReadySettleDelayMs: 1200,
 
   buildLaunchCommand(context: LaunchContext): LaunchCommand {
     const env: Record<string, string> = {
@@ -69,8 +65,9 @@ export const codexAdapter: CliAdapter = {
   detectReady(output: string): ReadyDetectionResult {
     const lines = output.split('\n');
     const lastLine = lines[lines.length - 1] ?? '';
+    const hasBanner = BANNER_RE.test(output);
 
-    if (BANNER_RE.test(output)) {
+    if (hasBanner) {
       // If we see the banner AND the last line looks like a prompt, we are highly confident.
       if (PROMPT_RE.test(lastLine) || READY_KEYWORDS_RE.test(lastLine)) {
         return { ready: true, confidence: 'high', detail: 'Codex banner and prompt detected' };
@@ -80,12 +77,12 @@ export const codexAdapter: CliAdapter = {
       return { ready: false, confidence: 'low', detail: 'Codex banner detected, waiting for prompt' };
     }
 
-    if (PROMPT_RE.test(lastLine) || READY_KEYWORDS_RE.test(lastLine)) {
-      return { ready: true, confidence: 'medium', detail: 'Codex prompt indicator detected' };
-    }
-
     if (SHELL_PROMPT_RE.test(lastLine)) {
       return { ready: false, confidence: 'low', detail: 'Shell prompt visible — CLI may have exited' };
+    }
+
+    if (PROMPT_RE.test(lastLine) || READY_KEYWORDS_RE.test(lastLine)) {
+      return { ready: false, confidence: 'low', detail: 'Prompt-like output without Codex banner — waiting' };
     }
 
     return { ready: false, confidence: 'low' };
@@ -194,12 +191,7 @@ export const codexAdapter: CliAdapter = {
 
     const flat = target.replace(/\r?\n/g, ' ').replace(/\s{2,}/g, ' ').trim();
     return {
-      // Ctrl+U is returned as a separate preClear so RuntimeManager can write it
-      // first, sleep a settle gap, then write the bracketed paste.  Sending both
-      // in a single PTY write causes the Codex readline reset (which fires ~ms
-      // after the prompt appears) to eat the leading bytes of the paste.
-      preClear: '\x15',
-      paste: `\x1b[200~${flat}\x1b[201~`,
+      paste: flat,
       submit: '\r',
     };
   },

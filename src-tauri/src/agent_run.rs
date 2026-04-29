@@ -1492,6 +1492,20 @@ pub fn start_agent_run(
     Ok(running)
 }
 
+/// Write a combined prompt to the run's prompt file and return the path.
+/// Used by the Codex visible PTY exec path so the shell can pipe the file into `codex exec -`.
+#[tauri::command]
+pub fn write_prompt_temp_file(
+    app: AppHandle,
+    run_id: String,
+    prompt: String,
+    cwd: Option<String>,
+) -> Result<String, String> {
+    let (prompt_path, _, _, _) = run_paths(&app, &run_id, cwd.as_deref())?;
+    fs::write(&prompt_path, &prompt).map_err(|e| e.to_string())?;
+    Ok(prompt_path.to_string_lossy().to_string())
+}
+
 #[tauri::command]
 pub fn cancel_agent_run(
     app: AppHandle,

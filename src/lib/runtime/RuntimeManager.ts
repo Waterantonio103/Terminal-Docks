@@ -61,6 +61,12 @@ const PRE_CLEAR_SETTLE_MS = 300;
 const BOOTSTRAP_EVENT_TIMEOUT_MS = 8_000;
 const TASK_ACK_TIMEOUT_MS = 30_000;
 const BOOTSTRAP_INJECTION_TIMEOUT_MS = 10_000;
+const CODEX_IDLE_WAIT_MS = 1_000;
+const CODEX_IDLE_TIMEOUT_MS = 8_000;
+const CODEX_BOOTSTRAP_RETRY_DELAY_MS = 3_500;
+const CODEX_TASK_RETRY_DELAY_MS = 8_000;
+const CODEX_TYPE_CHUNK_SIZE = 48;
+const CODEX_TYPE_CHUNK_DELAY_MS = 20;
 
 // ──────────────────────────────────────────────
 // Listeners
@@ -696,7 +702,7 @@ class RuntimeManager {
     if (session.isHeadless) {
       await this.launchHeadless(session, activationPayload, signal, baseUrl);
     } else {
-      await this.injectInteractiveTask(session, signal);
+      await this.injectInteractiveTask(session, signal, false);
     }
 
     session.transitionTo('awaiting_ack');
@@ -1061,7 +1067,7 @@ class RuntimeManager {
 
     const isExecStdin = session.adapter.execMode === 'exec_stdin';
 
-    // 3. For interactive PTY: launch CLI in terminal (skip if already running, or exec_stdin)
+    // 3. For interactive PTY: launch CLI in terminal (skip if already running or exec_stdin).
     if (session.isTerminal && !isExecStdin) {
       session.transitionTo('awaiting_cli_ready');
       this.bindRuntimeToTerminalPane(session);
@@ -1122,10 +1128,7 @@ class RuntimeManager {
       status: 'registered',
     });
 
-    // 5. Inject bootstrap prompt
-    // exec_stdin path: build a combined bootstrap+task prompt and spawn `codex exec -`
-    // with the full text piped to stdin.  This avoids the interactive TUI readiness
-    // race entirely — no PTY write, no timing tricks needed.
+    // 5. Inject bootstrap prompt for combined-launch paths.
     if (isExecStdin) {
       session.transitionTo('bootstrap_injecting');
       try {
@@ -1155,13 +1158,14 @@ class RuntimeManager {
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         throw new Error(
-          `exec-stdin launch failed for CLI "${session.cliId}" on node "${session.nodeId}": ${msg}`,
+          `combined prompt launch failed for CLI "${session.cliId}" on node "${session.nodeId}": ${msg}`,
         );
       }
       session.transitionTo('bootstrap_sent');
     }
 
     // PTY path: inject bootstrap prompt into interactive terminal (explicit state)
+    let bootstrapPromptBody: string | null = null;
     if (session.isTerminal && !isExecStdin) {
       session.transitionTo('bootstrap_injecting');
 
@@ -1181,22 +1185,9 @@ class RuntimeManager {
 
       if (bootstrapPrompt) {
         try {
-          const promptBody = bootstrapPrompt.replace(/\r$/, '');
-          const { preClear, paste, submit } = session.adapter.buildActivationInput(promptBody);
-          const settleDelay = session.adapter.postReadySettleDelayMs ?? 0;
-
+          bootstrapPromptBody = bootstrapPrompt.replace(/\r$/, '');
           const injectResult = await Promise.race([
-            (async () => {
-              if (settleDelay > 0) await sleep(settleDelay);
-              if (preClear) {
-                await writeToTerminal(session.terminalId, preClear);
-                await sleep(PRE_CLEAR_SETTLE_MS);
-              }
-              await writeToTerminal(session.terminalId, paste);
-              await sleep(PASTE_SUBMIT_GAP_MS);
-              await writeToTerminal(session.terminalId, submit);
-              return true;
-            })(),
+            this.injectInteractivePrompt(session, bootstrapPromptBody, false).then(() => true),
             sleep(BOOTSTRAP_INJECTION_TIMEOUT_MS).then(() => false),
           ]);
 
@@ -1220,6 +1211,15 @@ class RuntimeManager {
     session.transitionTo('awaiting_mcp_ready');
 
     try {
+      if (session.cliId === 'codex' && session.isTerminal && bootstrapPromptBody) {
+        const bootstrapRace = await Promise.race([
+          mcpReadyPromise.then(() => 'ready' as const),
+          sleep(CODEX_BOOTSTRAP_RETRY_DELAY_MS).then(() => 'retry' as const),
+        ]);
+        if (bootstrapRace === 'retry') {
+          await this.injectInteractivePrompt(session, bootstrapPromptBody, true);
+        }
+      }
       await mcpReadyPromise;
     } catch {
       throw new Error(
@@ -1266,7 +1266,7 @@ class RuntimeManager {
       if (session.isHeadless) {
         await this.launchHeadless(session, activationPayload, signal, baseUrl);
       } else {
-        await this.injectInteractiveTask(session, signal);
+        await this.injectInteractiveTask(session, signal, false);
       }
     }
 
@@ -1274,7 +1274,7 @@ class RuntimeManager {
     session.transitionTo('awaiting_ack');
 
     try {
-      await this.waitForMcpState(
+      const ackPromise = this.waitForMcpState(
         session.sessionId,
         session.missionId,
         session.nodeId,
@@ -1283,6 +1283,16 @@ class RuntimeManager {
         new Set(['activation_acked', 'running', 'completed', 'done']),
         TASK_ACK_TIMEOUT_MS,
       );
+      if (session.cliId === 'codex' && session.isTerminal && !isExecStdin) {
+        const ackRace = await Promise.race([
+          ackPromise.then(() => 'acked' as const),
+          sleep(CODEX_TASK_RETRY_DELAY_MS).then(() => 'retry' as const),
+        ]);
+        if (ackRace === 'retry') {
+          await this.injectInteractiveTask(session, signal, true);
+        }
+      }
+      await ackPromise;
 
       session.transitionTo('running');
 
@@ -1336,23 +1346,14 @@ class RuntimeManager {
     await startHeadlessRun(request as import('./TerminalRuntime.js').HeadlessRunRequest);
   }
 
-  private async injectInteractiveTask(session: RuntimeSession, signal: string): Promise<void> {
+  private async injectInteractiveTask(session: RuntimeSession, signal: string, retry: boolean): Promise<void> {
     const terminalAlive = await isTerminalActive(session.terminalId);
     if (!terminalAlive) {
       throw new Error(`Terminal process for ${session.nodeId} has exited.`);
     }
 
     await sleep(CLI_STARTUP_WAIT_MS);
-
-    const adapter = session.adapter;
-    const { preClear, paste, submit } = adapter.buildActivationInput(signal);
-    if (preClear) {
-      await writeToTerminal(session.terminalId, preClear);
-      await sleep(PRE_CLEAR_SETTLE_MS);
-    }
-    await writeToTerminal(session.terminalId, paste);
-    await sleep(PASTE_SUBMIT_GAP_MS);
-    await writeToTerminal(session.terminalId, submit);
+    await this.injectInteractivePrompt(session, signal, retry);
 
     this.emit({
       type: 'task_injected',
@@ -1577,6 +1578,70 @@ class RuntimeManager {
     }
     console.warn(`[runtime] cli-ready timeout cli=${session.cliId} lastDetail="${lastDetail ?? 'none'}" timeoutMs=${timeoutMs}`);
     return false;
+  }
+
+  private async waitForTerminalOutputIdle(
+    terminalId: string,
+    idleMs: number,
+    timeoutMs: number,
+  ): Promise<boolean> {
+    const deadline = Date.now() + timeoutMs;
+    let lastOutput = '';
+    let lastChangeAt = Date.now();
+
+    while (Date.now() < deadline) {
+      const output = await getRecentTerminalOutput(terminalId, 12_288);
+      if (output !== lastOutput) {
+        lastOutput = output;
+        lastChangeAt = Date.now();
+      } else if (Date.now() - lastChangeAt >= idleMs) {
+        return true;
+      }
+      await sleep(150);
+    }
+    return false;
+  }
+
+  private async injectInteractivePrompt(
+    session: RuntimeSession,
+    signal: string,
+    retry: boolean,
+  ): Promise<void> {
+    const adapter = session.adapter;
+    const { preClear, paste, submit } = adapter.buildActivationInput(signal);
+
+    if (session.cliId === 'codex') {
+      await this.waitForTerminalOutputIdle(
+        session.terminalId,
+        CODEX_IDLE_WAIT_MS,
+        CODEX_IDLE_TIMEOUT_MS,
+      );
+      if (retry) {
+        await writeToTerminal(session.terminalId, '\x15');
+        await sleep(PRE_CLEAR_SETTLE_MS);
+      }
+      await this.writeTerminalLikeTyping(session.terminalId, paste);
+      await sleep(PASTE_SUBMIT_GAP_MS);
+      await writeToTerminal(session.terminalId, submit);
+      return;
+    }
+
+    if (preClear) {
+      await writeToTerminal(session.terminalId, preClear);
+      await sleep(PRE_CLEAR_SETTLE_MS);
+    }
+    await writeToTerminal(session.terminalId, paste);
+    await sleep(PASTE_SUBMIT_GAP_MS);
+    await writeToTerminal(session.terminalId, submit);
+  }
+
+  private async writeTerminalLikeTyping(terminalId: string, value: string): Promise<void> {
+    if (!value) return;
+    for (let index = 0; index < value.length; index += CODEX_TYPE_CHUNK_SIZE) {
+      const chunk = value.slice(index, index + CODEX_TYPE_CHUNK_SIZE);
+      await writeToTerminal(terminalId, chunk);
+      await sleep(CODEX_TYPE_CHUNK_DELAY_MS);
+    }
   }
 
   private hasDifferentLiveSessionOnTerminal(current: RuntimeSession): boolean {

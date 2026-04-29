@@ -222,6 +222,18 @@ export async function startHeadlessRun(request: HeadlessRunRequest): Promise<voi
   await invoke('start_agent_run', { payload: request });
 }
 
+/**
+ * Write prompt content to a temp file inside the run directory and return the file path.
+ * Used by the visible Codex PTY exec path to pipe the prompt file into `codex exec -`.
+ */
+export async function writePromptTempFile(
+  runId: string,
+  prompt: string,
+  cwd: string | null,
+): Promise<string> {
+  return await invoke<string>('write_prompt_temp_file', { runId, prompt, cwd });
+}
+
 // ──────────────────────────────────────────────
 // MCP Notifications
 // ──────────────────────────────────────────────

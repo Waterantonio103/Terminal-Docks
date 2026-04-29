@@ -52,6 +52,7 @@ pub fn run() {
             db::save_session_event,
             db::get_session_history,
             agent_run::start_agent_run,
+            agent_run::write_prompt_temp_file,
             agent_run::cancel_agent_run,
             agent_run::get_agent_run,
             agent_run::list_agent_runs,
