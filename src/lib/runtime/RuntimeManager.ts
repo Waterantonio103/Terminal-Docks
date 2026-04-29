@@ -54,6 +54,7 @@ import { emit } from '@tauri-apps/api/event';
 
 const CLI_LAUNCH_DELAY_MS = 500;
 const CLI_STARTUP_WAIT_MS = 2_000;
+const CLI_READY_WAIT_MS = 20_000;
 const PASTE_SUBMIT_GAP_MS = 150;
 const PRE_CLEAR_SETTLE_MS = 300;
 const BOOTSTRAP_EVENT_TIMEOUT_MS = 8_000;
@@ -951,16 +952,25 @@ class RuntimeManager {
       if (!terminalReady) {
         throw new Error(`Terminal ${session.terminalId} did not become active before CLI launch (state: awaiting_cli_ready, node: ${session.nodeId}).`);
       }
+      let launchedCli = false;
       if (await this.shouldLaunchCliInTerminal(session)) {
         await sleep(CLI_LAUNCH_DELAY_MS);
         const launchCmd = buildPtyLaunchCommand(session.cliId, { model: session.model, yolo: session.yolo });
         await writeToTerminal(session.terminalId, `${launchCmd}\r`);
         await sleep(CLI_STARTUP_WAIT_MS);
+        launchedCli = true;
         useWorkspaceStore.getState().updatePaneDataByTerminalId(session.terminalId, {
           cliSource: 'connect_agent',
           cli: session.cliId,
           model: session.model,
         });
+      }
+      const cliReady = await this.waitForCliReady(session, CLI_READY_WAIT_MS);
+      if (!cliReady) {
+        const reason = launchedCli
+          ? `CLI "${session.cliId}" did not report ready state within ${CLI_READY_WAIT_MS}ms after launch.`
+          : `CLI "${session.cliId}" is not ready and launch was skipped by gate logic.`;
+        throw new Error(reason);
       }
     }
 
@@ -1200,6 +1210,9 @@ class RuntimeManager {
       throw new Error(error ?? 'Headless execution is not configured for this node.');
     }
 
+    console.log(
+      `[RuntimeManager] startHeadlessRun: cli="${session.cliId}", command="${request.command}", args=${JSON.stringify(request.args)}, mode="${request.executionMode}"`,
+    );
     await startHeadlessRun(request as import('./TerminalRuntime.js').HeadlessRunRequest);
   }
 
@@ -1424,6 +1437,19 @@ class RuntimeManager {
       await sleep(100);
     }
     return true;
+  }
+
+  private async waitForCliReady(session: RuntimeSession, timeoutMs: number): Promise<boolean> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const output = await getRecentTerminalOutput(session.terminalId, 12_288);
+      if (output) {
+        const ready = session.adapter.detectReady(output);
+        if (ready.ready) return true;
+      }
+      await sleep(200);
+    }
+    return false;
   }
 
   private hasDifferentLiveSessionOnTerminal(current: RuntimeSession): boolean {

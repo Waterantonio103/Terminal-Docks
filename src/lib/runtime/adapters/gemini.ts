@@ -24,6 +24,7 @@ const GEMINI_INPUT_HINT_RE = /\b(type|enter|input|paste|write)\b.*\b(prompt|mess
 export const geminiAdapter: CliAdapter = {
   id: 'gemini',
   label: 'Gemini CLI',
+  postReadySettleDelayMs: 500,
 
   buildLaunchCommand(context: LaunchContext): LaunchCommand {
     const env: Record<string, string> = {
@@ -59,20 +60,17 @@ export const geminiAdapter: CliAdapter = {
   },
 
   detectReady(output: string): ReadyDetectionResult {
+    const tail = output.split('\n').slice(-3).join('\n');
+    if (SHELL_PROMPT_RE.test(tail) && !BANNER_RE.test(output)) {
+      return { ready: false, confidence: 'low', detail: 'Shell prompt only — Gemini not confirmed' };
+    }
+
     if (BANNER_RE.test(output)) {
       if (PROMPT_BAR_RE.test(output) || READY_KEYWORDS_RE.test(output) || GEMINI_INPUT_HINT_RE.test(output)) {
         return { ready: true, confidence: 'high', detail: 'Gemini banner and input prompt detected' };
       }
       // Banner alone is not enough, wait for prompt
       return { ready: false, confidence: 'low', detail: 'Gemini banner detected, waiting for prompt' };
-    }
-
-    if (PROMPT_BAR_RE.test(output) || READY_KEYWORDS_RE.test(output)) {
-      return { ready: true, confidence: 'medium', detail: 'Gemini prompt indicator detected' };
-    }
-
-    if (SHELL_PROMPT_RE.test(output)) {
-      return { ready: false, confidence: 'low', detail: 'Shell prompt visible — CLI may have exited' };
     }
 
     return { ready: false, confidence: 'low' };
@@ -153,10 +151,11 @@ export const geminiAdapter: CliAdapter = {
     return events;
   },
 
-  buildActivationInput(signal: string): { paste: string; submit: string } {
+  buildActivationInput(signal: string): { preClear?: string; paste: string; submit: string } {
     const flat = signal.replace(/\r?\n/g, ' ').replace(/\s{2,}/g, ' ').trim();
     return {
-      paste: `\x15\x1b[200~${flat}\x1b[201~`,
+      preClear: '\x15',
+      paste: `\x1b[200~${flat}\x1b[201~`,
       submit: '\r',
     };
   },

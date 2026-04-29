@@ -1024,28 +1024,81 @@ pub fn start_agent_run(
         return start_local_http_run(app, payload, record, stdout_path, stderr_path);
     }
 
-    let mut command_builder = Command::new(&command);
-    command_builder.args(&args);
-    command_builder
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    if payload.prompt_delivery == "stdin" {
-        command_builder.stdin(Stdio::piped());
-    }
-    if let Some(cwd) = payload
-        .cwd
-        .as_ref()
-        .filter(|value| !value.trim().is_empty())
-    {
-        command_builder.current_dir(cwd);
-    }
-    for (key, value) in &env {
-        command_builder.env(key, value);
-    }
+    let build_command = |cmd_name: &str| {
+        let mut command_builder = Command::new(cmd_name);
+        command_builder.args(&args);
+        command_builder
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        if payload.prompt_delivery == "stdin" {
+            command_builder.stdin(Stdio::piped());
+        }
+        if let Some(cwd) = payload
+            .cwd
+            .as_ref()
+            .filter(|value| !value.trim().is_empty())
+        {
+            command_builder.current_dir(cwd);
+        }
+        for (key, value) in &env {
+            command_builder.env(key, value);
+        }
+        command_builder
+    };
 
-    let mut child = match command_builder.spawn() {
+    let mut child = match build_command(&command).spawn() {
         Ok(child) => child,
         Err(error) => {
+            #[cfg(target_os = "windows")]
+            if error.kind() == std::io::ErrorKind::NotFound
+                && !command.to_ascii_lowercase().ends_with(".cmd")
+            {
+                let cmd_fallback = format!("{}.cmd", command);
+                if let Ok(child) = build_command(&cmd_fallback).spawn() {
+                    child
+                } else {
+                    let message = format!(
+                        "CLI launch failed: program not found. Make sure '{}' is installed and available in your PATH.",
+                        command
+                    );
+                    update_run_status(
+                        &app,
+                        &payload.run_id,
+                        "failed",
+                        None,
+                        Some(&message),
+                        false,
+                        true,
+                    )
+                    .ok();
+                    emit_status(
+                        &app,
+                        &payload.run_id,
+                        &payload.mission_id,
+                        &payload.node_id,
+                        "failed",
+                        Some(message.clone()),
+                    );
+                    emit_output(
+                        &app,
+                        &payload.run_id,
+                        &payload.mission_id,
+                        &payload.node_id,
+                        "stderr",
+                        message.clone(),
+                    );
+                    emit_exit(
+                        &app,
+                        &payload.run_id,
+                        &payload.mission_id,
+                        &payload.node_id,
+                        "failed",
+                        None,
+                        Some(message.clone()),
+                    );
+                    return Err(message);
+                }
+            } else {
             let message = if error.kind() == std::io::ErrorKind::NotFound {
                 format!(
                     "CLI launch failed: program not found. Make sure '{}' is installed and available in your PATH.",
@@ -1090,6 +1143,7 @@ pub fn start_agent_run(
                 Some(message.clone()),
             );
             return Err(message);
+            }
         }
     };
 
