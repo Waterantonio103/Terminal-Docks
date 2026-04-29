@@ -397,6 +397,8 @@ export function buildTaskDetails(missionId, nodeId) {
       : null;
     return {
       missionId,
+      nodeId,
+      goal: '',
       graphId: null,
       missionStatus: 'active',
       authoringMode: 'adhoc',
@@ -429,6 +431,8 @@ export function buildTaskDetails(missionId, nodeId) {
       inbox: [],
       pendingPushes: [],
       upstreamContext: {},
+      workspaceDir: null,
+      assignment: null,
     };
   }
 
@@ -467,11 +471,13 @@ export function buildTaskDetails(missionId, nodeId) {
 
   return {
     missionId,
+    nodeId,
     graphId: record.graphId,
     missionStatus: record.status,
     authoringMode: record.mission.metadata?.authoringMode ?? null,
     presetId: record.mission.metadata?.presetId ?? null,
     runVersion: Number.isInteger(record.mission.metadata?.runVersion) ? record.mission.metadata.runVersion : 1,
+    goal: record.mission.task?.prompt ?? '',
     objective: record.mission.task?.prompt ?? '',
     task: record.mission.task ?? null,
     node: {
@@ -501,6 +507,18 @@ export function buildTaskDetails(missionId, nodeId) {
     inbox,
     pendingPushes,
     upstreamContext,
+    workspaceDir: record.mission.task?.workspaceDir ?? null,
+    assignment: {
+      missionId,
+      nodeId,
+      roleId: node.roleId,
+      instructionOverride: node.instructionOverride ?? '',
+      goal: record.mission.task?.prompt ?? '',
+      workspaceDir: record.mission.task?.workspaceDir ?? null,
+      terminalId: node.terminal?.terminalId ?? runtimeSession?.terminal_id ?? null,
+      modelId: node.terminal?.model ?? null,
+      yolo: Boolean(node.terminal?.yolo),
+    },
   };
 }
 
@@ -876,6 +894,105 @@ export function ackTaskPush({ sessionId, missionId, nodeId, taskSeq }) {
   return info.changes > 0;
 }
 
+function listTransportSessionsByTerminal(terminalId, cli = null) {
+  if (typeof terminalId !== 'string' || !terminalId.trim()) return [];
+  return Object.entries(sessions)
+    .filter(([, session]) =>
+      session &&
+      session.transport &&
+      session.terminalId === terminalId &&
+      (cli ? session.cli === cli : true)
+    )
+    .map(([sessionId, session]) => ({ sessionId, session }));
+}
+
+function bindTransportSessionToRuntime({
+  transportSessionId,
+  runtimeSessionId,
+  missionId,
+  nodeId,
+  attempt,
+  terminalId = null,
+  cli = null,
+}) {
+  if (typeof transportSessionId !== 'string' || !transportSessionId.trim()) return false;
+  if (typeof runtimeSessionId !== 'string' || !runtimeSessionId.trim()) return false;
+  sessions[transportSessionId] = sessions[transportSessionId] ?? {};
+  sessions[transportSessionId].boundRuntimeSessionId = runtimeSessionId;
+  sessions[transportSessionId].missionId = missionId;
+  sessions[transportSessionId].nodeId = nodeId;
+  sessions[transportSessionId].attempt = attempt;
+  if (terminalId) sessions[transportSessionId].terminalId = terminalId;
+  if (cli) sessions[transportSessionId].cli = cli;
+  sessions[transportSessionId].updatedAt = Date.now();
+  return true;
+}
+
+function resolveBoundRuntimeSession({ transportSessionId, explicitSessionId = null }) {
+  const candidate = typeof explicitSessionId === 'string' && explicitSessionId.trim()
+    ? explicitSessionId.trim()
+    : (
+        sessions[transportSessionId]?.boundRuntimeSessionId ??
+        (db.prepare('SELECT session_id FROM agent_runtime_sessions WHERE session_id = ? LIMIT 1').get(transportSessionId)?.session_id ?? null)
+      );
+
+  if (!candidate) {
+    return { error: 'No current runtime session is bound. Use get_task_details({ missionId, nodeId }) instead.' };
+  }
+
+  const row = db.prepare(
+    `SELECT session_id, agent_id, mission_id, node_id, attempt, terminal_id, status,
+            datetime(created_at, 'localtime') AS created_at,
+            datetime(updated_at, 'localtime') AS updated_at
+       FROM agent_runtime_sessions
+      WHERE session_id = ?
+      ORDER BY updated_at DESC
+      LIMIT 1`
+  ).get(candidate);
+
+  if (!row) {
+    return { error: `Runtime session ${candidate} is not registered. Use get_task_details({ missionId, nodeId }) instead.` };
+  }
+
+  return { row };
+}
+
+function ackAndEmitTaskFetch(details, callerSessionId) {
+  if (!details) return;
+  const targetSid = details.runtimeSession?.sessionId ?? callerSessionId ?? null;
+  const currentAttempt = Number(details.node?.attempt ?? 0);
+  if (!targetSid || !Number.isInteger(currentAttempt) || currentAttempt < 1) return;
+
+  ackTaskPush({
+    sessionId: targetSid,
+    missionId: details.missionId,
+    nodeId: details.nodeId ?? details.node?.id,
+    taskSeq: currentAttempt,
+  });
+
+  emitAgentEvent({
+    type: 'activation:acked',
+    sessionId: targetSid,
+    missionId: details.missionId,
+    nodeId: details.nodeId ?? details.node?.id,
+    attempt: currentAttempt,
+    taskSeq: currentAttempt,
+    at: Date.now(),
+  });
+
+  if (callerSessionId && callerSessionId !== targetSid) {
+    emitAgentEvent({
+      type: 'activation:acked',
+      sessionId: callerSessionId,
+      missionId: details.missionId,
+      nodeId: details.nodeId ?? details.node?.id,
+      attempt: currentAttempt,
+      taskSeq: currentAttempt,
+      at: Date.now(),
+    });
+  }
+}
+
 export function resetStarlinkState() {
   db.exec(`
     DELETE FROM tasks;
@@ -959,16 +1076,16 @@ export function getBroadcastHistory() {
 }
 
 export function executeConnectAgent(
-  { role, agentId, terminalId, cli, profileId, capabilities, workingDir },
+  { role, agentId, terminalId, cli, profileId, capabilities, workingDir, sessionId: runtimeSessionId = null, missionId: runtimeMissionId = null, nodeId: runtimeNodeId = null, attempt: runtimeAttempt = null },
   sessionId = 'unknown',
   options = {},
 ) {
   const {
     silent = false,
     source = 'connect',
-    missionId = null,
-    nodeId = null,
-    attempt = null,
+    missionId = runtimeMissionId,
+    nodeId = runtimeNodeId,
+    attempt = runtimeAttempt,
     activationId = null,
     runId = null,
   } = options;
@@ -993,6 +1110,37 @@ export function executeConnectAgent(
   sessions[sid].workingDir = typeof workingDir === 'string' && workingDir.trim() ? workingDir.trim() : (sessions[sid].workingDir ?? null);
   sessions[sid].connectedAt = sessions[sid].connectedAt ?? Date.now();
   sessions[sid].updatedAt = Date.now();
+  if (runtimeSessionId && missionId && nodeId && Number.isInteger(attempt) && attempt > 0) {
+    bindTransportSessionToRuntime({
+      transportSessionId: sid,
+      runtimeSessionId,
+      missionId,
+      nodeId,
+      attempt,
+      terminalId: terminalId ?? null,
+      cli: cli ?? null,
+    });
+  } else if (terminalId) {
+    const runtimeCandidates = db.prepare(
+      `SELECT session_id, mission_id, node_id, attempt, terminal_id
+         FROM agent_runtime_sessions
+        WHERE terminal_id = ? AND status IN ('adapter_starting', 'activation_pending', 'registered', 'activated', 'running')
+        ORDER BY updated_at DESC
+        LIMIT 2`
+    ).all(terminalId);
+    if (runtimeCandidates.length === 1) {
+      const candidate = runtimeCandidates[0];
+      bindTransportSessionToRuntime({
+        transportSessionId: sid,
+        runtimeSessionId: candidate.session_id,
+        missionId: candidate.mission_id,
+        nodeId: candidate.node_id,
+        attempt: candidate.attempt,
+        terminalId: candidate.terminal_id,
+        cli: cli ?? null,
+      });
+    }
+  }
 
   const message = `Role: ${role}. Agent "${agentId}" is online and ready. (Session: ${sid})`;
 
@@ -1007,6 +1155,7 @@ export function executeConnectAgent(
     missionId,
     nodeId,
     attempt,
+    runtimeSessionId,
     activationId,
     runId,
   }));
@@ -1205,6 +1354,19 @@ export function executeRuntimeBootstrapRegistration({
         SET status = 'registered', updated_at = CURRENT_TIMESTAMP
       WHERE session_id = ?`
   ).run(sessionId);
+
+  const transportCandidates = listTransportSessionsByTerminal(terminalId, cli);
+  if (transportCandidates.length === 1) {
+    bindTransportSessionToRuntime({
+      transportSessionId: transportCandidates[0].sessionId,
+      runtimeSessionId: sessionId,
+      missionId,
+      nodeId,
+      attempt,
+      terminalId,
+      cli,
+    });
+  }
 
   return {
     ok: true,
@@ -1462,7 +1624,11 @@ function persistGraphHandoff({
     }), 'task_update');
   }
 
-  return { taskId, eventBody };
+  return makeToolText(
+    taskId !== null
+      ? `Task ${taskId} created\n${JSON.stringify(eventBody, null, 2)}`
+      : JSON.stringify(eventBody, null, 2),
+  );
 }
 
 export function executeHandoffTask(
@@ -1483,6 +1649,23 @@ export function executeHandoffTask(
     finalOutcome: normalizedOutcome,
   });
   const payloadStr = JSON.stringify(structuredCompletion);
+
+  if (missionId && fromNodeId && targetNodeId) {
+    const validation = validateGraphHandoff({
+      missionId,
+      fromNodeId,
+      targetNodeId,
+      outcome: normalizedOutcome,
+      fromRole,
+      targetRole,
+      fromAttempt,
+    });
+    if (validation.error) {
+      return makeToolText(validation.error, true);
+    }
+    fromRole = String(validation.fromNode.roleId).trim().toLowerCase();
+    targetRole = String(validation.targetNode.roleId).trim().toLowerCase();
+  }
 
   let taskId = null;
   if (targetRole && targetRole !== 'done') {
@@ -1565,7 +1748,11 @@ export function executeHandoffTask(
     }
   }
 
-  return { taskId, eventBody };
+  return makeToolText(
+    taskId !== null
+      ? `Task ${taskId} created\n${JSON.stringify(eventBody, null, 2)}`
+      : JSON.stringify(eventBody, null, 2),
+  );
 }
 
 
@@ -2193,40 +2380,51 @@ function createMcpServer(getSessionId) {
         content: [{ type: 'text', text: `Mission ${missionId} or node ${nodeId} could not be found. Confirm the NEW_TASK payload and active mission.` }]
       };
     }
-    
-    const sid = getSessionId();
-    if (sid) {
-      const targetSid = details.runtimeSession?.sessionId ?? sid;
-      const currentAttempt = Number(details.node?.attempt ?? 0);
-      if (details.runtimeSession?.sessionId && Number.isInteger(currentAttempt) && currentAttempt > 0) {
-        ackTaskPush({
-          sessionId: details.runtimeSession.sessionId,
-          missionId,
-          nodeId,
-          taskSeq: currentAttempt,
-        });
-      }
-      emitAgentEvent({ 
-        type: 'activation:acked', 
-        sessionId: targetSid, 
-        missionId, 
-        nodeId, 
-        attempt: currentAttempt,
-        taskSeq: currentAttempt,
-      });
-      
-      // Also emit for the SSE session itself just in case
-      if (targetSid !== sid) {
-        emitAgentEvent({ 
-          type: 'activation:acked', 
-          sessionId: sid, 
-          missionId, 
-          nodeId, 
-          attempt: currentAttempt,
-          taskSeq: currentAttempt,
-        });
-      }
+    ackAndEmitTaskFetch(details, getSessionId());
+
+    return { content: [{ type: 'text', text: JSON.stringify(details, null, 2) }] };
+  });
+
+  server.registerTool('get_current_task', {
+    title: 'Get Current Task',
+    description: 'Resolve the current runtime session bound to this MCP connection and return the canonical task payload for it. Prefer this in persistent Codex runtimes.',
+    inputSchema: {
+      sessionId: z.string().optional().describe('Optional explicit runtime session ID fallback when transport binding is unavailable.'),
     }
+  }, async ({ sessionId } = {}) => {
+    const callerSessionId = getSessionId() ?? 'unknown';
+    const resolved = resolveBoundRuntimeSession({
+      transportSessionId: callerSessionId,
+      explicitSessionId: sessionId ?? null,
+    });
+
+    if (resolved.error) {
+      return {
+        isError: true,
+        content: [{ type: 'text', text: resolved.error }],
+      };
+    }
+
+    const details = buildTaskDetails(resolved.row.mission_id, resolved.row.node_id);
+    if (!details) {
+      return {
+        isError: true,
+        content: [{ type: 'text', text: `Mission ${resolved.row.mission_id} or node ${resolved.row.node_id} could not be found.` }],
+      };
+    }
+
+    details.runtimeSession = {
+      sessionId: resolved.row.session_id,
+      agentId: resolved.row.agent_id,
+      terminalId: resolved.row.terminal_id,
+      status: resolved.row.status,
+      createdAt: resolved.row.created_at,
+      updatedAt: resolved.row.updated_at,
+    };
+    details.sessionId = resolved.row.session_id;
+    details.attempt = resolved.row.attempt;
+
+    ackAndEmitTaskFetch(details, callerSessionId);
 
     return { content: [{ type: 'text', text: JSON.stringify(details, null, 2) }] };
   });
@@ -2746,7 +2944,7 @@ function createMcpServer(getSessionId) {
   // ── Session / messaging ────────────────────────────────────────────────────
   server.registerTool('connect_agent', {
     title: 'Connect Agent',
-    description: 'Legacy metadata tool. Announces presence to other sessions. Graph-mode activation no longer depends on this call.',
+    description: 'Connect the current MCP transport session to Terminal Docks metadata. When sessionId/missionId/nodeId/attempt are supplied, this also binds the transport to the active runtime session for get_current_task().',
     inputSchema: {
       role: z.string().describe('Your assigned role (e.g. Coordinator, Scout, Builder, Reviewer)'),
       agentId: z.string().describe('A friendly name for your agent instance'),
@@ -2762,9 +2960,13 @@ function createMcpServer(getSessionId) {
         }),
       ])).optional().describe('Optional explicit capability set for this worker session'),
       workingDir: z.string().optional().describe('Optional default working directory for assignment affinity'),
+      sessionId: z.string().optional().describe('Optional Terminal Docks runtime session ID to bind to this MCP transport.'),
+      missionId: z.string().optional().describe('Optional active mission ID for runtime binding.'),
+      nodeId: z.string().optional().describe('Optional active node ID for runtime binding.'),
+      attempt: z.number().int().positive().optional().describe('Optional active attempt number for runtime binding.'),
     }
-  }, async ({ role, agentId, terminalId, cli, profileId, capabilities, workingDir }) =>
-    executeConnectAgent({ role, agentId, terminalId, cli, profileId, capabilities, workingDir }, getSessionId() ?? 'unknown')
+  }, async ({ role, agentId, terminalId, cli, profileId, capabilities, workingDir, sessionId, missionId, nodeId, attempt }) =>
+    executeConnectAgent({ role, agentId, terminalId, cli, profileId, capabilities, workingDir, sessionId, missionId, nodeId, attempt }, getSessionId() ?? 'unknown')
   );
 
   server.registerTool('register_worker_capabilities', {

@@ -1,5 +1,9 @@
 import assert from 'node:assert/strict';
-import { buildCliRunCommand } from '../.tmp-tests/lib/cliCommandBuilders.js';
+import {
+  buildCliRunCommand,
+  buildCodexFollowupTaskSignal,
+  buildCodexInteractiveLaunchCommand,
+} from '../.tmp-tests/lib/cliCommandBuilders.js';
 import { buildStartAgentRunRequest } from '../.tmp-tests/lib/runtimeDispatcher.js';
 
 function payload(overrides = {}) {
@@ -86,6 +90,29 @@ run('codex selected model is placed before exec', () => {
   assert.equal(command.command, 'codex');
   assert.deepEqual(command.args.slice(0, 4), ['--model', 'gpt-5.3-codex', '--ask-for-approval', 'never']);
   assert.ok(command.args.indexOf('--model') < command.args.indexOf('exec'));
+});
+
+run('codex interactive launch flattens the bootstrap prompt before shell quoting', () => {
+  const command = buildCodexInteractiveLaunchCommand({
+    modelId: 'gpt-5.4-mini',
+    yolo: false,
+    bootstrapPrompt: 'You are a Terminal-Docks Codex runtime.\nA workflow task is ready for you.',
+  });
+
+  assert.equal(command.startsWith('codex --model gpt-5.4-mini --ask-for-approval never --sandbox workspace-write '), true);
+  assert.equal(command.includes('\n'), false);
+  assert.equal(command.includes('You are a Terminal-Docks Codex runtime. A workflow task is ready for you.'), true);
+});
+
+run('codex follow-up task signal is tiny and session-aware', () => {
+  assert.equal(
+    buildCodexFollowupTaskSignal(),
+    'NEW_TASK. call get_current_task(), execute it, then complete_task().',
+  );
+  assert.equal(
+    buildCodexFollowupTaskSignal({ sessionId: 'session-123' }),
+    'NEW_TASK. call get_current_task({ sessionId: "session-123" }), execute it, then complete_task().',
+  );
 });
 
 run('local HTTP runtimes share the headless adapter request path', () => {

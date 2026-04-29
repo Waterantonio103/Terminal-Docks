@@ -156,48 +156,63 @@ export function materializePromptArgs(command: CliRunCommand, prompt: string): C
 
 export type ShellKind = 'windows' | 'powershell' | 'cmd' | 'unix';
 
-/**
- * Build a shell command that pipes a prompt file into `codex exec -` via the visible PTY.
- * Global flags (--model, --ask-for-approval, YOLO) must appear BEFORE `exec`.
- */
-export function buildCodexVisibleExecCommand({
-  promptPath,
-  model,
+function quoteShellArgument(value: string, shellKind: ShellKind): string {
+  if (shellKind === 'powershell') {
+    return `'${value.replace(/'/g, "''")}'`;
+  }
+  if (shellKind === 'cmd' || shellKind === 'windows') {
+    return `"${value.replace(/(["^])/g, '^$1')}"`;
+  }
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+export function buildCodexInteractiveLaunchCommand({
+  modelId,
   yolo,
+  bootstrapPrompt,
   shellKind = 'windows',
 }: {
-  promptPath: string;
-  model?: string | null;
+  modelId?: string | null;
   yolo?: boolean;
+  bootstrapPrompt: string;
   shellKind?: ShellKind;
 }): string {
-  const codexParts: string[] = ['codex'];
-  if (model?.trim()) codexParts.push('--model', model.trim());
+  const normalizedPrompt = bootstrapPrompt.replace(/\s+/g, ' ').trim();
+  const parts: string[] = ['codex'];
+  if (modelId?.trim()) parts.push('--model', modelId.trim());
   if (yolo) {
-    codexParts.push('--dangerously-bypass-approvals-and-sandbox');
+    parts.push('--dangerously-bypass-approvals-and-sandbox');
   } else {
-    codexParts.push('--ask-for-approval', 'never', '--sandbox', 'workspace-write');
+    parts.push('--ask-for-approval', 'never', '--sandbox', 'workspace-write');
   }
-  codexParts.push('exec', '--json', '--skip-git-repo-check', '-');
-  const codexCmd = codexParts.join(' ');
+  parts.push(quoteShellArgument(normalizedPrompt, shellKind));
+  return parts.join(' ');
+}
 
-  if (shellKind === 'windows') {
-    const cmdPath = promptPath.replace(/"/g, '');
-    const inner = `type "${cmdPath}" | ${codexCmd}`;
-    return `cmd /d /s /c "${inner}"`;
+export function buildCodexInteractiveLaunchArgs({
+  modelId,
+  yolo,
+  bootstrapPrompt,
+}: {
+  modelId?: string | null;
+  yolo?: boolean;
+  bootstrapPrompt: string;
+}): string[] {
+  return [
+    ...(modelId?.trim() ? ['--model', modelId.trim()] : []),
+    ...(yolo
+      ? ['--dangerously-bypass-approvals-and-sandbox']
+      : ['--ask-for-approval', 'never', '--sandbox', 'workspace-write']),
+    bootstrapPrompt,
+  ];
+}
+
+export function buildCodexFollowupTaskSignal({ sessionId }: { sessionId?: string | null } = {}): string {
+  if (sessionId?.trim()) {
+    const escaped = sessionId.trim().replace(/"/g, '\\"');
+    return `NEW_TASK. call get_current_task({ sessionId: "${escaped}" }), execute it, then complete_task().`;
   }
-  if (shellKind === 'powershell') {
-    // Single-quoted path: backslashes are literal in PowerShell single-quoted strings
-    const psPath = promptPath.replace(/'/g, "''");
-    return `Get-Content -Raw '${psPath}' | ${codexCmd}`;
-  }
-  if (shellKind === 'cmd') {
-    const cmdPath = promptPath.replace(/"/g, '');
-    return `type "${cmdPath}" | ${codexCmd}`;
-  }
-  // Unix bash/zsh
-  const unixPath = promptPath.replace(/'/g, "'\\''");
-  return `cat '${unixPath}' | ${codexCmd}`;
+  return 'NEW_TASK. call get_current_task(), execute it, then complete_task().';
 }
 
 export function buildPtyLaunchCommand(cliId: string, options: { model?: string | null; yolo?: boolean }): string {

@@ -89,7 +89,7 @@ export const codexAdapter: CliAdapter = {
   },
 
   buildInitialPrompt(context: TaskContext): string {
-    return `### MISSION_CONTROL_ACTIVATION_REQUEST ### You have been assigned a new task. Please call 'get_task_details({ missionId: "${context.missionId}", nodeId: "${context.nodeId}" })' to retrieve your full context. --- ENVELOPE --- ${context.payloadJson} --- END ENVELOPE --- `;
+    return `NEW_TASK. call get_current_task({ sessionId: "${context.sessionId}" }), execute it, then complete_task().`;
   },
 
   detectPermissionRequest(output: string): PermissionDetectionResult | null {
@@ -166,26 +166,10 @@ export const codexAdapter: CliAdapter = {
   buildActivationInput(signal: string): { preClear?: string; paste: string; submit: string } {
     let target = signal;
 
-    // Sniff for the large NEW_TASK activation request and shorten it.
     if (signal.includes('### MISSION_CONTROL_ACTIVATION_REQUEST ###')) {
-      const missionIdMatch = signal.match(/missionId: "([^"]+)"/);
-      const nodeIdMatch = signal.match(/nodeId: "([^"]+)"/);
-      if (missionIdMatch && nodeIdMatch) {
-        target = `### MISSION_CONTROL_ACTIVATION_REQUEST ### Please call 'get_task_details({ missionId: "${missionIdMatch[1]}", nodeId: "${nodeIdMatch[1]}" })'`;
-      }
-    } 
-    // Sniff for the large bootstrap prompt and shorten it.
-    else if (signal.includes('Connect to MCP before task activation.')) {
-      const mcpUrlMatch = signal.match(/MCP URL: (https?:\/\/[^\s]+)\./);
-      const roleMatch = signal.match(/role="([^"]+)"/);
-      const agentIdMatch = signal.match(/agentId="([^"]+)"/);
-      const terminalIdMatch = signal.match(/terminalId="([^"]+)"/);
-      const missionIdMatch = signal.match(/missionId: "([^"]+)"/);
-      const nodeIdMatch = signal.match(/nodeId: "([^"]+)"/);
-      const attemptMatch = signal.match(/attempt=(\d+)/);
-
-      if (mcpUrlMatch && roleMatch && agentIdMatch && terminalIdMatch && missionIdMatch && nodeIdMatch && attemptMatch) {
-        target = `Connect to MCP: ${mcpUrlMatch[1]}. Call connect_agent(role="${roleMatch[1]}", agentId="${agentIdMatch[1]}", terminalId="${terminalIdMatch[1]}", missionId="${missionIdMatch[1]}", nodeId="${nodeIdMatch[1]}", attempt=${attemptMatch[1]}). Then wait for NEW_TASK and run get_task_details.`;
+      const sessionIdMatch = signal.match(/sessionId:\s*"([^"]+)"/);
+      if (sessionIdMatch) {
+        target = `NEW_TASK. call get_current_task({ sessionId: "${sessionIdMatch[1]}" }), execute it, then complete_task().`;
       }
     }
 

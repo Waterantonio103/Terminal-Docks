@@ -1492,8 +1492,7 @@ pub fn start_agent_run(
     Ok(running)
 }
 
-/// Write a combined prompt to the run's prompt file and return the path.
-/// Used by the Codex visible PTY exec path so the shell can pipe the file into `codex exec -`.
+/// Write prompt content to the run's prompt file and return the path.
 #[tauri::command]
 pub fn write_prompt_temp_file(
     app: AppHandle,

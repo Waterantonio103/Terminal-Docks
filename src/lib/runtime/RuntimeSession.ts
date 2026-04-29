@@ -47,6 +47,7 @@ export class RuntimeSession {
   private _disconnectedAt?: number;
   private _lastError?: string;
   private _activePermission?: RuntimePermissionRequest;
+  private _completedTaskCount = 0;
 
   private stateListeners = new Set<(from: RuntimeSessionState, to: RuntimeSessionState) => void>();
 
@@ -113,6 +114,10 @@ export class RuntimeSession {
     return this._activePermission;
   }
 
+  get completedTaskCount(): number {
+    return this._completedTaskCount;
+  }
+
   get isHeadless(): boolean {
     return this.executionMode === 'headless' || this.executionMode === 'streaming_headless';
   }
@@ -169,6 +174,10 @@ export class RuntimeSession {
 
   markCompleted(): void {
     this.transitionTo('completed');
+  }
+
+  markTaskCompletedForReuse(): void {
+    this._completedTaskCount += 1;
   }
 
   markCancelled(reason: string): void {

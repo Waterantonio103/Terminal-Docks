@@ -29,11 +29,13 @@ import { getCliAdapter } from './adapters/index.js';
 
 import {
   checkMcpHealth,
+  destroyTerminal,
   getMcpBaseUrl,
   getRecentTerminalOutput,
   registerMcpSession,
   registerActivationDispatch,
   acknowledgeActivation,
+  spawnTerminal,
   startHeadlessRun,
   writeToTerminal,
   isTerminalActive,
@@ -42,7 +44,11 @@ import {
 } from './TerminalRuntime.js';
 import { buildNewTaskSignal } from '../missionRuntime.js';
 import { buildStartAgentRunRequest } from '../runtimeDispatcher.js';
-import { buildPtyLaunchCommand } from '../cliCommandBuilders.js';
+import {
+  buildCodexFollowupTaskSignal,
+  buildCodexInteractiveLaunchArgs,
+  buildPtyLaunchCommand,
+} from '../cliCommandBuilders.js';
 import { getRuntimeBootstrapContract, buildRuntimeBootstrapRegistrationRequest } from '../runtimeBootstrap.js';
 import { mcpBus } from '../workers/mcpEventBus.js';
 import { detectCliFromTerminalOutput } from '../cliDetection.js';
@@ -509,13 +515,16 @@ class RuntimeManager {
       };
     }
 
-    // A running or permission-blocked session means the agent is still active from a
-    // previous run that was not properly cleaned up. Stop and recreate instead of
-    // re-injecting into a session whose MCP connection may be gone.
-    if (session.state === 'running' || session.state === 'awaiting_permission') {
+    if (session.state === 'awaiting_permission') {
       return {
         status: 'wrong_state',
-        details: `Session is in active state "${session.state}" and was not cleaned up after the previous run.`,
+        details: `Session is blocked on a permission prompt.`,
+      };
+    }
+    if (session.state === 'running' && session.cliId !== 'codex') {
+      return {
+        status: 'wrong_state',
+        details: `Session is still marked running for CLI "${session.cliId}".`,
       };
     }
 
@@ -597,40 +606,40 @@ class RuntimeManager {
    * If not, it stops the old session and creates/launches a new one.
    */
   async ensureRuntimeReadyForTask(args: CreateRuntimeArgs): Promise<RuntimeSession> {
-    const existing = this.getSessionForNode(args.missionId, args.nodeId, args.attempt);
+    const expectedReuse: RuntimeReuseExpectation = {
+      cliId: args.cliId,
+      model: args.modelId ?? args.model ?? null,
+      yolo: args.yolo,
+      executionMode: args.executionMode,
+      workspaceDir: args.workspaceDir ?? null,
+    };
+
+    const existing = this.findReusableSessionCandidate(args);
     if (existing) {
-      const validation = await this.validateSessionForReuse(existing.sessionId, {
-        cliId: args.cliId,
-        model: args.modelId ?? args.model ?? null,
-        yolo: args.yolo,
-        executionMode: args.executionMode,
-        workspaceDir: args.workspaceDir ?? null,
-      });
+      const validation = await this.validateSessionForReuse(existing.sessionId, expectedReuse);
       if (validation.status === 'reusable') {
         console.log(
-          `[runtime] reuse accepted cli=${existing.cliId} model=${normalizeModelForReuse(existing.model) ?? '<default>'} yolo=${existing.yolo} session=${existing.sessionId}`,
+          `[codex] reusable runtime found; sending follow-up get_current_task signal session=${existing.sessionId} terminal=${existing.terminalId}`,
         );
-        await this.reinjectTask(existing.sessionId);
-        return existing;
+        this.retireSession(existing);
+        const reused = await this.createRuntimeForNode(args);
+        this.wirePtyEvents(args.terminalId, reused.sessionId);
+        await this.launchCli(reused.sessionId, args.activationPayload);
+        return reused;
       }
 
       if (validation.status === 'model_mismatch') {
-        console.warn(
-          `[runtime] reuse rejected reason=model_mismatch old=${normalizeModelForReuse(existing.model) ?? '<default>'} new=${normalizeModelForReuse(args.modelId ?? args.model) ?? '<default>'}`,
-        );
+        console.warn(`[codex] not reusable reason=model_mismatch; relaunching`);
       } else if (validation.status === 'yolo_mismatch') {
-        console.warn(
-          `[runtime] reuse rejected reason=yolo_mismatch old=${existing.yolo} new=${Boolean(args.yolo)}`,
-        );
-      } else if (validation.status === 'cli_mismatch') {
-        console.warn(`[runtime] reuse rejected reason=cli_mismatch old=${existing.cliId} new=${args.cliId}`);
+        console.warn(`[codex] not reusable reason=yolo_mismatch; relaunching`);
+      } else if (validation.status === 'workspace_mismatch') {
+        console.warn(`[codex] not reusable reason=workspace_mismatch; relaunching`);
+      } else if (validation.status === 'stale') {
+        console.warn(`[codex] not reusable reason=terminal_dead; relaunching`);
       } else {
-        console.warn(`[runtime] reuse rejected reason=${validation.status} details=${validation.details}`);
+        console.warn(`[codex] not reusable reason=${validation.status}; relaunching`);
       }
 
-      console.warn(
-        `[RuntimeManager] Existing session ${existing.sessionId} not reusable (${validation.status}: ${validation.details}), stopping and recreating.`
-      );
       try {
         await this.stopRuntime({
           sessionId: existing.sessionId,
@@ -676,26 +685,27 @@ class RuntimeManager {
 
     const activationPayload = this.buildActivationPayload(session);
     const baseUrl = await getMcpBaseUrl();
-
-    const signal = buildNewTaskSignal({
-      missionId: session.missionId,
-      nodeId: session.nodeId,
-      roleId: session.role,
-      sessionId: session.sessionId,
-      agentId: session.agentId,
-      terminalId: session.terminalId,
-      activatedAt: Date.now(),
-      attempt: session.attempt,
-      payload: activationPayload.inputPayload ?? null,
-      runId: activationPayload.runId,
-      cliType: session.cliId,
-      modelId: session.model || null,
-      yolo: session.yolo,
-      executionMode: session.executionMode,
-      goal: activationPayload.goal,
-      workspaceDir: session.workspaceDir,
-      assignment: activationPayload.assignment,
-    }, baseUrl);
+    const signal = session.cliId === 'codex'
+      ? buildCodexFollowupTaskSignal()
+      : buildNewTaskSignal({
+          missionId: session.missionId,
+          nodeId: session.nodeId,
+          roleId: session.role,
+          sessionId: session.sessionId,
+          agentId: session.agentId,
+          terminalId: session.terminalId,
+          activatedAt: Date.now(),
+          attempt: session.attempt,
+          payload: null,
+          runId: `run-${session.sessionId}`,
+          cliType: session.cliId,
+          modelId: session.model || null,
+          yolo: session.yolo,
+          executionMode: session.executionMode,
+          goal: session.goal,
+          workspaceDir: session.workspaceDir,
+          assignment: activationPayload.assignment,
+        }, baseUrl);
 
     session.transitionTo('injecting_task');
 
@@ -830,14 +840,20 @@ class RuntimeManager {
         const outcome = (event.outcome === 'success' || event.outcome === 'failure')
           ? (event.outcome as 'success' | 'failure')
           : 'success';
-        session.markCompleted();
+        if (session.cliId !== 'codex') {
+          session.markCompleted();
+        } else {
+          session.markTaskCompletedForReuse();
+        }
         this.emit({
           type: 'session_completed',
           sessionId,
           nodeId: session.nodeId,
           outcome,
         });
-        this.cleanupSession(session);
+        if (session.cliId !== 'codex') {
+          this.cleanupSession(session);
+        }
         return;
       }
 
@@ -950,7 +966,8 @@ class RuntimeManager {
       const reason = 'Terminal process exited.';
       session.markDisconnected(reason);
 
-      if (session.state === 'running' || session.state === 'awaiting_ack' || session.state === 'awaiting_permission') {
+      const completedReusableCodex = session.cliId === 'codex' && session.completedTaskCount > 0;
+      if (!completedReusableCodex && (session.state === 'running' || session.state === 'awaiting_ack' || session.state === 'awaiting_permission')) {
         session.markFailed(reason);
         this.emit({
           type: 'session_failed',
@@ -1065,22 +1082,26 @@ class RuntimeManager {
       throw new Error('MCP server unavailable during activation handshake.');
     }
 
-    const isExecStdin = session.adapter.execMode === 'exec_stdin';
+    let launchedCli = false;
 
-    // 3. For interactive PTY: launch CLI in terminal (skip if already running or exec_stdin).
-    if (session.isTerminal && !isExecStdin) {
+    // 3. For interactive PTY: launch CLI in terminal if needed.
+    if (session.isTerminal) {
       session.transitionTo('awaiting_cli_ready');
       this.bindRuntimeToTerminalPane(session);
       const terminalReady = await this.waitForTerminalReady(session.terminalId, 5_000);
       if (!terminalReady) {
         throw new Error(`Terminal ${session.terminalId} did not become active before CLI launch (state: awaiting_cli_ready, node: ${session.nodeId}).`);
       }
-      let launchedCli = false;
       if (await this.shouldLaunchCliInTerminal(session)) {
         await sleep(CLI_LAUNCH_DELAY_MS);
-        const launchCmd = buildPtyLaunchCommand(session.cliId, { model: session.model, yolo: session.yolo });
-        console.log(`[runtime] launch command=${launchCmd}`);
-        await writeToTerminal(session.terminalId, `${launchCmd}\r`);
+        if (session.cliId === 'codex') {
+          console.log('[codex] first-run launch with prompt argument');
+          await this.spawnCodexDirectly(session);
+        } else {
+          const launchCmd = buildPtyLaunchCommand(session.cliId, { model: session.model, yolo: session.yolo });
+          console.log(`[runtime] launch command=${launchCmd}`);
+          await writeToTerminal(session.terminalId, `${launchCmd}\r`);
+        }
         await sleep(CLI_STARTUP_WAIT_MS);
         launchedCli = true;
         useWorkspaceStore.getState().updatePaneDataByTerminalId(session.terminalId, {
@@ -1128,45 +1149,9 @@ class RuntimeManager {
       status: 'registered',
     });
 
-    // 5. Inject bootstrap prompt for combined-launch paths.
-    if (isExecStdin) {
-      session.transitionTo('bootstrap_injecting');
-      try {
-        const execBaseUrl = await getMcpBaseUrl();
-        const bootstrapPart = this.buildExecStdinBootstrapPrompt(session, execBaseUrl);
-        const taskSignal = buildNewTaskSignal({
-          missionId: session.missionId,
-          nodeId: session.nodeId,
-          roleId: session.role,
-          sessionId: session.sessionId,
-          agentId: session.agentId,
-          terminalId: session.terminalId,
-          activatedAt: Date.now(),
-          attempt: session.attempt,
-          payload: activationPayload.inputPayload ?? null,
-          runId: activationPayload.runId,
-          cliType: session.cliId,
-          modelId: session.model || null,
-          yolo: session.yolo,
-          executionMode: session.executionMode,
-          goal: activationPayload.goal,
-          workspaceDir: session.workspaceDir,
-          assignment: activationPayload.assignment,
-        }, execBaseUrl);
-        const combinedPrompt = `${bootstrapPart}\n\n${taskSignal}`;
-        await this.launchHeadless(session, activationPayload, combinedPrompt, execBaseUrl);
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        throw new Error(
-          `combined prompt launch failed for CLI "${session.cliId}" on node "${session.nodeId}": ${msg}`,
-        );
-      }
-      session.transitionTo('bootstrap_sent');
-    }
-
     // PTY path: inject bootstrap prompt into interactive terminal (explicit state)
     let bootstrapPromptBody: string | null = null;
-    if (session.isTerminal && !isExecStdin) {
+    if (session.isTerminal && session.cliId !== 'codex') {
       session.transitionTo('bootstrap_injecting');
 
       let bootstrapPrompt: string | null = null;
@@ -1237,37 +1222,58 @@ class RuntimeManager {
       status: 'ready',
     });
 
-    // 7. Build NEW_TASK signal
-    const baseUrl = await getMcpBaseUrl();
-    const signal = buildNewTaskSignal({
-      missionId: session.missionId,
-      nodeId: session.nodeId,
-      roleId: session.role,
-      sessionId: session.sessionId,
-      agentId: session.agentId,
-      terminalId: session.terminalId,
-      activatedAt: Date.now(),
-      attempt: session.attempt,
-      payload: activationPayload.inputPayload ?? null,
-      runId: activationPayload.runId,
-      cliType: session.cliId,
-      modelId: session.model || null,
-      yolo: session.yolo,
-      executionMode: session.executionMode,
-      goal: activationPayload.goal,
-      workspaceDir: session.workspaceDir,
-      assignment: activationPayload.assignment,
-    }, baseUrl);
-
-    // 8. Inject task (exec_stdin path already delivered the task in the combined prompt)
+    // 7. Build NEW_TASK signal for existing reusable Codex sessions and non-Codex PTY paths.
     session.transitionTo('injecting_task');
 
-    if (!isExecStdin) {
-      if (session.isHeadless) {
-        await this.launchHeadless(session, activationPayload, signal, baseUrl);
-      } else {
-        await this.injectInteractiveTask(session, signal, false);
+    if (session.isHeadless) {
+      const baseUrl = await getMcpBaseUrl();
+      const signal = buildNewTaskSignal({
+        missionId: session.missionId,
+        nodeId: session.nodeId,
+        roleId: session.role,
+        sessionId: session.sessionId,
+        agentId: session.agentId,
+        terminalId: session.terminalId,
+        activatedAt: Date.now(),
+        attempt: session.attempt,
+        payload: activationPayload.inputPayload ?? null,
+        runId: activationPayload.runId,
+        cliType: session.cliId,
+        modelId: session.model || null,
+        yolo: session.yolo,
+        executionMode: session.executionMode,
+        goal: activationPayload.goal,
+        workspaceDir: session.workspaceDir,
+        assignment: activationPayload.assignment,
+      }, baseUrl);
+      await this.launchHeadless(session, activationPayload, signal, baseUrl);
+    } else if (session.cliId === 'codex') {
+      if (!launchedCli) {
+        console.log('[codex] reusable runtime found; sending follow-up get_current_task signal');
+        await this.injectInteractiveTask(session, buildCodexFollowupTaskSignal(), false);
       }
+    } else {
+      const baseUrl = await getMcpBaseUrl();
+      const signal = buildNewTaskSignal({
+        missionId: session.missionId,
+        nodeId: session.nodeId,
+        roleId: session.role,
+        sessionId: session.sessionId,
+        agentId: session.agentId,
+        terminalId: session.terminalId,
+        activatedAt: Date.now(),
+        attempt: session.attempt,
+        payload: activationPayload.inputPayload ?? null,
+        runId: activationPayload.runId,
+        cliType: session.cliId,
+        modelId: session.model || null,
+        yolo: session.yolo,
+        executionMode: session.executionMode,
+        goal: activationPayload.goal,
+        workspaceDir: session.workspaceDir,
+        assignment: activationPayload.assignment,
+      }, baseUrl);
+      await this.injectInteractiveTask(session, signal, false);
     }
 
     // 9. Wait for ACK
@@ -1283,13 +1289,13 @@ class RuntimeManager {
         new Set(['activation_acked', 'running', 'completed', 'done']),
         TASK_ACK_TIMEOUT_MS,
       );
-      if (session.cliId === 'codex' && session.isTerminal && !isExecStdin) {
+      if (session.cliId === 'codex' && session.isTerminal && !launchedCli) {
         const ackRace = await Promise.race([
           ackPromise.then(() => 'acked' as const),
           sleep(CODEX_TASK_RETRY_DELAY_MS).then(() => 'retry' as const),
         ]);
         if (ackRace === 'retry') {
-          await this.injectInteractiveTask(session, signal, true);
+          await this.injectInteractiveTask(session, buildCodexFollowupTaskSignal(), true);
         }
       }
       await ackPromise;
@@ -1317,7 +1323,9 @@ class RuntimeManager {
       });
     } catch {
       throw new Error(
-        `Agent for CLI "${session.cliId}" on node "${session.nodeId}" did not call get_task_details within ${Math.round(TASK_ACK_TIMEOUT_MS / 1000)}s (state: awaiting_ack). Check terminal for errors.`,
+        session.cliId === 'codex'
+          ? `Codex did not fetch the current task from MCP. Try New Runtime or check MCP connection.`
+          : `Agent for CLI "${session.cliId}" on node "${session.nodeId}" did not call get_task_details within ${Math.round(TASK_ACK_TIMEOUT_MS / 1000)}s (state: awaiting_ack). Check terminal for errors.`,
       );
     }
   }
@@ -1363,20 +1371,69 @@ class RuntimeManager {
     });
   }
 
-  private buildExecStdinBootstrapPrompt(
-    session: RuntimeSession,
-    mcpUrl: string,
-  ): string {
+  private async spawnCodexDirectly(session: RuntimeSession): Promise<void> {
+    try {
+      await destroyTerminal(session.terminalId);
+    } catch {
+      // Best effort: the shell PTY may already be gone.
+    }
+
+    await sleep(150);
+
+    const env: Record<string, string> = {
+      TD_SESSION_ID: session.sessionId,
+      TD_AGENT_ID: session.agentId,
+      TD_MISSION_ID: session.missionId,
+      TD_NODE_ID: session.nodeId,
+      TD_WORKSPACE: session.workspaceDir ?? '',
+      TD_KIND: 'codex',
+    };
+
+    await spawnTerminal({
+      id: session.terminalId,
+      rows: 24,
+      cols: 80,
+      cwd: session.workspaceDir ?? null,
+      command: 'codex',
+      args: buildCodexInteractiveLaunchArgs({
+        modelId: session.model || null,
+        yolo: session.yolo,
+        bootstrapPrompt: this.buildCodexBootstrapPrompt(session),
+      }),
+      env,
+    });
+  }
+
+  private findReusableSessionCandidate(args: CreateRuntimeArgs): RuntimeSession | undefined {
+    if (args.cliId !== 'codex') {
+      return this.getSessionForNode(args.missionId, args.nodeId, args.attempt);
+    }
+
+    return Array.from(this.sessions.values()).find(session =>
+      session.cliId === 'codex' &&
+      session.terminalId === args.terminalId &&
+      (session.workspaceDir ?? null) === (args.workspaceDir ?? null),
+    );
+  }
+
+  private retireSession(session: RuntimeSession): void {
+    session.markCompleted();
+    this.cleanupSession(session);
+  }
+
+  private buildCodexBootstrapPrompt(session: RuntimeSession): string {
     const role = session.role;
     const profileId = session.profileId ?? role;
-    // Do NOT say "wait for NEW_TASK" — the task signal is appended directly below this
-    // in the combined prompt, so Codex should proceed immediately after connecting.
-    return (
-      `Connect to MCP before task activation. MCP URL: ${mcpUrl}. ` +
-      `Call connect_agent with role="${role}", agentId="${session.agentId}", terminalId="${session.terminalId}", ` +
-      `cli="${session.cliId}", profileId="${profileId}", missionId="${session.missionId}", nodeId="${session.nodeId}", attempt=${session.attempt}. ` +
-      `After connection, immediately proceed to execute the task described below and call get_task_details to receive your full assignment.`
-    );
+    return [
+      'You are a Terminal-Docks Codex runtime.',
+      'A workflow task is ready for you.',
+      `If needed, call connect_agent({ role: "${role}", agentId: "${session.agentId}", terminalId: "${session.terminalId}", cli: "codex", profileId: "${profileId}", workingDir: "${session.workspaceDir ?? ''}", sessionId: "${session.sessionId}", missionId: "${session.missionId}", nodeId: "${session.nodeId}", attempt: ${session.attempt} }).`,
+      'Then call get_current_task().',
+      'Execute the returned task using the provided workspace, inbox, upstream context, and legal next targets.',
+      'When done, call complete_task(...).',
+      `If get_current_task is unavailable, call get_task_details({ missionId: "${session.missionId}", nodeId: "${session.nodeId}" }).`,
+      `Runtime metadata: missionId: "${session.missionId}" nodeId: "${session.nodeId}" sessionId: "${session.sessionId}" attempt: ${session.attempt}`,
+    ].join(' ');
   }
 
   private buildInteractiveBootstrapPrompt(
