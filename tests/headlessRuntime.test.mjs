@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import {
   buildCliRunCommand,
   buildCodexFollowupTaskSignal,
+  buildCodexInteractiveLaunchArgs,
   buildCodexInteractiveLaunchCommand,
 } from '../.tmp-tests/lib/cliCommandBuilders.js';
 import { buildStartAgentRunRequest } from '../.tmp-tests/lib/runtimeDispatcher.js';
@@ -77,29 +78,56 @@ run('runtime dispatcher materializes non-path variables and keeps promptPath for
   assert.equal(request.prompt, 'hello');
 });
 
-run('codex headless command uses true stdin and global flags before exec', () => {
+run('codex headless command is disabled for normal workflow safety', () => {
   const command = buildCliRunCommand(payload({ cliType: 'codex' }));
-  assert.equal(command.command, 'codex');
-  assert.equal(command.promptDelivery, 'stdin');
-  assert.deepEqual(command.args, ['--ask-for-approval', 'never', '--sandbox', 'workspace-write', 'exec', '--json', '--skip-git-repo-check', '-']);
-  assert.equal(command.env.CODEX_HOME, undefined);
+  assert.equal(command.command, '');
+  assert.equal(command.promptDelivery, 'unsupported');
+  assert.match(command.unsupportedReason, /interactive PTY/);
 });
 
-run('codex selected model is placed before exec', () => {
-  const command = buildCliRunCommand(payload({ cliType: 'codex' }), { model: 'gpt-5.3-codex' });
-  assert.equal(command.command, 'codex');
-  assert.deepEqual(command.args.slice(0, 4), ['--model', 'gpt-5.3-codex', '--ask-for-approval', 'never']);
-  assert.ok(command.args.indexOf('--model') < command.args.indexOf('exec'));
+run('codex interactive argv places model and yolo before final prompt', () => {
+  const args = buildCodexInteractiveLaunchArgs({
+    modelId: 'gpt-5.5',
+    yolo: true,
+    workspaceDir: 'C:/workspace',
+    mcpUrl: 'http://127.0.0.1:3741/mcp?token=abc',
+    bootstrapPrompt: 'Say "hello"',
+  });
+
+  assert.deepEqual(args, [
+    '-c',
+    'mcp_servers.terminal_docks.url="http://127.0.0.1:3741/mcp?token=abc"',
+    '--model',
+    'gpt-5.5',
+    '--cd',
+    'C:/workspace',
+    '--no-alt-screen',
+    '--dangerously-bypass-approvals-and-sandbox',
+    'Say "hello"',
+  ]);
+  assert.equal(args.at(-1), 'Say "hello"');
 });
 
-run('codex interactive launch flattens the bootstrap prompt before shell quoting', () => {
+run('codex interactive argv preserves complex prompt as final argument', () => {
+  const prompt = 'Say "hello"\nit\'s broken\n{"key":"value"}\n`backtick`';
+  const args = buildCodexInteractiveLaunchArgs({
+    modelId: null,
+    yolo: false,
+    bootstrapPrompt: prompt,
+  });
+
+  assert.deepEqual(args, ['--no-alt-screen', prompt]);
+  assert.equal(args.at(-1), prompt);
+});
+
+run('codex shell fallback flattens the bootstrap prompt before shell quoting', () => {
   const command = buildCodexInteractiveLaunchCommand({
     modelId: 'gpt-5.4-mini',
     yolo: false,
     bootstrapPrompt: 'You are a Terminal-Docks Codex runtime.\nA workflow task is ready for you.',
   });
 
-  assert.equal(command.startsWith('codex --model gpt-5.4-mini --ask-for-approval never --sandbox workspace-write '), true);
+  assert.equal(command.startsWith('codex --model gpt-5.4-mini --no-alt-screen '), true);
   assert.equal(command.includes('\n'), false);
   assert.equal(command.includes('You are a Terminal-Docks Codex runtime. A workflow task is ready for you.'), true);
 });

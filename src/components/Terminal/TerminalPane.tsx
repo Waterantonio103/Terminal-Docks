@@ -107,6 +107,14 @@ export function TerminalPane({ pane, dragEndSeq }: { pane: Pane; dragEndSeq?: nu
     fitAddon.current   = fit;
     searchAddon.current = search;
 
+    const publishTerminalSize = () => {
+      if (!term.rows || !term.cols) return;
+      useWorkspaceStore.getState().updatePaneDataByTerminalId(terminalId, {
+        terminalRows: term.rows,
+        terminalCols: term.cols,
+      });
+    };
+
     // Handle paste events ourselves to prevent duplication
     // Use capture phase to run before xterm.js's internal handler
     const pasteHandler = (e: ClipboardEvent) => {
@@ -132,7 +140,11 @@ export function TerminalPane({ pane, dragEndSeq }: { pane: Pane; dragEndSeq?: nu
     } catch { /* WebGL not available */ }
 
     // Use a timeout longer than the panel's 200ms CSS transition so dimensions are stable
-    setTimeout(() => fit.fit(), 260);
+    setTimeout(() => {
+      fit.fit();
+      publishTerminalSize();
+      invoke('resize_pty', { id: terminalId, rows: term.rows, cols: term.cols }).catch(() => {});
+    }, 260);
     terminalInstance.current = term;
 
     // Scroll tracking
@@ -175,6 +187,7 @@ export function TerminalPane({ pane, dragEndSeq }: { pane: Pane; dragEndSeq?: nu
     });
 
     let unlisten: UnlistenFn | null = null;
+    let refitUnlisten: UnlistenFn | null = null;
 
     const initPty = async () => {
       const storeSnap = useWorkspaceStore.getState();
@@ -199,6 +212,17 @@ export function TerminalPane({ pane, dragEndSeq }: { pane: Pane; dragEndSeq?: nu
             }).catch(() => {});
           }
         }
+      });
+
+      refitUnlisten = await listen<{ terminalId: string }>('terminal-refit-requested', (event) => {
+        if (event.payload.terminalId !== terminalId) return;
+        if (terminalElement.offsetWidth === 0 || terminalElement.offsetHeight === 0) return;
+        fit.fit();
+        publishTerminalSize();
+        if (term.rows && term.cols) {
+          invoke('resize_pty', { id: terminalId, rows: term.rows, cols: term.cols }).catch(() => {});
+        }
+        term.refresh(0, term.rows - 1);
       });
 
       const customCommand = pane.data?.customCliCommand;
@@ -238,7 +262,7 @@ export function TerminalPane({ pane, dragEndSeq }: { pane: Pane; dragEndSeq?: nu
         // and it's not managed by RuntimeManager (which handles its own booting).
         // Re-read pane data at fire time — RuntimeManager may have registered
         // runtimeSessionId after mount but before this timeout fires.
-        if (spawned) {
+        if (spawned && !(command === 'codex' && boundNodeId)) {
           setTimeout(() => {
             const storeState = useWorkspaceStore.getState();
             const allPanes = storeState.tabs.flatMap(t => t.panes);
@@ -296,6 +320,7 @@ export function TerminalPane({ pane, dragEndSeq }: { pane: Pane; dragEndSeq?: nu
         // Guard against zero-dimension containers (e.g. during CSS transitions or hidden states)
         if (terminalElement.offsetWidth === 0 || terminalElement.offsetHeight === 0) return;
         fit.fit();
+        publishTerminalSize();
         if (term.rows && term.cols) {
           invoke('resize_pty', { id: terminalId, rows: term.rows, cols: term.cols });
         }
@@ -309,6 +334,7 @@ export function TerminalPane({ pane, dragEndSeq }: { pane: Pane; dragEndSeq?: nu
       resizeObserver.disconnect();
       terminalElement.removeEventListener('paste', pasteHandler, true);
       if (unlisten) unlisten();
+      if (refitUnlisten) refitUnlisten();
       term.dispose();
     };
   }, [terminalId]);

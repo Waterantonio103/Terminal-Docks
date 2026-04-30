@@ -123,26 +123,6 @@ export function buildCliRunCommand(
     };
   }
 
-  if (cli === 'codex') {
-    const args: string[] = [];
-    if (options.model?.trim()) {
-      args.push('--model', options.model.trim());
-    }
-    if (options.yolo) {
-      args.push('--dangerously-bypass-approvals-and-sandbox');
-    } else {
-      args.push('--ask-for-approval', 'never', '--sandbox', 'workspace-write');
-    }
-    args.push('exec', '--json', '--skip-git-repo-check', '-');
-
-    return {
-      command: 'codex',
-      args,
-      env,
-      promptDelivery: 'stdin',
-    };
-  }
-
   return unsupported(`Unknown or unsupported CLI "${cli || 'unknown'}".`, env);
 }
 
@@ -166,25 +146,43 @@ function quoteShellArgument(value: string, shellKind: ShellKind): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
+function buildCodexInteractiveFlagArgs({
+  modelId,
+  yolo,
+  workspaceDir,
+  mcpUrl,
+}: {
+  modelId?: string | null;
+  yolo?: boolean;
+  workspaceDir?: string | null;
+  mcpUrl?: string | null;
+}): string[] {
+  return [
+    ...(mcpUrl?.trim() ? ['-c', `mcp_servers.terminal_docks.url="${mcpUrl.trim()}"`] : []),
+    ...(modelId?.trim() ? ['--model', modelId.trim()] : []),
+    ...(workspaceDir?.trim() ? ['--cd', workspaceDir.trim()] : []),
+    '--no-alt-screen',
+    ...(yolo ? ['--dangerously-bypass-approvals-and-sandbox'] : []),
+  ];
+}
+
 export function buildCodexInteractiveLaunchCommand({
   modelId,
   yolo,
+  workspaceDir,
+  mcpUrl,
   bootstrapPrompt,
   shellKind = 'windows',
 }: {
   modelId?: string | null;
   yolo?: boolean;
+  workspaceDir?: string | null;
+  mcpUrl?: string | null;
   bootstrapPrompt: string;
   shellKind?: ShellKind;
 }): string {
   const normalizedPrompt = bootstrapPrompt.replace(/\s+/g, ' ').trim();
-  const parts: string[] = ['codex'];
-  if (modelId?.trim()) parts.push('--model', modelId.trim());
-  if (yolo) {
-    parts.push('--dangerously-bypass-approvals-and-sandbox');
-  } else {
-    parts.push('--ask-for-approval', 'never', '--sandbox', 'workspace-write');
-  }
+  const parts: string[] = ['codex', ...buildCodexInteractiveFlagArgs({ modelId, yolo, workspaceDir, mcpUrl })];
   parts.push(quoteShellArgument(normalizedPrompt, shellKind));
   return parts.join(' ');
 }
@@ -192,17 +190,18 @@ export function buildCodexInteractiveLaunchCommand({
 export function buildCodexInteractiveLaunchArgs({
   modelId,
   yolo,
+  workspaceDir,
+  mcpUrl,
   bootstrapPrompt,
 }: {
   modelId?: string | null;
   yolo?: boolean;
+  workspaceDir?: string | null;
+  mcpUrl?: string | null;
   bootstrapPrompt: string;
 }): string[] {
   return [
-    ...(modelId?.trim() ? ['--model', modelId.trim()] : []),
-    ...(yolo
-      ? ['--dangerously-bypass-approvals-and-sandbox']
-      : ['--ask-for-approval', 'never', '--sandbox', 'workspace-write']),
+    ...buildCodexInteractiveFlagArgs({ modelId, yolo, workspaceDir, mcpUrl }),
     bootstrapPrompt,
   ];
 }
@@ -229,8 +228,6 @@ export function buildPtyLaunchCommand(cliId: string, options: { model?: string |
     else if (cli === 'gemini') parts.push('--yolo');
     else if (cli === 'codex') parts.push('--dangerously-bypass-approvals-and-sandbox');
     // opencode: --yolo is only valid for `opencode run`, not the default TUI mode.
-  } else if (cli === 'codex') {
-    parts.push('--ask-for-approval', 'never', '--sandbox', 'workspace-write');
   }
 
   return parts.join(' ');

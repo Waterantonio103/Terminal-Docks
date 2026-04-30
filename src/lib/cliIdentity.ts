@@ -46,11 +46,11 @@ export function isValidCliId(value: unknown): value is CliId {
 export function supportsHeadless(cli: CliId): boolean {
   switch (cli) {
     case 'claude':
-    case 'codex':
     case 'ollama':
     case 'lmstudio':
     case 'custom':
       return true;
+    case 'codex':
     case 'gemini':
     case 'opencode':
       return false;

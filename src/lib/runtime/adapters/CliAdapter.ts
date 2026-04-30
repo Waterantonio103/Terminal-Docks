@@ -209,8 +209,8 @@ export interface CliAdapter {
    *   'pty'        — launch in an interactive PTY terminal (default for most CLIs)
    *   'exec_stdin' — spawn as a child process with piped stdin; the full prompt
    *                  (bootstrap + task) is written to stdin then stdin is closed.
-   *                  Use for CLIs like Codex whose TUI has an input-readiness race
-   *                  that makes interactive PTY injection unreliable.
+   *                  This is for explicit legacy/headless adapters only, not for
+   *                  normal interactive workflow launches.
    */
   readonly execMode?: 'pty' | 'exec_stdin';
 }

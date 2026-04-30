@@ -26,6 +26,20 @@ pub struct PtyState {
     pub(crate) permission_audit: Mutex<Vec<PermissionAuditEntry>>,
 }
 
+#[cfg(target_os = "windows")]
+fn windows_command_candidates(command: &str) -> Vec<String> {
+    let path = std::path::Path::new(command);
+    if path.extension().is_some() {
+        return vec![command.to_string()];
+    }
+    vec![format!("{}.cmd", command), command.to_string()]
+}
+
+#[cfg(not(target_os = "windows"))]
+fn windows_command_candidates(command: &str) -> Vec<String> {
+    vec![command.to_string()]
+}
+
 impl PtyState {
     pub fn new() -> Self {
         Self {
@@ -598,73 +612,49 @@ pub fn spawn_pty_with_command(
         .openpty(pty_size)
         .map_err(|e| format!("Failed to open pty: {}", e))?;
 
-    let mut cmd = CommandBuilder::new(&command);
-    cmd.env("TERM", "xterm-256color");
-
-    // Phase 1: Inject MCP auto-connection config
-    cmd.env("TD_SESSION_ID", &id);
     let mcp_state = app.state::<crate::mcp::McpState>();
     let mcp_url = crate::mcp::get_mcp_url(mcp_state);
-    cmd.env("TD_MCP_URL", mcp_url);
+    let candidates = windows_command_candidates(&command);
+    let mut last_error: Option<String> = None;
+    let mut child = None;
 
-    for arg in &args {
-        cmd.arg(arg);
-    }
-    if let Some(ref vars) = env {
-        for (key, value) in vars {
-            cmd.env(key, value);
+    for candidate in candidates {
+        let mut cmd = CommandBuilder::new(&candidate);
+        cmd.env("TERM", "xterm-256color");
+        cmd.env("TD_SESSION_ID", &id);
+        cmd.env("TD_MCP_URL", mcp_url.clone());
+        for arg in &args {
+            cmd.arg(arg);
         }
-    }
-    if let Some(ref path) = cwd {
-        if !path.is_empty() {
-            cmd.cwd(path);
-        }
-    }
-
-    let child = match pair.slave.spawn_command(cmd) {
-        Ok(child) => child,
-        Err(error) => {
-            #[cfg(target_os = "windows")]
-            {
-                let not_found = error
-                    .downcast_ref::<std::io::Error>()
-                    .map(|inner| inner.kind() == std::io::ErrorKind::NotFound)
-                    .unwrap_or(false);
-                if not_found
-                    && !command.to_ascii_lowercase().ends_with(".cmd")
-                {
-                    let mut fallback = CommandBuilder::new(format!("{}.cmd", command));
-                    fallback.env("TERM", "xterm-256color");
-                    fallback.env("TD_SESSION_ID", &id);
-                    let mcp_state = app.state::<crate::mcp::McpState>();
-                    let mcp_url = crate::mcp::get_mcp_url(mcp_state);
-                    fallback.env("TD_MCP_URL", mcp_url);
-                    for arg in &args {
-                        fallback.arg(arg);
-                    }
-                    if let Some(vars) = &env {
-                        for (key, value) in vars {
-                            fallback.env(key, value);
-                        }
-                    }
-                    if let Some(path) = &cwd {
-                        if !path.is_empty() {
-                            fallback.cwd(path);
-                        }
-                    }
-                    pair.slave
-                        .spawn_command(fallback)
-                        .map_err(|e| format!("Failed to spawn command '{}': {}", command, e))?
-                } else {
-                    return Err(format!("Failed to spawn command '{}': {}", command, error));
-                }
-            }
-            #[cfg(not(target_os = "windows"))]
-            {
-                return Err(format!("Failed to spawn command '{}': {}", command, error));
+        if let Some(ref vars) = env {
+            for (key, value) in vars {
+                cmd.env(key, value);
             }
         }
-    };
+        if let Some(ref path) = cwd {
+            if !path.is_empty() {
+                cmd.cwd(path);
+            }
+        }
+
+        match pair.slave.spawn_command(cmd) {
+            Ok(spawned) => {
+                child = Some(spawned);
+                break;
+            }
+            Err(error) => {
+                last_error = Some(format!("{}: {}", candidate, error));
+            }
+        }
+    }
+
+    let child = child.ok_or_else(|| {
+        format!(
+            "Failed to spawn command '{}': {}",
+            command,
+            last_error.unwrap_or_else(|| "no launch candidates were tried".to_string())
+        )
+    })?;
 
     let master = pair.master;
     let writer = master

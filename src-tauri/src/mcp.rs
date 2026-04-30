@@ -194,6 +194,22 @@ fn register_opencode(mcp_url: &str) -> CliRegistrationResult {
     }
 }
 
+fn register_codex(mcp_url: &str) -> CliRegistrationResult {
+    if !is_cli_available("codex") {
+        return CliRegistrationResult {
+            cli: "codex".into(),
+            success: false,
+            message: "Could not run codex".into(),
+        };
+    }
+
+    CliRegistrationResult {
+        cli: "codex".into(),
+        success: true,
+        message: format!("codex MCP server will be injected per workflow launch via {}", mcp_url),
+    }
+}
+
 fn register_aider(_mcp_url: &str) -> CliRegistrationResult {
     CliRegistrationResult {
         cli: "aider".into(),
@@ -306,6 +322,7 @@ fn is_desktop_available(name: &str) -> bool {
 fn register_with_ai_clis(app_handle: &AppHandle, mcp_url: &str) {
     let registrations: Vec<(&str, Box<dyn Fn(&str) -> CliRegistrationResult>)> = vec![
         ("claude", Box::new(register_claude)),
+        ("codex", Box::new(register_codex)),
         ("gemini", Box::new(register_gemini)),
         ("opencode", Box::new(register_opencode)),
         ("aider", Box::new(register_aider)),

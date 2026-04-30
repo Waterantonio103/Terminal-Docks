@@ -53,7 +53,6 @@ export const codexAdapter: CliAdapter = {
     const args: string[] = [];
     if (context.model?.trim()) args.push('--model', context.model.trim());
     if (context.yolo) args.push('--dangerously-bypass-approvals-and-sandbox');
-    else args.push('--ask-for-approval', 'never', '--sandbox', 'workspace-write');
     return {
       command: 'codex',
       args,

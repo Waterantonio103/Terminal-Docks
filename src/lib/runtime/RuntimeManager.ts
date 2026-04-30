@@ -31,6 +31,7 @@ import {
   checkMcpHealth,
   destroyTerminal,
   getMcpBaseUrl,
+  getMcpUrl,
   getRecentTerminalOutput,
   registerMcpSession,
   registerActivationDispatch,
@@ -73,6 +74,7 @@ const CODEX_BOOTSTRAP_RETRY_DELAY_MS = 3_500;
 const CODEX_TASK_RETRY_DELAY_MS = 8_000;
 const CODEX_TYPE_CHUNK_SIZE = 48;
 const CODEX_TYPE_CHUNK_DELAY_MS = 20;
+const CODEX_INITIAL_LAUNCH_VERIFY_MS = 2_000;
 
 // ──────────────────────────────────────────────
 // Listeners
@@ -102,6 +104,8 @@ class RuntimeManager {
   private listeners = new Set<ManagerListener>();
   private snapshotListeners = new Set<SnapshotListener>();
   private ptyCleanupFns = new Map<string, () => void>();
+  private suppressedPtyExitUntil = new Map<string, number>();
+  private reusableCodexTerminalIds = new Set<string>();
   private nativeListenerUnsub?: () => void;
   private disposed = false;
 
@@ -621,6 +625,9 @@ class RuntimeManager {
         console.log(
           `[codex] reusable runtime found; sending follow-up get_current_task signal session=${existing.sessionId} terminal=${existing.terminalId}`,
         );
+        if (args.cliId === 'codex') {
+          this.reusableCodexTerminalIds.add(args.terminalId);
+        }
         this.retireSession(existing);
         const reused = await this.createRuntimeForNode(args);
         this.wirePtyEvents(args.terminalId, reused.sessionId);
@@ -956,6 +963,12 @@ class RuntimeManager {
       const session = this.sessions.get(sessionId);
       if (!session) return;
 
+      const suppressUntil = this.suppressedPtyExitUntil.get(terminalId) ?? 0;
+      if (Date.now() < suppressUntil) {
+        console.warn(`[runtime] ignoring expected pty-exit during CLI relaunch terminal=${terminalId} cli=${session.cliId}`);
+        return;
+      }
+
       try {
         const stillAlive = await isTerminalActive(terminalId);
         if (stillAlive) return;
@@ -963,7 +976,14 @@ class RuntimeManager {
         // proceed — PTY was destroyed
       }
 
-      const reason = 'Terminal process exited.';
+      const recentOutput = await getRecentTerminalOutput(terminalId, 12_288);
+      const reason = session.cliId === 'codex'
+        ? this.buildCodexCrashDiagnostic(session, {
+            promptBytes: null,
+            recentOutput,
+            directPty: true,
+          })
+        : 'Terminal process exited.';
       session.markDisconnected(reason);
 
       const completedReusableCodex = session.cliId === 'codex' && session.completedTaskCount > 0;
@@ -1083,6 +1103,7 @@ class RuntimeManager {
     }
 
     let launchedCli = false;
+    let reusedCodexRuntime = false;
 
     // 3. For interactive PTY: launch CLI in terminal if needed.
     if (session.isTerminal) {
@@ -1092,11 +1113,28 @@ class RuntimeManager {
       if (!terminalReady) {
         throw new Error(`Terminal ${session.terminalId} did not become active before CLI launch (state: awaiting_cli_ready, node: ${session.nodeId}).`);
       }
-      if (await this.shouldLaunchCliInTerminal(session)) {
+      reusedCodexRuntime = session.cliId === 'codex' && this.reusableCodexTerminalIds.has(session.terminalId);
+      if (reusedCodexRuntime) {
+        this.reusableCodexTerminalIds.delete(session.terminalId);
+      }
+      const shouldLaunchCli = session.cliId === 'codex'
+        ? !reusedCodexRuntime
+        : await this.shouldLaunchCliInTerminal(session);
+      if (shouldLaunchCli) {
         await sleep(CLI_LAUNCH_DELAY_MS);
         if (session.cliId === 'codex') {
-          console.log('[codex] first-run launch with prompt argument');
-          await this.spawnCodexDirectly(session);
+          const mcpUrl = await getMcpUrl();
+          const launch = await this.spawnCodexDirectly(session, mcpUrl);
+          const alive = await this.waitForTerminalReady(session.terminalId, CODEX_INITIAL_LAUNCH_VERIFY_MS);
+          if (!alive) {
+            const recentOutput = await getRecentTerminalOutput(session.terminalId, 12_288);
+            throw new Error(this.buildCodexCrashDiagnostic(session, {
+              args: launch.args,
+              promptBytes: launch.promptBytes,
+              recentOutput,
+              directPty: true,
+            }));
+          }
         } else {
           const launchCmd = buildPtyLaunchCommand(session.cliId, { model: session.model, yolo: session.yolo });
           console.log(`[runtime] launch command=${launchCmd}`);
@@ -1110,12 +1148,24 @@ class RuntimeManager {
           model: session.model,
         });
       }
-      const cliReady = await this.waitForCliReady(session, CLI_READY_WAIT_MS);
-      if (!cliReady) {
-        const reason = launchedCli
-          ? `CLI "${session.cliId}" did not report ready state within ${CLI_READY_WAIT_MS}ms after launch.`
-          : `CLI "${session.cliId}" is not ready and launch was skipped by gate logic.`;
-        throw new Error(reason);
+      if (session.cliId === 'codex') {
+        const alive = await isTerminalActive(session.terminalId);
+        if (!alive) {
+          const recentOutput = await getRecentTerminalOutput(session.terminalId, 12_288);
+          throw new Error(this.buildCodexCrashDiagnostic(session, {
+            promptBytes: null,
+            recentOutput,
+            directPty: launchedCli,
+          }));
+        }
+      } else {
+        const cliReady = await this.waitForCliReady(session, CLI_READY_WAIT_MS);
+        if (!cliReady) {
+          const reason = launchedCli
+            ? `CLI "${session.cliId}" did not report ready state within ${CLI_READY_WAIT_MS}ms after launch.`
+            : `CLI "${session.cliId}" is not ready and launch was skipped by gate logic.`;
+          throw new Error(reason);
+        }
       }
     }
 
@@ -1248,7 +1298,7 @@ class RuntimeManager {
       }, baseUrl);
       await this.launchHeadless(session, activationPayload, signal, baseUrl);
     } else if (session.cliId === 'codex') {
-      if (!launchedCli) {
+      if (reusedCodexRuntime && !launchedCli) {
         console.log('[codex] reusable runtime found; sending follow-up get_current_task signal');
         await this.injectInteractiveTask(session, buildCodexFollowupTaskSignal(), false);
       }
@@ -1289,7 +1339,7 @@ class RuntimeManager {
         new Set(['activation_acked', 'running', 'completed', 'done']),
         TASK_ACK_TIMEOUT_MS,
       );
-      if (session.cliId === 'codex' && session.isTerminal && !launchedCli) {
+      if (session.cliId === 'codex' && session.isTerminal && reusedCodexRuntime && !launchedCli) {
         const ackRace = await Promise.race([
           ackPromise.then(() => 'acked' as const),
           sleep(CODEX_TASK_RETRY_DELAY_MS).then(() => 'retry' as const),
@@ -1371,37 +1421,112 @@ class RuntimeManager {
     });
   }
 
-  private async spawnCodexDirectly(session: RuntimeSession): Promise<void> {
+  private async spawnCodexDirectly(
+    session: RuntimeSession,
+    mcpUrl: string,
+  ): Promise<{ args: string[]; promptBytes: number; rows: number; cols: number }> {
+    this.suppressedPtyExitUntil.set(session.terminalId, Date.now() + 5_000);
     try {
       await destroyTerminal(session.terminalId);
     } catch {
       // Best effort: the shell PTY may already be gone.
     }
 
-    await sleep(150);
-
     const env: Record<string, string> = {
       TD_SESSION_ID: session.sessionId,
       TD_AGENT_ID: session.agentId,
       TD_MISSION_ID: session.missionId,
       TD_NODE_ID: session.nodeId,
+      TD_ATTEMPT: String(session.attempt),
+      TD_MCP_URL: mcpUrl,
       TD_WORKSPACE: session.workspaceDir ?? '',
       TD_KIND: 'codex',
     };
 
+    const bootstrapPrompt = this.buildCodexBootstrapPrompt(session);
+    const args = buildCodexInteractiveLaunchArgs({
+      modelId: session.model || null,
+      yolo: session.yolo,
+      workspaceDir: session.workspaceDir,
+      mcpUrl,
+      bootstrapPrompt,
+    });
+    const promptBytes = new TextEncoder().encode(bootstrapPrompt).length;
+    const { rows, cols } = this.getTerminalDimensions(session.terminalId);
+
+    console.log('[codex] launching interactive TUI with prompt arg');
+    console.log(`[codex] command=codex args=${this.formatCodexArgsForLog(args)}`);
+    console.log(`[codex] promptBytes=${promptBytes}`);
+    console.log(`[codex] ptySize=${cols}x${rows}`);
+    console.log(`[codex] model=${session.model || '<default>'}`);
+    console.log(`[codex] yolo=${session.yolo}`);
+    console.log(`[codex] cwd=${session.workspaceDir ?? '<none>'}`);
+    console.log('[codex] directPtyCommandSpawn=true');
+
     await spawnTerminal({
       id: session.terminalId,
-      rows: 24,
-      cols: 80,
+      rows,
+      cols,
       cwd: session.workspaceDir ?? null,
       command: 'codex',
-      args: buildCodexInteractiveLaunchArgs({
-        modelId: session.model || null,
-        yolo: session.yolo,
-        bootstrapPrompt: this.buildCodexBootstrapPrompt(session),
-      }),
+      args,
       env,
     });
+    await emit('terminal-refit-requested', { terminalId: session.terminalId }).catch(() => {});
+
+    setTimeout(() => {
+      const suppressUntil = this.suppressedPtyExitUntil.get(session.terminalId) ?? 0;
+      if (Date.now() >= suppressUntil - 4_000) {
+        this.suppressedPtyExitUntil.delete(session.terminalId);
+      }
+    }, 1_000);
+
+    return { args, promptBytes, rows, cols };
+  }
+
+  private getTerminalDimensions(terminalId: string): { rows: number; cols: number } {
+    const fallback = { rows: 24, cols: 80 };
+    const panes = useWorkspaceStore.getState().tabs.flatMap(tab => tab.panes);
+    const pane = panes.find(candidate =>
+      candidate.type === 'terminal' && candidate.data?.terminalId === terminalId,
+    );
+    const rows = Number(pane?.data?.terminalRows);
+    const cols = Number(pane?.data?.terminalCols);
+    return {
+      rows: Number.isFinite(rows) && rows >= 2 ? Math.floor(rows) : fallback.rows,
+      cols: Number.isFinite(cols) && cols >= 20 ? Math.floor(cols) : fallback.cols,
+    };
+  }
+
+  private formatCodexArgsForLog(args: string[] = []): string {
+    if (!args.length) return '[]';
+    return `[${args.map((arg, index) => index === args.length - 1 ? '<prompt:redacted>' : arg).join(', ')}]`;
+  }
+
+  private buildCodexCrashDiagnostic(
+    session: RuntimeSession,
+    details: {
+      args?: string[] | null;
+      promptBytes?: number | null;
+      recentOutput?: string | null;
+      directPty?: boolean;
+    } = {},
+  ): string {
+    const recentOutput = previewText(details.recentOutput, 1200) ?? '<none>';
+    const args = details.args
+      ? this.formatCodexArgsForLog(details.args)
+      : '[<unknown>, <prompt:redacted>]';
+    return [
+      'Codex terminal exited early.',
+      'command=codex',
+      `args=${args}`,
+      `model=${session.model || '<default>'}`,
+      `yolo=${session.yolo}`,
+      `cwd=${session.workspaceDir ?? '<none>'}`,
+      `promptBytes=${details.promptBytes ?? '<unknown>'}`,
+      `directPtyCommandSpawn=${details.directPty ?? true}`,
+      `recentOutput=${recentOutput}`,
+    ].join(' ');
   }
 
   private findReusableSessionCandidate(args: CreateRuntimeArgs): RuntimeSession | undefined {
@@ -1422,16 +1547,13 @@ class RuntimeManager {
   }
 
   private buildCodexBootstrapPrompt(session: RuntimeSession): string {
-    const role = session.role;
-    const profileId = session.profileId ?? role;
     return [
       'You are a Terminal-Docks Codex runtime.',
-      'A workflow task is ready for you.',
-      `If needed, call connect_agent({ role: "${role}", agentId: "${session.agentId}", terminalId: "${session.terminalId}", cli: "codex", profileId: "${profileId}", workingDir: "${session.workspaceDir ?? ''}", sessionId: "${session.sessionId}", missionId: "${session.missionId}", nodeId: "${session.nodeId}", attempt: ${session.attempt} }).`,
-      'Then call get_current_task().',
-      'Execute the returned task using the provided workspace, inbox, upstream context, and legal next targets.',
-      'When done, call complete_task(...).',
-      `If get_current_task is unavailable, call get_task_details({ missionId: "${session.missionId}", nodeId: "${session.nodeId}" }).`,
+      'Use the terminal_docks MCP server tools.',
+      'First call get_current_task() from terminal_docks if available.',
+      `If get_current_task is unavailable, call get_task_details({ missionId: "${session.missionId}", nodeId: "${session.nodeId}" }) from terminal_docks.`,
+      'Execute the task.',
+      'When done, call complete_task().',
       `Runtime metadata: missionId: "${session.missionId}" nodeId: "${session.nodeId}" sessionId: "${session.sessionId}" attempt: ${session.attempt}`,
     ].join(' ');
   }
