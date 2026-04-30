@@ -14,6 +14,17 @@ fn greet(name: &str) -> String {
     format!("Hello, {}! You've been greeted from Rust!", name)
 }
 
+#[tauri::command]
+async fn get_command_output(command: String, args: Vec<String>) -> Result<String, String> {
+    let output = std::process::Command::new(&command)
+        .args(&args)
+        .output()
+        .map_err(|e| e.to_string())?;
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    Ok(stdout + &stderr)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -84,6 +95,7 @@ pub fn run() {
             model_detection::detect_models,
             model_detection::discover_models,
             model_detection::discover_cli_models,
+            get_command_output,
         ])
         .setup(|app| {
             db::init_db(app.handle()).expect("Failed to init db");

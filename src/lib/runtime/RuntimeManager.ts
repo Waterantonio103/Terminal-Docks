@@ -54,6 +54,7 @@ import {
   buildCodexFollowupTaskSignal,
   buildCodexInteractiveLaunchArgs,
   buildPtyLaunchCommand,
+  resolveCodexYoloFlag,
 } from '../cliCommandBuilders.js';
 import { getRuntimeBootstrapContract, buildRuntimeBootstrapRegistrationRequest } from '../runtimeBootstrap.js';
 import { mcpBus } from '../workers/mcpEventBus.js';
@@ -76,7 +77,6 @@ const BOOTSTRAP_INJECTION_TIMEOUT_MS = 10_000;
 const CODEX_IDLE_WAIT_MS = 1_000;
 const CODEX_IDLE_TIMEOUT_MS = 8_000;
 const CODEX_BOOTSTRAP_RETRY_DELAY_MS = 3_500;
-const CODEX_TASK_RETRY_DELAY_MS = 8_000;
 const CODEX_TYPE_CHUNK_SIZE = 48;
 const CODEX_TYPE_CHUNK_DELAY_MS = 20;
 const CODEX_INITIAL_LAUNCH_VERIFY_MS = 2_000;
@@ -195,7 +195,6 @@ class RuntimeManager {
   private snapshotListeners = new Set<SnapshotListener>();
   private ptyCleanupFns = new Map<string, () => void>();
   private suppressedPtyExitUntil = new Map<string, number>();
-  private reusableCodexTerminalIds = new Set<string>();
   private terminalLocks = new TerminalLock();
   private nativeListenerUnsub?: () => void;
   private disposed = false;
@@ -272,12 +271,6 @@ class RuntimeManager {
 
       const isMcpCompletingCli = session.cliId === 'claude' || session.cliId === 'ollama' || session.cliId === 'lmstudio';
       if (status === 'completed' && isMcpCompletingCli) return;
-      if (status === 'completed' && session.cliId === 'codex') {
-        console.log(
-          `[runtime] codex completed via process exit cli=${session.cliId} model=${session.model || '<default>'} yolo=${session.yolo} exitCode=${exitCode ?? 'null'} turnCompleted=${Boolean(stdoutTurnCompleted)}`,
-        );
-        return;
-      }
       if (session.state === 'completed' || session.state === 'failed') return;
 
       const reason = status === 'completed'
@@ -696,9 +689,6 @@ class RuntimeManager {
         console.log(
           `[runtime] reusable runtime found; sending follow-up signal session=${existing.sessionId} terminal=${terminalId}`,
         );
-        if (args.cliId === 'codex') {
-          this.reusableCodexTerminalIds.add(terminalId);
-        }
         this.retireSession(existing);
         const reused = await this.createRuntimeForNode(args);
         this.claimTerminalOwnership(terminalId, reused.sessionId);
@@ -919,19 +909,18 @@ class RuntimeManager {
         const outcome = (event.outcome === 'success' || event.outcome === 'failure')
           ? (event.outcome as 'success' | 'failure')
           : 'success';
-        if (session.cliId !== 'codex') {
-          session.markCompleted();
-        } else {
-          session.markTaskCompletedForReuse();
-        }
+        session.markCompleted();
         this.emit({
           type: 'session_completed',
           sessionId,
           nodeId: session.nodeId,
           outcome,
         });
-        if (session.cliId !== 'codex') {
-          this.cleanupSession(session);
+        this.cleanupSession(session);
+        if (session.cliId === 'codex' && session.terminalId) {
+          this.destroyAndWaitForTerminal(session.terminalId).catch(err =>
+            console.warn(`[codex] PTY destroy after task completion failed terminal=${session.terminalId}`, err),
+          );
         }
         return;
       }
@@ -1066,8 +1055,7 @@ class RuntimeManager {
         : 'Terminal process exited.';
       session.markDisconnected(reason);
 
-      const completedReusableCodex = session.cliId === 'codex' && session.completedTaskCount > 0;
-      if (!completedReusableCodex && (session.state === 'running' || session.state === 'awaiting_ack' || session.state === 'awaiting_permission')) {
+      if (session.state === 'running' || session.state === 'awaiting_ack' || session.state === 'awaiting_permission') {
         session.markFailed(reason);
         this.emit({
           type: 'session_failed',
@@ -1304,7 +1292,6 @@ class RuntimeManager {
     }
 
     let launchedCli = false;
-    let reusedCodexRuntime = false;
 
     // 3. For interactive PTY: launch CLI in terminal if needed.
     if (session.isTerminal) {
@@ -1314,12 +1301,9 @@ class RuntimeManager {
       if (!terminalReady) {
         throw new Error(`Terminal ${session.terminalId} did not become active before CLI launch (state: awaiting_cli_ready, node: ${session.nodeId}).`);
       }
-      reusedCodexRuntime = session.cliId === 'codex' && this.reusableCodexTerminalIds.has(session.terminalId);
-      if (reusedCodexRuntime) {
-        this.reusableCodexTerminalIds.delete(session.terminalId);
-      }
+      // Codex is fresh_process: always launch a new process.
       const shouldLaunchCli = session.cliId === 'codex'
-        ? !reusedCodexRuntime
+        ? true
         : await this.shouldLaunchCliInTerminal(session);
       if (shouldLaunchCli) {
         await sleep(CLI_LAUNCH_DELAY_MS);
@@ -1496,10 +1480,8 @@ class RuntimeManager {
       }, baseUrl);
       await this.launchHeadless(session, activationPayload, signal, baseUrl);
     } else if (session.cliId === 'codex') {
-      if (reusedCodexRuntime && !launchedCli) {
-        console.log('[codex] reusable runtime found; sending follow-up get_current_task signal');
-        await this.injectInteractiveTask(session, buildCodexFollowupTaskSignal(), false);
-      }
+      // Codex receives its task via the bootstrap prompt CLI argument at launch —
+      // no separate interactive task injection needed for fresh_process runs.
     } else if (bootstrapPromptBody) {
       console.log(`[runtime] bootstrap was injected; skipping terminal NEW_TASK injection — task delivered via MCP cli=${session.cliId}`);
     } else {
@@ -1538,15 +1520,6 @@ class RuntimeManager {
         new Set(['activation_acked', 'running', 'completed', 'done']),
         TASK_ACK_TIMEOUT_MS,
       );
-      if (session.cliId === 'codex' && session.isTerminal && reusedCodexRuntime && !launchedCli) {
-        const ackRace = await Promise.race([
-          ackPromise.then(() => 'acked' as const),
-          sleep(CODEX_TASK_RETRY_DELAY_MS).then(() => 'retry' as const),
-        ]);
-        if (ackRace === 'retry') {
-          await this.injectInteractiveTask(session, buildCodexFollowupTaskSignal(), true);
-        }
-      }
       await ackPromise;
 
       session.transitionTo('running');
@@ -1640,18 +1613,20 @@ class RuntimeManager {
     };
 
     const bootstrapPrompt = this.buildCodexBootstrapPrompt(session);
+    const resolvedYoloFlag = session.yolo ? await resolveCodexYoloFlag() : null;
     const args = buildCodexInteractiveLaunchArgs({
       modelId: session.model || null,
       yolo: session.yolo,
       workspaceDir: session.workspaceDir,
       mcpUrl,
       bootstrapPrompt,
+      resolvedYoloFlag,
     });
     const promptBytes = new TextEncoder().encode(bootstrapPrompt).length;
     const { rows, cols } = this.getTerminalDimensions(session.terminalId);
 
     console.log('[codex] launching interactive TUI with prompt arg');
-    console.log(`[codex] resolved yolo flag=${session.yolo ? '--dangerously-bypass-approvals-and-sandbox' : '<none>'}`);
+    console.log(`[codex] resolved yolo flag=${resolvedYoloFlag ?? '<none>'}`);
     console.log(`[codex] command=codex args=${this.formatCodexArgsForLog(args)}`);
     console.log(`[codex] promptBytes=${promptBytes}`);
     console.log(`[codex] ptySize=${cols}x${rows}`);

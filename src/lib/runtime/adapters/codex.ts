@@ -52,7 +52,10 @@ export const codexAdapter: CliAdapter = {
 
     const args: string[] = [];
     if (context.model?.trim()) args.push('--model', context.model.trim());
-    const yoloFlag = '--dangerously-bypass-approvals-and-sandbox';
+    // Yolo flag is probed and resolved by resolveCodexYoloFlag() in spawnCodexDirectly.
+    // buildLaunchCommand is used for headless path (currently unsupported for codex),
+    // so fall back to --yolo as the preferred flag here.
+    const yoloFlag = '--yolo';
     if (context.yolo) {
       args.push(yoloFlag);
       console.log(`[codex] resolved yolo flag=${yoloFlag}`);

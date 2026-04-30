@@ -146,18 +146,55 @@ function quoteShellArgument(value: string, shellKind: ShellKind): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
+// Cached result of resolveCodexYoloFlag — undefined means not yet probed.
+let _cachedCodexYoloFlag: string | null | undefined = undefined;
+
+/**
+ * Detect the correct yolo flag for the installed Codex CLI.
+ * Prefers --yolo (newer versions); falls back to --dangerously-bypass-approvals-and-sandbox.
+ * Result is cached after first probe.
+ */
+export async function resolveCodexYoloFlag(): Promise<string | null> {
+  if (_cachedCodexYoloFlag !== undefined) return _cachedCodexYoloFlag;
+
+  try {
+    const { invoke } = await import('@tauri-apps/api/core');
+    const helpText = await invoke<string>('get_command_output', {
+      command: 'codex',
+      args: ['--help'],
+    }).catch(() => '');
+
+    if (helpText.includes('--yolo')) {
+      _cachedCodexYoloFlag = '--yolo';
+    } else if (helpText.includes('--dangerously-bypass-approvals-and-sandbox')) {
+      _cachedCodexYoloFlag = '--dangerously-bypass-approvals-and-sandbox';
+    } else {
+      console.warn('[codex] no supported yolo flag found in codex --help output; omitting yolo flag');
+      _cachedCodexYoloFlag = null;
+    }
+  } catch (err) {
+    console.warn('[codex] could not probe codex --help, defaulting to --yolo', err);
+    _cachedCodexYoloFlag = '--yolo';
+  }
+
+  console.log(`[codex] resolved yolo flag=${_cachedCodexYoloFlag ?? '<none>'}`);
+  return _cachedCodexYoloFlag;
+}
+
 function buildCodexInteractiveFlagArgs({
   modelId,
   yolo,
   workspaceDir,
   mcpUrl,
+  resolvedYoloFlag,
 }: {
   modelId?: string | null;
   yolo?: boolean;
   workspaceDir?: string | null;
   mcpUrl?: string | null;
+  resolvedYoloFlag?: string | null;
 }): string[] {
-  const yoloFlag = yolo ? '--dangerously-bypass-approvals-and-sandbox' : null;
+  const yoloFlag = yolo ? (resolvedYoloFlag ?? '--yolo') : null;
   console.log(`[codex] buildCodexInteractiveFlagArgs: resolved yolo flag=${yoloFlag ?? '<none>'}`);
   const args = [
     ...(mcpUrl?.trim() ? ['-c', `mcp_servers.terminal_docks.url="${mcpUrl.trim()}"`] : []),
@@ -176,6 +213,7 @@ export function buildCodexInteractiveLaunchCommand({
   workspaceDir,
   mcpUrl,
   bootstrapPrompt,
+  resolvedYoloFlag,
   shellKind = 'windows',
 }: {
   modelId?: string | null;
@@ -183,10 +221,11 @@ export function buildCodexInteractiveLaunchCommand({
   workspaceDir?: string | null;
   mcpUrl?: string | null;
   bootstrapPrompt: string;
+  resolvedYoloFlag?: string | null;
   shellKind?: ShellKind;
 }): string {
   const normalizedPrompt = bootstrapPrompt.replace(/\s+/g, ' ').trim();
-  const parts: string[] = ['codex', ...buildCodexInteractiveFlagArgs({ modelId, yolo, workspaceDir, mcpUrl })];
+  const parts: string[] = ['codex', ...buildCodexInteractiveFlagArgs({ modelId, yolo, workspaceDir, mcpUrl, resolvedYoloFlag })];
   parts.push(quoteShellArgument(normalizedPrompt, shellKind));
   return parts.join(' ');
 }
@@ -197,15 +236,17 @@ export function buildCodexInteractiveLaunchArgs({
   workspaceDir,
   mcpUrl,
   bootstrapPrompt,
+  resolvedYoloFlag,
 }: {
   modelId?: string | null;
   yolo?: boolean;
   workspaceDir?: string | null;
   mcpUrl?: string | null;
   bootstrapPrompt: string;
+  resolvedYoloFlag?: string | null;
 }): string[] {
   return [
-    ...buildCodexInteractiveFlagArgs({ modelId, yolo, workspaceDir, mcpUrl }),
+    ...buildCodexInteractiveFlagArgs({ modelId, yolo, workspaceDir, mcpUrl, resolvedYoloFlag }),
     bootstrapPrompt,
   ];
 }
@@ -230,7 +271,7 @@ export function buildPtyLaunchCommand(cliId: string, options: { model?: string |
   if (options.yolo) {
     if (cli === 'claude') parts.push('--dangerously-skip-permissions');
     else if (cli === 'gemini') parts.push('--yolo');
-    else if (cli === 'codex') parts.push('--dangerously-bypass-approvals-and-sandbox');
+    else if (cli === 'codex') parts.push('--yolo');
     // opencode: --yolo is only valid for `opencode run`, not the default TUI mode.
   }
 
