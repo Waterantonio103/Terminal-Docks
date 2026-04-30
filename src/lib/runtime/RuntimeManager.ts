@@ -160,6 +160,8 @@ class TerminalLock {
       release = resolve;
     });
 
+    this.locks.set(terminalId, next);
+
     if (existing) {
       console.log(`[runtime] acquiring terminal lock terminal=${terminalId} op=${label} (waiting)`);
       await existing;
@@ -167,9 +169,10 @@ class TerminalLock {
       console.log(`[runtime] acquiring terminal lock terminal=${terminalId} op=${label}`);
     }
 
-    this.locks.set(terminalId, next);
     return () => {
-      this.locks.delete(terminalId);
+      if (this.locks.get(terminalId) === next) {
+        this.locks.delete(terminalId);
+      }
       release();
       console.log(`[runtime] released terminal lock terminal=${terminalId} op=${label}`);
     };
@@ -496,12 +499,9 @@ class RuntimeManager {
     const strategy = getCliStrategy(session.cliId);
     const terminalId = session.terminalId;
 
-    const release = await this.terminalLocks.acquire(terminalId, `stop:${args.sessionId.slice(0, 12)}`);
-    try {
+    await this.withTerminalLock(terminalId, `stop:${args.sessionId.slice(0, 12)}`, async () => {
       await this.stopRuntimeInner(session, args.reason ?? 'Stopped by user', strategy);
-    } finally {
-      release();
-    }
+    });
   }
 
   async resolvePermission(args: ResolvePermissionArgs): Promise<void> {
@@ -668,12 +668,9 @@ class RuntimeManager {
       `[runtime] ensureRuntimeReadyForTask: cli=${args.cliId} mode=${strategy.workflowMode} terminal=${terminalId} node=${args.nodeId}`,
     );
 
-    const release = await this.terminalLocks.acquire(terminalId, `ensure:${args.nodeId}`);
-    try {
-      return await this.ensureRuntimeReadyForTaskInner(args, strategy);
-    } finally {
-      release();
-    }
+    return this.withTerminalLock(terminalId, `ensure:${args.nodeId}`, () =>
+      this.ensureRuntimeReadyForTaskInner(args, strategy),
+    );
   }
 
   private async ensureRuntimeReadyForTaskInner(
@@ -689,6 +686,8 @@ class RuntimeManager {
       executionMode: args.executionMode,
       workspaceDir: args.workspaceDir ?? null,
     };
+
+    let needsPtyDestroy = false;
 
     const existing = this.findReusableSessionCandidate(args);
     if (existing && strategy.workflowMode === 'reusable_interactive') {
@@ -712,11 +711,13 @@ class RuntimeManager {
         `[runtime] existing session not reusable reason=${validation.status} cli=${args.cliId}; stopping and relaunching`,
       );
       await this.stopRuntimeAndWait(existing, `Session not reusable: ${validation.details}`, strategy);
+      needsPtyDestroy = true;
     } else if (existing) {
       console.log(
         `[runtime] existing session found but strategy=${strategy.workflowMode}; stopping and relaunching`,
       );
       await this.stopRuntimeAndWait(existing, `Strategy ${strategy.workflowMode} requires fresh process`, strategy);
+      needsPtyDestroy = true;
     }
 
     const conflictingSessions = Array.from(this.sessions.values()).filter(session =>
@@ -732,12 +733,13 @@ class RuntimeManager {
         `Conflicting runtime replaced by cli=${args.cliId} model=${normalizeModelForReuse(args.modelId ?? args.model) ?? '<default>'} yolo=${Boolean(args.yolo)}`,
         strategy,
       );
+      needsPtyDestroy = true;
     }
 
-    if (strategy.workflowMode === 'fresh_process' && strategy.requiresPty) {
+    if (needsPtyDestroy && strategy.requiresPty) {
       const active = await isTerminalActive(terminalId);
       if (active) {
-        console.warn(`[runtime] terminal ${terminalId} still active after stopping sessions; destroying for fresh_process`);
+        console.warn(`[runtime] terminal ${terminalId} still active after stopping sessions; destroying for fresh launch`);
         await this.destroyAndWaitForTerminal(terminalId);
       }
     }
@@ -1222,6 +1224,15 @@ class RuntimeManager {
     }
   }
 
+  private async withTerminalLock<T>(terminalId: string, label: string, fn: () => Promise<T>): Promise<T> {
+    const release = await this.terminalLocks.acquire(terminalId, label);
+    try {
+      return await fn();
+    } finally {
+      release();
+    }
+  }
+
   // ── Internal: Activation Pipeline ──────────────────────────────────
 
   private async runActivationPipeline(
@@ -1640,6 +1651,7 @@ class RuntimeManager {
     const { rows, cols } = this.getTerminalDimensions(session.terminalId);
 
     console.log('[codex] launching interactive TUI with prompt arg');
+    console.log(`[codex] resolved yolo flag=${session.yolo ? '--dangerously-bypass-approvals-and-sandbox' : '<none>'}`);
     console.log(`[codex] command=codex args=${this.formatCodexArgsForLog(args)}`);
     console.log(`[codex] promptBytes=${promptBytes}`);
     console.log(`[codex] ptySize=${cols}x${rows}`);

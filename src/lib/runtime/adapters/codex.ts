@@ -52,7 +52,14 @@ export const codexAdapter: CliAdapter = {
 
     const args: string[] = [];
     if (context.model?.trim()) args.push('--model', context.model.trim());
-    if (context.yolo) args.push('--dangerously-bypass-approvals-and-sandbox');
+    const yoloFlag = '--dangerously-bypass-approvals-and-sandbox';
+    if (context.yolo) {
+      args.push(yoloFlag);
+      console.log(`[codex] resolved yolo flag=${yoloFlag}`);
+    } else {
+      console.log('[codex] resolved yolo flag=<none> (yolo=false)');
+    }
+    console.log(`[codex] final codex args (no prompt)=[${args.join(', ')}]`);
     return {
       command: 'codex',
       args,

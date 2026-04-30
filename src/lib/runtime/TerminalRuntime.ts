@@ -23,8 +23,9 @@ export async function spawnTerminal(args: {
   args?: string[];
   env?: Record<string, string>;
 }): Promise<void> {
+  let result: boolean;
   if (args.command) {
-    await invoke('spawn_pty_with_command', {
+    result = await invoke<boolean>('spawn_pty_with_command', {
       id: args.id,
       rows: args.rows,
       cols: args.cols,
@@ -34,12 +35,15 @@ export async function spawnTerminal(args: {
       env: args.env ?? {},
     });
   } else {
-    await invoke('spawn_pty', {
+    result = await invoke<boolean>('spawn_pty', {
       id: args.id,
       rows: args.rows,
       cols: args.cols,
       cwd: args.cwd ?? null,
     });
+  }
+  if (result !== true) {
+    throw new Error(`PTY spawn for terminalId "${args.id}" returned false — backend refused creation.`);
   }
 }
 

@@ -467,9 +467,11 @@ pub fn spawn_pty(
     cols: u16,
     cwd: Option<String>,
 ) -> Result<bool, String> {
-    let mut ptys = state.ptys.lock().unwrap();
-    if ptys.contains_key(&id) {
-        return Ok(false);
+    {
+        let ptys = state.ptys.lock().unwrap();
+        if ptys.contains_key(&id) {
+            return Err(format!("PTY already exists for terminalId {}", id));
+        }
     }
 
     let pty_system = NativePtySystem::default();
@@ -530,10 +532,17 @@ pub fn spawn_pty(
         recent_output: Arc::clone(&recent_output),
     };
 
-    ptys.insert(id.clone(), instance);
-    drop(ptys); // Release lock before spawning thread
+    {
+        let mut ptys = state.ptys.lock().unwrap();
+        if ptys.contains_key(&id) {
+            return Err(format!("PTY already exists for terminalId {} (race)", id));
+        }
+        ptys.insert(id.clone(), instance);
+    }
 
-    // Read thread
+    let id_clone = id.clone();
+    let app_clone = app.clone();
+
     thread::spawn(move || {
         let mut buf = [0; 4096];
         loop {
@@ -546,12 +555,12 @@ pub fn spawn_pty(
                         let mut recent = recent_output.lock().unwrap();
                         push_recent_output(&mut recent, &data);
                     }
-                    let pty_state = app.state::<PtyState>();
-                    maybe_emit_permission_request(&app, &pty_state, &id, &chunk);
-                    let _ = app.emit(
+                    let pty_state = app_clone.state::<PtyState>();
+                    maybe_emit_permission_request(&app_clone, &pty_state, &id_clone, &chunk);
+                    let _ = app_clone.emit(
                         "pty-out",
                         Payload {
-                            id: id.clone(),
+                            id: id_clone.clone(),
                             data,
                         },
                     );
@@ -559,25 +568,25 @@ pub fn spawn_pty(
                 Err(_) => break,
             }
         }
-        // Reader EOF does not always mean the child has exited (ConPTY on Windows
-        // can close the master reader while the child process is still alive after
-        // exec).  Wait briefly and only emit pty-exit when the child has truly exited.
         let child_exited = 'outer: loop {
             thread::sleep(std::time::Duration::from_millis(250));
-            let pty_state = app.state::<PtyState>();
+            let pty_state = app_clone.state::<PtyState>();
             let mut ptys = pty_state.ptys.lock().unwrap();
-            match ptys.get_mut(&id) {
+            match ptys.get_mut(&id_clone) {
                 Some(instance) => match instance.child.try_wait() {
                     Ok(None) => continue 'outer,
-                    _ => break 'outer true,
+                    _ => {
+                        let _ = ptys.remove(&id_clone);
+                        break 'outer true;
+                    }
                 },
                 None => break 'outer true,
             }
         };
         if child_exited {
-            let pty_state = app.state::<PtyState>();
-            expire_terminal_permissions(&app, &pty_state, &id);
-            let _ = app.emit("pty-exit", PtyExitPayload { id });
+            let pty_state = app_clone.state::<PtyState>();
+            expire_terminal_permissions(&app_clone, &pty_state, &id_clone);
+            let _ = app_clone.emit("pty-exit", PtyExitPayload { id: id_clone });
         }
     });
 
@@ -596,9 +605,11 @@ pub fn spawn_pty_with_command(
     args: Vec<String>,
     env: Option<HashMap<String, String>>,
 ) -> Result<bool, String> {
-    let mut ptys = state.ptys.lock().unwrap();
-    if ptys.contains_key(&id) {
-        return Ok(false);
+    {
+        let ptys = state.ptys.lock().unwrap();
+        if ptys.contains_key(&id) {
+            return Err(format!("PTY already exists for terminalId {}", id));
+        }
     }
 
     let pty_system = NativePtySystem::default();
@@ -672,8 +683,16 @@ pub fn spawn_pty_with_command(
         recent_output: Arc::clone(&recent_output),
     };
 
-    ptys.insert(id.clone(), instance);
-    drop(ptys);
+    {
+        let mut ptys = state.ptys.lock().unwrap();
+        if ptys.contains_key(&id) {
+            return Err(format!("PTY already exists for terminalId {} (race)", id));
+        }
+        ptys.insert(id.clone(), instance);
+    }
+
+    let id_clone = id.clone();
+    let app_clone = app.clone();
 
     thread::spawn(move || {
         let mut buf = [0; 4096];
@@ -687,12 +706,12 @@ pub fn spawn_pty_with_command(
                         let mut recent = recent_output.lock().unwrap();
                         push_recent_output(&mut recent, &data);
                     }
-                    let pty_state = app.state::<PtyState>();
-                    maybe_emit_permission_request(&app, &pty_state, &id, &chunk);
-                    let _ = app.emit(
+                    let pty_state = app_clone.state::<PtyState>();
+                    maybe_emit_permission_request(&app_clone, &pty_state, &id_clone, &chunk);
+                    let _ = app_clone.emit(
                         "pty-out",
                         Payload {
-                            id: id.clone(),
+                            id: id_clone.clone(),
                             data,
                         },
                     );
@@ -702,20 +721,23 @@ pub fn spawn_pty_with_command(
         }
         let child_exited = 'outer: loop {
             thread::sleep(std::time::Duration::from_millis(250));
-            let pty_state = app.state::<PtyState>();
+            let pty_state = app_clone.state::<PtyState>();
             let mut ptys = pty_state.ptys.lock().unwrap();
-            match ptys.get_mut(&id) {
+            match ptys.get_mut(&id_clone) {
                 Some(instance) => match instance.child.try_wait() {
                     Ok(None) => continue 'outer,
-                    _ => break 'outer true,
+                    _ => {
+                        let _ = ptys.remove(&id_clone);
+                        break 'outer true;
+                    }
                 },
                 None => break 'outer true,
             }
         };
         if child_exited {
-            let pty_state = app.state::<PtyState>();
-            expire_terminal_permissions(&app, &pty_state, &id);
-            let _ = app.emit("pty-exit", PtyExitPayload { id });
+            let pty_state = app_clone.state::<PtyState>();
+            expire_terminal_permissions(&app_clone, &pty_state, &id_clone);
+            let _ = app_clone.emit("pty-exit", PtyExitPayload { id: id_clone });
         }
     });
 
@@ -745,10 +767,12 @@ pub fn get_pty_recent_output(
 pub fn is_pty_active(state: State<'_, PtyState>, id: String) -> bool {
     let mut ptys = state.ptys.lock().unwrap();
     if let Some(instance) = ptys.get_mut(&id) {
-        // Check if the child process is still alive by trying to wait without blocking
         match instance.child.try_wait() {
-            Ok(None) => true, // Still running
-            _ => false,       // Exited or error
+            Ok(None) => true,
+            _ => {
+                let _ = ptys.remove(&id);
+                false
+            }
         }
     } else {
         false

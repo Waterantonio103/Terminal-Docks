@@ -157,13 +157,17 @@ function buildCodexInteractiveFlagArgs({
   workspaceDir?: string | null;
   mcpUrl?: string | null;
 }): string[] {
-  return [
+  const yoloFlag = yolo ? '--dangerously-bypass-approvals-and-sandbox' : null;
+  console.log(`[codex] buildCodexInteractiveFlagArgs: resolved yolo flag=${yoloFlag ?? '<none>'}`);
+  const args = [
     ...(mcpUrl?.trim() ? ['-c', `mcp_servers.terminal_docks.url="${mcpUrl.trim()}"`] : []),
     ...(modelId?.trim() ? ['--model', modelId.trim()] : []),
     ...(workspaceDir?.trim() ? ['--cd', workspaceDir.trim()] : []),
     '--no-alt-screen',
-    ...(yolo ? ['--dangerously-bypass-approvals-and-sandbox'] : []),
+    ...(yoloFlag ? [yoloFlag] : []),
   ];
+  console.log(`[codex] final codex args (no prompt)=[${args.join(', ')}]`);
+  return args;
 }
 
 export function buildCodexInteractiveLaunchCommand({
