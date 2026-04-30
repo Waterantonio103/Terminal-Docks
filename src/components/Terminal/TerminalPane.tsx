@@ -234,8 +234,33 @@ export function TerminalPane({ pane, dragEndSeq }: { pane: Pane; dragEndSeq?: nu
       }).catch(() => {});
 
       console.log(`[TerminalPane] Auto-launch check for ${pane.id} (${terminalId})`, { customCommand, cli, spawned: false });
+
+      const trySpawnPty = async (opts: Parameters<typeof invoke>[1]): Promise<boolean> => {
+        try {
+          return await invoke<boolean>('spawn_pty', opts);
+        } catch (err) {
+          if (String(err).includes('already exists')) {
+            console.log(`[TerminalPane] PTY already exists for ${terminalId} — attaching to existing`);
+            return false;
+          }
+          throw err;
+        }
+      };
+
+      const trySpawnPtyWithCommand = async (opts: Parameters<typeof invoke>[1]): Promise<boolean> => {
+        try {
+          return await invoke<boolean>('spawn_pty_with_command', opts);
+        } catch (err) {
+          if (String(err).includes('already exists')) {
+            console.log(`[TerminalPane] PTY already exists for ${terminalId} — attaching to existing`);
+            return false;
+          }
+          throw err;
+        }
+      };
+
       if (customCommand) {
-        const spawned = await invoke<boolean>('spawn_pty_with_command', {
+        const spawned = await trySpawnPtyWithCommand({
           id: terminalId,
           rows: term.rows || 24,
           cols: term.cols || 80,
@@ -250,7 +275,7 @@ export function TerminalPane({ pane, dragEndSeq }: { pane: Pane; dragEndSeq?: nu
         // For known CLIs in "interactive PTY" mode, we spawn a default shell
         // and then send the command. This is more robust on Windows where
         // binaries like 'codex' or 'claude' are often .cmd shims.
-        const spawned = await invoke<boolean>('spawn_pty', {
+        const spawned = await trySpawnPty({
           id: terminalId,
           rows: term.rows || 24,
           cols: term.cols || 80,
@@ -283,7 +308,7 @@ export function TerminalPane({ pane, dragEndSeq }: { pane: Pane; dragEndSeq?: nu
           }, 600);
         }
       } else {
-        const spawned = await invoke<boolean>('spawn_pty', {
+        const spawned = await trySpawnPty({
           id: terminalId,
           rows: term.rows || 24,
           cols: term.cols || 80,
@@ -303,7 +328,9 @@ export function TerminalPane({ pane, dragEndSeq }: { pane: Pane; dragEndSeq?: nu
       emit('pty-spawned', { id: terminalId });
     };
 
-    initPty();
+    initPty().catch((err) => {
+      console.error(`[TerminalPane] initPty failed for ${terminalId}:`, err);
+    });
 
     term.onData((data) => {
       invoke('write_to_pty', { id: terminalId, data });

@@ -97,21 +97,21 @@ const CLI_STRATEGIES: Record<string, CliRuntimeStrategy> = {
   },
   claude: {
     cliId: 'claude',
-    workflowMode: 'reusable_interactive',
+    workflowMode: 'fresh_process',
     supportsMcpHandshake: true,
     supportsPromptInjection: true,
     requiresPty: true,
   },
   gemini: {
     cliId: 'gemini',
-    workflowMode: 'reusable_interactive',
+    workflowMode: 'fresh_process',
     supportsMcpHandshake: true,
     supportsPromptInjection: true,
     requiresPty: true,
   },
   opencode: {
     cliId: 'opencode',
-    workflowMode: 'reusable_interactive',
+    workflowMode: 'fresh_process',
     supportsMcpHandshake: true,
     supportsPromptInjection: true,
     requiresPty: true,
@@ -232,7 +232,20 @@ class RuntimeManager {
           activationPayload: payload,
         });
       } catch (error) {
+        const reason = error instanceof Error ? error.message : String(error);
         console.error(`[RuntimeManager] Failed to launch CLI for ${node_id}:`, error);
+        acknowledgeActivation({
+          missionId: mission_id,
+          nodeId: node_id,
+          attempt,
+          status: 'failed',
+          reason,
+        }).catch(() => {});
+        emit('workflow-node-update', {
+          id: node_id,
+          status: 'failed',
+          attempt,
+        }).catch(() => {});
       }
     });
 
@@ -680,10 +693,11 @@ class RuntimeManager {
       workspaceDir: args.workspaceDir ?? null,
     };
 
+    const isWorkflowRun = !args.missionId.startsWith('adhoc-');
     let needsPtyDestroy = false;
 
     const existing = this.findReusableSessionCandidate(args);
-    if (existing && strategy.workflowMode === 'reusable_interactive') {
+    if (existing && strategy.workflowMode === 'reusable_interactive' && !isWorkflowRun) {
       const validation = await this.validateSessionForReuse(existing.sessionId, expectedReuse);
       if (validation.status === 'reusable') {
         console.log(
@@ -704,7 +718,7 @@ class RuntimeManager {
       needsPtyDestroy = true;
     } else if (existing) {
       console.log(
-        `[runtime] existing session found but strategy=${strategy.workflowMode}; stopping and relaunching`,
+        `[runtime] existing session found; stopping for fresh launch cli=${args.cliId} strategy=${strategy.workflowMode}`,
       );
       await this.stopRuntimeAndWait(existing, `Strategy ${strategy.workflowMode} requires fresh process`, strategy);
       needsPtyDestroy = true;
@@ -726,11 +740,16 @@ class RuntimeManager {
       needsPtyDestroy = true;
     }
 
-    if (needsPtyDestroy && strategy.requiresPty) {
-      const active = await isTerminalActive(terminalId);
-      if (active) {
-        console.warn(`[runtime] terminal ${terminalId} still active after stopping sessions; destroying for fresh launch`);
+    if (strategy.requiresPty) {
+      if (isWorkflowRun) {
+        console.log(`[runtime] workflow run: unconditionally destroying terminal=${terminalId}`);
         await this.destroyAndWaitForTerminal(terminalId);
+      } else if (needsPtyDestroy) {
+        const active = await isTerminalActive(terminalId);
+        if (active) {
+          console.warn(`[runtime] terminal ${terminalId} still active after stopping sessions; destroying for fresh launch`);
+          await this.destroyAndWaitForTerminal(terminalId);
+        }
       }
     }
 
@@ -1132,11 +1151,27 @@ class RuntimeManager {
   ): Promise<void> {
     const active = await isTerminalActive(terminalId);
     if (active) {
-      throw new Error(`Cannot spawn CLI: terminalId "${terminalId}" already has an active PTY. Stop or destroy it first.`);
+      // TerminalPane's initPty() may have raced between our destroyAndWaitForTerminal call
+      // and this check, spawning a new PTY. Destroy it and continue — we own this terminal.
+      console.warn(`[runtime] terminal ${terminalId} still active at spawn (TerminalPane race); destroying before retry`);
+      await this.destroyAndWaitForTerminal(terminalId);
+      await sleep(150);
     }
 
     console.log(`[runtime] spawning CLI terminal=${terminalId} command=${opts.command ?? '<shell>'}`);
-    await spawnTerminal({ id: terminalId, ...opts });
+    try {
+      await spawnTerminal({ id: terminalId, ...opts });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes('already exists')) {
+        console.warn(`[runtime] PTY already exists on spawn; destroying and retrying terminal=${terminalId}`);
+        await this.destroyAndWaitForTerminal(terminalId);
+        await sleep(250);
+        await spawnTerminal({ id: terminalId, ...opts });
+      } else {
+        throw err;
+      }
+    }
     console.log(`[runtime] spawn success terminal=${terminalId}`);
   }
 
@@ -1295,16 +1330,22 @@ class RuntimeManager {
 
     // 3. For interactive PTY: launch CLI in terminal if needed.
     if (session.isTerminal) {
+      const isWorkflowRun = !session.missionId.startsWith('adhoc-');
       session.transitionTo('awaiting_cli_ready');
       this.bindRuntimeToTerminalPane(session);
-      const terminalReady = await this.waitForTerminalReady(session.terminalId, 5_000);
-      if (!terminalReady) {
-        throw new Error(`Terminal ${session.terminalId} did not become active before CLI launch (state: awaiting_cli_ready, node: ${session.nodeId}).`);
+
+      if (!isWorkflowRun) {
+        const terminalReady = await this.waitForTerminalReady(session.terminalId, 5_000);
+        if (!terminalReady) {
+          throw new Error(`Terminal ${session.terminalId} did not become active before CLI launch (state: awaiting_cli_ready, node: ${session.nodeId}).`);
+        }
       }
-      // Codex is fresh_process: always launch a new process.
-      const shouldLaunchCli = session.cliId === 'codex'
+
+      // Workflow runs always spawn fresh; adhoc checks if CLI is already running.
+      const shouldLaunchCli = isWorkflowRun
         ? true
         : await this.shouldLaunchCliInTerminal(session);
+
       if (shouldLaunchCli) {
         await sleep(CLI_LAUNCH_DELAY_MS);
         if (session.cliId === 'codex') {
@@ -1320,6 +1361,15 @@ class RuntimeManager {
               directPty: true,
             }));
           }
+        } else if (isWorkflowRun) {
+          await this.spawnCliDirectly(session);
+          const terminalReady = await this.waitForTerminalReady(session.terminalId, 5_000);
+          if (!terminalReady) {
+            throw new Error(`Terminal ${session.terminalId} did not become active after fresh spawn for CLI "${session.cliId}" (node: ${session.nodeId}).`);
+          }
+          const launchCmd = buildPtyLaunchCommand(session.cliId, { model: session.model, yolo: session.yolo });
+          console.log(`[runtime] launch command=${launchCmd}`);
+          await writeToTerminal(session.terminalId, `${launchCmd}\r`);
         } else {
           const launchCmd = buildPtyLaunchCommand(session.cliId, { model: session.model, yolo: session.yolo });
           console.log(`[runtime] launch command=${launchCmd}`);
@@ -1591,6 +1641,26 @@ class RuntimeManager {
       nodeId: session.nodeId,
       attempt: session.attempt,
     });
+  }
+
+  private async spawnCliDirectly(session: RuntimeSession): Promise<void> {
+    this.suppressedPtyExitUntil.set(session.terminalId, Date.now() + 5_000);
+
+    await this.destroyAndWaitForTerminal(session.terminalId);
+
+    const { rows, cols } = this.getTerminalDimensions(session.terminalId);
+
+    console.log(`[runtime] spawning fresh shell terminal=${session.terminalId} cli=${session.cliId}`);
+    await this.safeSpawnTerminal(session.terminalId, {
+      rows,
+      cols,
+      cwd: session.workspaceDir ?? null,
+    });
+    await emit('terminal-refit-requested', { terminalId: session.terminalId }).catch(() => {});
+
+    setTimeout(() => {
+      this.suppressedPtyExitUntil.delete(session.terminalId);
+    }, 6_000);
   }
 
   private async spawnCodexDirectly(
