@@ -143,6 +143,7 @@ class RuntimeObserver {
         return 'completed';
       case 'failed':
       case 'cancelled':
+      case 'disconnected':
         return 'failed';
       default:
         return 'idle';

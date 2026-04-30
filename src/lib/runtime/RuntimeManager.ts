@@ -5,9 +5,11 @@
  * launch, send tasks to, and stop runtimes. Routes PTY output through
  * CLI adapters. Emits events for UI and Orchestrator subscription.
  *
- * This is the single owner of terminal/runtime creation responsibility.
- * Code that previously called Tauri PTY commands or drove MCP registration
- * from UI components should now call RuntimeManager instead.
+ * INVARIANT: There is exactly one active RuntimeSession owner for a
+ * terminalId at a time. All workflow activation goes through
+ * ensureRuntimeReadyForTask(...). No code path may call
+ * createRuntimeForNode(...) + launchCli(...) directly for workflow
+ * activation.
  *
  * Phase 4 — Wave 3 / Agent B
  */
@@ -15,16 +17,19 @@
 import { listen } from '@tauri-apps/api/event';
 import { RuntimeSession } from './RuntimeSession.js';
 import type {
+  CliRuntimeStrategy,
   CreateRuntimeArgs,
   RuntimeManagerEvent,
   RuntimeManagerSnapshot,
+  RuntimeReuseExpectation,
+  RuntimeSessionState,
   SendTaskArgs,
   SendInputArgs,
+  SessionLivenessResult,
   StopRuntimeArgs,
   ResolvePermissionArgs,
-  SessionLivenessResult,
-  RuntimeReuseExpectation,
 } from './RuntimeTypes.js';
+import { isRuntimeSessionTerminal } from './RuntimeTypes.js';
 import { getCliAdapter } from './adapters/index.js';
 
 import {
@@ -75,6 +80,53 @@ const CODEX_TASK_RETRY_DELAY_MS = 8_000;
 const CODEX_TYPE_CHUNK_SIZE = 48;
 const CODEX_TYPE_CHUNK_DELAY_MS = 20;
 const CODEX_INITIAL_LAUNCH_VERIFY_MS = 2_000;
+const PTY_DESTROY_WAIT_MS = 5_000;
+const PTY_DESTROY_POLL_MS = 100;
+
+// ──────────────────────────────────────────────
+// CLI Runtime Strategies
+// ──────────────────────────────────────────────
+
+const CLI_STRATEGIES: Record<string, CliRuntimeStrategy> = {
+  codex: {
+    cliId: 'codex',
+    workflowMode: 'fresh_process',
+    supportsMcpHandshake: true,
+    supportsPromptInjection: true,
+    requiresPty: true,
+  },
+  claude: {
+    cliId: 'claude',
+    workflowMode: 'reusable_interactive',
+    supportsMcpHandshake: true,
+    supportsPromptInjection: true,
+    requiresPty: true,
+  },
+  gemini: {
+    cliId: 'gemini',
+    workflowMode: 'reusable_interactive',
+    supportsMcpHandshake: true,
+    supportsPromptInjection: true,
+    requiresPty: true,
+  },
+  opencode: {
+    cliId: 'opencode',
+    workflowMode: 'reusable_interactive',
+    supportsMcpHandshake: true,
+    supportsPromptInjection: true,
+    requiresPty: true,
+  },
+};
+
+function getCliStrategy(cliId: string): CliRuntimeStrategy {
+  return CLI_STRATEGIES[cliId] ?? {
+    cliId: cliId as any,
+    workflowMode: 'fresh_process',
+    supportsMcpHandshake: false,
+    supportsPromptInjection: false,
+    requiresPty: true,
+  };
+}
 
 // ──────────────────────────────────────────────
 // Listeners
@@ -95,17 +147,53 @@ function previewText(value: string | null | undefined, limit = 280): string | nu
 }
 
 // ──────────────────────────────────────────────
+// Per-Terminal Mutex
+// ──────────────────────────────────────────────
+
+class TerminalLock {
+  private locks = new Map<string, Promise<void>>();
+
+  async acquire(terminalId: string, label: string): Promise<() => void> {
+    const existing = this.locks.get(terminalId);
+    let release!: () => void;
+    const next = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+
+    if (existing) {
+      console.log(`[runtime] acquiring terminal lock terminal=${terminalId} op=${label} (waiting)`);
+      await existing;
+    } else {
+      console.log(`[runtime] acquiring terminal lock terminal=${terminalId} op=${label}`);
+    }
+
+    this.locks.set(terminalId, next);
+    return () => {
+      this.locks.delete(terminalId);
+      release();
+      console.log(`[runtime] released terminal lock terminal=${terminalId} op=${label}`);
+    };
+  }
+
+  isLocked(terminalId: string): boolean {
+    return this.locks.has(terminalId);
+  }
+}
+
+// ──────────────────────────────────────────────
 // RuntimeManager
 // ──────────────────────────────────────────────
 
 class RuntimeManager {
   private sessions = new Map<string, RuntimeSession>();
   private sessionsByNode = new Map<string, string>();
+  private terminalOwners = new Map<string, string>();
   private listeners = new Set<ManagerListener>();
   private snapshotListeners = new Set<SnapshotListener>();
   private ptyCleanupFns = new Map<string, () => void>();
   private suppressedPtyExitUntil = new Map<string, number>();
   private reusableCodexTerminalIds = new Set<string>();
+  private terminalLocks = new TerminalLock();
   private nativeListenerUnsub?: () => void;
   private disposed = false;
 
@@ -122,7 +210,7 @@ class RuntimeManager {
       const { mission_id, node_id, attempt, payload } = event.payload;
 
       try {
-        const session = await this.createRuntimeForNode({
+        await this.ensureRuntimeReadyForTask({
           missionId: mission_id,
           nodeId: node_id,
           attempt,
@@ -141,18 +229,11 @@ class RuntimeManager {
           yolo: Boolean(payload.yolo),
           activationPayload: payload,
         });
-
-        // wireMcpEvents is now called inside createRuntimeForNode.
-        this.wirePtyEvents(payload.terminalId, session.sessionId);
-
-        await this.launchCli(session.sessionId, payload);
       } catch (error) {
         console.error(`[RuntimeManager] Failed to launch CLI for ${node_id}:`, error);
       }
     });
 
-    // Acknowledge headless run exits that complete without going through MCP.
-    // Skipped for interactive CLIs (claude/ollama/lmstudio) which complete via MCP tools.
     listen<{
       runId: string;
       missionId: string;
@@ -178,6 +259,13 @@ class RuntimeManager {
       if (!sessionKey) return;
       const session = this.sessions.get(sessionKey[1]);
       if (!session) return;
+
+      if (!this.isCurrentOwner(session)) {
+        console.log(
+          `[runtime] stale agent-run-exit ignored session=${session.sessionId} terminal=${session.terminalId}`,
+        );
+        return;
+      }
 
       const isMcpCompletingCli = session.cliId === 'claude' || session.cliId === 'ollama' || session.cliId === 'lmstudio';
       if (status === 'completed' && isMcpCompletingCli) return;
@@ -219,10 +307,6 @@ class RuntimeManager {
 
   // ── Public API ──────────────────────────────────────────────────
 
-  /**
-   * Create a new runtime session for a workflow node.
-   * Does NOT launch the CLI yet — call launchCli() separately.
-   */
   async createRuntimeForNode(args: CreateRuntimeArgs): Promise<RuntimeSession> {
     const adapter = getCliAdapter(args.cliId);
     if (!adapter) {
@@ -256,7 +340,7 @@ class RuntimeManager {
     this.sessionsByNode.set(`${args.missionId}:${args.nodeId}:${args.attempt}`, session.sessionId);
     this.wireMcpEvents(session.sessionId);
 
-    session.onStateChange((from: import('./RuntimeTypes.js').RuntimeSessionState, to: import('./RuntimeTypes.js').RuntimeSessionState) => {
+    session.onStateChange((from: RuntimeSessionState, to: RuntimeSessionState) => {
       this.emit({
         type: 'session_state_changed',
         sessionId: session.sessionId,
@@ -265,7 +349,6 @@ class RuntimeManager {
         to,
       });
 
-      // UI Bridge: Sync to Workspace Store (only when status actually changes to avoid re-render loops)
       const existingBinding = useWorkspaceStore.getState().nodeRuntimeBindings[session.nodeId];
       if (existingBinding?.adapterStatus !== to || existingBinding?.runtimeSessionId !== session.sessionId) {
         const existingTerminalId = existingBinding?.terminalId;
@@ -276,7 +359,6 @@ class RuntimeManager {
         });
       }
 
-      // UI Bridge: Emit legacy Tauri event for NodeTreePane
       emit('workflow-node-update', {
         id: session.nodeId,
         status: to,
@@ -297,16 +379,6 @@ class RuntimeManager {
     return session;
   }
 
-  /**
-   * Launch the CLI for a session and complete the full activation pipeline:
-   *  1. Register dispatch with backend
-   *  2. Check MCP health
-   *  3. For interactive PTY: launch CLI in terminal
-   *  4. Register session with MCP
-   *  5. Wait for agent:ready handshake
-   *  6. Build and inject NEW_TASK signal
-   *  7. Wait for task ACK
-   */
   async launchCli(sessionId: string, externalPayload?: import('../missionRuntime.js').RuntimeActivationPayload): Promise<void> {
     const session = this.getSession(sessionId);
     if (!session) throw new Error(`No runtime session: ${sessionId}`);
@@ -331,9 +403,6 @@ class RuntimeManager {
     }
   }
 
-  /**
-   * Send a task prompt to an already-running session.
-   */
   async sendTask(args: SendTaskArgs): Promise<void> {
     const session = this.getSession(args.sessionId);
     if (!session) throw new Error(`No runtime session: ${args.sessionId}`);
@@ -392,9 +461,6 @@ class RuntimeManager {
     });
   }
 
-  /**
-   * Send raw input to the PTY for a session.
-   */
   async sendInput(args: SendInputArgs): Promise<void> {
     const session = this.getSession(args.sessionId);
     if (!session) throw new Error(`No runtime session: ${args.sessionId}`);
@@ -406,11 +472,6 @@ class RuntimeManager {
     await writeToTerminal(session.terminalId, args.input);
   }
 
-  /**
-   * Write a raw bootstrap/connect prompt to a terminal by terminalId.
-   * This is the single gateway for Connect-mode prompt injection.
-   * All callers must use this instead of writing to the PTY directly.
-   */
   async writeBootstrapToTerminal(terminalId: string, data: string, caller: string): Promise<void> {
     console.log(
       `[RuntimeManager] writeBootstrapToTerminal: caller="${caller}", terminalId="${terminalId}", dataLength=${data.length}`,
@@ -428,31 +489,21 @@ class RuntimeManager {
     await writeToTerminal(terminalId, data);
   }
 
-  /**
-   * Stop a runtime session. Destroys the PTY if interactive.
-   */
   async stopRuntime(args: StopRuntimeArgs): Promise<void> {
     const session = this.getSession(args.sessionId);
     if (!session) return;
 
-    const alreadyTerminal = session.state === 'completed' || session.state === 'failed' || session.state === 'cancelled';
-    try {
-      if (session.isTerminal && !alreadyTerminal) {
-        await writeToTerminal(session.terminalId, '\x03');
-        await sleep(200);
-        await writeToTerminal(session.terminalId, '\x03');
-      }
-      session.markCancelled(args.reason ?? 'Stopped by user');
-    } catch {
-      session.markCancelled(args.reason ?? 'Stopped by user');
-    }
+    const strategy = getCliStrategy(session.cliId);
+    const terminalId = session.terminalId;
 
-    this.cleanupSession(session);
+    const release = await this.terminalLocks.acquire(terminalId, `stop:${args.sessionId.slice(0, 12)}`);
+    try {
+      await this.stopRuntimeInner(session, args.reason ?? 'Stopped by user', strategy);
+    } finally {
+      release();
+    }
   }
 
-  /**
-   * Resolve a permission request for a session.
-   */
   async resolvePermission(args: ResolvePermissionArgs): Promise<void> {
     const session = this.getSession(args.sessionId);
     if (!session) throw new Error(`No runtime session: ${args.sessionId}`);
@@ -486,7 +537,7 @@ class RuntimeManager {
     this.notifySnapshot();
   }
 
-  // ── Session Liveness Validation (Group 5) ────────────────────
+  // ── Session Liveness Validation ────────────────────
 
   async validateSessionForReuse(
     sessionId: string,
@@ -497,17 +548,14 @@ class RuntimeManager {
       return { status: 'stale', details: 'Session object no longer exists in RuntimeManager.' };
     }
 
-    const terminalStates: import('./RuntimeTypes.js').RuntimeSessionState[] = [
-      'completed', 'failed', 'cancelled',
-    ];
-    if (terminalStates.includes(session.state)) {
+    if (isRuntimeSessionTerminal(session.state)) {
       return {
         status: 'wrong_state',
         details: `Session is in terminal state "${session.state}".`,
       };
     }
 
-    const midPipelineStates: import('./RuntimeTypes.js').RuntimeSessionState[] = [
+    const midPipelineStates: RuntimeSessionState[] = [
       'creating', 'launching_cli', 'awaiting_cli_ready', 'registering_mcp',
       'bootstrap_injecting', 'bootstrap_sent', 'awaiting_mcp_ready',
       'injecting_task', 'awaiting_ack',
@@ -605,11 +653,35 @@ class RuntimeManager {
   }
 
   /**
-   * Ensure a runtime is ready for a task. (Group 5)
-   * If a reusable session exists, it re-injects the task.
-   * If not, it stops the old session and creates/launches a new one.
+   * Ensure a runtime is ready for a task.
+   * This is the ONLY method that workflow activation may call.
+   *
+   * For fresh_process CLIs: always stops old sessions and launches fresh.
+   * For reusable_interactive CLIs: validates existing session and reuses
+   * only if idle/ready is provable.
    */
   async ensureRuntimeReadyForTask(args: CreateRuntimeArgs): Promise<RuntimeSession> {
+    const strategy = getCliStrategy(args.cliId);
+    const terminalId = args.terminalId;
+
+    console.log(
+      `[runtime] ensureRuntimeReadyForTask: cli=${args.cliId} mode=${strategy.workflowMode} terminal=${terminalId} node=${args.nodeId}`,
+    );
+
+    const release = await this.terminalLocks.acquire(terminalId, `ensure:${args.nodeId}`);
+    try {
+      return await this.ensureRuntimeReadyForTaskInner(args, strategy);
+    } finally {
+      release();
+    }
+  }
+
+  private async ensureRuntimeReadyForTaskInner(
+    args: CreateRuntimeArgs,
+    strategy: CliRuntimeStrategy,
+  ): Promise<RuntimeSession> {
+    const terminalId = args.terminalId;
+
     const expectedReuse: RuntimeReuseExpectation = {
       cliId: args.cliId,
       model: args.modelId ?? args.model ?? null,
@@ -619,65 +691,60 @@ class RuntimeManager {
     };
 
     const existing = this.findReusableSessionCandidate(args);
-    if (existing) {
+    if (existing && strategy.workflowMode === 'reusable_interactive') {
       const validation = await this.validateSessionForReuse(existing.sessionId, expectedReuse);
       if (validation.status === 'reusable') {
         console.log(
-          `[codex] reusable runtime found; sending follow-up get_current_task signal session=${existing.sessionId} terminal=${existing.terminalId}`,
+          `[runtime] reusable runtime found; sending follow-up signal session=${existing.sessionId} terminal=${terminalId}`,
         );
         if (args.cliId === 'codex') {
-          this.reusableCodexTerminalIds.add(args.terminalId);
+          this.reusableCodexTerminalIds.add(terminalId);
         }
         this.retireSession(existing);
         const reused = await this.createRuntimeForNode(args);
-        this.wirePtyEvents(args.terminalId, reused.sessionId);
+        this.claimTerminalOwnership(terminalId, reused.sessionId);
+        this.wirePtyEvents(terminalId, reused.sessionId);
         await this.launchCli(reused.sessionId, args.activationPayload);
         return reused;
       }
 
-      if (validation.status === 'model_mismatch') {
-        console.warn(`[codex] not reusable reason=model_mismatch; relaunching`);
-      } else if (validation.status === 'yolo_mismatch') {
-        console.warn(`[codex] not reusable reason=yolo_mismatch; relaunching`);
-      } else if (validation.status === 'workspace_mismatch') {
-        console.warn(`[codex] not reusable reason=workspace_mismatch; relaunching`);
-      } else if (validation.status === 'stale') {
-        console.warn(`[codex] not reusable reason=terminal_dead; relaunching`);
-      } else {
-        console.warn(`[codex] not reusable reason=${validation.status}; relaunching`);
-      }
-
-      try {
-        await this.stopRuntime({
-          sessionId: existing.sessionId,
-          reason: `Session not reusable: ${validation.details}`,
-        });
-      } catch {
-        // ignore errors stopping stale session
-      }
+      console.warn(
+        `[runtime] existing session not reusable reason=${validation.status} cli=${args.cliId}; stopping and relaunching`,
+      );
+      await this.stopRuntimeAndWait(existing, `Session not reusable: ${validation.details}`, strategy);
+    } else if (existing) {
+      console.log(
+        `[runtime] existing session found but strategy=${strategy.workflowMode}; stopping and relaunching`,
+      );
+      await this.stopRuntimeAndWait(existing, `Strategy ${strategy.workflowMode} requires fresh process`, strategy);
     }
 
     const conflictingSessions = Array.from(this.sessions.values()).filter(session =>
-      session.terminalId === args.terminalId ||
+      session.terminalId === terminalId ||
       (session.missionId === args.missionId && session.nodeId === args.nodeId),
     );
     for (const conflict of conflictingSessions) {
       console.warn(
         `[runtime] stopping conflicting session session=${conflict.sessionId} cli=${conflict.cliId} model=${normalizeModelForReuse(conflict.model) ?? '<default>'} yolo=${conflict.yolo} terminal=${conflict.terminalId}`,
       );
-      try {
-        await this.stopRuntime({
-          sessionId: conflict.sessionId,
-          reason: `Conflicting runtime replaced by cli=${args.cliId} model=${normalizeModelForReuse(args.modelId ?? args.model) ?? '<default>'} yolo=${Boolean(args.yolo)}`,
-        });
-      } catch {
-        // ignore best-effort cleanup failures
+      await this.stopRuntimeAndWait(
+        conflict,
+        `Conflicting runtime replaced by cli=${args.cliId} model=${normalizeModelForReuse(args.modelId ?? args.model) ?? '<default>'} yolo=${Boolean(args.yolo)}`,
+        strategy,
+      );
+    }
+
+    if (strategy.workflowMode === 'fresh_process' && strategy.requiresPty) {
+      const active = await isTerminalActive(terminalId);
+      if (active) {
+        console.warn(`[runtime] terminal ${terminalId} still active after stopping sessions; destroying for fresh_process`);
+        await this.destroyAndWaitForTerminal(terminalId);
       }
     }
 
     const session = await this.createRuntimeForNode(args);
-    // wireMcpEvents is now called inside createRuntimeForNode.
-    this.wirePtyEvents(args.terminalId, session.sessionId);
+    this.claimTerminalOwnership(terminalId, session.sessionId);
+    this.wirePtyEvents(terminalId, session.sessionId);
     await this.launchCli(session.sessionId, args.activationPayload);
     return session;
   }
@@ -772,7 +839,7 @@ class RuntimeManager {
 
   getActiveSessions(): RuntimeSession[] {
     return Array.from(this.sessions.values()).filter(
-      s => s.state !== 'completed' && s.state !== 'failed' && s.state !== 'cancelled',
+      s => !isRuntimeSessionTerminal(s.state),
     );
   }
 
@@ -806,7 +873,7 @@ class RuntimeManager {
     return {
       sessions,
       activeCount: sessions.filter(s =>
-        s.state !== 'completed' && s.state !== 'failed' && s.state !== 'cancelled',
+        !isRuntimeSessionTerminal(s.state),
       ).length,
     };
   }
@@ -829,15 +896,18 @@ class RuntimeManager {
 
   // ── MCP Event Wiring ──────────────────────────────────────────
 
-  /**
-   * Wire up MCP SSE event subscriptions for a session.
-   * Call after creating a session.
-   */
   wireMcpEvents(sessionId: string): () => void {
     const session = this.sessions.get(sessionId);
     if (!session) return () => {};
 
     return mcpBus.subscribe(sessionId, event => {
+      if (!this.isCurrentOwner(session)) {
+        console.log(
+          `[runtime] stale MCP event ignored type=${event.type} session=${sessionId}`,
+        );
+        return;
+      }
+
       if (event.type === 'agent:heartbeat') {
         session.updateHeartbeat(event.at);
         this.emit({ type: 'heartbeat', sessionId, nodeId: session.nodeId, at: event.at });
@@ -890,12 +960,15 @@ class RuntimeManager {
           nodeId: session.nodeId,
           reason,
         });
+        this.cleanupSession(session);
       }
     });
   }
 
   /**
    * Wire PTY spawn/exit listeners for a terminal.
+   * Includes stale event protection: if the terminalId has been assigned
+   * to a newer sessionId, old exit events are silently ignored.
    */
   wirePtyEvents(terminalId: string, sessionId: string): () => void {
     let unlistenSpawn: (() => void) | undefined;
@@ -917,12 +990,11 @@ class RuntimeManager {
     listen<{ id: string; data: string }>('pty-data', event => {
       if (event.payload.id !== terminalId) return;
       const session = this.sessions.get(sessionId);
-      if (!session || session.state === 'completed' || session.state === 'failed') return;
+      if (!session || isRuntimeSessionTerminal(session.state)) return;
 
       session.updateHeartbeat();
       this.emit({ type: 'heartbeat', sessionId, nodeId: session.nodeId, at: Date.now() });
 
-      // Permission Detection (Phase 10)
       const perm = session.adapter.detectPermissionRequest(event.payload.data);
       if (perm && session.state !== 'awaiting_permission') {
         const request = {
@@ -940,11 +1012,9 @@ class RuntimeManager {
         });
       }
 
-      // Completion Detection Fallback
       const comp = session.adapter.detectCompletion(event.payload.data);
       if (comp && session.state === 'running') {
-        // We don't auto-complete here yet, but we could emit a hint.
-        // Usually MCP tool 'complete_task' is the authority.
+        // MCP tool 'complete_task' is the authority.
       }
     }).then(fn => {
       if (disposed) {
@@ -960,6 +1030,14 @@ class RuntimeManager {
 
     listen<{ id: string }>('pty-exit', async event => {
       if (event.payload.id !== terminalId) return;
+
+      if (!this.isCurrentOwnerForTerminal(terminalId, sessionId)) {
+        console.log(
+          `[runtime] stale pty-exit ignored terminal=${terminalId} oldSession=${sessionId} (newer owner active)`,
+        );
+        return;
+      }
+
       const session = this.sessions.get(sessionId);
       if (!session) return;
 
@@ -1029,14 +1107,127 @@ class RuntimeManager {
     };
   }
 
+  // ── Terminal Ownership ──────────────────────────────────────────
+
+  private claimTerminalOwnership(terminalId: string, sessionId: string): void {
+    const prev = this.terminalOwners.get(terminalId);
+    if (prev && prev !== sessionId) {
+      console.log(
+        `[runtime] terminal ownership transferred terminal=${terminalId} from=${prev.slice(0, 12)} to=${sessionId.slice(0, 12)}`,
+      );
+    }
+    this.terminalOwners.set(terminalId, sessionId);
+  }
+
+  private releaseTerminalOwnership(terminalId: string, sessionId: string): void {
+    if (this.terminalOwners.get(terminalId) === sessionId) {
+      this.terminalOwners.delete(terminalId);
+      console.log(`[runtime] terminal ownership released terminal=${terminalId} session=${sessionId.slice(0, 12)}`);
+    }
+  }
+
+  private isCurrentOwner(session: RuntimeSession): boolean {
+    return this.terminalOwners.get(session.terminalId) === session.sessionId;
+  }
+
+  private isCurrentOwnerForTerminal(terminalId: string, sessionId: string): boolean {
+    return this.terminalOwners.get(terminalId) === sessionId;
+  }
+
+  // ── Safe PTY Operations ──────────────────────────────────────────
+
+  private async safeSpawnTerminal(
+    terminalId: string,
+    opts: { rows: number; cols: number; cwd?: string | null; command?: string; args?: string[]; env?: Record<string, string> },
+  ): Promise<void> {
+    const active = await isTerminalActive(terminalId);
+    if (active) {
+      throw new Error(`Cannot spawn CLI: terminalId "${terminalId}" already has an active PTY. Stop or destroy it first.`);
+    }
+
+    console.log(`[runtime] spawning CLI terminal=${terminalId} command=${opts.command ?? '<shell>'}`);
+    await spawnTerminal({ id: terminalId, ...opts });
+    console.log(`[runtime] spawn success terminal=${terminalId}`);
+  }
+
+  private async destroyAndWaitForTerminal(terminalId: string): Promise<void> {
+    console.log(`[runtime] destroying terminal terminal=${terminalId}`);
+    try {
+      await destroyTerminal(terminalId);
+    } catch (err) {
+      console.warn(`[runtime] destroy terminal failed (may already be gone) terminal=${terminalId}`, err);
+    }
+
+    const deadline = Date.now() + PTY_DESTROY_WAIT_MS;
+    while (Date.now() < deadline) {
+      try {
+        const active = await isTerminalActive(terminalId);
+        if (!active) {
+          console.log(`[runtime] PTY destroyed terminal=${terminalId}`);
+          return;
+        }
+      } catch {
+        return;
+      }
+      await sleep(PTY_DESTROY_POLL_MS);
+    }
+    console.warn(`[runtime] PTY destroy wait timed out terminal=${terminalId}`);
+  }
+
+  // ── Session Stop (inner, no lock) ──────────────────────────────
+
+  private async stopRuntimeInner(
+    session: RuntimeSession,
+    reason: string,
+    _strategy: CliRuntimeStrategy,
+  ): Promise<void> {
+    const alreadyTerminal = isRuntimeSessionTerminal(session.state);
+    try {
+      if (session.isTerminal && !alreadyTerminal) {
+        await writeToTerminal(session.terminalId, '\x03');
+        await sleep(200);
+        await writeToTerminal(session.terminalId, '\x03');
+      }
+      session.markCancelled(reason);
+    } catch {
+      session.markCancelled(reason);
+    }
+
+    this.releaseTerminalOwnership(session.terminalId, session.sessionId);
+    this.cleanupSession(session);
+  }
+
+  private async stopRuntimeAndWait(
+    session: RuntimeSession,
+    reason: string,
+    strategy: CliRuntimeStrategy,
+  ): Promise<void> {
+    try {
+      await this.stopRuntimeInner(session, reason, strategy);
+    } catch {
+      // best effort
+    }
+
+    if (strategy.requiresPty && session.terminalId) {
+      try {
+        const deadline = Date.now() + 3_000;
+        while (Date.now() < deadline) {
+          const active = await isTerminalActive(session.terminalId);
+          if (!active) break;
+          await sleep(100);
+        }
+      } catch {
+        // ignore
+      }
+    }
+  }
+
   // ── Internal: Activation Pipeline ──────────────────────────────────
 
   private async runActivationPipeline(
     session: RuntimeSession,
     activationPayload: import('../missionRuntime.js').RuntimeActivationPayload,
   ): Promise<void> {
-    // Ad-hoc sessions (launched directly from the UI without a compiled mission) bypass
-    // the full MCP handshake pipeline — there is no graph agent to ACK the task.
     if (session.missionId.startsWith('adhoc-')) {
       session.transitionTo('launching_cli');
       if (session.isTerminal) {
@@ -1080,7 +1271,6 @@ class RuntimeManager {
       activatedAt: Date.now(),
     });
 
-    // Register terminal metadata
     await registerTerminalMetadata({
       terminalId: session.terminalId,
       nodeId: session.nodeId,
@@ -1199,7 +1389,6 @@ class RuntimeManager {
       status: 'registered',
     });
 
-    // PTY path: inject bootstrap prompt into interactive terminal (explicit state)
     let bootstrapPromptBody: string | null = null;
     if (session.isTerminal && session.cliId !== 'codex') {
       session.transitionTo('bootstrap_injecting');
@@ -1242,7 +1431,6 @@ class RuntimeManager {
       session.transitionTo('bootstrap_sent');
     }
 
-    // 6. Wait for agent:ready handshake — only reached if bootstrap was injected (or sent) successfully
     session.transitionTo('awaiting_mcp_ready');
 
     try {
@@ -1272,7 +1460,6 @@ class RuntimeManager {
       status: 'ready',
     });
 
-    // 7. Build NEW_TASK signal for existing reusable Codex sessions and non-Codex PTY paths.
     session.transitionTo('injecting_task');
 
     if (session.isHeadless) {
@@ -1302,6 +1489,8 @@ class RuntimeManager {
         console.log('[codex] reusable runtime found; sending follow-up get_current_task signal');
         await this.injectInteractiveTask(session, buildCodexFollowupTaskSignal(), false);
       }
+    } else if (bootstrapPromptBody) {
+      console.log(`[runtime] bootstrap was injected; skipping terminal NEW_TASK injection — task delivered via MCP cli=${session.cliId}`);
     } else {
       const baseUrl = await getMcpBaseUrl();
       const signal = buildNewTaskSignal({
@@ -1326,7 +1515,6 @@ class RuntimeManager {
       await this.injectInteractiveTask(session, signal, false);
     }
 
-    // 9. Wait for ACK
     session.transitionTo('awaiting_ack');
 
     try {
@@ -1426,11 +1614,8 @@ class RuntimeManager {
     mcpUrl: string,
   ): Promise<{ args: string[]; promptBytes: number; rows: number; cols: number }> {
     this.suppressedPtyExitUntil.set(session.terminalId, Date.now() + 5_000);
-    try {
-      await destroyTerminal(session.terminalId);
-    } catch {
-      // Best effort: the shell PTY may already be gone.
-    }
+
+    await this.destroyAndWaitForTerminal(session.terminalId);
 
     const env: Record<string, string> = {
       TD_SESSION_ID: session.sessionId,
@@ -1463,8 +1648,7 @@ class RuntimeManager {
     console.log(`[codex] cwd=${session.workspaceDir ?? '<none>'}`);
     console.log('[codex] directPtyCommandSpawn=true');
 
-    await spawnTerminal({
-      id: session.terminalId,
+    await this.safeSpawnTerminal(session.terminalId, {
       rows,
       cols,
       cwd: session.workspaceDir ?? null,
@@ -1543,6 +1727,7 @@ class RuntimeManager {
 
   private retireSession(session: RuntimeSession): void {
     session.markCompleted();
+    this.releaseTerminalOwnership(session.terminalId, session.sessionId);
     this.cleanupSession(session);
   }
 
@@ -1595,7 +1780,7 @@ class RuntimeManager {
     })) ?? [];
 
     const assignment: import('../missionRuntime.js').RuntimeAssignmentPayload = {
-      roleInstructions: '', // Could be enriched from node definition later
+      roleInstructions: '',
       missionGoal: session.goal || '',
       upstreamOutputs,
       workspaceContext: {
@@ -1856,6 +2041,14 @@ class RuntimeManager {
 
     if (this.hasDifferentLiveSessionOnTerminal(session)) return false;
 
+    if (paneCliSource == null) {
+      const active = await isTerminalActive(session.terminalId).catch(() => false);
+      if (!active) return false;
+
+      console.log(`[runtime] pane has no active cliSource; forcing fresh CLI launch cli=${session.cliId} terminal=${session.terminalId}`);
+      return true;
+    }
+
     const recentOutput = await getRecentTerminalOutput(session.terminalId, 12_288);
     if (!recentOutput) return true;
 
@@ -1875,12 +2068,16 @@ class RuntimeManager {
       this.ptyCleanupFns.delete(session.sessionId);
     }
 
-    // Reset pane's cliSource so the next run on the same terminal re-evaluates
-    // whether the CLI is still running. Without this, `shouldLaunchCliInTerminal`
-    // sees 'connect_agent' from the previous run and skips the relaunch.
     if (session.terminalId) {
-      useWorkspaceStore.getState().updatePaneDataByTerminalId(session.terminalId, { cliSource: undefined });
+      useWorkspaceStore.getState().updatePaneDataByTerminalId(session.terminalId, {
+        cliSource: undefined,
+        cli: undefined,
+        model: undefined,
+        runtimeSessionId: undefined,
+      });
     }
+
+    this.releaseTerminalOwnership(session.terminalId, session.sessionId);
 
     this.sessions.delete(session.sessionId);
     const nodeKey = `${session.missionId}:${session.nodeId}:${session.attempt}`;
@@ -1921,6 +2118,7 @@ class RuntimeManager {
     this.ptyCleanupFns.clear();
     this.sessions.clear();
     this.sessionsByNode.clear();
+    this.terminalOwners.clear();
     this.listeners.clear();
     this.snapshotListeners.clear();
   }

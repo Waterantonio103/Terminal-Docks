@@ -14,6 +14,7 @@ import type {
   RuntimeSessionState,
   RuntimePermissionRequest,
 } from './RuntimeTypes.js';
+import { isRuntimeSessionTerminal } from './RuntimeTypes.js';
 import type { CliId, ExecutionMode } from '../workflow/WorkflowTypes.js';
 
 function generateSessionId(cliId: string): string {
@@ -157,6 +158,12 @@ export class RuntimeSession {
   transitionTo(newState: RuntimeSessionState): void {
     const prev = this._state;
     if (prev === newState) return;
+    if (isRuntimeSessionTerminal(prev) && !isRuntimeSessionTerminal(newState)) {
+      console.warn(
+        `[RuntimeSession] blocked invalid transition from terminal state "${prev}" to "${newState}" session=${this.sessionId}`,
+      );
+      return;
+    }
     this._state = newState;
     for (const listener of this.stateListeners) {
       try {
@@ -188,6 +195,7 @@ export class RuntimeSession {
   markDisconnected(reason: string): void {
     this._disconnectedAt = Date.now();
     this._lastError = reason;
+    this.transitionTo('disconnected');
   }
 
   updateHeartbeat(at?: number): void {

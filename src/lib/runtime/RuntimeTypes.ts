@@ -30,7 +30,33 @@ export type RuntimeSessionState =
   | 'awaiting_permission'
   | 'completed'
   | 'failed'
-  | 'cancelled';
+  | 'cancelled'
+  | 'disconnected';
+
+export const RUNTIME_SESSION_TERMINAL_STATES: ReadonlySet<RuntimeSessionState> = new Set([
+  'completed',
+  'failed',
+  'cancelled',
+  'disconnected',
+]);
+
+export function isRuntimeSessionTerminal(state: RuntimeSessionState): boolean {
+  return RUNTIME_SESSION_TERMINAL_STATES.has(state);
+}
+
+// ──────────────────────────────────────────────
+// CLI Runtime Strategy
+// ──────────────────────────────────────────────
+
+export type CliWorkflowMode = 'fresh_process' | 'reusable_interactive';
+
+export interface CliRuntimeStrategy {
+  cliId: CliId;
+  workflowMode: CliWorkflowMode;
+  supportsMcpHandshake: boolean;
+  supportsPromptInjection: boolean;
+  requiresPty: boolean;
+}
 
 // ──────────────────────────────────────────────
 // Create Runtime Arguments
