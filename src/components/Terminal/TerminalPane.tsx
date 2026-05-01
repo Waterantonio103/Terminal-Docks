@@ -226,6 +226,11 @@ export function TerminalPane({ pane, dragEndSeq }: { pane: Pane; dragEndSeq?: nu
       });
 
       const customCommand = pane.data?.customCliCommand;
+      // Re-read from store — RuntimeManager may have set runtimeManaged before initPty runs
+      // (e.g. after a fast activation event on an already-mounted pane).
+      const latestPaneSnap = storeSnap.tabs.flatMap(t => t.panes).find(p => p.id === pane.id);
+      const runtimeManaged = Boolean(latestPaneSnap?.data?.runtimeManaged);
+
       await invoke('register_pty_runtime_metadata', {
         terminalId,
         nodeId: boundNodeId,
@@ -233,7 +238,7 @@ export function TerminalPane({ pane, dragEndSeq }: { pane: Pane; dragEndSeq?: nu
         cli: typeof cli === 'string' ? cli : 'generic',
       }).catch(() => {});
 
-      console.log(`[TerminalPane] Auto-launch check for ${pane.id} (${terminalId})`, { customCommand, cli, spawned: false });
+      console.log(`[TerminalPane] Auto-launch check for ${pane.id} (${terminalId})`, { customCommand, cli, runtimeManaged, spawned: false });
 
       const trySpawnPty = async (opts: Parameters<typeof invoke>[1]): Promise<boolean> => {
         try {
@@ -259,7 +264,10 @@ export function TerminalPane({ pane, dragEndSeq }: { pane: Pane; dragEndSeq?: nu
         }
       };
 
-      if (customCommand) {
+      if (runtimeManaged) {
+        // RuntimeManager owns spawning for this terminal — attach only, no spawn.
+        console.log(`[TerminalPane] runtimeManaged=true; skipping spawn for ${terminalId}`);
+      } else if (customCommand) {
         const spawned = await trySpawnPtyWithCommand({
           id: terminalId,
           rows: term.rows || 24,
@@ -293,6 +301,7 @@ export function TerminalPane({ pane, dragEndSeq }: { pane: Pane; dragEndSeq?: nu
             const allPanes = storeState.tabs.flatMap(t => t.panes);
             const latestPane = allPanes.find(p => p.id === pane.id);
             const hasPaneSessionId = typeof latestPane?.data?.runtimeSessionId === 'string';
+            const isRuntimeManaged = Boolean(latestPane?.data?.runtimeManaged);
             const nodeId = latestPane?.data?.nodeId as string | undefined;
             const hasStoreBinding = nodeId
               ? Boolean(storeState.nodeRuntimeBindings[nodeId]?.runtimeSessionId)
@@ -301,7 +310,7 @@ export function TerminalPane({ pane, dragEndSeq }: { pane: Pane; dragEndSeq?: nu
                   typeof binding.runtimeSessionId === 'string'
                 );
             const cliAlreadyRunning = latestPane?.data?.cliSource === 'stdout' || latestPane?.data?.cliSource === 'connect_agent';
-            if (!hasPaneSessionId && !hasStoreBinding && !cliAlreadyRunning) {
+            if (!hasPaneSessionId && !hasStoreBinding && !cliAlreadyRunning && !isRuntimeManaged) {
               console.log(`[TerminalPane] Auto-launching CLI: ${command}`);
               invoke('write_to_pty', { id: terminalId, data: `${command}\r` }).catch(() => {});
             }

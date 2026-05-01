@@ -1658,6 +1658,12 @@ class RuntimeManager {
     });
     await emit('terminal-refit-requested', { terminalId: session.terminalId }).catch(() => {});
 
+    // Wait for the shell to initialize and show its prompt before returning.
+    // New Runtime works because TerminalPane's shell is already warm by the time
+    // RuntimeManager runs writeToTerminal. Here we spawn a fresh shell, so we must
+    // wait for it to reach an idle/prompt state before the caller injects the CLI command.
+    await this.waitForTerminalOutputIdle(session.terminalId, 300, 3_000);
+
     setTimeout(() => {
       this.suppressedPtyExitUntil.delete(session.terminalId);
     }, 6_000);
@@ -1964,12 +1970,14 @@ class RuntimeManager {
   }
 
   private bindRuntimeToTerminalPane(session: RuntimeSession): void {
+    const isWorkflowRun = !session.missionId.startsWith('adhoc-');
     useWorkspaceStore.getState().updatePaneDataByTerminalId(session.terminalId, {
       runtimeSessionId: session.sessionId,
       nodeId: session.nodeId,
       roleId: session.role,
       cli: session.cliId,
       model: session.model,
+      ...(isWorkflowRun ? { runtimeManaged: true } : {}),
     });
   }
 

@@ -260,20 +260,28 @@ export function buildCodexFollowupTaskSignal({ sessionId }: { sessionId?: string
 }
 
 export function buildPtyLaunchCommand(cliId: string, options: { model?: string | null; yolo?: boolean }): string {
+  const { command, args } = buildPtyLaunchCommandParts(cliId, options);
+  return [command, ...args].join(' ');
+}
+
+export function buildPtyLaunchCommandParts(
+  cliId: string,
+  options: { model?: string | null; yolo?: boolean },
+): { command: string; args: string[] } {
   const cli = normalizeCliId(cliId);
-  const parts: string[] = [cliId];
+  const args: string[] = [];
 
   const supportsModelFlag = cli === 'claude' || cli === 'opencode' || cli === 'gemini' || cli === 'codex';
   if (options.model && supportsModelFlag) {
-    parts.push('--model', options.model);
+    args.push('--model', options.model);
   }
 
   if (options.yolo) {
-    if (cli === 'claude') parts.push('--dangerously-skip-permissions');
-    else if (cli === 'gemini') parts.push('--yolo');
-    else if (cli === 'codex') parts.push('--yolo');
+    if (cli === 'claude') args.push('--dangerously-skip-permissions');
+    else if (cli === 'gemini') args.push('--yolo');
+    else if (cli === 'codex') args.push('--yolo');
     // opencode: --yolo is only valid for `opencode run`, not the default TUI mode.
   }
 
-  return parts.join(' ');
+  return { command: cliId, args };
 }
