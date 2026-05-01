@@ -47,14 +47,14 @@ import {
   isTerminalActive,
   registerTerminalMetadata,
   notifyMcpDisconnected,
+  resizeTerminal,
 } from './TerminalRuntime.js';
 import { buildNewTaskSignal } from '../missionRuntime.js';
 import { buildStartAgentRunRequest } from '../runtimeDispatcher.js';
 import {
+  buildCodexInteractiveLaunchCommand,
   buildCodexFollowupTaskSignal,
-  buildCodexInteractiveLaunchArgs,
   buildPtyLaunchCommand,
-  buildPtyLaunchCommandParts,
   resolveCodexYoloFlag,
 } from '../cliCommandBuilders.js';
 import { getRuntimeBootstrapContract, buildRuntimeBootstrapRegistrationRequest } from '../runtimeBootstrap.js';
@@ -68,6 +68,7 @@ import { emit } from '@tauri-apps/api/event';
 // ──────────────────────────────────────────────
 
 const CLI_LAUNCH_DELAY_MS = 500;
+const SHELL_LAUNCH_SETTLE_MS = 700;
 const CLI_STARTUP_WAIT_MS = 2_000;
 const CLI_READY_WAIT_MS = 20_000;
 const PASTE_SUBMIT_GAP_MS = 150;
@@ -80,7 +81,6 @@ const CODEX_IDLE_TIMEOUT_MS = 8_000;
 const CODEX_BOOTSTRAP_RETRY_DELAY_MS = 3_500;
 const CODEX_TYPE_CHUNK_SIZE = 48;
 const CODEX_TYPE_CHUNK_DELAY_MS = 20;
-const CODEX_INITIAL_LAUNCH_VERIFY_MS = 2_000;
 const PTY_DESTROY_WAIT_MS = 5_000;
 const PTY_DESTROY_POLL_MS = 100;
 
@@ -402,6 +402,12 @@ class RuntimeManager {
       await this.runActivationPipeline(session, activationPayload);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      if (this.isTerminalNotFoundError(error)) {
+        if (session.state !== 'failed') {
+          await this.failRuntimeForMissingPty(session, error);
+        }
+        return;
+      }
       session.markFailed(message);
       this.emit({
         type: 'session_failed',
@@ -456,12 +462,12 @@ class RuntimeManager {
 
     const { preClear, paste, submit } = adapter.buildActivationInput(signal);
     if (preClear) {
-      await writeToTerminal(session.terminalId, preClear);
+      await this.writeToTerminalOrFail(session, preClear);
       await sleep(PRE_CLEAR_SETTLE_MS);
     }
-    await writeToTerminal(session.terminalId, paste);
+    await this.writeToTerminalOrFail(session, paste);
     await sleep(PASTE_SUBMIT_GAP_MS);
-    await writeToTerminal(session.terminalId, submit);
+    await this.writeToTerminalOrFail(session, submit);
 
     this.emit({
       type: 'task_injected',
@@ -479,7 +485,7 @@ class RuntimeManager {
       throw new Error('Cannot send raw input to a headless session');
     }
 
-    await writeToTerminal(session.terminalId, args.input);
+    await this.writeToTerminalOrFail(session, args.input);
   }
 
   async writeBootstrapToTerminal(terminalId: string, data: string, caller: string): Promise<void> {
@@ -496,7 +502,11 @@ class RuntimeManager {
       );
     }
 
-    await writeToTerminal(terminalId, data);
+    if (matchingSession) {
+      await this.writeToTerminalOrFail(matchingSession, data);
+    } else {
+      await this.writeToTerminalByIdOrFail(terminalId, data);
+    }
   }
 
   async stopRuntime(args: StopRuntimeArgs): Promise<void> {
@@ -529,7 +539,7 @@ class RuntimeManager {
     });
 
     if (session.isTerminal) {
-      await writeToTerminal(session.terminalId, response.input);
+      await this.writeToTerminalOrFail(session, response.input);
     }
 
     session.clearPermission();
@@ -1216,9 +1226,9 @@ class RuntimeManager {
     const alreadyTerminal = isRuntimeSessionTerminal(session.state);
     try {
       if (session.isTerminal && !alreadyTerminal) {
-        await writeToTerminal(session.terminalId, '\x03');
+        await this.writeToTerminalOrFail(session, '\x03');
         await sleep(200);
-        await writeToTerminal(session.terminalId, '\x03');
+        await this.writeToTerminalOrFail(session, '\x03');
       }
       session.markCancelled(reason);
     } catch {
@@ -1279,7 +1289,7 @@ class RuntimeManager {
           await sleep(CLI_LAUNCH_DELAY_MS);
           try {
             const launchCmd = buildPtyLaunchCommand(session.cliId, { model: session.model, yolo: session.yolo });
-            await writeToTerminal(session.terminalId, `${launchCmd}\r`);
+            await this.writeToTerminalOrFail(session, `${launchCmd}\r`);
             useWorkspaceStore.getState().updatePaneDataByTerminalId(session.terminalId, {
               cliSource: 'connect_agent',
               cli: session.cliId,
@@ -1334,6 +1344,7 @@ class RuntimeManager {
     }
 
     let launchedCli = false;
+    let startupPromptDeliveredViaLaunch = false;
 
     // 3. For interactive PTY: launch CLI in terminal if needed.
     if (session.isTerminal) {
@@ -1354,30 +1365,13 @@ class RuntimeManager {
 
       if (shouldLaunchCli) {
         await sleep(CLI_LAUNCH_DELAY_MS);
-        if (session.cliId === 'codex') {
-          const mcpUrl = await getMcpUrl();
-          const launch = await this.spawnCodexDirectly(session, mcpUrl);
-          const alive = await this.waitForTerminalReady(session.terminalId, CODEX_INITIAL_LAUNCH_VERIFY_MS);
-          if (!alive) {
-            const recentOutput = await getRecentTerminalOutput(session.terminalId, 12_288);
-            throw new Error(this.buildCodexCrashDiagnostic(session, {
-              args: launch.args,
-              promptBytes: launch.promptBytes,
-              recentOutput,
-              directPty: true,
-            }));
-          }
-        } else if (isWorkflowRun) {
-          await this.spawnCliDirectly(session);
-          const terminalReady = await this.waitForTerminalReady(session.terminalId, 5_000);
-          if (!terminalReady) {
-            throw new Error(`Terminal ${session.terminalId} did not become active after fresh spawn for CLI "${session.cliId}" (node: ${session.nodeId}).`);
-          }
-          console.log(`[runtime] workflow CLI direct spawn complete terminal=${session.terminalId} command=${session.cliId}`);
+        if (isWorkflowRun) {
+          const launchResult = await this.launchInteractiveWorkflowCliViaShell(session, activationPayload);
+          startupPromptDeliveredViaLaunch = launchResult.promptDeliveredAtLaunch;
         } else {
           const launchCmd = buildPtyLaunchCommand(session.cliId, { model: session.model, yolo: session.yolo });
           console.log(`[runtime] launch command=${launchCmd}`);
-          await writeToTerminal(session.terminalId, `${launchCmd}\r`);
+          await this.writeToTerminalOrFail(session, `${launchCmd}\r`);
         }
         await sleep(CLI_STARTUP_WAIT_MS);
         launchedCli = true;
@@ -1387,29 +1381,15 @@ class RuntimeManager {
           model: session.model,
         });
       }
-      if (session.cliId === 'codex') {
-        const alive = await isTerminalActive(session.terminalId);
-        if (!alive) {
-          const recentOutput = await getRecentTerminalOutput(session.terminalId, 12_288);
-          throw new Error(this.buildCodexCrashDiagnostic(session, {
-            promptBytes: null,
-            recentOutput,
-            directPty: launchedCli,
-          }));
-        }
+      if (isWorkflowRun && launchedCli) {
+        // launchInteractiveWorkflowCliViaShell already waited for adapter readiness.
       } else {
-        const isWorkflowDirectSpawn = isWorkflowRun && launchedCli && (session.cliId as string) !== 'codex';
-        if (isWorkflowDirectSpawn) {
-          // CLI was spawned directly as the PTY process — no shell ready-check needed.
-          console.log(`[runtime] workflow direct spawn ready assumed cli=${session.cliId}`);
-        } else {
-          const cliReady = await this.waitForCliReady(session, CLI_READY_WAIT_MS);
-          if (!cliReady) {
-            const reason = launchedCli
-              ? `CLI "${session.cliId}" did not report ready state within ${CLI_READY_WAIT_MS}ms after launch.`
-              : `CLI "${session.cliId}" is not ready and launch was skipped by gate logic.`;
-            throw new Error(reason);
-          }
+        const cliReady = await this.waitForCliReady(session, CLI_READY_WAIT_MS);
+        if (!cliReady) {
+          const reason = launchedCli
+            ? `CLI "${session.cliId}" did not report ready state within ${CLI_READY_WAIT_MS}ms after launch.`
+            : `CLI "${session.cliId}" is not ready and launch was skipped by gate logic.`;
+          throw new Error(reason);
         }
       }
     }
@@ -1445,7 +1425,7 @@ class RuntimeManager {
     });
 
     let bootstrapPromptBody: string | null = null;
-    if (session.isTerminal && session.cliId !== 'codex') {
+    if (session.isTerminal && !startupPromptDeliveredViaLaunch) {
       session.transitionTo('bootstrap_injecting');
 
       let bootstrapPrompt: string | null = null;
@@ -1539,11 +1519,6 @@ class RuntimeManager {
         assignment: activationPayload.assignment,
       }, baseUrl);
       await this.launchHeadless(session, activationPayload, signal, baseUrl);
-    } else if (session.cliId === 'codex') {
-      // Codex receives its task via the bootstrap prompt CLI argument at launch —
-      // no separate interactive task injection needed for fresh_process runs.
-    } else if (bootstrapPromptBody) {
-      console.log(`[runtime] bootstrap was injected; skipping terminal NEW_TASK injection — task delivered via MCP cli=${session.cliId}`);
     } else {
       const baseUrl = await getMcpBaseUrl();
       const signal = buildNewTaskSignal({
@@ -1643,6 +1618,7 @@ class RuntimeManager {
     }
 
     await sleep(CLI_STARTUP_WAIT_MS);
+    console.log(`[runtime] injecting task prompt cli=${session.cliId} terminal=${session.terminalId}`);
     await this.injectInteractivePrompt(session, signal, retry);
 
     this.emit({
@@ -1653,17 +1629,15 @@ class RuntimeManager {
     });
   }
 
-  private async spawnCliDirectly(session: RuntimeSession): Promise<void> {
+  private async launchInteractiveWorkflowCliViaShell(
+    session: RuntimeSession,
+    activationPayload: import('../missionRuntime.js').RuntimeActivationPayload,
+  ): Promise<{ promptDeliveredAtLaunch: boolean }> {
     this.suppressedPtyExitUntil.set(session.terminalId, Date.now() + 5_000);
 
     await this.destroyAndWaitForTerminal(session.terminalId);
 
     const { rows, cols } = this.getTerminalDimensions(session.terminalId);
-    const launch = buildPtyLaunchCommandParts(session.cliId, {
-      model: session.model,
-      yolo: session.yolo,
-    });
-
     const env: Record<string, string> = {
       TD_SESSION_ID: session.sessionId,
       TD_AGENT_ID: session.agentId,
@@ -1674,93 +1648,95 @@ class RuntimeManager {
       TD_KIND: session.cliId,
     };
 
-    console.log('[runtime] spawning workflow CLI directly', {
+    console.log('[runtime] spawning workflow shell', {
       terminalId: session.terminalId,
-      command: launch.command,
-      args: launch.args,
       cli: session.cliId,
     });
 
-    if (!launch.command) {
-      throw new Error(`No PTY command resolved for CLI ${session.cliId}`);
+    await this.safeSpawnTerminal(session.terminalId, {
+      rows,
+      cols,
+      cwd: session.workspaceDir ?? null,
+      env,
+    });
+
+    console.log(`[runtime] shell spawn success terminal=${session.terminalId} cli=${session.cliId}`);
+    await resizeTerminal(session.terminalId, rows, cols).catch(() => {});
+    await emit('terminal-refit-requested', { terminalId: session.terminalId }).catch(() => {});
+
+    const terminalReady = await this.waitForTerminalReady(session.terminalId, 5_000);
+    if (!terminalReady) {
+      throw new Error(`Terminal ${session.terminalId} did not become active after shell spawn for CLI "${session.cliId}" (node: ${session.nodeId}).`);
     }
 
-    await this.safeSpawnTerminal(session.terminalId, {
-      rows,
-      cols,
-      cwd: session.workspaceDir ?? null,
-      command: launch.command,
-      args: launch.args,
-      env,
+    await sleep(SHELL_LAUNCH_SETTLE_MS);
+    const launch = await this.buildInteractiveWorkflowShellLaunchCommand(session, activationPayload);
+    const launchCmd = launch.command;
+
+    console.log(`[runtime] writing CLI launch command: ${launch.promptDeliveredAtLaunch ? 'codex <startup-prompt:redacted>' : launchCmd}`);
+    await this.writeToTerminalOrFail(session, `${launchCmd}\r`);
+    await sleep(150);
+    await resizeTerminal(session.terminalId, rows, cols).catch(() => {});
+
+    useWorkspaceStore.getState().updatePaneDataByTerminalId(session.terminalId, {
+      runtimeManaged: true,
+      cli: session.cliId,
+      cliSource: 'runtime_shell_launch',
+      runtimeSessionId: session.sessionId,
+      model: session.model,
     });
 
     await emit('terminal-refit-requested', { terminalId: session.terminalId }).catch(() => {});
 
-    setTimeout(() => {
-      this.suppressedPtyExitUntil.delete(session.terminalId);
-    }, 6_000);
-  }
-
-  private async spawnCodexDirectly(
-    session: RuntimeSession,
-    mcpUrl: string,
-  ): Promise<{ args: string[]; promptBytes: number; rows: number; cols: number }> {
-    this.suppressedPtyExitUntil.set(session.terminalId, Date.now() + 5_000);
-
-    await this.destroyAndWaitForTerminal(session.terminalId);
-
-    const env: Record<string, string> = {
-      TD_SESSION_ID: session.sessionId,
-      TD_AGENT_ID: session.agentId,
-      TD_MISSION_ID: session.missionId,
-      TD_NODE_ID: session.nodeId,
-      TD_ATTEMPT: String(session.attempt),
-      TD_MCP_URL: mcpUrl,
-      TD_WORKSPACE: session.workspaceDir ?? '',
-      TD_KIND: 'codex',
-    };
-
-    const bootstrapPrompt = this.buildCodexBootstrapPrompt(session);
-    const resolvedYoloFlag = session.yolo ? await resolveCodexYoloFlag() : null;
-    const args = buildCodexInteractiveLaunchArgs({
-      modelId: session.model || null,
-      yolo: session.yolo,
-      workspaceDir: session.workspaceDir,
-      mcpUrl,
-      bootstrapPrompt,
-      resolvedYoloFlag,
-    });
-    const promptBytes = new TextEncoder().encode(bootstrapPrompt).length;
-    const { rows, cols } = this.getTerminalDimensions(session.terminalId);
-
-    console.log('[codex] launching interactive TUI with prompt arg');
-    console.log(`[codex] resolved yolo flag=${resolvedYoloFlag ?? '<none>'}`);
-    console.log(`[codex] command=codex args=${this.formatCodexArgsForLog(args)}`);
-    console.log(`[codex] promptBytes=${promptBytes}`);
-    console.log(`[codex] ptySize=${cols}x${rows}`);
-    console.log(`[codex] model=${session.model || '<default>'}`);
-    console.log(`[codex] yolo=${session.yolo}`);
-    console.log(`[codex] cwd=${session.workspaceDir ?? '<none>'}`);
-    console.log('[codex] directPtyCommandSpawn=true');
-
-    await this.safeSpawnTerminal(session.terminalId, {
-      rows,
-      cols,
-      cwd: session.workspaceDir ?? null,
-      command: 'codex',
-      args,
-      env,
-    });
-    await emit('terminal-refit-requested', { terminalId: session.terminalId }).catch(() => {});
+    await sleep(CLI_STARTUP_WAIT_MS);
+    const cliReady = await this.waitForCliReady(session, CLI_READY_WAIT_MS);
+    if (!cliReady) {
+      throw new Error(`CLI "${session.cliId}" did not report ready state within ${CLI_READY_WAIT_MS}ms after shell launch.`);
+    }
+    console.log(`[runtime] CLI ready cli=${session.cliId} terminal=${session.terminalId}`);
 
     setTimeout(() => {
       const suppressUntil = this.suppressedPtyExitUntil.get(session.terminalId) ?? 0;
       if (Date.now() >= suppressUntil - 4_000) {
         this.suppressedPtyExitUntil.delete(session.terminalId);
       }
-    }, 1_000);
+    }, 6_000);
 
-    return { args, promptBytes, rows, cols };
+    return { promptDeliveredAtLaunch: launch.promptDeliveredAtLaunch };
+  }
+
+  private async buildInteractiveWorkflowShellLaunchCommand(
+    session: RuntimeSession,
+    activationPayload: import('../missionRuntime.js').RuntimeActivationPayload,
+  ): Promise<{ command: string; promptDeliveredAtLaunch: boolean }> {
+    if (session.cliId !== 'codex') {
+      return {
+        command: buildPtyLaunchCommand(session.cliId, {
+          model: session.model,
+          yolo: session.yolo,
+        }),
+        promptDeliveredAtLaunch: false,
+      };
+    }
+
+    const bootstrapPrompt = this.buildInteractiveBootstrapPrompt(
+      session,
+      activationPayload,
+      await getMcpBaseUrl(),
+    ).replace(/\r$/, '');
+    const resolvedYoloFlag = session.yolo ? await resolveCodexYoloFlag() : null;
+    return {
+      command: buildCodexInteractiveLaunchCommand({
+        modelId: session.model || null,
+        yolo: session.yolo,
+        workspaceDir: session.workspaceDir,
+        mcpUrl: await getMcpUrl(),
+        bootstrapPrompt,
+        resolvedYoloFlag,
+        shellKind: 'windows',
+      }),
+      promptDeliveredAtLaunch: true,
+    };
   }
 
   private getTerminalDimensions(terminalId: string): { rows: number; cols: number } {
@@ -1824,18 +1800,6 @@ class RuntimeManager {
     session.markCompleted();
     this.releaseTerminalOwnership(session.terminalId, session.sessionId);
     this.cleanupSession(session);
-  }
-
-  private buildCodexBootstrapPrompt(session: RuntimeSession): string {
-    return [
-      'You are a Terminal-Docks Codex runtime.',
-      'Use the terminal_docks MCP server tools.',
-      'First call get_current_task() from terminal_docks if available.',
-      `If get_current_task is unavailable, call get_task_details({ missionId: "${session.missionId}", nodeId: "${session.nodeId}" }) from terminal_docks.`,
-      'Execute the task.',
-      'When done, call complete_task().',
-      `Runtime metadata: missionId: "${session.missionId}" nodeId: "${session.nodeId}" sessionId: "${session.sessionId}" attempt: ${session.attempt}`,
-    ].join(' ');
   }
 
   private buildInteractiveBootstrapPrompt(
@@ -2013,6 +1977,55 @@ class RuntimeManager {
     });
   }
 
+  private isTerminalNotFoundError(error: unknown): boolean {
+    const message = error instanceof Error ? error.message : String(error);
+    return message.includes('not found in active PTY state');
+  }
+
+  private async writeToTerminalByIdOrFail(terminalId: string, data: string): Promise<void> {
+    const active = await isTerminalActive(terminalId).catch(() => false);
+    if (!active) {
+      throw new Error(`Terminal ID ${terminalId} not found in active PTY state.`);
+    }
+    await writeToTerminal(terminalId, data);
+  }
+
+  private async writeToTerminalOrFail(session: RuntimeSession, data: string): Promise<void> {
+    try {
+      await this.writeToTerminalByIdOrFail(session.terminalId, data);
+    } catch (error) {
+      if (this.isTerminalNotFoundError(error)) {
+        await this.failRuntimeForMissingPty(session, error);
+      }
+      throw error;
+    }
+  }
+
+  private async failRuntimeForMissingPty(session: RuntimeSession, error: unknown): Promise<void> {
+    const message = error instanceof Error ? error.message : String(error);
+    const reason = `Terminal process disappeared during runtime launch or injection: ${message}`;
+    session.markFailed(reason);
+    this.emit({
+      type: 'session_failed',
+      sessionId: session.sessionId,
+      nodeId: session.nodeId,
+      error: reason,
+    });
+    await acknowledgeActivation({
+      missionId: session.missionId,
+      nodeId: session.nodeId,
+      attempt: session.attempt,
+      status: 'failed',
+      reason,
+    }).catch(() => {});
+    await emit('workflow-node-update', {
+      id: session.nodeId,
+      status: 'failed',
+      attempt: session.attempt,
+      message: reason,
+    }).catch(() => {});
+  }
+
   private async waitForTerminalReady(terminalId: string, timeoutMs: number): Promise<boolean> {
     const deadline = Date.now() + timeoutMs;
     while (!(await isTerminalActive(terminalId))) {
@@ -2025,9 +2038,11 @@ class RuntimeManager {
   private async waitForCliReady(session: RuntimeSession, timeoutMs: number): Promise<boolean> {
     const deadline = Date.now() + timeoutMs;
     let lastDetail: string | null = null;
+    let lastOutputLength = 0;
     while (Date.now() < deadline) {
       const output = await getRecentTerminalOutput(session.terminalId, 12_288);
       if (output) {
+        lastOutputLength = output.length;
         const ready = session.adapter.detectReady(output);
         if (ready.detail && ready.detail !== lastDetail) {
           console.log(`[runtime] cli-ready cli=${session.cliId} ready=${ready.ready} detail="${ready.detail}"`);
@@ -2037,7 +2052,10 @@ class RuntimeManager {
       }
       await sleep(200);
     }
-    console.warn(`[runtime] cli-ready timeout cli=${session.cliId} lastDetail="${lastDetail ?? 'none'}" timeoutMs=${timeoutMs}`);
+    const recentOutput = await getRecentTerminalOutput(session.terminalId, 2_000).catch(() => '');
+    console.warn(
+      `[runtime] cli-ready timeout cli=${session.cliId} lastDetail="${lastDetail ?? 'none'}" outputLength=${lastOutputLength} timeoutMs=${timeoutMs} recent="${previewText(recentOutput, 500) ?? '<empty>'}"`,
+    );
     return false;
   }
 
@@ -2078,29 +2096,29 @@ class RuntimeManager {
         CODEX_IDLE_TIMEOUT_MS,
       );
       if (retry) {
-        await writeToTerminal(session.terminalId, '\x15');
+        await this.writeToTerminalOrFail(session, '\x15');
         await sleep(PRE_CLEAR_SETTLE_MS);
       }
       await this.writeTerminalLikeTyping(session.terminalId, paste);
       await sleep(PASTE_SUBMIT_GAP_MS);
-      await writeToTerminal(session.terminalId, submit);
+      await this.writeToTerminalOrFail(session, submit);
       return;
     }
 
     if (preClear) {
-      await writeToTerminal(session.terminalId, preClear);
+      await this.writeToTerminalOrFail(session, preClear);
       await sleep(PRE_CLEAR_SETTLE_MS);
     }
-    await writeToTerminal(session.terminalId, paste);
+    await this.writeToTerminalOrFail(session, paste);
     await sleep(PASTE_SUBMIT_GAP_MS);
-    await writeToTerminal(session.terminalId, submit);
+    await this.writeToTerminalOrFail(session, submit);
   }
 
   private async writeTerminalLikeTyping(terminalId: string, value: string): Promise<void> {
     if (!value) return;
     for (let index = 0; index < value.length; index += CODEX_TYPE_CHUNK_SIZE) {
       const chunk = value.slice(index, index + CODEX_TYPE_CHUNK_SIZE);
-      await writeToTerminal(terminalId, chunk);
+      await this.writeToTerminalByIdOrFail(terminalId, chunk);
       await sleep(CODEX_TYPE_CHUNK_DELAY_MS);
     }
   }
@@ -2133,7 +2151,9 @@ class RuntimeManager {
     const paneCli = typeof pane?.data?.cli === 'string' ? pane.data.cli : null;
     const paneCliSource = typeof pane?.data?.cliSource === 'string' ? pane.data.cliSource : null;
 
-    const isKnownRunning = (paneCliSource === 'stdout' || paneCliSource === 'connect_agent') && paneCli === session.cliId;
+    const isKnownRunning =
+      (paneCliSource === 'stdout' || paneCliSource === 'connect_agent' || paneCliSource === 'runtime_shell_launch') &&
+      paneCli === session.cliId;
     if (isKnownRunning) return false;
 
     if (this.hasDifferentLiveSessionOnTerminal(session)) return false;

@@ -125,8 +125,8 @@ export function RuntimeView() {
     });
   }, []);
 
-  const onWheel = useCallback(
-    (event: React.WheelEvent<HTMLDivElement>) => {
+  const handleCanvasWheel = useCallback(
+    (event: WheelEvent) => {
       event.preventDefault();
       event.stopPropagation();
       if (!canvasRef.current) return;
@@ -146,6 +146,15 @@ export function RuntimeView() {
     },
     [pan, zoom, persistPan, persistZoom]
   );
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    canvas.addEventListener('wheel', handleCanvasWheel, { passive: false });
+    return () => {
+      canvas.removeEventListener('wheel', handleCanvasWheel);
+    };
+  }, [handleCanvasWheel]);
 
   const onCanvasMouseDown = useCallback(
     (event: React.MouseEvent<HTMLDivElement>) => {
@@ -432,7 +441,6 @@ export function RuntimeView() {
         <div
           ref={canvasRef}
           className="relative flex-1 overflow-hidden"
-          onWheel={onWheel}
           onMouseDown={onCanvasMouseDown}
           style={{ cursor: isInteracting ? 'grabbing' : 'grab' }}
         >

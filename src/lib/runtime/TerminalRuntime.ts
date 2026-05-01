@@ -40,6 +40,7 @@ export async function spawnTerminal(args: {
       rows: args.rows,
       cols: args.cols,
       cwd: args.cwd ?? null,
+      env: args.env ?? {},
     });
   }
   if (result !== true) {
@@ -51,7 +52,8 @@ export async function writeToTerminal(terminalId: string, data: string): Promise
   try {
     await invoke('write_to_pty', { id: terminalId, data });
   } catch (err) {
-    console.warn(`[pty] Ignored write error for ${terminalId}:`, err);
+    console.warn(`[pty] Write error for ${terminalId}:`, err);
+    throw err;
   }
 }
 

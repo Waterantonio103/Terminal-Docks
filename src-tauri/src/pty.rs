@@ -74,6 +74,18 @@ fn push_recent_output(buf: &mut VecDeque<u8>, bytes: &[u8]) {
     buf.extend(bytes.iter().copied());
 }
 
+fn maybe_answer_terminal_query(state: &PtyState, id: &str, chunk: &str) {
+    if !chunk.contains("\x1b[6n") {
+        return;
+    }
+
+    let mut ptys = state.ptys.lock().unwrap();
+    if let Some(instance) = ptys.get_mut(id) {
+        let _ = instance.writer.write_all(b"\x1b[1;1R");
+        let _ = instance.writer.flush();
+    }
+}
+
 #[derive(Clone, serde::Serialize)]
 struct Payload {
     id: String,
@@ -466,6 +478,7 @@ pub fn spawn_pty(
     rows: u16,
     cols: u16,
     cwd: Option<String>,
+    env: Option<HashMap<String, String>>,
 ) -> Result<bool, String> {
     {
         let ptys = state.ptys.lock().unwrap();
@@ -500,6 +513,11 @@ pub fn spawn_pty(
     let mcp_state = app.state::<crate::mcp::McpState>();
     let mcp_url = crate::mcp::get_mcp_url(mcp_state);
     cmd.env("TD_MCP_URL", mcp_url);
+    if let Some(vars) = env {
+        for (key, value) in vars {
+            cmd.env(key, value);
+        }
+    }
 
     if !cfg!(target_os = "windows") {
         cmd.args(["-l", "-i"]);
@@ -556,6 +574,7 @@ pub fn spawn_pty(
                         push_recent_output(&mut recent, &data);
                     }
                     let pty_state = app_clone.state::<PtyState>();
+                    maybe_answer_terminal_query(&pty_state, &id_clone, &chunk);
                     maybe_emit_permission_request(&app_clone, &pty_state, &id_clone, &chunk);
                     let _ = app_clone.emit(
                         "pty-out",
@@ -707,6 +726,7 @@ pub fn spawn_pty_with_command(
                         push_recent_output(&mut recent, &data);
                     }
                     let pty_state = app_clone.state::<PtyState>();
+                    maybe_answer_terminal_query(&pty_state, &id_clone, &chunk);
                     maybe_emit_permission_request(&app_clone, &pty_state, &id_clone, &chunk);
                     let _ = app_clone.emit(
                         "pty-out",
@@ -788,14 +808,26 @@ pub fn write_to_pty(state: State<'_, PtyState>, id: String, data: String) -> Res
         // especially on Windows/ConPTY which can be sensitive to large rapid writes.
         if bytes.len() > 512 {
             for chunk in bytes.chunks(512) {
-                let _ = instance.writer.write_all(chunk);
-                let _ = instance.writer.flush();
+                instance
+                    .writer
+                    .write_all(chunk)
+                    .map_err(|e| format!("Failed to write to PTY {}: {}", id, e))?;
+                instance
+                    .writer
+                    .flush()
+                    .map_err(|e| format!("Failed to flush PTY {}: {}", id, e))?;
                 // Tiny sleep to allow the PTY driver to process the chunk
                 thread::sleep(std::time::Duration::from_millis(5));
             }
         } else {
-            let _ = instance.writer.write_all(bytes);
-            let _ = instance.writer.flush();
+            instance
+                .writer
+                .write_all(bytes)
+                .map_err(|e| format!("Failed to write to PTY {}: {}", id, e))?;
+            instance
+                .writer
+                .flush()
+                .map_err(|e| format!("Failed to flush PTY {}: {}", id, e))?;
         }
         Ok(())
     } else {

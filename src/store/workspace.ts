@@ -245,7 +245,7 @@ export interface Pane {
   data?: {
     terminalId?: string;
     cli?: WorkflowAgentCli;
-    cliSource?: 'connect_agent' | 'stdout' | 'heuristic';
+    cliSource?: 'connect_agent' | 'stdout' | 'heuristic' | 'runtime_shell_launch';
     cliConfidence?: 'low' | 'medium' | 'high';
     cliUpdatedAt?: number;
     roleId?: string;

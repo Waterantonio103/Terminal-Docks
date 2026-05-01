@@ -1631,8 +1631,8 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
     return () => window.removeEventListener('keydown', onWindowKeyDown);
   }, [applyOperator, createFrameFromSelection]);
 
-  const onWheel = useCallback(
-    (event: React.WheelEvent<HTMLDivElement>) => {
+  const handleCanvasWheel = useCallback(
+    (event: WheelEvent) => {
       event.preventDefault();
       if (!canvasRef.current) {
         return;
@@ -1649,6 +1649,15 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
     },
     [applyOperator, view.pan, view.zoom]
   );
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    canvas.addEventListener('wheel', handleCanvasWheel, { passive: false });
+    return () => {
+      canvas.removeEventListener('wheel', handleCanvasWheel);
+    };
+  }, [handleCanvasWheel]);
 
   const startNodeDrag = useCallback(
     (event: React.MouseEvent<HTMLDivElement>, node: NodeInstance) => {
@@ -1819,7 +1828,7 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
         <div className={validationTone === 'error' ? 'text-red-300' : validationTone === 'ok' ? 'text-emerald-300' : 'text-text-muted'}>{validationMessage}</div>
       </div>
 
-      <div ref={canvasRef} className="relative flex-1 overflow-hidden" onMouseDown={onCanvasMouseDown} onContextMenu={onCanvasContextMenu} onWheel={onWheel}>
+      <div ref={canvasRef} className="relative flex-1 overflow-hidden" onMouseDown={onCanvasMouseDown} onContextMenu={onCanvasContextMenu}>
         <DotTunnelBackground />
         <div
           className="absolute inset-0 opacity-60"
