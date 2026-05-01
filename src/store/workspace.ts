@@ -588,7 +588,7 @@ export const useWorkspaceStore = create<WorkspaceState>()(
             type: 'terminal',
             title,
             gridPos,
-            data: { terminalId, nodeId, roleId, cli, cliSource: 'heuristic', executionMode }
+            data: { terminalId, nodeId, roleId, cli, cliSource: 'heuristic', executionMode, runtimeManaged: true }
           };
           
           return {

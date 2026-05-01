@@ -462,7 +462,7 @@ export class WorkflowOrchestrator {
       // Group 5: Single entry point for runtime readiness.
       // Handles reuse, stale cleanup, and new launch.
       const result = await this.runtimeManager!.ensureRuntimeReadyForTask({
-        missionId: run.definitionId,
+        missionId: run.runId,
         nodeId,
         attempt,
         role: nodeDef.roleId,

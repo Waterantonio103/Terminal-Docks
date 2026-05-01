@@ -743,6 +743,11 @@ class RuntimeManager {
 
     if (strategy.requiresPty) {
       if (isWorkflowRun) {
+        // Flag the pane as runtime-managed BEFORE destroying the PTY.
+        // TerminalPane reads this on remount — if set after destroy it always reads false.
+        useWorkspaceStore.getState().updatePaneDataByTerminalId(terminalId, {
+          runtimeManaged: true,
+        });
         console.log(`[runtime] workflow run: unconditionally destroying terminal=${terminalId}`);
         await this.destroyAndWaitForTerminal(terminalId);
       } else if (needsPtyDestroy) {
@@ -757,6 +762,7 @@ class RuntimeManager {
     const session = await this.createRuntimeForNode(args);
     this.claimTerminalOwnership(terminalId, session.sessionId);
     this.wirePtyEvents(terminalId, session.sessionId);
+    this.bindRuntimeToTerminalPane(session);
     await this.launchCli(session.sessionId, args.activationPayload);
     return session;
   }
@@ -1333,7 +1339,6 @@ class RuntimeManager {
     if (session.isTerminal) {
       const isWorkflowRun = !session.missionId.startsWith('adhoc-');
       session.transitionTo('awaiting_cli_ready');
-      this.bindRuntimeToTerminalPane(session);
 
       if (!isWorkflowRun) {
         const terminalReady = await this.waitForTerminalReady(session.terminalId, 5_000);
@@ -1368,9 +1373,7 @@ class RuntimeManager {
           if (!terminalReady) {
             throw new Error(`Terminal ${session.terminalId} did not become active after fresh spawn for CLI "${session.cliId}" (node: ${session.nodeId}).`);
           }
-          const launchCmd = buildPtyLaunchCommand(session.cliId, { model: session.model, yolo: session.yolo });
-          console.log(`[runtime] launch command=${launchCmd}`);
-          await writeToTerminal(session.terminalId, `${launchCmd}\r`);
+          console.log(`[runtime] workflow CLI direct spawn complete terminal=${session.terminalId} command=${session.cliId}`);
         } else {
           const launchCmd = buildPtyLaunchCommand(session.cliId, { model: session.model, yolo: session.yolo });
           console.log(`[runtime] launch command=${launchCmd}`);
@@ -1395,12 +1398,18 @@ class RuntimeManager {
           }));
         }
       } else {
-        const cliReady = await this.waitForCliReady(session, CLI_READY_WAIT_MS);
-        if (!cliReady) {
-          const reason = launchedCli
-            ? `CLI "${session.cliId}" did not report ready state within ${CLI_READY_WAIT_MS}ms after launch.`
-            : `CLI "${session.cliId}" is not ready and launch was skipped by gate logic.`;
-          throw new Error(reason);
+        const isWorkflowDirectSpawn = isWorkflowRun && launchedCli && (session.cliId as string) !== 'codex';
+        if (isWorkflowDirectSpawn) {
+          // CLI was spawned directly as the PTY process — no shell ready-check needed.
+          console.log(`[runtime] workflow direct spawn ready assumed cli=${session.cliId}`);
+        } else {
+          const cliReady = await this.waitForCliReady(session, CLI_READY_WAIT_MS);
+          if (!cliReady) {
+            const reason = launchedCli
+              ? `CLI "${session.cliId}" did not report ready state within ${CLI_READY_WAIT_MS}ms after launch.`
+              : `CLI "${session.cliId}" is not ready and launch was skipped by gate logic.`;
+            throw new Error(reason);
+          }
         }
       }
     }

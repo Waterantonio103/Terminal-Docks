@@ -48,7 +48,11 @@ export async function spawnTerminal(args: {
 }
 
 export async function writeToTerminal(terminalId: string, data: string): Promise<void> {
-  await invoke('write_to_pty', { id: terminalId, data });
+  try {
+    await invoke('write_to_pty', { id: terminalId, data });
+  } catch (err) {
+    console.warn(`[pty] Ignored write error for ${terminalId}:`, err);
+  }
 }
 
 export async function isTerminalActive(terminalId: string): Promise<boolean> {
@@ -56,7 +60,11 @@ export async function isTerminalActive(terminalId: string): Promise<boolean> {
 }
 
 export async function destroyTerminal(terminalId: string): Promise<void> {
-  await invoke('destroy_pty', { id: terminalId });
+  try {
+    await invoke('destroy_pty', { id: terminalId });
+  } catch (err) {
+    console.warn(`[pty] Ignored destroy error for ${terminalId}:`, err);
+  }
 }
 
 export async function getRecentTerminalOutput(terminalId: string, maxBytes = 4096): Promise<string> {
@@ -68,7 +76,11 @@ export async function getRecentTerminalOutput(terminalId: string, maxBytes = 409
 }
 
 export async function resizeTerminal(terminalId: string, rows: number, cols: number): Promise<void> {
-  await invoke('resize_pty', { id: terminalId, rows, cols });
+  try {
+    await invoke('resize_pty', { id: terminalId, rows, cols });
+  } catch (err) {
+    console.warn(`[pty] Ignored resize error for ${terminalId}:`, err);
+  }
 }
 
 // ──────────────────────────────────────────────

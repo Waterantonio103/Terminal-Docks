@@ -29,7 +29,7 @@ export function TerminalPane({ pane, dragEndSeq }: { pane: Pane; dragEndSeq?: nu
 
   useEffect(() => {
     console.log(`[TerminalPane] Mounted pane: ${pane.id}`, pane.data);
-  }, [pane.id, pane.data]);
+  }, [pane.id]);
 
   const showSearchRef = useRef(false);
   useEffect(() => { showSearchRef.current = showSearch; }, [showSearch]);
@@ -147,6 +147,19 @@ export function TerminalPane({ pane, dragEndSeq }: { pane: Pane; dragEndSeq?: nu
     }, 260);
     terminalInstance.current = term;
 
+    // Multi-pass repaint — Tauri WKWebView blanks the WebGL canvas during
+    // store-write re-renders. Three passes ensure at least one lands after
+    // the compositor settles.
+    const doRepaint = () => {
+      if (!terminalInstance.current) return;
+      fitAddon.current?.fit();
+      terminalInstance.current.refresh(0, terminalInstance.current.rows - 1);
+      terminalInstance.current.scrollToBottom();
+    };
+    const repaintT1 = setTimeout(doRepaint, 300);
+    const repaintT2 = setTimeout(doRepaint, 1100);
+    const repaintT3 = setTimeout(doRepaint, 2500);
+
     // Scroll tracking
     term.onScroll(() => {
       const buf = term.buffer.active;
@@ -226,10 +239,20 @@ export function TerminalPane({ pane, dragEndSeq }: { pane: Pane; dragEndSeq?: nu
       });
 
       const customCommand = pane.data?.customCliCommand;
-      // Re-read from store — RuntimeManager may have set runtimeManaged before initPty runs
-      // (e.g. after a fast activation event on an already-mounted pane).
-      const latestPaneSnap = storeSnap.tabs.flatMap(t => t.panes).find(p => p.id === pane.id);
-      const runtimeManaged = Boolean(latestPaneSnap?.data?.runtimeManaged);
+      // Re-read from store at decision time — the flag may arrive after mount
+      // because RuntimeManager writes it during the activation pipeline.
+      // Also check live PTY state: if RuntimeManager already spawned the PTY,
+      // never put a shell on top of it regardless of the flag.
+      const latestPaneSnap = useWorkspaceStore.getState().tabs.flatMap(t => t.panes).find(p => p.id === pane.id);
+      const runtimeManagedByFlag = Boolean(latestPaneSnap?.data?.runtimeManaged);
+      const runtimeManagedByBinding = boundNodeId
+        ? Boolean(useWorkspaceStore.getState().nodeRuntimeBindings[boundNodeId]?.runtimeSessionId)
+        : false;
+      const ptyAlreadyExists = await invoke<boolean>('is_pty_active', { id: terminalId }).catch(() => false);
+      const runtimeManaged = runtimeManagedByFlag || runtimeManagedByBinding || ptyAlreadyExists;
+      if (ptyAlreadyExists && !runtimeManagedByFlag) {
+        console.log(`[TerminalPane] PTY pre-exists — treating as runtime-managed terminal=${terminalId}`);
+      }
 
       await invoke('register_pty_runtime_metadata', {
         terminalId,
@@ -267,6 +290,29 @@ export function TerminalPane({ pane, dragEndSeq }: { pane: Pane; dragEndSeq?: nu
       if (runtimeManaged) {
         // RuntimeManager owns spawning for this terminal — attach only, no spawn.
         console.log(`[TerminalPane] runtimeManaged=true; skipping spawn for ${terminalId}`);
+        // The PTY may have already output data before our pty-out listener registered.
+        // Trigger a resize — on Tauri/WKWebView this causes the PTY backend to flush
+        // its output buffer to all active listeners, replaying any missed startup output.
+        setTimeout(() => {
+          if (!terminalInstance.current) return;
+          const rows = terminalInstance.current.rows || 24;
+          const cols = terminalInstance.current.cols || 80;
+          fitAddon.current?.fit();
+          invoke('resize_pty', { id: terminalId, rows, cols }).catch(() => {});
+          terminalInstance.current.refresh(0, rows - 1);
+          terminalInstance.current.scrollToBottom();
+          console.log(`[TerminalPane] post-attach flush triggered terminal=${terminalId}`);
+        }, 150);
+        // Second flush after CLI has had more time to render its initial UI
+        setTimeout(() => {
+          if (!terminalInstance.current) return;
+          const rows = terminalInstance.current.rows || 24;
+          const cols = terminalInstance.current.cols || 80;
+          fitAddon.current?.fit();
+          invoke('resize_pty', { id: terminalId, rows, cols }).catch(() => {});
+          terminalInstance.current.refresh(0, rows - 1);
+          terminalInstance.current.scrollToBottom();
+        }, 800);
       } else if (customCommand) {
         const spawned = await trySpawnPtyWithCommand({
           id: terminalId,
@@ -367,6 +413,9 @@ export function TerminalPane({ pane, dragEndSeq }: { pane: Pane; dragEndSeq?: nu
 
     return () => {
       clearTimeout(resizeTimeout);
+      clearTimeout(repaintT1);
+      clearTimeout(repaintT2);
+      clearTimeout(repaintT3);
       resizeObserver.disconnect();
       terminalElement.removeEventListener('paste', pasteHandler, true);
       if (unlisten) unlisten();

@@ -947,8 +947,13 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
         const currentTerminalId = typeof data.terminalId === 'string' ? data.terminalId : '';
         const storedTerminalId = storedBindings[nodeId];
         const resolvedTerminalId = currentTerminalId || storedTerminalId;
-        const openResolvedTerminal = resolvedTerminalId
-          ? openTerminals.find(t => t.id === resolvedTerminalId)
+        // Read live from store instead of stale openTerminals React state
+        const livePanes = useWorkspaceStore.getState().tabs.flatMap(t => t.panes);
+        const liveResolvedPane = resolvedTerminalId
+          ? livePanes.find(p => p.type === 'terminal' && p.data?.terminalId === resolvedTerminalId)
+          : null;
+        const openResolvedTerminal = liveResolvedPane
+          ? { id: liveResolvedPane.data!.terminalId as string, cli: liveResolvedPane.data!.cli as WorkflowAgentCli, title: liveResolvedPane.title, paneId: liveResolvedPane.id }
           : null;
         const canReuseResolvedTerminal = openResolvedTerminal && openResolvedTerminal.cli === selectedCli;
         if (canReuseResolvedTerminal) {
@@ -986,6 +991,17 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
             freshBindings.set(nodeId, { id: persistedId, title: existing.title, paneId: existing.paneId, cli: selectedCli });
             continue;
           }
+        }
+
+        // Remove any existing pane for this node before creating a new one.
+        // Without this, old panes accumulate causing duplicate nodeId keys in RuntimeView.
+        const storeBeforeCreate = useWorkspaceStore.getState();
+        const allPanesBeforeCreate = storeBeforeCreate.tabs.flatMap(t => t.panes);
+        const oldPane = allPanesBeforeCreate.find(p =>
+          p.type === 'terminal' && p.data?.nodeId === nodeId
+        );
+        if (oldPane) {
+          storeBeforeCreate.removePane(oldPane.id);
         }
 
         // Spawn a real terminal pane for this node (inline so it doesn't depend
