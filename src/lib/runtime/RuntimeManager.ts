@@ -54,6 +54,7 @@ import {
   buildCodexFollowupTaskSignal,
   buildCodexInteractiveLaunchArgs,
   buildPtyLaunchCommand,
+  buildPtyLaunchCommandParts,
   resolveCodexYoloFlag,
 } from '../cliCommandBuilders.js';
 import { getRuntimeBootstrapContract, buildRuntimeBootstrapRegistrationRequest } from '../runtimeBootstrap.js';
@@ -1649,20 +1650,42 @@ class RuntimeManager {
     await this.destroyAndWaitForTerminal(session.terminalId);
 
     const { rows, cols } = this.getTerminalDimensions(session.terminalId);
+    const launch = buildPtyLaunchCommandParts(session.cliId, {
+      model: session.model,
+      yolo: session.yolo,
+    });
 
-    console.log(`[runtime] spawning fresh shell terminal=${session.terminalId} cli=${session.cliId}`);
+    const env: Record<string, string> = {
+      TD_SESSION_ID: session.sessionId,
+      TD_AGENT_ID: session.agentId,
+      TD_MISSION_ID: session.missionId,
+      TD_NODE_ID: session.nodeId,
+      TD_ATTEMPT: String(session.attempt),
+      TD_WORKSPACE: session.workspaceDir ?? '',
+      TD_KIND: session.cliId,
+    };
+
+    console.log('[runtime] spawning workflow CLI directly', {
+      terminalId: session.terminalId,
+      command: launch.command,
+      args: launch.args,
+      cli: session.cliId,
+    });
+
+    if (!launch.command) {
+      throw new Error(`No PTY command resolved for CLI ${session.cliId}`);
+    }
+
     await this.safeSpawnTerminal(session.terminalId, {
       rows,
       cols,
       cwd: session.workspaceDir ?? null,
+      command: launch.command,
+      args: launch.args,
+      env,
     });
-    await emit('terminal-refit-requested', { terminalId: session.terminalId }).catch(() => {});
 
-    // Wait for the shell to initialize and show its prompt before returning.
-    // New Runtime works because TerminalPane's shell is already warm by the time
-    // RuntimeManager runs writeToTerminal. Here we spawn a fresh shell, so we must
-    // wait for it to reach an idle/prompt state before the caller injects the CLI command.
-    await this.waitForTerminalOutputIdle(session.terminalId, 300, 3_000);
+    await emit('terminal-refit-requested', { terminalId: session.terminalId }).catch(() => {});
 
     setTimeout(() => {
       this.suppressedPtyExitUntil.delete(session.terminalId);

@@ -264,24 +264,43 @@ export function buildPtyLaunchCommand(cliId: string, options: { model?: string |
   return [command, ...args].join(' ');
 }
 
+export interface PtyLaunchParts {
+  command: string;
+  args: string[];
+}
+
 export function buildPtyLaunchCommandParts(
   cliId: string,
-  options: { model?: string | null; yolo?: boolean },
-): { command: string; args: string[] } {
+  options: { model?: string | null; yolo?: boolean }
+): PtyLaunchParts {
   const cli = normalizeCliId(cliId);
-  const args: string[] = [];
 
-  const supportsModelFlag = cli === 'claude' || cli === 'opencode' || cli === 'gemini' || cli === 'codex';
-  if (options.model && supportsModelFlag) {
-    args.push('--model', options.model);
+  if (cli === 'claude') {
+    const args: string[] = [];
+    if (options.model?.trim()) args.push('--model', options.model.trim());
+    if (options.yolo) args.push('--dangerously-skip-permissions');
+    return { command: 'claude', args };
   }
 
-  if (options.yolo) {
-    if (cli === 'claude') args.push('--dangerously-skip-permissions');
-    else if (cli === 'gemini') args.push('--yolo');
-    else if (cli === 'codex') args.push('--yolo');
-    // opencode: --yolo is only valid for `opencode run`, not the default TUI mode.
+  if (cli === 'gemini') {
+    const args: string[] = [];
+    if (options.model?.trim()) args.push('--model', options.model.trim());
+    if (options.yolo) args.push('--yolo');
+    return { command: 'gemini', args };
   }
 
-  return { command: cliId, args };
+  if (cli === 'opencode') {
+    const args: string[] = [];
+    if (options.model?.trim()) args.push('--model', options.model.trim());
+    return { command: 'opencode', args };
+  }
+
+  if (cli === 'codex') {
+    const args: string[] = [];
+    if (options.model?.trim()) args.push('--model', options.model.trim());
+    if (options.yolo) args.push('--yolo');
+    return { command: 'codex', args };
+  }
+
+  return { command: cliId, args: [] };
 }
