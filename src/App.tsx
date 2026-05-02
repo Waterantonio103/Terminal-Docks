@@ -53,6 +53,8 @@ import { runtimeExecutor } from './lib/runtime/RuntimeExecutor';
 import { terminalOutputBus } from './lib/runtime/TerminalOutputBus';
 import { workflowOrchestrator } from './lib/workflow/WorkflowOrchestrator';
 
+let liveWorkflowHarnessStarted = false;
+
 function sendFrontendErrorToDebugMcp(report: FatalErrorReport, name?: string) {
   invoke<string>('get_mcp_base_url')
     .then(baseUrl => fetch(`${baseUrl}/internal/frontend-error`, {
@@ -76,6 +78,14 @@ function App() {
     terminalOutputBus.start().catch(console.error);
     workflowOrchestrator.setRuntimeManager(runtimeExecutor);
     runtimeManager.startListening().catch(console.error);
+    if (import.meta.env.DEV && import.meta.env.VITE_LIVE_WORKFLOW_DEBUG === '1' && !liveWorkflowHarnessStarted) {
+      liveWorkflowHarnessStarted = true;
+      import('./lib/debug/liveWorkflowHarness')
+        .then(({ liveWorkflowHarnessOptionsFromEnv, runLiveWorkflowHarness }) =>
+          runLiveWorkflowHarness(liveWorkflowHarnessOptionsFromEnv()),
+        )
+        .catch(console.error);
+    }
   }, []);
 
   const toggleSidebar = useWorkspaceStore((s) => s.toggleSidebar);

@@ -76,7 +76,7 @@ const CLI_READY_WAIT_MS = 20_000;
 const PASTE_SUBMIT_GAP_MS = 150;
 const PRE_CLEAR_SETTLE_MS = 300;
 const BOOTSTRAP_EVENT_TIMEOUT_MS = 8_000;
-const TASK_ACK_TIMEOUT_MS = 30_000;
+const TASK_ACK_TIMEOUT_MS = 60_000;
 const BOOTSTRAP_INJECTION_TIMEOUT_MS = 10_000;
 const CODEX_IDLE_WAIT_MS = 1_000;
 const CODEX_IDLE_TIMEOUT_MS = 8_000;
@@ -205,7 +205,7 @@ class RuntimeManager {
   async startListening(): Promise<void> {
     if (this.nativeListenerUnsub) return;
 
-    this.nativeListenerUnsub = await listen<{
+    const unlistenActivation = await listen<{
       mission_id: string;
       node_id: string;
       attempt: number;
@@ -251,6 +251,21 @@ class RuntimeManager {
         }).catch(() => {});
       }
     });
+
+    const unlistenNodeUpdate = await listen<{
+      id: string;
+      status: string;
+      attempt?: number;
+      outcome?: 'success' | 'failure';
+      reason?: string;
+    }>('workflow-node-update', (event) => {
+      this.handleNativeNodeUpdate(event.payload);
+    });
+
+    this.nativeListenerUnsub = () => {
+      unlistenActivation();
+      unlistenNodeUpdate();
+    };
 
     listen<{
       runId: string;
@@ -317,6 +332,52 @@ class RuntimeManager {
     }).catch(console.error);
   }
 
+  private handleNativeNodeUpdate(update: {
+    id: string;
+    status: string;
+    attempt?: number;
+    outcome?: 'success' | 'failure';
+    reason?: string;
+  }): void {
+    const status = update.status?.toLowerCase();
+    if (status !== 'completed' && status !== 'failed') return;
+
+    const session = Array.from(this.sessions.values()).find(candidate =>
+      candidate.nodeId === update.id &&
+      (update.attempt == null || candidate.attempt === update.attempt) &&
+      !isRuntimeSessionTerminal(candidate.state),
+    );
+    if (!session || !this.isCurrentOwner(session)) return;
+
+    if (status === 'completed') {
+      const outcome = update.outcome ?? 'success';
+      session.markCompleted();
+      this.emit({
+        type: 'session_completed',
+        sessionId: session.sessionId,
+        nodeId: session.nodeId,
+        outcome,
+      });
+      this.cleanupSession(session);
+      if (session.cliId === 'codex' && session.terminalId) {
+        this.destroyAndWaitForTerminal(session.terminalId).catch(err =>
+          console.warn(`[codex] PTY destroy after native completion failed terminal=${session.terminalId}`, err),
+        );
+      }
+      return;
+    }
+
+    const reason = update.reason || `Node ${session.nodeId} reported failed from native workflow update.`;
+    session.markFailed(reason);
+    this.emit({
+      type: 'session_failed',
+      sessionId: session.sessionId,
+      nodeId: session.nodeId,
+      error: reason,
+    });
+    this.cleanupSession(session);
+  }
+
   // ── Public API ──────────────────────────────────────────────────
 
   async createRuntimeForNode(args: CreateRuntimeArgs): Promise<RuntimeSession> {
@@ -349,6 +410,7 @@ class RuntimeManager {
       paneId: args.paneId,
       workspaceDir: args.workspaceDir,
       goal: args.goal ?? undefined,
+      instructionOverride: args.instructionOverride ?? undefined,
       legalTargets: args.legalTargets,
       upstreamPayloads: args.upstreamPayloads,
       model: args.modelId ?? args.model,
@@ -1792,9 +1854,13 @@ class RuntimeManager {
     await emit('terminal-refit-requested', { terminalId: session.terminalId }).catch(() => {});
 
     await sleep(CLI_STARTUP_WAIT_MS);
-    const cliReady = await this.waitForCliReady(session, CLI_READY_WAIT_MS);
-    if (!cliReady) {
-      throw new Error(`CLI "${session.cliId}" did not report ready state within ${CLI_READY_WAIT_MS}ms after shell launch.`);
+    if (launch.promptDeliveredAtLaunch) {
+      console.log(`[runtime] CLI launch prompt already delivered cli=${session.cliId} terminal=${session.terminalId}; skipping idle prompt wait`);
+    } else {
+      const cliReady = await this.waitForCliReady(session, CLI_READY_WAIT_MS);
+      if (!cliReady) {
+        throw new Error(`CLI "${session.cliId}" did not report ready state within ${CLI_READY_WAIT_MS}ms after shell launch.`);
+      }
     }
     console.log(`[runtime] CLI ready cli=${session.cliId} terminal=${session.terminalId}`);
     missionRepository.appendWorkflowEvent({
@@ -1952,7 +2018,7 @@ class RuntimeManager {
     })) ?? [];
 
     const assignment: import('../missionRuntime.js').RuntimeAssignmentPayload = {
-      roleInstructions: '',
+      roleInstructions: session.instructionOverride ?? '',
       missionGoal: session.goal || '',
       upstreamOutputs,
       workspaceContext: {

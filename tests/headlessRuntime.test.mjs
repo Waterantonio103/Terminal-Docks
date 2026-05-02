@@ -5,6 +5,7 @@ import {
   buildCodexInteractiveLaunchArgs,
   buildCodexInteractiveLaunchCommand,
 } from '../.tmp-tests/lib/cliCommandBuilders.js';
+import { codexAdapter } from '../.tmp-tests/lib/runtime/adapters/codex.js';
 import { buildStartAgentRunRequest } from '../.tmp-tests/lib/runtimeDispatcher.js';
 
 function payload(overrides = {}) {
@@ -96,7 +97,11 @@ run('codex interactive argv places model and yolo before final prompt', () => {
 
   assert.deepEqual(args, [
     '-c',
-    'mcp_servers.terminal_docks.url="http://127.0.0.1:3741/mcp?token=abc"',
+    'mcp_servers.pencil.enabled=false',
+    '-c',
+    'mcp_servers.excalidraw.enabled=false',
+    '-c',
+    'mcp_servers.terminal-docks.url="http://127.0.0.1:3741/mcp?token=abc"',
     '--model',
     'gpt-5.5',
     '--cd',
@@ -116,7 +121,14 @@ run('codex interactive argv preserves complex prompt as final argument', () => {
     bootstrapPrompt: prompt,
   });
 
-  assert.deepEqual(args, ['--no-alt-screen', prompt]);
+  assert.deepEqual(args, [
+    '-c',
+    'mcp_servers.pencil.enabled=false',
+    '-c',
+    'mcp_servers.excalidraw.enabled=false',
+    '--no-alt-screen',
+    prompt,
+  ]);
   assert.equal(args.at(-1), prompt);
 });
 
@@ -127,7 +139,12 @@ run('codex shell fallback flattens the bootstrap prompt before shell quoting', (
     bootstrapPrompt: 'You are a Terminal-Docks Codex runtime.\nA workflow task is ready for you.',
   });
 
-  assert.equal(command.startsWith('codex --model gpt-5.4-mini --no-alt-screen '), true);
+  assert.equal(
+    command.startsWith(
+      'codex -c mcp_servers.pencil.enabled=false -c mcp_servers.excalidraw.enabled=false --model gpt-5.4-mini --no-alt-screen ',
+    ),
+    true,
+  );
   assert.equal(command.includes('\n'), false);
   assert.equal(command.includes('You are a Terminal-Docks Codex runtime. A workflow task is ready for you.'), true);
 });
@@ -141,6 +158,27 @@ run('codex follow-up task signal is tiny and session-aware', () => {
     buildCodexFollowupTaskSignal({ sessionId: 'session-123' }),
     'NEW_TASK. call get_current_task({ sessionId: "session-123" }), execute it, then complete_task().',
   );
+});
+
+run('codex permission detector ignores ordinary status output', () => {
+  assert.equal(
+    codexAdapter.detectPermissionRequest('gpt-5.5 high · Context 94% left · Context 6% used'),
+    null,
+  );
+});
+
+run('codex permission detector accepts MCP tool approval prompts', () => {
+  const request = codexAdapter.detectPermissionRequest(
+    'Allow the terminal-docks MCP server to run tool "connect_agent"?\n' +
+      '  1. Allow\n' +
+      '  2. Allow for this session\n' +
+      '  3. Always allow\n' +
+      '  4. Cancel\n' +
+      'enter to submit | esc to cancel',
+  );
+
+  assert.equal(request?.detected, true);
+  assert.match(request?.request.rawPrompt ?? '', /connect_agent/);
 });
 
 run('local HTTP runtimes share the headless adapter request path', () => {

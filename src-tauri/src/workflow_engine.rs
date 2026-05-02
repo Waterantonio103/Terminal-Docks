@@ -2188,6 +2188,7 @@ pub fn acknowledge_runtime_activation(
             "activated" => "activation_acked",
             other => other,
         };
+        let mut status_to_persist = normalized_status.to_string();
 
         match normalized_status {
             "adapter_starting" | "mcp_connecting" | "registered" | "ready"
@@ -2212,28 +2213,43 @@ pub fn acknowledge_runtime_activation(
                 active_mission.node_failure_reasons.remove(&node_id);
             }
             "activation_acked" => {
-                let pending = active_mission
-                    .pending_runtime_activations
-                    .get_mut(&key)
-                    .ok_or_else(|| {
-                        format!(
-                            "No pending activation request found for {}/{} attempt {}.",
-                            mission_id, node_id, attempt
-                        )
-                    })?;
-                pending.status = "activation_acked".to_string();
-                if next_reason.is_some() {
-                    pending.reason = next_reason.clone();
-                }
-                last_payload = pending.payload.input_payload.clone();
-                active_mission
+                let current_status = active_mission
                     .node_statuses
-                    .insert(node_id.clone(), "activation_acked".to_string());
-                active_mission.node_failure_reasons.remove(&node_id);
-                // Mark the MCP task_push row as acknowledged so list_task_activations
-                // and buildTaskDetails no longer show it as pending.
-                let ack_sid = runtime_session_id(&mission_id, &node_id, attempt);
-                ack_task_push_db(&app, &ack_sid, &mission_id, &node_id, attempt);
+                    .get(&node_id)
+                    .cloned()
+                    .unwrap_or_default();
+                if matches!(
+                    current_status.as_str(),
+                    "running" | "completed" | "failed" | "cancelled"
+                ) {
+                    let ack_sid = runtime_session_id(&mission_id, &node_id, attempt);
+                    ack_task_push_db(&app, &ack_sid, &mission_id, &node_id, attempt);
+                    active_mission.node_failure_reasons.remove(&node_id);
+                    status_to_persist = current_status;
+                } else {
+                    let pending = active_mission
+                        .pending_runtime_activations
+                        .get_mut(&key)
+                        .ok_or_else(|| {
+                            format!(
+                                "No pending activation request found for {}/{} attempt {}.",
+                                mission_id, node_id, attempt
+                            )
+                        })?;
+                    pending.status = "activation_acked".to_string();
+                    if next_reason.is_some() {
+                        pending.reason = next_reason.clone();
+                    }
+                    last_payload = pending.payload.input_payload.clone();
+                    active_mission
+                        .node_statuses
+                        .insert(node_id.clone(), "activation_acked".to_string());
+                    active_mission.node_failure_reasons.remove(&node_id);
+                    // Mark the MCP task_push row as acknowledged so list_task_activations
+                    // and buildTaskDetails no longer show it as pending.
+                    let ack_sid = runtime_session_id(&mission_id, &node_id, attempt);
+                    ack_task_push_db(&app, &ack_sid, &mission_id, &node_id, attempt);
+                }
             }
             "running" => {
                 let prev_status = active_mission
@@ -2299,7 +2315,7 @@ pub fn acknowledge_runtime_activation(
             role_id,
             active_mission.node_waves.get(&node_id).cloned(),
             last_payload,
-            normalized_status.to_string(),
+            status_to_persist,
             next_reason,
             active_mission.mission.metadata.run_version,
         )

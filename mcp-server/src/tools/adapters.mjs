@@ -22,7 +22,15 @@ export function registerAdapterTools(server) {
        ON CONFLICT(adapter_id) DO UPDATE SET lifecycle = 'registered', updated_at = CURRENT_TIMESTAMP`
     ).run(adapterId, args.sessionId, args.terminalId, args.nodeId, args.missionId, args.role, args.cli, args.cwd ?? null);
 
-    db.prepare(`UPDATE agent_runtime_sessions SET status = 'registered', updated_at = CURRENT_TIMESTAMP WHERE session_id = ?`).run(args.sessionId);
+    db.prepare(
+      `UPDATE agent_runtime_sessions
+       SET status = CASE
+         WHEN status IN ('running', 'completed', 'failed', 'cancelled') THEN status
+         ELSE 'registered'
+       END,
+       updated_at = CURRENT_TIMESTAMP
+       WHERE session_id = ?`
+    ).run(args.sessionId);
     emitAgentEvent({ type: 'agent:ready', sessionId: args.sessionId, missionId: args.missionId, nodeId: args.nodeId });
 
     return { content: [{ type: 'text', text: 'Adapter registered.' }] };
@@ -39,7 +47,15 @@ export function registerAdapterTools(server) {
     }
   }, async (args) => {
     db.prepare(`UPDATE task_pushes SET acked_at = CURRENT_TIMESTAMP WHERE session_id = ? AND mission_id = ? AND node_id = ? AND task_seq = ?`).run(args.sessionId, args.missionId, args.nodeId, args.taskSeq);
-    db.prepare(`UPDATE agent_runtime_sessions SET status = 'activated', updated_at = CURRENT_TIMESTAMP WHERE session_id = ?`).run(args.sessionId);
+    db.prepare(
+      `UPDATE agent_runtime_sessions
+       SET status = CASE
+         WHEN status IN ('running', 'completed', 'failed', 'cancelled') THEN status
+         ELSE 'activated'
+       END,
+       updated_at = CURRENT_TIMESTAMP
+       WHERE session_id = ?`
+    ).run(args.sessionId);
     emitAgentEvent({ type: 'activation:acked', sessionId: args.sessionId, missionId: args.missionId, nodeId: args.nodeId });
 
     return { content: [{ type: 'text', text: 'Activation acknowledged.' }] };

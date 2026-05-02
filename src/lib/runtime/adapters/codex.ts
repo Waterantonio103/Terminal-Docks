@@ -10,13 +10,16 @@ import type {
   ReadyDetectionResult,
   RuntimeOutputEvent,
   TaskContext,
-} from './CliAdapter';
+} from './CliAdapter.js';
 
 const BANNER_RE = /\bcodex\b/i;
 const PROMPT_RE = /(?:\uff1e|❯|Input:|Prompt:)\s*$/m;
 const SHELL_PROMPT_RE = /(?:[A-Za-z]:\\.*>|(?:\$|>|#))\s*$/m;
 const READY_KEYWORDS_RE = /\b(ready|listening|connected|type|enter)\b/i;
-const PERMISSION_RE = /(?:allow|deny|approve|reject|permission|grant|trust)/i;
+const MCP_PERMISSION_PROMPT_RE =
+  /Allow\s+the\s+.+?\s+MCP\s+server\s+to\s+run\s+tool\s+"[^"]+"\?\s*[\s\S]*(?:\b1\.\s*Allow\b|\bAlways\s+allow\b|\benter\s+to\s+submit\b)/i;
+const GENERIC_PERMISSION_PROMPT_RE =
+  /(?:allow|approve|grant)\s+(?:this\s+)?(?:command|tool|operation|request|permission)\??\s*[\s\S]*(?:\b1\.\s*Allow\b|\bAlways\s+allow\b|\by\/n\b|\[y\/n\])/i;
 const COMPLETION_RE = /(?:task completed|finished|done|exit code\s+0)/i;
 const FAILURE_RE = /(?:error:|failed|exception|exit code\s+[1-9])/i;
 
@@ -102,10 +105,12 @@ export const codexAdapter: CliAdapter = {
   },
 
   detectPermissionRequest(output: string): PermissionDetectionResult | null {
-    if (!PERMISSION_RE.test(output)) return null;
+    if (!MCP_PERMISSION_PROMPT_RE.test(output) && !GENERIC_PERMISSION_PROMPT_RE.test(output)) {
+      return null;
+    }
 
     const lines = output.split('\n').filter(l => l.trim());
-    const promptLine = lines[lines.length - 1] ?? '';
+    const promptLine = lines.slice(-12).join('\n');
 
     let category: PermissionRequest['category'] = 'unknown';
     if (/bash|command|shell|exec|run\s/i.test(promptLine)) category = 'shell_execution';

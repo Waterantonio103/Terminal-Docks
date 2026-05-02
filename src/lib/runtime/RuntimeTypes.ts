@@ -75,6 +75,7 @@ export interface CreateRuntimeArgs {
   paneId?: string;
   workspaceDir: string | null;
   goal?: string | null;
+  instructionOverride?: string | null;
   inputPayload?: unknown;
   legalTargets?: import('../workflow/WorkflowTypes.js').LegalTarget[];
   upstreamPayloads?: import('../workflow/WorkflowRun.js').HandoffRecord[];

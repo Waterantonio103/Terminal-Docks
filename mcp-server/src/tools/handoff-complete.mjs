@@ -55,9 +55,20 @@ function requireRuntimeSessionForAttempt(missionId, nodeId, attempt) {
   return { row };
 }
 
+const ACTIVE_RUNTIME_SESSION_STATUSES = new Set([
+  'adapter_starting',
+  'activation_pending',
+  'registered',
+  'activated',
+  'ready',
+  'activation_acked',
+  'running',
+  'dispatched',
+]);
+
 function nodeRuntimeIsRunning(missionId, nodeId, attempt) {
   const runtime = getMissionNodeRuntime(missionId, nodeId);
-  if (!runtime || runtime.status !== 'running') {
+  if (!runtime) {
     return { error: `Node ${nodeId} is not currently running in mission ${missionId}.` };
   }
   if (runtime.attempt !== attempt) {
@@ -68,6 +79,20 @@ function nodeRuntimeIsRunning(missionId, nodeId, attempt) {
   const sessionValidation = requireRuntimeSessionForAttempt(missionId, nodeId, attempt);
   if (sessionValidation.error) {
     return { error: `${sessionValidation.error} Activation drift detected.` };
+  }
+  if (runtime.status !== 'running') {
+    const sessionStatus = String(sessionValidation.row.status ?? '').toLowerCase();
+    if (!ACTIVE_RUNTIME_SESSION_STATUSES.has(sessionStatus)) {
+      return { error: `Node ${nodeId} is not currently running in mission ${missionId}.` };
+    }
+
+    // Native activation updates can arrive out of order under chained live
+    // workflows. If the registered runtime session is still active, complete
+    // against that session and repair the node runtime status before routing.
+    db.prepare(
+      "UPDATE mission_node_runtime SET status = 'running', updated_at = CURRENT_TIMESTAMP WHERE mission_id = ? AND node_id = ? AND attempt = ?"
+    ).run(missionId, nodeId, attempt);
+    runtime.status = 'running';
   }
   return { runtime, runtimeSession: sessionValidation.row };
 }
@@ -169,9 +194,10 @@ function persistGraphHandoff({
 
 export function executeHandoffTask(args, sid) {
   let { fromRole, targetRole, title, description, payload, completion, parentTaskId, missionId, fromNodeId, targetNodeId, outcome, fromAttempt } = args;
+  let runtimeValidation = null;
 
   if (missionId && fromNodeId) {
-    const runtimeValidation = nodeRuntimeIsRunning(missionId, fromNodeId, fromAttempt);
+    runtimeValidation = nodeRuntimeIsRunning(missionId, fromNodeId, fromAttempt);
     if (runtimeValidation.error) {
       // Return the specific error text the tests expect
       const errorText = runtimeValidation.error.replace('Stale attempt', 'Stale handoff attempt');
@@ -217,7 +243,8 @@ export function executeHandoffTask(args, sid) {
 
   emitAgentEvent({
     type: 'task:completed',
-    sessionId: sid,
+    sessionId: runtimeValidation?.runtimeSession?.session_id ?? sid,
+    transportSessionId: sid,
     missionId,
     nodeId: fromNodeId,
     attempt: fromAttempt,
@@ -296,7 +323,8 @@ export function executeCompleteTask(args, sid) {
 
   emitAgentEvent({
     type: 'task:completed',
-    sessionId: sid,
+    sessionId: runtimeCheck.runtimeSession.session_id,
+    transportSessionId: sid,
     missionId,
     nodeId,
     attempt,

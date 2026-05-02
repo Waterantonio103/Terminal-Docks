@@ -13,6 +13,7 @@ export const TEMPLATE_NAMES = [
   'simple_input_to_gemini',
   'simple_input_to_opencode',
   'input_agent_output',
+  'input_agent_agent_output',
   'same_workflow_twice',
   'change_model_and_rerun',
   'mcp_handshake_smoke',
@@ -24,6 +25,7 @@ const CLI_BY_TEMPLATE = {
   simple_input_to_gemini: 'gemini',
   simple_input_to_opencode: 'opencode',
   input_agent_output: 'codex',
+  input_agent_agent_output: 'codex',
   same_workflow_twice: 'codex',
   change_model_and_rerun: 'codex',
   mcp_handshake_smoke: 'codex',
@@ -128,24 +130,44 @@ export function buildMissionTemplate({ debugRun, templateName, cliId, model, yol
   let startNodeIds = [primaryNode.id];
   let executionLayers = [[primaryNode.id]];
 
-  if (templateName === 'input_agent_output') {
-    const outputNode = buildAgentNode({
-      id: 'debug-output-agent',
-      roleId: 'debug-output',
+  if (templateName === 'input_agent_output' || templateName === 'input_agent_agent_output') {
+    const secondNode = buildAgentNode({
+      id: templateName === 'input_agent_agent_output' ? 'debug-agent-b' : 'debug-output-agent',
+      roleId: templateName === 'input_agent_agent_output' ? 'debug-agent' : 'debug-output',
       cli,
       model,
       yolo,
-      terminalId: `debug-term-${suffix}-out`,
-      title: `Debug ${cli} Output`,
+      terminalId: `debug-term-${suffix}-b`,
+      title: `Debug ${cli} B`,
     });
-    nodes.push(outputNode);
+    nodes.push(secondNode);
     edges.push({
-      id: `edge:${primaryNode.id}:always:${outputNode.id}`,
+      id: `edge:${primaryNode.id}:always:${secondNode.id}`,
       fromNodeId: primaryNode.id,
-      toNodeId: outputNode.id,
+      toNodeId: secondNode.id,
       condition: 'always',
     });
-    executionLayers = [[primaryNode.id], [outputNode.id]];
+    executionLayers = [[primaryNode.id], [secondNode.id]];
+
+    if (templateName === 'input_agent_agent_output') {
+      const outputNode = buildAgentNode({
+        id: 'debug-output-agent',
+        roleId: 'debug-output',
+        cli,
+        model,
+        yolo,
+        terminalId: `debug-term-${suffix}-out`,
+        title: `Debug ${cli} Output`,
+      });
+      nodes.push(outputNode);
+      edges.push({
+        id: `edge:${secondNode.id}:always:${outputNode.id}`,
+        fromNodeId: secondNode.id,
+        toNodeId: outputNode.id,
+        condition: 'always',
+      });
+      executionLayers = [[primaryNode.id], [secondNode.id], [outputNode.id]];
+    }
   }
 
   if (templateName === 'same_workflow_twice' || templateName === 'change_model_and_rerun') {

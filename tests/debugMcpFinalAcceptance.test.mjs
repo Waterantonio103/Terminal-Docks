@@ -102,7 +102,7 @@ try {
     suiteName: 'simple_workflows',
   }));
   assert.equal(simpleSuite.status, 'completed');
-  assert.equal(simpleSuite.results.length, 5);
+  assert.equal(simpleSuite.results.length, 6);
 
   const consecutiveRun = textPayload(await tools.get('debug_start_run').handler({
     suiteName: 'consecutive_runs',

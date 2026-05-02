@@ -89,6 +89,28 @@ try {
   }));
   assert.equal(terminal.matched, true);
 
+  const tripleWorkflow = textPayload(await tools.get('debug_create_test_workflow').handler({
+    debugRunId,
+    templateName: 'input_agent_agent_output',
+    cliId: 'gemini',
+    model: 'gemini-2.5-pro',
+  }));
+  assert.equal(tripleWorkflow.nodeIds.length, 3);
+  assert.equal(tripleWorkflow.terminalIds.length, 3);
+
+  const tripleMissionRow = db.prepare('SELECT mission_json FROM compiled_missions WHERE mission_id = ?').get(tripleWorkflow.missionId);
+  const tripleMission = JSON.parse(tripleMissionRow.mission_json);
+  assert.deepEqual(tripleMission.metadata.executionLayers, [
+    ['debug-agent-a'],
+    ['debug-agent-b'],
+    ['debug-output-agent'],
+  ]);
+  assert.deepEqual(tripleMission.edges.map(edge => [edge.fromNodeId, edge.toNodeId]), [
+    ['debug-agent-a', 'debug-agent-b'],
+    ['debug-agent-b', 'debug-output-agent'],
+  ]);
+  assert.deepEqual(tripleMission.nodes.map(node => node.terminal.cli), ['gemini', 'gemini', 'gemini']);
+
   const blocked = await tools.get('debug_run_workflow').handler({
     debugRunId,
     missionId: 'not-a-debug-mission',
@@ -97,11 +119,12 @@ try {
   assert.equal(blocked.isError, true);
 
   const updatedRun = getDebugRun(debugRunId);
-  assert.deepEqual(updatedRun.missionIds, [workflow.missionId]);
+  assert.deepEqual(updatedRun.missionIds, [workflow.missionId, tripleWorkflow.missionId]);
 
   const reset = textPayload(await tools.get('debug_reset_test_state').handler({ debugRunId }));
-  assert.deepEqual(reset.missionIds, [workflow.missionId]);
+  assert.deepEqual(reset.missionIds, [workflow.missionId, tripleWorkflow.missionId]);
   assert.equal(db.prepare('SELECT COUNT(*) AS count FROM compiled_missions WHERE mission_id = ?').get(workflow.missionId).count, 0);
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM compiled_missions WHERE mission_id = ?').get(tripleWorkflow.missionId).count, 0);
   assert.deepEqual(getDebugRun(debugRunId).missionIds, []);
 
   const events = listDebugEvents(debugRunId);

@@ -36,6 +36,7 @@ export class RuntimeSession {
   readonly paneId?: string;
   readonly workspaceDir: string | null;
   readonly goal?: string;
+  readonly instructionOverride?: string;
   readonly legalTargets?: import('../workflow/WorkflowTypes.js').LegalTarget[];
   readonly upstreamPayloads?: import('../workflow/WorkflowRun.js').HandoffRecord[];
   readonly createdAt: number;
@@ -67,6 +68,7 @@ export class RuntimeSession {
       paneId?: string | null;
       workspaceDir?: string | null;
       goal?: string;
+      instructionOverride?: string | null;
       legalTargets?: import('../workflow/WorkflowTypes.js').LegalTarget[];
       upstreamPayloads?: import('../workflow/WorkflowRun.js').HandoffRecord[];
       model?: string | null;
@@ -87,6 +89,7 @@ export class RuntimeSession {
     this.paneId = args.paneId ?? undefined;
     this.workspaceDir = args.workspaceDir ?? null;
     this.goal = args.goal;
+    this.instructionOverride = args.instructionOverride ?? undefined;
     this.legalTargets = args.legalTargets;
     this.upstreamPayloads = args.upstreamPayloads;
     this.model = args.model ?? '';

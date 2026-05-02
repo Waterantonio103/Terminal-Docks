@@ -14,7 +14,7 @@ import type {
 
 const BANNER_RE = /\bclaude (code|assistant)\b/i;
 const SHELL_PROMPT_RE = /(?:\$|>|#)\s*$/m;
-const PERMISSION_RE = /(?:allow|deny|approve|reject|permission|grant access)/i;
+const PERMISSION_RE = /(?:allow|approve|grant|deny|reject).*(?:\?|y\/n|\[y\/n\]|\b1\.)/is;
 
 const COMPLETION_RE = /(?:task completed|finished|done|exit code\s+0)/i;
 const FAILURE_RE = /(?:error:|failed|exception|exit code\s+[1-9])/i;

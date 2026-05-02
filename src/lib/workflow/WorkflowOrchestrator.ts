@@ -184,6 +184,14 @@ export class WorkflowOrchestrator {
         this.wireMcpForSession(run.runId, event.sessionId);
         break;
 
+      case 'session_completed':
+        this.handleNodeCompletion(run.runId, {
+          nodeId: event.nodeId,
+          attempt: run.nodeStates[event.nodeId]?.attempt || 1,
+          outcome: event.outcome,
+        });
+        break;
+
       case 'session_state_changed':
         setNodeState(run, event.nodeId, event.to as import('./WorkflowTypes.js').NodeLifecycleState);
         this.emit({
@@ -276,6 +284,15 @@ export class WorkflowOrchestrator {
     if (!run) return;
 
     const { nodeId, outcome, targetNodeId } = report;
+    const existingState = run.nodeStates[nodeId]?.state;
+    const attempts = run.nodeStates[nodeId]?.attempts ?? [];
+    const currentAttempt = attempts[attempts.length - 1];
+    if (
+      (existingState === 'completed' || existingState === 'failed' || existingState === 'cancelled') &&
+      currentAttempt?.outcome
+    ) {
+      return;
+    }
 
     // Phase 11: Validation of legal targets
     if (targetNodeId) {
@@ -472,6 +489,7 @@ export class WorkflowOrchestrator {
         terminalId: nodeDef.config.terminalId || '',
         paneId: nodeDef.config.paneId,
         workspaceDir: nodeDef.config.workspaceDir ?? null,
+        instructionOverride: nodeDef.config.instructionOverride ?? null,
         modelId: nodeDef.config.model ?? null,
         yolo: nodeDef.config.yolo ?? false,
         goal: (run.definition.nodes.find(n => n.kind === 'task') as any)?.config?.prompt || '',

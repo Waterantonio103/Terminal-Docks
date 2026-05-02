@@ -197,7 +197,14 @@ function buildCodexInteractiveFlagArgs({
   const yoloFlag = yolo ? (resolvedYoloFlag ?? '--dangerously-bypass-approvals-and-sandbox') : null;
   console.log(`[codex] buildCodexInteractiveFlagArgs: resolved yolo flag=${yoloFlag ?? '<none>'}`);
   const args = [
-    ...(mcpUrl?.trim() ? ['-c', `mcp_servers.terminal_docks.url="${mcpUrl.trim()}"`] : []),
+    // Keep workflow-launched Codex sessions focused on Terminal Docks. The
+    // user's Codex config may include unrelated MCP servers that add startup
+    // latency or fail independently of the workflow under test.
+    '-c',
+    'mcp_servers.pencil.enabled=false',
+    '-c',
+    'mcp_servers.excalidraw.enabled=false',
+    ...(mcpUrl?.trim() ? ['-c', `mcp_servers.terminal-docks.url="${mcpUrl.trim()}"`] : []),
     ...(modelId?.trim() ? ['--model', modelId.trim()] : []),
     ...(workspaceDir?.trim() ? ['--cd', workspaceDir.trim()] : []),
     '--no-alt-screen',

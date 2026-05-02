@@ -21,6 +21,8 @@
     "src/lib/workflowRuntimePlanning.ts",
     "src/lib/runtime/TerminalOutputBus.ts",
     "src/lib/runtime/RuntimeTypes.ts",
+    "src/lib/runtime/adapters/CliAdapter.ts",
+    "src/lib/runtime/adapters/codex.ts",
     "src/lib/workflow/*.ts"
   ]
 }

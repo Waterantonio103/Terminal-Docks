@@ -16,7 +16,7 @@ const BANNER_RE = /\bopencode\b/i;
 const PROMPT_RE = /(?:>|\uff1e|❯|Input:|Prompt:|\$)\s*$/m;
 const SHELL_PROMPT_RE = /(?:\$|>|#)\s*$/m;
 const READY_KEYWORDS_RE = /\b(ready|listening|connected|type|enter)\b/i;
-const PERMISSION_RE = /(?:allow|deny|approve|reject|permission|grant|trust)/i;
+const PERMISSION_RE = /(?:allow|approve|grant|trust|deny|reject).*(?:\?|y\/n|\[y\/n\]|\b1\.)/is;
 const COMPLETION_RE = /(?:task completed|finished|done|exit code\s+0)/i;
 const FAILURE_RE = /(?:error:|failed|exception|exit code\s+[1-9])/i;
 

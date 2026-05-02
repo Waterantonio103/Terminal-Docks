@@ -14,6 +14,7 @@ const SUITES = {
     'simple_input_to_gemini',
     'simple_input_to_opencode',
     'input_agent_output',
+    'input_agent_agent_output',
   ],
   consecutive_runs: [
     'same_workflow_twice',

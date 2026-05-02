@@ -345,6 +345,40 @@ try {
     );
   });
 
+  await run('complete_task heals active runtime status drift before routing', async () => {
+    resetStarlinkState();
+    seedCompiledMission(demoMission());
+    seedMissionNodeRuntime({
+      missionId: 'mission-graph',
+      nodeId: 'builder',
+      roleId: 'builder',
+      status: 'activation_acked',
+      attempt: 1,
+      currentWaveId: 'root:mission-graph',
+    });
+    seedAgentRuntimeSession({
+      sessionId: 'session:mission-graph:builder:1',
+      agentId: 'agent:mission-graph:builder:term-builder',
+      missionId: 'mission-graph',
+      nodeId: 'builder',
+      attempt: 1,
+      terminalId: 'term-builder',
+      status: 'running',
+    });
+
+    const result = executeCompleteTask({
+      missionId: 'mission-graph',
+      nodeId: 'builder',
+      attempt: 1,
+      outcome: 'success',
+      title: 'Builder completed after drift',
+      summary: 'Runtime session stayed active while node status drifted.',
+    }, 'session:mission-graph:builder:1');
+
+    assert.equal(result.isError, undefined);
+    assert.equal(JSON.parse(result.content[0].text).status, 'completed');
+  });
+
   await run('assign_task_by_requirements picks the best available worker', async () => {
     resetStarlinkState();
     seedConnectedSession('worker-a', { role: 'builder' });
