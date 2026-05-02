@@ -120,7 +120,7 @@ export class RuntimeSession {
   }
 
   get isHeadless(): boolean {
-    return this.executionMode === 'headless' || this.executionMode === 'streaming_headless';
+    return this.executionMode === 'headless' || this.executionMode === 'streaming_headless' || this.executionMode === 'api';
   }
 
   get isTerminal(): boolean {

@@ -24,6 +24,7 @@ export type RuntimeSessionState =
   | 'bootstrap_sent'
   | 'awaiting_mcp_ready'
   | 'ready'
+  | 'manual_takeover'
   | 'injecting_task'
   | 'awaiting_ack'
   | 'running'

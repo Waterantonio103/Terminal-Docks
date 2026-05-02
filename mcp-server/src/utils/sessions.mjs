@@ -1,4 +1,4 @@
-import { sessions } from '../state.mjs';
+import { sessions, fileLocks } from '../state.mjs';
 import { db } from '../db/index.mjs';
 
 export const WORKER_CAPABILITY_IDS = [
@@ -60,7 +60,12 @@ export function sessionLoadForAssignment(sessionId) {
 }
 
 export function evaluateWorkerForRequirements(sessionId, session, options) {
-  const { requiredCapabilities, preferredCapabilities = [], workingDir } = options;
+  const { requiredCapabilities, preferredCapabilities = [], workingDir, excludedSessionIds, writeAccess, fileScope = [] } = options;
+
+  if (excludedSessionIds && excludedSessionIds.has(sessionId)) {
+    return { eligible: false, sessionId, reason: 'excluded' };
+  }
+
   const capabilities = effectiveSessionCapabilities(session);
   const byId = new Map(capabilities.map(c => [c.id, c]));
 
@@ -68,6 +73,13 @@ export function evaluateWorkerForRequirements(sessionId, session, options) {
   if (missing.length > 0) return { eligible: false, sessionId, reason: 'missing_capabilities' };
 
   if (workingDir && session.workingDir !== workingDir) return { eligible: false, sessionId, reason: 'working_dir_mismatch' };
+
+  if (writeAccess && fileScope.length > 0) {
+    const contention = fileScope.filter(f => fileLocks[f] && fileLocks[f].sessionId !== sessionId);
+    if (contention.length > 0) {
+      return { eligible: false, sessionId, reason: 'file_contention', contention };
+    }
+  }
 
   const reqScore = requiredCapabilities.reduce((s, id) => s + (byId.get(id)?.level ?? 0), 0);
   const prefMatches = preferredCapabilities.filter(id => byId.has(id));

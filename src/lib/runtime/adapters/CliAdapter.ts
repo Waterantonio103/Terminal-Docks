@@ -31,6 +31,8 @@ export type CompletionOutcome = 'success' | 'failure';
 
 export type ReadyDetectionConfidence = 'low' | 'medium' | 'high';
 
+import type { ExecutionMode } from '../../workflow/WorkflowTypes.js';
+
 // ---------------------------------------------------------------------------
 // Context types passed into adapter methods by the Runtime Manager
 // ---------------------------------------------------------------------------
@@ -44,7 +46,7 @@ export interface LaunchContext {
   profileId: string;
   workspaceDir: string | null;
   mcpUrl: string;
-  executionMode: 'headless' | 'streaming_headless' | 'interactive_pty';
+  executionMode: ExecutionMode;
   model?: string | null;
   yolo?: boolean;
   envOverrides?: Record<string, string>;

@@ -38,6 +38,7 @@ export type OrchestratorEvent =
   | { type: 'handoff_completed'; runId: string; fromNodeId: string; toNodeId: string; outcome: CompletionOutcome; timestamp: number }
   | { type: 'handoff_rejected'; runId: string; fromNodeId: string; toNodeId: string; reason: string; timestamp: number }
   | { type: 'artifact_published'; runId: string; nodeId: string; artifact: Artifact; timestamp: number }
+  | { type: 'manual_takeover_requested'; runId: string; nodeId: string; timestamp: number }
   | { type: 'task_injected'; runId: string; nodeId: string; attempt: number; timestamp: number }
   | { type: 'task_acked'; runId: string; nodeId: string; attempt: number; timestamp: number }
   | { type: 'downstream_activated'; runId: string; sourceNodeId: string; targetNodeId: string; timestamp: number }

@@ -69,6 +69,28 @@ function screenToWorld(screen: Point, pan: Point, zoom: number): Point {
   return { x: (screen.x - pan.x) / zoom, y: (screen.y - pan.y) / zoom };
 }
 
+function layoutKeyFor(session: EnrichedRuntimeSession, index: number): string {
+  return session.nodeId || session.terminalId || `runtime-${index}`;
+}
+
+function computeDefaultLayout(
+  session: EnrichedRuntimeSession,
+  index: number,
+  occupied: Set<string>,
+): RuntimeNodeLayout {
+  const position = session.position;
+  let x = typeof position?.x === 'number' ? position.x : 60 + (index % 3) * (DEFAULT_NODE_WIDTH + GRID_GAP_X);
+  let y = typeof position?.y === 'number' ? position.y : 70 + Math.floor(index / 3) * (DEFAULT_NODE_HEIGHT + GRID_GAP_Y);
+  let guard = 0;
+  while (occupied.has(`${Math.round(x)}:${Math.round(y)}`) && guard < 20) {
+    x += 32;
+    y += 28;
+    guard += 1;
+  }
+  occupied.add(`${Math.round(x)}:${Math.round(y)}`);
+  return { x, y, width: DEFAULT_NODE_WIDTH, height: DEFAULT_NODE_HEIGHT };
+}
+
 function runtimePaneFor(session: EnrichedRuntimeSession): Pane {
   return {
     id: `runtime-${session.terminalId}`,
@@ -91,7 +113,15 @@ export function RuntimeView() {
   const globalGraph = useWorkspaceStore(state => state.globalGraph);
 
   const sessions = useRuntimeSessions();
-  const { focusRuntime, stopRuntime, retryRuntime, resolvePermission } = useRuntimeObserver();
+  const { 
+    focusRuntime, 
+    stopRuntime, 
+    retryRuntime, 
+    resolvePermission,
+    resumeNode,
+    forceCompleteNode,
+    forceFailNode
+  } = useRuntimeObserver();
 
   const [pan, setPan] = useState<Point>(() => ({ ..._sessionPan }));
   const [zoom, setZoom] = useState(() => _sessionZoom);
@@ -295,44 +325,29 @@ export function RuntimeView() {
     };
   }, [interaction, zoom, persistPan, persistLayouts]);
 
-  const runtimeNodes = useMemo(() => {
-    const occupied = new Set<string>();
-    return sessions.map((session, index) => {
-      const key = session.nodeId || session.terminalId || `runtime-${index}`;
-      const position = session.position;
-      const existing = nodeLayouts[key];
-      let x: number, y: number;
-      if (existing) {
-        x = existing.x;
-        y = existing.y;
-      } else {
-        x = typeof position?.x === 'number' ? position.x : 60 + (index % 3) * (DEFAULT_NODE_WIDTH + GRID_GAP_X);
-        y = typeof position?.y === 'number' ? position.y : 70 + Math.floor(index / 3) * (DEFAULT_NODE_HEIGHT + GRID_GAP_Y);
-      }
-      let guard = 0;
-      while (occupied.has(`${Math.round(x)}:${Math.round(y)}`) && guard < 20) {
-        x += 32;
-        y += 28;
-        guard += 1;
-      }
-      occupied.add(`${Math.round(x)}:${Math.round(y)}`);
-      return { key, session, x, y };
-    });
-  }, [sessions, nodeLayouts]);
+  const runtimeNodes = useMemo(
+    () => sessions.map((session, index) => ({ key: layoutKeyFor(session, index), session })),
+    [sessions],
+  );
 
   useEffect(() => {
     persistLayouts(prev => {
-      let changed = false;
-      const next = { ...prev };
-      for (const node of runtimeNodes) {
-        if (!next[node.key]) {
-          next[node.key] = { x: node.x, y: node.y, width: DEFAULT_NODE_WIDTH, height: DEFAULT_NODE_HEIGHT };
-          changed = true;
-        }
+      const occupied = new Set<string>();
+      for (const layout of Object.values(prev)) {
+        occupied.add(`${Math.round(layout.x)}:${Math.round(layout.y)}`);
       }
-      return changed ? next : prev;
+
+      let next: Record<string, RuntimeNodeLayout> | null = null;
+      for (let index = 0; index < sessions.length; index += 1) {
+        const session = sessions[index];
+        const key = layoutKeyFor(session, index);
+        if ((next ?? prev)[key]) continue;
+        if (!next) next = { ...prev };
+        next[key] = computeDefaultLayout(session, index, occupied);
+      }
+      return next ?? prev;
     });
-  }, [runtimeNodes, persistLayouts]);
+  }, [sessions, persistLayouts]);
 
   const runtimeNodeByNodeId = useMemo(() => {
     const map = new Map<string, typeof runtimeNodes[number]>();
@@ -570,9 +585,45 @@ export function RuntimeView() {
                     </div>
                   )}
 
+                  {session.status === 'manual_takeover' && (
+                    <div className="m-3 mb-0 rounded border border-blue-400/40 bg-blue-400/10 p-3 text-[11px] text-blue-100">
+                      <div className="flex items-center gap-2 font-semibold">
+                        <Cpu size={13} />
+                        Manual Takeover
+                      </div>
+                      <div className="mt-1 text-blue-100/70">Node is waiting for manual intervention. Use the terminal to perform tasks.</div>
+                      <div className="mt-2 flex gap-2">
+                        <button 
+                          className="px-2 py-1 rounded bg-emerald-500/20 text-emerald-200 border border-emerald-400/30 hover:bg-emerald-500/30 transition-colors" 
+                          onClick={() => resumeNode(session.missionId, session.nodeId)}
+                        >
+                          Resume
+                        </button>
+                        <button 
+                          className="px-2 py-1 rounded bg-blue-500/20 text-blue-200 border border-blue-400/30 hover:bg-blue-500/30 transition-colors" 
+                          onClick={() => forceCompleteNode(session.missionId, session.nodeId, 'success', 'Manually completed')}
+                        >
+                          Force Success
+                        </button>
+                        <button 
+                          className="px-2 py-1 rounded bg-red-500/20 text-red-200 border border-red-400/30 hover:bg-red-500/30 transition-colors" 
+                          onClick={() => forceFailNode(session.missionId, session.nodeId, 'Manually failed')}
+                        >
+                          Force Fail
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
                   <div className="flex-1 min-h-0 background-bg-app overflow-hidden">
                     {pane ? (
                       <TerminalPane pane={pane} />
+                    ) : session.executionMode === 'api' || session.executionMode === 'streaming_headless' ? (
+                      <div className="h-full flex flex-col items-center justify-center text-[12px] text-text-muted p-4 text-center">
+                        <div className="mb-2 text-accent-primary"><Cpu size={24} /></div>
+                        <div>API / Streaming Backend Active</div>
+                        <div className="mt-1 text-[10px] opacity-70">Logs and artifacts will appear in Mission Control.</div>
+                      </div>
                     ) : (
                       <div className="h-full flex items-center justify-center text-[12px] text-text-muted">Runtime has no PTY stream.</div>
                     )}

@@ -68,6 +68,9 @@ export function useRuntimeObserver(): {
   stopRuntime: (session: EnrichedRuntimeSession) => void;
   retryRuntime: (session: EnrichedRuntimeSession) => void;
   resolvePermission: (sessionId: string, permissionId: string, decision: 'approve' | 'deny') => Promise<void>;
+  resumeNode: (missionId: string, nodeId: string) => Promise<void>;
+  forceCompleteNode: (missionId: string, nodeId: string, outcome: 'success' | 'failure', summary: string) => Promise<void>;
+  forceFailNode: (missionId: string, nodeId: string, error: string) => Promise<void>;
 } {
   const emit = useCallback(async (event: string, payload: unknown) => {
     try {
@@ -111,5 +114,37 @@ export function useRuntimeObserver(): {
     [],
   );
 
-  return { focusRuntime, stopRuntime, retryRuntime, resolvePermission };
+  const resumeNode = useCallback(
+    async (missionId: string, nodeId: string) => {
+      const { missionOrchestrator } = await import('../../lib/workflow/MissionOrchestrator');
+      await missionOrchestrator.resumeNode(missionId, nodeId);
+    },
+    [],
+  );
+
+  const forceCompleteNode = useCallback(
+    async (missionId: string, nodeId: string, outcome: 'success' | 'failure', summary: string) => {
+      const { missionOrchestrator } = await import('../../lib/workflow/MissionOrchestrator');
+      await missionOrchestrator.forceCompleteNode(missionId, nodeId, outcome, summary);
+    },
+    [],
+  );
+
+  const forceFailNode = useCallback(
+    async (missionId: string, nodeId: string, error: string) => {
+      const { missionOrchestrator } = await import('../../lib/workflow/MissionOrchestrator');
+      await missionOrchestrator.forceFailNode(missionId, nodeId, error);
+    },
+    [],
+  );
+
+  return { 
+    focusRuntime, 
+    stopRuntime, 
+    retryRuntime, 
+    resolvePermission, 
+    resumeNode, 
+    forceCompleteNode, 
+    forceFailNode 
+  };
 }

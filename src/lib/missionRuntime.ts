@@ -10,6 +10,8 @@ async function captureTerminalOutput(terminalId: string): Promise<string> {
   }
 }
 
+import type { ExecutionMode } from './workflow/WorkflowTypes.js';
+
 export interface WorkflowNodeTriggeredPayload {
   missionId: string;
   nodeId: string;
@@ -24,7 +26,7 @@ export interface WorkflowNodeTriggeredPayload {
   cliType?: string;
   modelId?: string | null;
   yolo?: boolean;
-  executionMode?: 'headless' | 'streaming_headless' | 'interactive_pty';
+  executionMode?: ExecutionMode;
   goal?: string;
   workspaceDir?: string | null;
   assignment?: RuntimeAssignmentPayload;
@@ -92,7 +94,7 @@ export interface RuntimeActivationPayload {
   cliType: string;
   modelId?: string | null;
   yolo?: boolean;
-  executionMode: 'headless' | 'streaming_headless' | 'interactive_pty';
+  executionMode: ExecutionMode;
   terminalId: string;
   paneId?: string | null;
   sessionId: string;
@@ -123,7 +125,7 @@ export interface NewTaskSignalPayload {
   cliType?: string;
   modelId?: string | null;
   yolo?: boolean;
-  executionMode?: 'headless' | 'streaming_headless' | 'interactive_pty';
+  executionMode?: ExecutionMode;
   goal?: string;
   workspaceDir?: string | null;
   assignment: RuntimeAssignmentPayload;

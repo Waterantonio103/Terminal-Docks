@@ -1,9 +1,10 @@
 import type { RuntimeActivationPayload } from './missionRuntime';
 import type { CliId } from './cliIdentity';
 import { normalizeCliId } from './cliIdentity';
+import type { ExecutionMode } from './workflow/WorkflowTypes';
 
 export type SupportedRuntimeCli = CliId;
-export type RuntimeExecutionMode = 'headless' | 'streaming_headless' | 'interactive_pty';
+export type RuntimeExecutionMode = ExecutionMode;
 
 export interface RuntimeBootstrapContract {
   cli: SupportedRuntimeCli;

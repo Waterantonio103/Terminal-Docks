@@ -62,25 +62,36 @@ const TRANSITIONS: ReadonlyMap<NodeLifecycleState, ReadonlySet<NodeLifecycleStat
   ])],
 
   ['awaiting_mcp_ready', new Set([
+    'manual_takeover',
     'injecting_task',
+    'failed',
+    'cancelled',
+  ])],
+
+  ['manual_takeover', new Set([
+    'injecting_task',
+    'completed',
     'failed',
     'cancelled',
   ])],
 
   ['injecting_task', new Set([
     'awaiting_ack',
+    'manual_takeover',
     'running',
     'failed',
     'cancelled',
   ])],
 
   ['awaiting_ack', new Set([
+    'manual_takeover',
     'running',
     'failed',
     'cancelled',
   ])],
 
   ['running', new Set([
+    'manual_takeover',
     'awaiting_permission',
     'completed',
     'failed',
@@ -121,6 +132,7 @@ const ACTIVE_STATES: ReadonlySet<NodeLifecycleState> = new Set([
   'awaiting_mcp_ready',
   'injecting_task',
   'awaiting_ack',
+  'manual_takeover',
   'running',
   'awaiting_permission',
 ]);

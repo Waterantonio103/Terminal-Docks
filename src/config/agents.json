@@ -37,7 +37,7 @@
         { "id": "shell_execution", "level": 3 },
         { "id": "repo_analysis", "level": 2 }
       ],
-      "coreInstructions": "Call `receive_messages({ missionId, nodeId })` and `get_workspace_context` to pick up your assigned task + plan. Implement it in the workspace directory using native file tools. Always call `lock_file` before editing any file — if it returns \"queued\", do NOT poll; keep working on unlocked files and watch for the [LOCK GRANTED] message in your inbox. Call `unlock_file` when done with each file. If you start a dev server, call `publish_result` with type=\"url\". In graph mode handoff only by exact `targetNodeId` from `get_task_details`, include `outcome`, and include `fromAttempt`."
+      "coreInstructions": "Call `receive_messages({ missionId, nodeId })` and `get_workspace_context` to pick up your assigned task + plan. Implement it in the workspace directory using native file tools. Always call `request_file_lock` before editing any file — if it returns \"queued\", do NOT poll; keep working on unlocked files and watch for the [LOCK GRANTED] message in your inbox. Call `release_file_lock` when done with each file. If you start a dev server, call `write_artifact` with type=\"url\". In graph mode handoff only by exact `targetNodeId` from `get_task_details`, include `outcome`, and include `fromAttempt`."
     },
     {
       "id": "tester",
@@ -50,7 +50,7 @@
         { "id": "coding", "level": 2 },
         { "id": "shell_execution", "level": 2 }
       ],
-      "coreInstructions": "Call `receive_messages({ missionId, nodeId })` and `get_workspace_context` for the plan + acceptance criteria. Write unit/integration tests in parallel with the Builder, targeting the same feature from the spec, not the Builder's in-progress code. Always call `lock_file` before editing any test file. If you need to inspect locked files, coordinate using `get_file_locks` and inbox messages. In graph mode handoff only by exact `targetNodeId` from `get_task_details` and include `fromAttempt`."
+      "coreInstructions": "Call `receive_messages({ missionId, nodeId })` and `get_workspace_context` for the plan + acceptance criteria. Write unit/integration tests in parallel with the Builder, targeting the same feature from the spec, not the Builder's in-progress code. Always call `request_file_lock` before editing any test file. If you need to inspect locked files, coordinate using `list_active_locks` and inbox messages. In graph mode handoff only by exact `targetNodeId` from `get_task_details` and include `fromAttempt`."
     },
     {
       "id": "security",
@@ -63,7 +63,7 @@
         { "id": "review", "level": 2 },
         { "id": "repo_analysis", "level": 2 }
       ],
-      "coreInstructions": "Call `receive_messages({ missionId, nodeId })` and `get_workspace_context` to understand the plan. Perform a threat review in parallel with the Builder: auth/authz, input validation, secret handling, injection surfaces, dependency CVEs. Prefer writing findings to `update_workspace_context` with key=\"securityReview\" so the Builder can consume them live. Only edit files for clear, low-risk fixes; always `lock_file` first. In graph mode handoff only by exact `targetNodeId` from `get_task_details` and include `fromAttempt`."
+      "coreInstructions": "Call `receive_messages({ missionId, nodeId })` and `get_workspace_context` to understand the plan. Perform a threat review in parallel with the Builder: auth/authz, input validation, secret handling, injection surfaces, dependency CVEs. Prefer writing findings to `update_workspace_context` with key=\"securityReview\" so the Builder can consume them live. Only edit files for clear, low-risk fixes; always `request_file_lock` first. In graph mode handoff only by exact `targetNodeId` from `get_task_details` and include `fromAttempt`."
     },
     {
       "id": "reviewer",

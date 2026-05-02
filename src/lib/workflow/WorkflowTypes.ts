@@ -38,7 +38,9 @@ export { normalizeCliId, isValidCliId, CANONICAL_CLI_IDS, assertCliIdConsistency
 export type ExecutionMode =
   | 'headless'
   | 'streaming_headless'
-  | 'interactive_pty';
+  | 'api'
+  | 'interactive_pty'
+  | 'manual';
 
 // ──────────────────────────────────────────────
 // Authoring Modes
@@ -124,6 +126,7 @@ export type NodeLifecycleState =
   | 'awaiting_mcp_ready'
   | 'injecting_task'
   | 'awaiting_ack'
+  | 'manual_takeover'
   | 'running'
   | 'awaiting_permission'
   | 'completed'

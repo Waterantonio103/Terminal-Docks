@@ -3,9 +3,21 @@ import { db } from '../db/index.mjs';
 import { makeToolText } from '../utils/index.mjs';
 import { fileLocks, fileWaitQueues, sessions, broadcast, messageQueues } from '../state.mjs';
 import { writeFileSync, readFileSync, existsSync } from 'fs';
-import { resolve, isAbsolute, relative } from 'path';
+import { resolve, isAbsolute, relative, sep } from 'path';
 
 const DEFAULT_LOCK_TTL_MS = 15 * 60 * 1000; // 15 minutes
+
+function isPathInsideWorkspace(filePath, workingDir) {
+  if (!workingDir) return true;
+  const resolvedWorkspace = resolve(workingDir);
+  const resolvedPath = resolve(filePath);
+  const rel = relative(resolvedWorkspace, resolvedPath);
+  return rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel);
+}
+
+function hasSecretLookingContent(content) {
+  return /AIza[0-9A-Za-z-_]{35}/.test(content) || /(?:sk-[a-zA-Z0-9]{20,})/.test(content);
+}
 
 /**
  * Cleanup expired locks from DB and in-memory state.
@@ -117,6 +129,16 @@ export function registerLockTools(server, getSessionId) {
     }
   }, async ({ filePath, content, missionId, nodeId, agentId }) => {
     const sid = getSessionId();
+    const session = sessions[sid];
+    
+    if (!isPathInsideWorkspace(filePath, session?.workingDir)) {
+      return { isError: true, content: [{ type: 'text', text: `Security Error: Cannot write outside workspace directory.` }] };
+    }
+
+    if (hasSecretLookingContent(content)) {
+      return { isError: true, content: [{ type: 'text', text: `Security Error: Secret-looking content detected in write.` }] };
+    }
+
     const graphScoped = Boolean(missionId || nodeId);
     const ownerId = graphScoped ? `mission:${missionId}:node:${nodeId}` : (agentId?.trim() ?? sid ?? 'unknown');
     
@@ -146,6 +168,12 @@ export function registerLockTools(server, getSessionId) {
     }
   }, async ({ filePath, oldString, newString, missionId, nodeId, agentId }) => {
     const sid = getSessionId();
+    const session = sessions[sid];
+
+    if (!isPathInsideWorkspace(filePath, session?.workingDir)) {
+      return { isError: true, content: [{ type: 'text', text: `Security Error: Cannot patch outside workspace directory.` }] };
+    }
+
     const graphScoped = Boolean(missionId || nodeId);
     const ownerId = graphScoped ? `mission:${missionId}:node:${nodeId}` : (agentId?.trim() ?? sid ?? 'unknown');
     
@@ -162,6 +190,9 @@ export function registerLockTools(server, getSessionId) {
       const updated = content.replace(oldString, newString);
       if (updated === content) {
         return { isError: true, content: [{ type: 'text', text: 'Target pattern not found or no changes made.' }] };
+      }
+      if (hasSecretLookingContent(updated)) {
+        return { isError: true, content: [{ type: 'text', text: `Security Error: Secret-looking content detected in patch result.` }] };
       }
       writeFileSync(filePath, updated);
       return { content: [{ type: 'text', text: `Successfully patched ${filePath}` }] };

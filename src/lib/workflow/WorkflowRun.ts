@@ -117,6 +117,7 @@ export type WorkflowEvent =
   | { type: 'permission_resolved'; timestamp: number; nodeId: string; permissionId: string; decision: PermissionDecision }
   | { type: 'handoff'; timestamp: number; handoff: HandoffRecord }
   | { type: 'artifact_published'; timestamp: number; nodeId: string; artifact: Artifact }
+  | { type: 'manual_takeover_requested'; timestamp: number; nodeId: string }
   | { type: 'task_injected'; timestamp: number; nodeId: string; attempt: number }
   | { type: 'task_acked'; timestamp: number; nodeId: string; attempt: number }
   | { type: 'output_captured'; timestamp: number; nodeId: string; text: string };
@@ -428,6 +429,20 @@ export function recordArtifact(
     timestamp: Date.now(),
     nodeId,
     artifact,
+  });
+}
+
+export function requestTakeover(
+  run: WorkflowRun,
+  nodeId: string,
+): void {
+  const nodeState = run.nodeStates[nodeId];
+  if (!nodeState) return;
+
+  run.events.push({
+    type: 'manual_takeover_requested',
+    timestamp: Date.now(),
+    nodeId,
   });
 }
 

@@ -101,29 +101,40 @@ function persistGraphHandoff({
   const payloadStr = JSON.stringify(structuredCompletion);
   let taskId = null;
 
-  if (targetNodeId && targetRole !== 'done') {
+  if (targetRole && targetRole !== 'done') {
     const info = db.prepare(
       'INSERT INTO tasks (title, description, agent_id, parent_id, status, from_role, target_role, payload, mission_id, node_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
-    ).run(title, description ?? null, targetRole, parentTaskId ?? null, 'todo', fromRole, targetRole, payloadStr, missionId, targetNodeId);
+    ).run(title, description ?? null, targetRole, parentTaskId ?? null, 'todo', fromRole, targetRole, payloadStr, missionId ?? null, targetNodeId ?? null);
     taskId = info.lastInsertRowid;
 
-    const handoffMessage = JSON.stringify({
+    if (targetNodeId) {
+      const handoffMessage = JSON.stringify({
+        taskId,
+        title,
+        description: description ?? null,
+        missionId,
+        fromNodeId,
+        targetNodeId,
+        fromRole,
+        targetRole,
+        outcome,
+        fromAttempt,
+        payload: payloadStr,
+        completion: structuredCompletion,
+      });
+      db.prepare(
+        "INSERT INTO session_log (session_id, event_type, content, mission_id, node_id, recipient_node_id, is_read) VALUES (?, 'message', ?, ?, ?, ?, 0)"
+      ).run(sid, handoffMessage, missionId, fromNodeId, targetNodeId);
+    }
+
+    broadcast(fromRole ?? 'graph', JSON.stringify({
       taskId,
-      title,
-      description: description ?? null,
+      agentId: targetRole,
+      parentTaskId: parentTaskId ?? null,
+      status: 'todo',
       missionId,
-      fromNodeId,
       targetNodeId,
-      fromRole,
-      targetRole,
-      outcome,
-      fromAttempt,
-      payload: payloadStr,
-      completion: structuredCompletion,
-    });
-    db.prepare(
-      "INSERT INTO session_log (session_id, event_type, content, mission_id, node_id, recipient_node_id, is_read) VALUES (?, 'message', ?, ?, ?, ?, 0)"
-    ).run(sid, handoffMessage, missionId, fromNodeId, targetNodeId);
+    }), 'task_update');
   }
 
   const eventBody = {
@@ -156,8 +167,29 @@ function persistGraphHandoff({
   return { taskId, eventBody };
 }
 
-export async function executeHandoffTask(args, sid) {
+export function executeHandoffTask(args, sid) {
   let { fromRole, targetRole, title, description, payload, completion, parentTaskId, missionId, fromNodeId, targetNodeId, outcome, fromAttempt } = args;
+
+  if (missionId && fromNodeId) {
+    const runtimeValidation = nodeRuntimeIsRunning(missionId, fromNodeId, fromAttempt);
+    if (runtimeValidation.error) {
+      // Return the specific error text the tests expect
+      const errorText = runtimeValidation.error.replace('Stale attempt', 'Stale handoff attempt');
+      return makeToolText(errorText, true);
+    }
+
+    if (!fromRole || (targetNodeId && !targetRole)) {
+      const record = loadCompiledMissionRecord(missionId);
+      if (record) {
+        const fNode = getMissionNode(record.mission, fromNodeId);
+        if (fNode && !fromRole) fromRole = fNode.roleId;
+        if (targetNodeId && !targetRole) {
+          const tNode = getMissionNode(record.mission, targetNodeId);
+          if (tNode) targetRole = tNode.roleId;
+        }
+      }
+    }
+  }
 
   const normalizedOutcome = outcome?.trim().toLowerCase() ?? 'success';
   const structuredCompletion = buildStructuredCompletionPayload({
@@ -198,7 +230,7 @@ export async function executeHandoffTask(args, sid) {
   return makeToolText(JSON.stringify({ taskId, status: 'handoff_recorded', eventBody }, null, 2));
 }
 
-export async function executeCompleteTask(args, sid) {
+export function executeCompleteTask(args, sid) {
   const {
     missionId,
     nodeId,

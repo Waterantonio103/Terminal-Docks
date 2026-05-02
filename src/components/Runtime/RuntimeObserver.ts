@@ -139,6 +139,8 @@ class RuntimeObserver {
       case 'running':
       case 'awaiting_permission':
         return 'running';
+      case 'manual_takeover':
+        return 'manual_takeover';
       case 'completed':
         return 'completed';
       case 'failed':

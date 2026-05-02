@@ -34,11 +34,12 @@ export type WorkflowNodeStatus =
   | 'done'
   | 'completed'
   | 'failed'
-  | 'disconnected';
+  | 'disconnected'
+  | 'manual_takeover';
 export type WorkflowMode = 'build' | 'edit';
 export type WorkflowEdgeCondition = 'always' | 'on_success' | 'on_failure';
 export type WorkflowAgentCli = 'claude' | 'gemini' | 'opencode' | 'codex' | 'custom' | 'ollama' | 'lmstudio';
-export type WorkflowExecutionMode = 'headless' | 'streaming_headless' | 'interactive_pty';
+export type WorkflowExecutionMode = 'api' | 'headless' | 'streaming_headless' | 'interactive_pty' | 'manual';
 export type WorkflowAuthoringMode = 'preset' | 'graph' | 'adaptive';
 export type WorkerCapabilityId = 'planning' | 'coding' | 'testing' | 'review' | 'security' | 'repo_analysis' | 'shell_execution';
 

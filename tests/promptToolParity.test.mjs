@@ -1,14 +1,20 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { readFileSync, readdirSync } from 'node:fs';
+import { resolve, join } from 'node:path';
 
 const root = resolve('.');
-const serverPath = resolve(root, 'mcp-server/server.mjs');
+const toolsDir = resolve(root, 'mcp-server/src/tools');
 const promptPath = resolve(root, 'src/lib/buildPrompt.ts');
 const agentsPath = resolve(root, 'src/config/agents.json');
 const launcherPath = resolve(root, 'src/components/Launcher/LauncherPane.tsx');
 
-const serverSource = readFileSync(serverPath, 'utf8');
+let serverSource = '';
+for (const file of readdirSync(toolsDir)) {
+  if (file.endsWith('.mjs')) {
+    serverSource += readFileSync(join(toolsDir, file), 'utf8') + '\n';
+  }
+}
+
 const promptSource = readFileSync(promptPath, 'utf8');
 const agentsSource = readFileSync(agentsPath, 'utf8');
 const launcherSource = readFileSync(launcherPath, 'utf8');

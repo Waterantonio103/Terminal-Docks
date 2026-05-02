@@ -1,4 +1,5 @@
 import type { RuntimeActivationPayload } from './missionRuntime.js';
+import type { ExecutionMode } from './workflow/WorkflowTypes.js';
 import {
   buildCliRunCommand,
   materializePromptArgs,
@@ -13,7 +14,7 @@ export interface StartAgentRunRequest {
   sessionId: string;
   agentId: string;
   cli: string;
-  executionMode: 'headless' | 'streaming_headless' | 'interactive_pty';
+  executionMode: ExecutionMode;
   cwd: string | null;
   command: string;
   args: string[];

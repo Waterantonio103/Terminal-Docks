@@ -7,11 +7,10 @@ const tempRoot = mkdtempSync(join(tmpdir(), 'terminal-docks-mcp-'));
 process.env.MCP_DB_PATH = join(tempRoot, 'tasks.db');
 process.env.MCP_DISABLE_HTTP = '1';
 
+const { buildTaskDetails } = await import('../mcp-server/src/tools/task-details.mjs');
+const { executeHandoffTask, executeCompleteTask } = await import('../mcp-server/src/tools/handoff-complete.mjs');
 const {
-  buildTaskDetails,
   validateGraphHandoff,
-  executeHandoffTask,
-  executeCompleteTask,
   executeReceiveMessages,
   executeRegisterWorkerCapabilities,
   executeAssignTaskByRequirements,
@@ -23,7 +22,7 @@ const {
   seedMissionNodeRuntime,
   seedAgentRuntimeSession,
   getBroadcastHistory,
-} = await import('../mcp-server/server.mjs');
+} = await import('../mcp-server/src/utils/test-helpers.mjs');
 
 function demoMission() {
   return {
@@ -111,6 +110,10 @@ async function run(name, fn) {
 
 function extractTaskIdFromHandoffResult(result) {
   const text = result?.content?.[0]?.text ?? '';
+  try {
+    const payload = JSON.parse(text);
+    if (payload.taskId) return payload.taskId;
+  } catch {}
   const match = text.match(/task\s+(\d+)/i);
   return match ? Number(match[1]) : null;
 }

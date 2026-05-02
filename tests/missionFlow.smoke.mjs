@@ -7,23 +7,22 @@ const tempRoot = mkdtempSync(join(tmpdir(), 'terminal-docks-smoke-'));
 process.env.MCP_DB_PATH = join(tempRoot, 'tasks.db');
 process.env.MCP_DISABLE_HTTP = '1';
 
-const [{ buildLaunchPrompt }, { compileMission }, { buildNewTaskSignal, parseNewTaskSignal }, starlink] = await Promise.all([
+const [{ buildLaunchPrompt }, { compileMission }, { buildNewTaskSignal, parseNewTaskSignal }] = await Promise.all([
   import('../.tmp-tests/lib/buildPrompt.js'),
   import('../.tmp-tests/lib/graphCompiler.js'),
   import('../.tmp-tests/lib/missionRuntime.js'),
-  import('../mcp-server/server.mjs'),
 ]);
 
+const { buildTaskDetails } = await import('../mcp-server/src/tools/task-details.mjs');
+const { executeHandoffTask } = await import('../mcp-server/src/tools/handoff-complete.mjs');
 const {
   resetStarlinkState,
   seedCompiledMission,
   seedMissionNodeRuntime,
   seedAgentRuntimeSession,
-  executeHandoffTask,
-  buildTaskDetails,
   executeReceiveMessages,
   getBroadcastHistory,
-} = starlink;
+} = await import('../mcp-server/src/utils/test-helpers.mjs');
 
 function taskNode(id = 'task-1') {
   return {

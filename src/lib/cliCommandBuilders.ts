@@ -194,7 +194,7 @@ function buildCodexInteractiveFlagArgs({
   mcpUrl?: string | null;
   resolvedYoloFlag?: string | null;
 }): string[] {
-  const yoloFlag = yolo ? (resolvedYoloFlag ?? '--yolo') : null;
+  const yoloFlag = yolo ? (resolvedYoloFlag ?? '--dangerously-bypass-approvals-and-sandbox') : null;
   console.log(`[codex] buildCodexInteractiveFlagArgs: resolved yolo flag=${yoloFlag ?? '<none>'}`);
   const args = [
     ...(mcpUrl?.trim() ? ['-c', `mcp_servers.terminal_docks.url="${mcpUrl.trim()}"`] : []),

@@ -320,7 +320,14 @@ class RuntimeManager {
   // ── Public API ──────────────────────────────────────────────────
 
   async createRuntimeForNode(args: CreateRuntimeArgs): Promise<RuntimeSession> {
-    const adapter = getCliAdapter(args.cliId);
+    let adapter = getCliAdapter(args.cliId);
+
+    // If 'api' or 'streaming_headless' mode, we use the special streaming adapter
+    // which handles tool calls directly via MCP without a PTY.
+    if (args.executionMode === 'api' || args.executionMode === 'streaming_headless') {
+      adapter = getCliAdapter('streaming');
+    }
+
     if (!adapter) {
       throw new Error(`No CLI adapter registered for "${args.cliId}"`);
     }
@@ -351,6 +358,16 @@ class RuntimeManager {
     this.sessions.set(session.sessionId, session);
     this.sessionsByNode.set(`${args.missionId}:${args.nodeId}:${args.attempt}`, session.sessionId);
     this.wireMcpEvents(session.sessionId);
+
+    missionRepository.appendWorkflowEvent({
+      missionId: args.missionId,
+      nodeId: args.nodeId,
+      sessionId: session.sessionId,
+      eventType: 'runtime_created',
+      severity: 'info',
+      message: `Runtime session created: ${session.sessionId}`,
+      payloadJson: JSON.stringify({ cliId: args.cliId, executionMode: args.executionMode }),
+    }).catch(() => {});
 
     session.onStateChange((from: RuntimeSessionState, to: RuntimeSessionState) => {
       this.emit({
@@ -459,6 +476,14 @@ class RuntimeManager {
         nodeId: session.nodeId,
         attempt: session.attempt,
       });
+      missionRepository.appendWorkflowEvent({
+        missionId: session.missionId,
+        nodeId: session.nodeId,
+        sessionId: session.sessionId,
+        eventType: 'task_injected',
+        severity: 'info',
+        message: `Task injected into session ${session.sessionId}`,
+      }).catch(() => {});
       return;
     }
 
@@ -477,6 +502,14 @@ class RuntimeManager {
       nodeId: session.nodeId,
       attempt: session.attempt,
     });
+    missionRepository.appendWorkflowEvent({
+      missionId: session.missionId,
+      nodeId: session.nodeId,
+      sessionId: session.sessionId,
+      eventType: 'task_injected',
+      severity: 'info',
+      message: `Task injected into session ${session.sessionId}`,
+    }).catch(() => {});
   }
 
   async sendInput(args: SendInputArgs): Promise<void> {
@@ -853,6 +886,14 @@ class RuntimeManager {
         nodeId: session.nodeId,
         attempt: session.attempt,
       });
+      missionRepository.appendWorkflowEvent({
+        missionId: session.missionId,
+        nodeId: session.nodeId,
+        sessionId: session.sessionId,
+        eventType: 'task_acknowledged',
+        severity: 'info',
+        message: `Task acknowledged by agent in session ${session.sessionId}`,
+      }).catch(() => {});
     } catch {
       throw new Error(
         `Agent for CLI "${session.cliId}" on node "${session.nodeId}" did not ACK re-injected task within ${Math.round(TASK_ACK_TIMEOUT_MS / 1000)}s.`,
@@ -1185,8 +1226,24 @@ class RuntimeManager {
     }
 
     console.log(`[runtime] spawning CLI terminal=${terminalId} command=${opts.command ?? '<shell>'}`);
+    missionRepository.appendWorkflowEvent({
+      missionId: 'system',
+      terminalId,
+      eventType: 'terminal_spawn_requested',
+      severity: 'info',
+      message: `Terminal spawn requested for ${terminalId}`,
+      payloadJson: JSON.stringify(opts),
+    }).catch(() => {});
+
     try {
       await spawnTerminal({ id: terminalId, ...opts });
+      missionRepository.appendWorkflowEvent({
+        missionId: 'system',
+        terminalId,
+        eventType: 'terminal_spawn_success',
+        severity: 'info',
+        message: `Terminal ${terminalId} spawned successfully.`,
+      }).catch(() => {});
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       if (msg.includes('already exists')) {
@@ -1350,6 +1407,26 @@ class RuntimeManager {
     const mcpHealthy = await checkMcpHealth();
     if (!mcpHealthy) {
       throw new Error('MCP server unavailable during activation handshake.');
+    }
+
+    if (activationPayload.executionMode === 'manual') {
+      console.log(`[RuntimeManager] Manual takeover for node ${session.nodeId}`);
+      session.transitionTo('manual_takeover');
+      missionRepository.appendWorkflowEvent({
+        missionId: session.missionId,
+        nodeId: session.nodeId,
+        sessionId: session.sessionId,
+        terminalId: session.terminalId,
+        eventType: 'manual_takeover_requested',
+        severity: 'warning',
+        message: `Manual takeover requested for node ${session.nodeId}.`,
+        payloadJson: JSON.stringify({
+          attempt: session.attempt,
+          cliId: session.cliId,
+          executionMode: session.executionMode,
+        }),
+      }).catch(() => {});
+      return;
     }
 
     let launchedCli = false;
@@ -1587,6 +1664,14 @@ class RuntimeManager {
         nodeId: session.nodeId,
         attempt: session.attempt,
       });
+      missionRepository.appendWorkflowEvent({
+        missionId: session.missionId,
+        nodeId: session.nodeId,
+        sessionId: session.sessionId,
+        eventType: 'task_acknowledged',
+        severity: 'info',
+        message: `Task acknowledged by agent in session ${session.sessionId}`,
+      }).catch(() => {});
     } catch {
       throw new Error(
         session.cliId === 'codex'
@@ -1703,6 +1788,15 @@ class RuntimeManager {
       throw new Error(`CLI "${session.cliId}" did not report ready state within ${CLI_READY_WAIT_MS}ms after shell launch.`);
     }
     console.log(`[runtime] CLI ready cli=${session.cliId} terminal=${session.terminalId}`);
+    missionRepository.appendWorkflowEvent({
+      missionId: session.missionId,
+      nodeId: session.nodeId,
+      sessionId: session.sessionId,
+      terminalId: session.terminalId,
+      eventType: 'cli_ready',
+      severity: 'info',
+      message: `CLI ${session.cliId} reported ready in terminal ${session.terminalId}`,
+    }).catch(() => {});
 
     setTimeout(() => {
       const suppressUntil = this.suppressedPtyExitUntil.get(session.terminalId) ?? 0;

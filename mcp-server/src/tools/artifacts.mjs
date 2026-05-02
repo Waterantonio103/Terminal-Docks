@@ -11,7 +11,7 @@ export function registerArtifactTools(server, getSessionId) {
     inputSchema: {
       missionId: z.string(),
       nodeId: z.string().optional(),
-      kind: z.enum(['file', 'summary', 'log', 'reference', 'patch', 'review_verdict']),
+      kind: z.enum(['file', 'summary', 'log', 'reference', 'patch', 'review_verdict', 'test_result', 'risk_report']),
       title: z.string(),
       contentText: z.string().optional(),
       contentJson: z.any().optional(),

@@ -35,11 +35,11 @@ export const EDIT_INSTRUCTIONS: Record<string, string> = {
   coordinator:
     'Based on the analysis, create a precise change plan. For each change specify: the exact file path, what currently exists (quote relevant lines if helpful), and exactly what it should become. Be specific enough that a Builder can implement without asking questions. Assign exclusive file ownership to prevent edit conflicts. Default delegation path: call `delegate_task`, then call `assign_task_by_requirements` with requiredCapabilities/preferredCapabilities/fileScope/writeAccess so the scheduler selects the best worker. Use explicit `assign_task` only when you need to pin a task to one exact session. Fan out parallel work by handing off to Tester and Security alongside Builder.',
   builder:
-    'Apply the targeted changes from the plan. Before touching any file call `lock_file` - if it returns "queued", keep working on other unlocked files until you receive a [LOCK GRANTED] message. Read each file first, then make MINIMAL targeted edits - change only what is specified. Preserve existing formatting, naming, and style. Do not rewrite files from scratch unless the plan explicitly says to.',
+    'Apply the targeted changes from the plan. Before touching any file call `request_file_lock` - if it returns "queued", keep working on other unlocked files until you receive a [LOCK GRANTED] message. Read each file first, then make MINIMAL targeted edits - change only what is specified. Preserve existing formatting, naming, and style. Do not rewrite files from scratch unless the plan explicitly says to.',
   tester:
-    'Write tests for the planned changes in parallel with the Builder. Target the acceptance criteria from the plan, not the Builder\'s in-progress code. Always `lock_file` before editing any test file. Do not modify source files owned by the Builder.',
+    'Write tests for the planned changes in parallel with the Builder. Target the acceptance criteria from the plan, not the Builder\'s in-progress code. Always `request_file_lock` before editing any test file. Do not modify source files owned by the Builder.',
   security:
-    'Audit the planned changes for security issues in parallel with the Builder: auth/authz, input validation, secret handling, injection surfaces, dependency CVEs. Record findings via `update_workspace_context` so the Builder can address them live. Only edit files for clear, low-risk fixes and always `lock_file` first.',
+    'Audit the planned changes for security issues in parallel with the Builder: auth/authz, input validation, secret handling, injection surfaces, dependency CVEs. Record findings via `update_workspace_context` so the Builder can address them live. Only edit files for clear, low-risk fixes and always `request_file_lock` first.',
   reviewer:
     'Review the combined output of Builder, Tester, and Security. Verify: (1) the objective was achieved, (2) no existing behaviour was broken, (3) changes follow the project\'s existing conventions, (4) tests cover the acceptance criteria, (5) security findings are addressed. Apply minor fixes yourself. Give a clear pass or fail verdict with specifics; on fail, target the specific specialist responsible via handoff_task.',
 };
@@ -107,7 +107,7 @@ export function buildLaunchPrompt(agentId: string, ctx: LaunchContext, instructi
       lines.push('This node currently has no legal outgoing targets. If your chosen outcome has no legal target in `get_task_details`, publish your result and stop instead of guessing a successor.');
     }
 
-    lines.push('Graph-mode minimal MCP contract: `get_task_details`, `receive_messages({ missionId, nodeId, afterSeq? })`, `complete_task({ missionId, nodeId, attempt, outcome, summary, filesChanged?, artifactReferences?, downstreamPayload? })`, `handoff_task({ missionId, fromNodeId, targetNodeId, outcome, title, description?, payload?, fromAttempt })`, `publish_result`, `get_workspace_context`, `lock_file`, `unlock_file`.');
+    lines.push('Graph-mode minimal MCP contract: `get_task_details`, `receive_messages({ missionId, nodeId, afterSeq? })`, `complete_task({ missionId, nodeId, attempt, outcome, summary, filesChanged?, artifactReferences?, downstreamPayload? })`, `handoff_task({ missionId, fromNodeId, targetNodeId, outcome, title, description?, payload?, fromAttempt })`, `write_artifact`, `get_workspace_context`, `request_file_lock`, `release_file_lock`.');
   } else {
     lines.push('No mission/node context was provided. Treat this as manual execution and avoid speculative handoffs.');
   }
@@ -136,7 +136,7 @@ export function buildLaunchPrompt(agentId: string, ctx: LaunchContext, instructi
       lines.push(`${step++}. This is a terminal node unless \`get_task_details\` reports otherwise. Do not call \`handoff_task\` without an exact legal \`targetNodeId\`.`);
     }
   }
-  lines.push(`${step}. Call the \`publish_result\` MCP tool with \`content\` = "${agent.name} Summary: <your summary>" and \`type\` = "markdown" so the user sees your work in Mission Control.`);
+  lines.push(`${step}. Call the \`write_artifact\` MCP tool with \`content\` = "${agent.name} Summary: <your summary>" and \`type\` = "markdown" so the user sees your work in Mission Control.`);
 
   // Join with a space - never newlines, as \n in PTY input is treated as Enter on Windows
   return lines.join(' ');

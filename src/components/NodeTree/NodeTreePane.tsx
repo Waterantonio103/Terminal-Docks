@@ -2,7 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { DotTunnelBackground } from '../shared/DotTunnelBackground';
 import { ModelDiscoveryLoading } from '../models/ModelDiscoveryLoading';
 import { AgentActionBadge } from '../models/AgentActionBadge';
-import { ArrowUpRight, ChevronDown, ChevronLeft, Play, Plus, RefreshCw, ScanSearch, Sparkles, Trash2, Workflow, X } from 'lucide-react';
+import { ArrowUpRight, ChevronDown, ChevronLeft, Play, Plus, RefreshCw, ScanSearch, Sparkles, Square, Terminal, Trash2, UserCheck, Workflow, X } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
 import { openUrl } from '@tauri-apps/plugin-opener';
 import { emit, listen } from '@tauri-apps/api/event';
@@ -24,12 +24,15 @@ import type { MaterializedNode, NodeInstance, Point2D } from '../../lib/node-sys
 import { detectRoleForPane } from '../../lib/cliDetection';
 import { runtimeManager } from '../../lib/runtime/RuntimeManager';
 import { runtimeExecutor } from '../../lib/runtime/RuntimeExecutor';
+import { missionOrchestrator } from '../../lib/workflow/MissionOrchestrator';
 import { terminalOutputBus } from '../../lib/runtime/TerminalOutputBus';
 import { supportsHeadless } from '../../lib/cliIdentity';
 import { useWorkspaceStore, type MissionAgent, type Pane, type ResultEntry, type WorkflowAgentCli, type WorkflowExecutionMode, type WorkflowGraph } from '../../store/workspace';
 import { discoverModelsForCli, supportsModelDiscovery } from '../../lib/models/modelDiscoveryService';
 import type { CliId, CliModel, ModelDiscoveryResult } from '../../lib/models/modelTypes';
 import { useMissionSnapshot } from '../../hooks/useMissionSnapshot';
+import { useWorkflowEvents } from '../../hooks/useWorkflowEvents';
+
 
 type ValidationTone = 'idle' | 'ok' | 'error';
 type ResizeEdge = 'n' | 's' | 'e' | 'w' | 'ne' | 'nw' | 'se' | 'sw';
@@ -67,7 +70,7 @@ const FRAME_MIN_HEIGHT = 100;
 const SOCKET_SNAP_RADIUS = 48;
 const SUPPORTED_WORKFLOW_CLIS = new Set(['claude', 'gemini', 'opencode', 'codex', 'custom', 'ollama', 'lmstudio']);
 const SELECTABLE_WORKFLOW_CLIS: WorkflowAgentCli[] = ['claude', 'codex', 'gemini', 'opencode', 'custom', 'ollama', 'lmstudio'];
-const SELECTABLE_EXECUTION_MODES: WorkflowExecutionMode[] = ['streaming_headless', 'headless', 'interactive_pty'];
+const SELECTABLE_EXECUTION_MODES: WorkflowExecutionMode[] = ['api', 'streaming_headless', 'headless', 'interactive_pty', 'manual'];
 const MAX_RUNTIME_SNIPPET_BYTES = 3072;
 const MODEL_DOC_URLS: Record<string, string | null> = {
   claude: 'https://code.claude.com/docs/en/model-config',
@@ -229,6 +232,23 @@ function extractArtifactHints(result: ResultEntry): string[] {
   return [...hits];
 }
 
+function parseArtifactMetadata(metadataJson: string | null | undefined): Record<string, unknown> {
+  if (!metadataJson) return {};
+  try {
+    const parsed = JSON.parse(metadataJson);
+    return parsed && typeof parsed === 'object' ? parsed as Record<string, unknown> : {};
+  } catch {
+    return {};
+  }
+}
+
+function snapshotArtifactPath(artifact: import('../../hooks/useMissionSnapshot').ArtifactRecord): string | undefined {
+  if (artifact.contentUri?.trim()) return artifact.contentUri.trim();
+  const metadata = parseArtifactMetadata(artifact.metadataJson);
+  const path = metadata.path;
+  return typeof path === 'string' && path.trim() ? path.trim() : undefined;
+}
+
 function ccw(a: Point2D, b: Point2D, c: Point2D) {
   return (c.y - a.y) * (b.x - a.x) > (b.y - a.y) * (c.x - a.x);
 }
@@ -284,6 +304,7 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
   const lastGraphSnapshotRef = useRef(JSON.stringify(graph));
   const isUserChangeRef = useRef(false);
   const missionSnapshot = useMissionSnapshot(activeMissionId);
+  const workflowEvents = useWorkflowEvents(activeMissionId);
 
   // Sync pane.data.cli from the persisted graph node configs before any useEffect
   // (including TerminalPane's initPty) can fire. useLayoutEffect runs synchronously
@@ -383,10 +404,21 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
   );
   const artifactHintsByNodeId = useMemo(() => {
     const map = new Map<string, string[]>();
+    const snapshotArtifactsByNode = new Map<string, string[]>();
+
+    for (const artifact of missionSnapshot?.artifacts ?? []) {
+      const nodeId = artifact.nodeId ?? '';
+      if (!nodeId) continue;
+      const current = snapshotArtifactsByNode.get(nodeId) ?? [];
+      const label = artifact.title || artifact.kind;
+      if (!current.includes(label)) current.push(label);
+      snapshotArtifactsByNode.set(nodeId, current.slice(0, 5));
+    }
+
     for (const agent of missionAgents) {
       if (!agent.nodeId) continue;
 
-      const hints: string[] = [];
+      const hints: string[] = [...(snapshotArtifactsByNode.get(agent.nodeId) ?? [])];
 
       // Priority 1: Structured artifacts
       if (agent.artifacts && agent.artifacts.length > 0) {
@@ -430,8 +462,44 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
 
       if (hints.length > 0) map.set(agent.nodeId, hints);
     }
+
+    for (const [nodeId, hints] of snapshotArtifactsByNode.entries()) {
+      if (!map.has(nodeId) && hints.length > 0) {
+        map.set(nodeId, hints);
+      }
+    }
+
     return map;
-  }, [missionAgents, results]);
+  }, [missionAgents, missionSnapshot?.artifacts, results]);
+  const combinedArtifacts = useMemo(() => {
+    const localArtifacts = missionAgents.flatMap(agent =>
+      (agent.artifacts ?? []).map(artifact => ({
+        id: artifact.id,
+        title: artifact.label,
+        kind: artifact.type,
+        createdAt: new Date(artifact.timestamp).toISOString(),
+        path: artifact.path,
+        contentText: artifact.content,
+        source: 'local' as const,
+      })),
+    );
+    const durableArtifacts = (missionSnapshot?.artifacts ?? []).map(artifact => ({
+      id: artifact.id,
+      title: artifact.title,
+      kind: artifact.kind,
+      createdAt: artifact.createdAt,
+      path: snapshotArtifactPath(artifact),
+      contentText: artifact.contentText ?? undefined,
+      source: 'snapshot' as const,
+    }));
+
+    const merged = new Map<string, typeof localArtifacts[number] | typeof durableArtifacts[number]>();
+    for (const artifact of [...durableArtifacts, ...localArtifacts]) {
+      const existing = merged.get(artifact.id);
+      if (!existing || artifact.source === 'local') merged.set(artifact.id, artifact);
+    }
+    return [...merged.values()].sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt));
+  }, [missionAgents, missionSnapshot?.artifacts]);
   const setRuntimeNodeState = useCallback(
     (nodeId: string, status: string, reason?: string | null) => {
       setState(previous => {
@@ -1920,6 +1988,9 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
             ).trim();
             const runtimeSessionId = String(runtimeAgent?.runtimeSessionId ?? runtimeBinding?.runtimeSessionId ?? '').trim();
             const artifactHints = artifactHintsByNodeId.get(materializedNode.node.id) ?? [];
+            const nodeEvents = workflowEvents.filter(e => e.nodeId === materializedNode.node.id);
+            const latestNodeEvent = nodeEvents[0];
+
             return (
               <div
                 key={materializedNode.node.id}
@@ -1945,6 +2016,61 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
                     <span>{workflowStatusLabel(runtimeStatus)}</span>
                   </div>
                 </div>
+
+                {/* Node Actions Toolbar */}
+                {!isFrame && (
+                  <div className="px-3 py-1.5 border-b border-border-panel flex items-center gap-1 background-bg-panel/50">
+                    <button
+                      onClick={() => activeMissionId && missionOrchestrator.runNode(activeMissionId, materializedNode.node.id)}
+                      title="Run Node"
+                      className="p-1 hover:bg-accent-primary/20 rounded text-text-muted hover:text-accent-primary transition-colors"
+                    >
+                      <Play size={12} />
+                    </button>
+                    <button
+                      onClick={() => activeMissionId && missionOrchestrator.retryNode(activeMissionId, materializedNode.node.id)}
+                      title="Retry Node"
+                      className="p-1 hover:bg-accent-primary/20 rounded text-text-muted hover:text-accent-primary transition-colors"
+                    >
+                      <RefreshCw size={12} />
+                    </button>
+                    <button
+                      onClick={() => activeMissionId && missionOrchestrator.cancelNode(activeMissionId, materializedNode.node.id)}
+                      title="Cancel Node"
+                      className="p-1 hover:bg-red-500/20 rounded text-text-muted hover:text-red-400 transition-colors"
+                    >
+                      <Square size={12} />
+                    </button>
+                    <div className="w-px h-3 bg-border-panel mx-1" />
+                    <button
+                      onClick={() => {
+                        const isManual = materializedNode.node.properties.executionMode === 'manual';
+                        applyOperator({
+                          type: 'set_node_property',
+                          nodeId: materializedNode.node.id,
+                          key: 'executionMode',
+                          value: isManual ? 'interactive_pty' : 'manual'
+                        });
+                      }}
+                      title={materializedNode.node.properties.executionMode === 'manual' ? "Release Takeover" : "Manual Takeover"}
+                      className={`p-1 rounded transition-colors ${materializedNode.node.properties.executionMode === 'manual' ? 'bg-accent-primary/20 text-accent-primary' : 'hover:bg-accent-primary/20 text-text-muted hover:text-accent-primary'}`}
+                    >
+                      <UserCheck size={12} />
+                    </button>
+                    <button
+                      onClick={() => {
+                        if (terminalId) {
+                          addPane('terminal', `Terminal: ${materializedNode.node.label || materializedNode.node.id}`, { terminalId });
+                        }
+                      }}
+                      title="Open Terminal"
+                      className="p-1 hover:bg-accent-primary/20 rounded text-text-muted hover:text-accent-primary transition-colors disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-text-muted"
+                      disabled={!terminalId}
+                    >
+                      <Terminal size={12} />
+                    </button>
+                  </div>
+                )}
 
                 <div className="px-3 py-3 relative">
                   {materializedNode.inputs.map((socket, index) => {
@@ -2221,6 +2347,12 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
                           <span className="truncate">{runtimeSessionId ? shortId(runtimeSessionId) : (terminalId ? 'bound' : 'not bound')}</span>
                         </div>
                       </div>
+                      {latestNodeEvent && (
+                        <div className="rounded border border-border-panel background-bg-surface px-2 py-1.5 text-[10px]">
+                          <div className="uppercase tracking-wide text-text-muted">Last Event</div>
+                          <div className="mt-0.5 text-text-secondary break-words">{latestNodeEvent.message}</div>
+                        </div>
+                      )}
                       {artifactHints.length > 0 && (
                         <div className="rounded border border-border-panel background-bg-surface px-2 py-1.5">
                           <div className="text-[10px] uppercase tracking-wide text-text-muted mb-1">Artifacts / Files</div>
@@ -2249,6 +2381,7 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
                         >
                           {supportsHeadless(runtimeCli as any) && (
                             <>
+                              <option value="api">API</option>
                               <option value="streaming_headless">Stream</option>
                               <option value="headless">Headless</option>
                             </>
@@ -2321,10 +2454,7 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
                       </div>
                       <div className="space-y-2 max-h-80 overflow-y-auto pr-1 custom-scrollbar">
                         {(() => {
-                          const allArtifacts = missionAgents.flatMap(a => a.artifacts ?? []);
-                          const sorted = [...allArtifacts].sort((a, b) => b.timestamp - a.timestamp);
-                          
-                          if (sorted.length === 0) {
+                          if (combinedArtifacts.length === 0) {
                             return (
                               <div className="py-12 flex flex-col items-center justify-center text-center px-4">
                                 <Sparkles size={24} className="text-text-muted opacity-20 mb-2" />
@@ -2334,31 +2464,31 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
                             );
                           }
                           
-                          return sorted.map(art => (
+                          return combinedArtifacts.map(art => (
                             <div 
                               key={art.id} 
                               className="p-2.5 rounded-lg border border-border-panel background-bg-app hover:border-accent-primary/30 hover:background-bg-surface transition-all group cursor-pointer"
                               onClick={() => {
                                 if (art.path) {
-                                  addPane('editor', art.label, { filePath: art.path });
+                                  addPane('editor', art.title, { filePath: art.path });
                                 }
                               }}
                             >
                               <div className="flex items-center justify-between mb-1.5">
                                 <div className="flex items-center gap-1.5">
                                   <div className={`w-1.5 h-1.5 rounded-full ${
-                                    art.type === 'file_change' ? 'bg-emerald-400' : 
-                                    art.type === 'summary' ? 'bg-amber-400' : 'bg-blue-400'
+                                    art.kind === 'file_change' || art.kind === 'file' || art.kind === 'patch' ? 'bg-emerald-400' : 
+                                    art.kind === 'summary' || art.kind === 'review_verdict' ? 'bg-amber-400' : 'bg-blue-400'
                                   } shadow-[0_0_8px_rgba(0,0,0,0.5)]`} />
                                   <span className="text-[9px] font-bold text-accent-primary uppercase tracking-tighter">
-                                    {art.type.replace('_', ' ')}
+                                    {art.kind.replace('_', ' ')}
                                   </span>
                                 </div>
                                 <span className="text-[9px] text-text-muted font-mono opacity-50">
-                                  {new Date(art.timestamp).toLocaleTimeString([], { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' })}
+                                  {new Date(art.createdAt).toLocaleTimeString([], { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' })}
                                 </span>
                               </div>
-                              <div className="text-[11px] text-text-primary font-semibold leading-tight group-hover:text-accent-primary transition-colors">{art.label}</div>
+                              <div className="text-[11px] text-text-primary font-semibold leading-tight group-hover:text-accent-primary transition-colors">{art.title}</div>
                               {art.path && (
                                 <div className="flex items-center gap-1 mt-1.5">
                                   <div className="text-[9px] text-text-muted truncate opacity-50 font-mono bg-black/20 px-1 py-0.5 rounded border border-white/5 flex-1">
@@ -2372,7 +2502,7 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
                         })()}
                       </div>
                       <div className="pt-2 border-t border-border-panel/50 flex items-center justify-between text-[9px] text-text-muted px-1">
-                        <span>{missionAgents.flatMap(a => a.artifacts ?? []).length} items captured</span>
+                        <span>{combinedArtifacts.length} items captured</span>
                         <div className="flex items-center gap-1">
                           <span className="w-1 h-1 rounded-full bg-emerald-400 animate-pulse" />
                           Live

@@ -15,10 +15,9 @@ export function registerQualityTools(server, getSessionId) {
       details: z.string().optional(),
     }
   }, async (args) => {
-    const sid = getSessionId() ?? 'unknown';
     return server.callTool('write_artifact', {
       ...args,
-      kind: 'summary',
+      kind: 'test_result',
       title: `Test Result: ${args.testName} (${args.passed ? 'PASS' : 'FAIL'})`,
       contentText: args.details,
       metadataJson: { testName: args.testName, passed: args.passed }
@@ -38,7 +37,7 @@ export function registerQualityTools(server, getSessionId) {
   }, async (args) => {
     return server.callTool('write_artifact', {
       ...args,
-      kind: 'summary',
+      kind: 'risk_report',
       title: `Risk Report: ${args.severity.toUpperCase()}`,
       contentText: `${args.risk}${args.mitigation ? `\n\nMitigation: ${args.mitigation}` : ''}`,
       metadataJson: { severity: args.severity }
