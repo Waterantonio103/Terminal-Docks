@@ -159,6 +159,99 @@ export function initDb() {
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
+    CREATE TABLE IF NOT EXISTS debug_runs (
+      id TEXT PRIMARY KEY,
+      suite_name TEXT NOT NULL,
+      autonomy_mode TEXT NOT NULL,
+      require_confirmation INTEGER NOT NULL DEFAULT 1,
+      status TEXT NOT NULL DEFAULT 'created',
+      max_repair_attempts INTEGER NOT NULL DEFAULT 3,
+      repair_attempt INTEGER NOT NULL DEFAULT 0,
+      max_files_changed INTEGER NOT NULL DEFAULT 8,
+      max_patch_bytes INTEGER NOT NULL DEFAULT 120000,
+      max_command_runtime_ms INTEGER NOT NULL DEFAULT 120000,
+      allowed_paths_json TEXT NOT NULL,
+      blocked_paths_json TEXT NOT NULL,
+      allowed_commands_json TEXT NOT NULL,
+      mission_ids_json TEXT NOT NULL DEFAULT '[]',
+      changed_files_json TEXT NOT NULL DEFAULT '[]',
+      report_artifact_id TEXT,
+      last_failure TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE TABLE IF NOT EXISTS debug_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      debug_run_id TEXT,
+      event_type TEXT NOT NULL,
+      payload_json TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY(debug_run_id) REFERENCES debug_runs(id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_debug_events_run_id ON debug_events(debug_run_id, id);
+    CREATE TABLE IF NOT EXISTS debug_reports (
+      id TEXT PRIMARY KEY,
+      debug_run_id TEXT NOT NULL,
+      status TEXT NOT NULL,
+      title TEXT NOT NULL,
+      content_text TEXT NOT NULL,
+      file_path TEXT,
+      bundle_json TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY(debug_run_id) REFERENCES debug_runs(id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_debug_reports_run_id ON debug_reports(debug_run_id, created_at);
+    CREATE TABLE IF NOT EXISTS debug_patch_artifacts (
+      id TEXT PRIMARY KEY,
+      debug_run_id TEXT NOT NULL,
+      title TEXT NOT NULL,
+      diagnosis TEXT,
+      diff TEXT NOT NULL,
+      files_touched_json TEXT NOT NULL,
+      expected_fix TEXT,
+      tests_to_run_json TEXT NOT NULL DEFAULT '[]',
+      risk_level TEXT NOT NULL DEFAULT 'medium',
+      rollback_notes TEXT,
+      status TEXT NOT NULL DEFAULT 'created',
+      applied_at DATETIME,
+      revert_json TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY(debug_run_id) REFERENCES debug_runs(id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_debug_patch_artifacts_run_id ON debug_patch_artifacts(debug_run_id, created_at);
+    CREATE TABLE IF NOT EXISTS debug_test_results (
+      id TEXT PRIMARY KEY,
+      debug_run_id TEXT NOT NULL,
+      suite_name TEXT,
+      test_name TEXT NOT NULL,
+      status TEXT NOT NULL,
+      failure_category TEXT,
+      notes TEXT,
+      evidence_json TEXT,
+      command TEXT,
+      stdout TEXT,
+      stderr TEXT,
+      exit_code INTEGER,
+      duration_ms INTEGER,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY(debug_run_id) REFERENCES debug_runs(id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_debug_test_results_run_id ON debug_test_results(debug_run_id, created_at);
+    CREATE TABLE IF NOT EXISTS debug_frontend_errors (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      timestamp TEXT,
+      kind TEXT,
+      name TEXT,
+      message TEXT NOT NULL,
+      stack TEXT,
+      route TEXT,
+      component TEXT,
+      payload_json TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_debug_frontend_errors_created_at ON debug_frontend_errors(created_at, id);
   `);
 
   // Migrations

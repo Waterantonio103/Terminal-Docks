@@ -7,8 +7,10 @@ import { generateId } from '../graphUtils.js';
 type Handler = (ev: McpServerEvent) => void;
 
 interface Connection {
-  es: EventSource;
+  es: EventSource | null;
   handlers: Set<Handler>;
+  connected: boolean;
+  fallbackOpened: boolean;
 }
 
 let cachedBaseUrl: string | null = null;
@@ -35,7 +37,7 @@ class McpEventBus {
       if (!current) return;
       current.handlers.delete(handler);
       if (current.handlers.size === 0) {
-        current.es.close();
+        current.es?.close();
         this.connections.delete(sessionId);
       }
     };
@@ -43,28 +45,49 @@ class McpEventBus {
 
   private openConnection(sessionId: string): Connection {
     const handlers = new Set<Handler>();
-    const conn: Connection = { es: undefined as unknown as EventSource, handlers };
+    const conn: Connection = { es: null, handlers, connected: false, fallbackOpened: false };
     this.connections.set(sessionId, conn);
 
     void getBaseUrl().then(base => {
       // Avoid re-opening if a dispose raced with the fetch.
       if (!this.connections.has(sessionId)) return;
-      const es = new EventSource(`${base}/events/session?sid=${encodeURIComponent(sessionId)}`);
-      conn.es = es;
-      es.onmessage = e => {
-        let ev: McpServerEvent | null = null;
-        try { ev = JSON.parse(e.data) as McpServerEvent; } catch { return; }
-        if (!ev || typeof ev.type !== 'string') return;
-        // Mirror into the registry so any subscriber (adapter, UI) sees
-        // state changes even if it hasn't subscribed yet.
-        applyToRegistry(ev);
-        for (const h of handlers) {
-          try { h(ev); } catch (error) { console.warn('mcp event handler failed', error); }
-        }
-      };
-      es.onerror = () => { /* EventSource auto-reconnects; nothing to do */ };
+      this.attachEventSource(conn, sessionId, `${base}/events/session?sid=${encodeURIComponent(sessionId)}`, false);
     });
     return conn;
+  }
+
+  private attachEventSource(conn: Connection, sessionId: string, url: string, fallback: boolean): void {
+    console.log(`[mcpEventBus] opening ${fallback ? 'fallback ' : ''}session SSE sid=${sessionId} url=${url}`);
+    const es = new EventSource(url);
+    conn.es = es;
+    es.onopen = () => {
+      conn.connected = true;
+      console.log(`[mcpEventBus] session SSE connected sid=${sessionId}${fallback ? ' fallback=true' : ''}`);
+    };
+    es.onmessage = e => {
+      let ev: McpServerEvent | null = null;
+      try { ev = JSON.parse(e.data) as McpServerEvent; } catch { return; }
+      if (!ev || typeof ev.type !== 'string') return;
+      if (fallback && ev.sessionId !== sessionId) return;
+      console.log(`[mcpEventBus] received event type=${ev.type} sid=${ev.sessionId}`);
+      // Mirror into the registry so any subscriber (adapter, UI) sees
+      // state changes even if it hasn't subscribed yet.
+      applyToRegistry(ev);
+      for (const h of conn.handlers) {
+        try { h(ev); } catch (error) { console.warn('mcp event handler failed', error); }
+      }
+    };
+    es.onerror = () => {
+      console.warn(`[mcpEventBus] session SSE error sid=${sessionId}${fallback ? ' fallback=true' : ''}`);
+      if (!fallback && !conn.connected && !conn.fallbackOpened) {
+        conn.fallbackOpened = true;
+        es.close();
+        void getBaseUrl().then(base => {
+          if (!this.connections.has(sessionId)) return;
+          this.attachEventSource(conn, sessionId, `${base}/events`, true);
+        });
+      }
+    };
   }
 }
 

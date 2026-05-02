@@ -7,20 +7,37 @@ import { summarizeSession, normalizeCapabilities, defaultCapabilitiesForRole } f
 export function registerAgentTools(server, getSessionId) {
   server.registerTool('connect_agent', {
     title: 'Connect Agent',
-    inputSchema: {
-      role: z.string(),
-      agentId: z.string(),
-      capabilities: z.array(z.any()).optional(),
-      workingDir: z.string().optional(),
-    }
-  }, async ({ role, agentId, capabilities, workingDir }) => {
-    const sid = getSessionId() ?? 'unknown';
+      inputSchema: {
+        role: z.string(),
+        agentId: z.string(),
+        capabilities: z.array(z.any()).optional(),
+        workingDir: z.string().optional(),
+        sessionId: z.string().optional(),
+        runtimeSessionId: z.string().optional(),
+        missionId: z.string().optional(),
+        nodeId: z.string().optional(),
+        attempt: z.number().int().optional(),
+        terminalId: z.string().optional(),
+        cli: z.string().optional(),
+        profileId: z.string().optional(),
+      }
+  }, async ({ role, agentId, capabilities, workingDir, sessionId, runtimeSessionId, missionId, nodeId, attempt, terminalId, cli, profileId }) => {
+    const transportSid = getSessionId() ?? 'unknown';
+    const runtimeSid = runtimeSessionId || sessionId || transportSid;
     const normalizedRole = role.toLowerCase();
     const normalizedCapabilities = normalizeCapabilities(capabilities, defaultCapabilitiesForRole(normalizedRole));
 
-    sessions[sid] = {
-      ...sessions[sid],
+    sessions[runtimeSid] = {
+      ...sessions[runtimeSid],
+      transportSessionId: transportSid,
+      runtimeSessionId: runtimeSid,
+      missionId,
+      nodeId,
+      attempt,
+      terminalId,
+      cli,
       role: normalizedRole,
+      profileId,
       agentId,
       capabilities: normalizedCapabilities,
       workingDir,
@@ -29,11 +46,19 @@ export function registerAgentTools(server, getSessionId) {
       updatedAt: Date.now(),
     };
 
-    logSession(sid, 'connect', JSON.stringify({ role, agentId, capabilities }));
-    broadcast('Starlink', `Agent "${agentId}" (${role}) connected via session ${sid}`);
-    emitAgentEvent({ type: 'agent:ready', sessionId: sid, role: normalizedRole, agentId });
+    if (transportSid !== runtimeSid) {
+      sessions[transportSid] = {
+        ...sessions[transportSid],
+        runtimeSessionId: runtimeSid,
+        aliasOf: runtimeSid,
+      };
+    }
 
-    return { content: [{ type: 'text', text: `Successfully connected. Session ID: ${sid}` }] };
+    logSession(runtimeSid, 'connect', JSON.stringify({ role, agentId, capabilities, transportSessionId: transportSid, runtimeSessionId: runtimeSid, missionId, nodeId, attempt, terminalId, cli, profileId }));
+    broadcast('Starlink', `Agent "${agentId}" (${role}) connected via session ${runtimeSid}`);
+    emitAgentEvent({ type: 'agent:ready', sessionId: runtimeSid, missionId, nodeId, attempt, role: normalizedRole, agentId, at: Date.now() });
+
+    return { content: [{ type: 'text', text: `Successfully connected. Session ID: ${runtimeSid}` }] };
   });
 
   server.registerTool('list_sessions', {

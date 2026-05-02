@@ -202,8 +202,11 @@ export function TerminalPane({ pane, dragEndSeq }: { pane: Pane; dragEndSeq?: nu
 
     let unlisten: (() => void) | null = null;
     let refitUnlisten: UnlistenFn | null = null;
+    let disposed = false;
+    const attachFlushTimers: ReturnType<typeof setTimeout>[] = [];
 
     const initPty = async () => {
+      if (disposed) return;
       const storeSnap = useWorkspaceStore.getState();
       const workspaceDir = storeSnap.workspaceDir;
       const boundNodeId = typeof pane.data?.nodeId === 'string' ? pane.data.nodeId : null;
@@ -214,6 +217,7 @@ export function TerminalPane({ pane, dragEndSeq }: { pane: Pane; dragEndSeq?: nu
       const cli = graphNode?.config?.cli ?? pane.data?.cli;
 
       await terminalOutputBus.start();
+      if (disposed) return;
       const replayChunks = terminalOutputBus.getChunksSince(terminalId, 0);
       for (const chunk of replayChunks) {
         term.write(chunk.bytes);
@@ -230,6 +234,7 @@ export function TerminalPane({ pane, dragEndSeq }: { pane: Pane; dragEndSeq?: nu
       });
 
       refitUnlisten = await listen<{ terminalId: string }>('terminal-refit-requested', (event) => {
+        if (disposed) return;
         if (event.payload.terminalId !== terminalId) return;
         if (terminalElement.offsetWidth === 0 || terminalElement.offsetHeight === 0) return;
         fit.fit();
@@ -292,29 +297,27 @@ export function TerminalPane({ pane, dragEndSeq }: { pane: Pane; dragEndSeq?: nu
       if (runtimeManaged) {
         // RuntimeManager owns spawning for this terminal — attach only, no spawn.
         console.log(`[TerminalPane] runtimeManaged=true; skipping spawn for ${terminalId}`);
-        // The PTY may have already output data before our pty-out listener registered.
-        // Trigger a resize — on Tauri/WKWebView this causes the PTY backend to flush
-        // its output buffer to all active listeners, replaying any missed startup output.
-        setTimeout(() => {
-          if (!terminalInstance.current) return;
-          const rows = terminalInstance.current.rows || 24;
-          const cols = terminalInstance.current.cols || 80;
-          fitAddon.current?.fit();
-          invoke('resize_pty', { id: terminalId, rows, cols }).catch(() => {});
-          terminalInstance.current.refresh(0, rows - 1);
-          terminalInstance.current.scrollToBottom();
-          console.log(`[TerminalPane] post-attach flush triggered terminal=${terminalId}`);
-        }, 150);
-        // Second flush after CLI has had more time to render its initial UI
-        setTimeout(() => {
-          if (!terminalInstance.current) return;
-          const rows = terminalInstance.current.rows || 24;
-          const cols = terminalInstance.current.cols || 80;
-          fitAddon.current?.fit();
-          invoke('resize_pty', { id: terminalId, rows, cols }).catch(() => {});
-          terminalInstance.current.refresh(0, rows - 1);
-          terminalInstance.current.scrollToBottom();
-        }, 800);
+        if (replayChunks.length === 0) {
+          // Only ask the backend for a startup flush if the global output bus
+          // has nothing to replay. Otherwise resize can duplicate buffered shell
+          // banners and echoed launch commands in the xterm view.
+          const scheduleAttachFlush = (delay: number, shouldLog: boolean) => {
+            const timer = setTimeout(() => {
+              if (disposed || !terminalInstance.current) return;
+              if (terminalOutputBus.getSequence(terminalId) > 0) return;
+              const rows = terminalInstance.current.rows || 24;
+              const cols = terminalInstance.current.cols || 80;
+              fitAddon.current?.fit();
+              invoke('resize_pty', { id: terminalId, rows, cols }).catch(() => {});
+              terminalInstance.current.refresh(0, rows - 1);
+              terminalInstance.current.scrollToBottom();
+              if (shouldLog) console.log(`[TerminalPane] post-attach flush triggered terminal=${terminalId}`);
+            }, delay);
+            attachFlushTimers.push(timer);
+          };
+          scheduleAttachFlush(150, true);
+          scheduleAttachFlush(800, false);
+        }
       } else if (customCommand) {
         const spawned = await trySpawnPtyWithCommand({
           id: terminalId,
@@ -418,6 +421,8 @@ export function TerminalPane({ pane, dragEndSeq }: { pane: Pane; dragEndSeq?: nu
       clearTimeout(repaintT1);
       clearTimeout(repaintT2);
       clearTimeout(repaintT3);
+      disposed = true;
+      for (const timer of attachFlushTimers) clearTimeout(timer);
       resizeObserver.disconnect();
       terminalElement.removeEventListener('paste', pasteHandler, true);
       if (unlisten) unlisten();

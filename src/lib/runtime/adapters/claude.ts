@@ -22,6 +22,7 @@ const FAILURE_RE = /(?:error:|failed|exception|exit code\s+[1-9])/i;
 export const claudeAdapter: CliAdapter = {
   id: 'claude',
   label: 'Claude Code',
+  postReadySettleDelayMs: 1000,
 
   buildLaunchCommand(context: LaunchContext): LaunchCommand {
     const env: Record<string, string> = {
@@ -138,11 +139,12 @@ export const claudeAdapter: CliAdapter = {
     return events;
   },
 
-  buildActivationInput(signal: string): { paste: string; submit: string } {
-    // Collapse newlines to spaces — \n in PTY input is treated as Enter on Windows
+  buildActivationInput(signal: string): { preClear?: string; paste: string; submit: string } {
+    // Claude's editor accepts plain PTY input more reliably than bracketed paste on Windows.
     const flat = signal.replace(/\r?\n/g, ' ').replace(/\s{2,}/g, ' ').trim();
     return {
-      paste: `\x15\x1b[200~${flat}\x1b[201~`,
+      preClear: '\x15',
+      paste: flat,
       submit: '\r',
     };
   },

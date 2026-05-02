@@ -3,6 +3,7 @@ import { WorkspaceGrid } from './components/Layout/WorkspaceGrid';
 import { QuickOpen } from './components/QuickOpen/QuickOpen';
 import { NodeTreePane } from './components/NodeTree/NodeTreePane';
 import { RuntimeView } from './components/Runtime/RuntimeView';
+import { DebugPanel } from './components/Debug/DebugPanel';
 import { useWorkspaceStore, PaneType, McpMessage, DbTask, type AppMode } from './store/workspace';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
@@ -51,6 +52,24 @@ import { runtimeManager } from './lib/runtime/RuntimeManager';
 import { runtimeExecutor } from './lib/runtime/RuntimeExecutor';
 import { terminalOutputBus } from './lib/runtime/TerminalOutputBus';
 import { workflowOrchestrator } from './lib/workflow/WorkflowOrchestrator';
+
+function sendFrontendErrorToDebugMcp(report: FatalErrorReport, name?: string) {
+  invoke<string>('get_mcp_base_url')
+    .then(baseUrl => fetch(`${baseUrl}/internal/frontend-error`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        timestamp: new Date(report.ts).toISOString(),
+        kind: report.kind,
+        name,
+        message: report.message,
+        stack: report.stack,
+        route: report.url,
+        breadcrumbs: report.breadcrumbs,
+      }),
+    }))
+    .catch(() => {});
+}
 
 function App() {
   useEffect(() => {
@@ -185,6 +204,7 @@ function App() {
       const { message, stack } = stringifyUnknownError(error);
       const next: FatalErrorReport = { ts: Date.now(), kind, message, stack, url: window.location.href, breadcrumbs: readBreadcrumbs() };
       writeFatalReport(next); setFatalReport(next);
+      sendFrontendErrorToDebugMcp(next);
     }
     const onError = (e: ErrorEvent) => report('error', e.error ?? e.message);
     const onRejection = (e: PromiseRejectionEvent) => report('unhandledrejection', e.reason);
@@ -229,7 +249,14 @@ function App() {
         <ModeRail />
         {appMode === 'workspace' && <Sidebar />}
         <main className="flex-1 flex flex-col min-w-0 bg-bg-app relative">
-          {appMode === 'workflow' ? <NodeTreePane graph={globalGraph} onGraphChange={setGlobalGraph} /> : appMode === 'runtime' ? <RuntimeView /> : (
+          {appMode === 'workflow' ? (
+            <div className="flex-1 min-h-0 flex overflow-hidden">
+              <div className="flex-1 min-w-0 overflow-hidden">
+                <NodeTreePane graph={globalGraph} onGraphChange={setGlobalGraph} />
+              </div>
+              <DebugPanel />
+            </div>
+          ) : appMode === 'runtime' ? <RuntimeView /> : (
             <>
               {layoutMode === 'grid' && (
                 <div className="flex items-center h-8 bg-bg-titlebar border-b border-border-panel px-2 gap-0.5 overflow-x-auto shrink-0 select-none relative" data-tauri-drag-region>
@@ -264,6 +291,7 @@ function App() {
       const { message, stack } = stringifyUnknownError(error);
       const next: FatalErrorReport = { ts: Date.now(), kind: 'react', message, stack, url: window.location.href, breadcrumbs: readBreadcrumbs() };
       recordBreadcrumb('error-boundary', { name, message }); writeFatalReport(next); setFatalReport(next);
+      sendFrontendErrorToDebugMcp(next, name);
     }} fallback={({ error, reset }) => (
       <div className={`h-screen w-screen theme-${theme} bg-bg-app text-text-primary flex items-center justify-center p-6`}>
         <div className="w-full max-w-2xl bg-bg-panel border border-border-panel rounded-xl shadow-2xl overflow-hidden">

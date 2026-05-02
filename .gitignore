@@ -14,6 +14,11 @@ dist-ssr
 *.local
 
 src-tauri/
+!src-tauri/
+src-tauri/*
+!src-tauri/examples/
+src-tauri/examples/*
+!src-tauri/examples/cli_probe.rs
 
 # Editor directories and files
 .vscode/*

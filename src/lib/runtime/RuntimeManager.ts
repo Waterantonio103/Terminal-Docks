@@ -1480,12 +1480,15 @@ class RuntimeManager {
       }
     }
 
+    console.log(`[runtime] CLI ready cli=${session.cliId} terminal=${session.terminalId}`);
+
     // 4. Register session with MCP
     if (!contract || !bootstrapRequest) {
       throw new Error(`CLI "${session.cliId}" does not have a runtime bootstrap contract.`);
     }
 
     session.transitionTo('registering_mcp');
+    console.log(`[runtime] registering MCP session session=${session.sessionId}`);
 
     const mcpReadyPromise = this.waitForMcpState(
       session.sessionId,
@@ -1502,6 +1505,7 @@ class RuntimeManager {
       void mcpReadyPromise.catch(() => {});
       throw new Error(registration?.message ?? registration?.error ?? 'Runtime registration was rejected by MCP.');
     }
+    console.log(`[runtime] MCP registration result session=${session.sessionId} ok=${registration.ok} message=${registration.message ?? ''}`);
 
     await acknowledgeActivation({
       missionId: session.missionId,
@@ -1531,6 +1535,7 @@ class RuntimeManager {
       if (bootstrapPrompt) {
         try {
           bootstrapPromptBody = bootstrapPrompt.replace(/\r$/, '');
+          console.log(`[runtime] injecting bootstrap prompt cli=${session.cliId} session=${session.sessionId}`);
           const injectResult = await Promise.race([
             this.injectInteractivePrompt(session, bootstrapPromptBody, false).then(() => true),
             sleep(BOOTSTRAP_INJECTION_TIMEOUT_MS).then(() => false),
@@ -1541,6 +1546,7 @@ class RuntimeManager {
               `Bootstrap prompt injection timed out (${BOOTSTRAP_INJECTION_TIMEOUT_MS}ms) for CLI "${session.cliId}" on node "${session.nodeId}".`,
             );
           }
+          console.log(`[runtime] bootstrap prompt injected cli=${session.cliId} session=${session.sessionId}`);
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
           throw new Error(
@@ -1553,6 +1559,7 @@ class RuntimeManager {
     }
 
     session.transitionTo('awaiting_mcp_ready');
+    console.log(`[runtime] waiting for agent:ready session=${session.sessionId}`);
 
     try {
       if (session.cliId === 'codex' && session.isTerminal && bootstrapPromptBody) {
@@ -1565,6 +1572,7 @@ class RuntimeManager {
         }
       }
       await mcpReadyPromise;
+      console.log(`[runtime] agent ready received session=${session.sessionId}`);
     } catch {
       throw new Error(
         `Timed out waiting for "${contract.handshakeEvent}" from CLI "${session.cliId}" on node "${session.nodeId}" (${BOOTSTRAP_EVENT_TIMEOUT_MS}ms). ` +
@@ -1626,6 +1634,7 @@ class RuntimeManager {
         workspaceDir: session.workspaceDir,
         assignment: activationPayload.assignment,
       }, baseUrl);
+      console.log(`[runtime] injecting task prompt cli=${session.cliId} session=${session.sessionId}`);
       await this.injectInteractiveTask(session, signal, false);
     }
 
@@ -1917,7 +1926,8 @@ class RuntimeManager {
     const prompt =
       `Connect to MCP before task activation. MCP URL: ${mcpUrl}. ` +
       `Call connect_agent with role="${role}", agentId="${session.agentId}", terminalId="${session.terminalId}", ` +
-      `cli="${session.cliId}", profileId="${profileId}", missionId="${session.missionId}", nodeId="${session.nodeId}", attempt=${session.attempt}${payloadSuffix}. ` +
+      `cli="${session.cliId}", profileId="${profileId}", sessionId="${session.sessionId}", runtimeSessionId="${session.sessionId}", ` +
+      `missionId="${session.missionId}", nodeId="${session.nodeId}", attempt=${session.attempt}${payloadSuffix}. ` +
       'After connection, wait for NEW_TASK and run get_task_details.';
     return `${prompt}\r`;
   }
@@ -2151,7 +2161,14 @@ class RuntimeManager {
           console.log(`[runtime] cli-ready cli=${session.cliId} ready=${ready.ready} detail="${ready.detail}"`);
           lastDetail = ready.detail;
         }
-        if (ready.ready) return true;
+        if (ready.ready) {
+          const settleMs = session.adapter.postReadySettleDelayMs ?? 0;
+          if (settleMs > 0) {
+            console.log(`[runtime] cli-ready settle cli=${session.cliId} delayMs=${settleMs}`);
+            await sleep(settleMs);
+          }
+          return true;
+        }
       }
       await sleep(200);
     }

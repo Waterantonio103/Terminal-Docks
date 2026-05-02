@@ -23,6 +23,7 @@ const FAILURE_RE = /(?:error:|failed|exception|exit code\s+[1-9])/i;
 export const opencodeAdapter: CliAdapter = {
   id: 'opencode',
   label: 'OpenCode',
+  postReadySettleDelayMs: 3000,
 
   buildLaunchCommand(context: LaunchContext): LaunchCommand {
     const env: Record<string, string> = {

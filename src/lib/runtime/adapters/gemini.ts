@@ -13,9 +13,10 @@ import type {
 } from './CliAdapter';
 
 const BANNER_RE = /\b(gemini|google gemini|gemini cli)\b/i;
-const PROMPT_BAR_RE = /(?:>|\uff1e|❯|Input:|Prompt:)\s*$/m;
-const SHELL_PROMPT_RE = /(?:\$|>|#)\s*$/m;
+const PROMPT_BAR_RE = /(?:^|\n)\s*(?:>|\uff1e|❯|Input:|Prompt:)\s*$/m;
+const SHELL_PROMPT_RE = /(?:^|\n)\s*(?:[A-Za-z]:\\[^>\r\n]*>|PS [^>\r\n]*>|[$#])\s*$/m;
 const READY_KEYWORDS_RE = /\b(ready|welcome|type your|enter your (?:prompt|message|query))\b/i;
+const GEMINI_UI_RE = /(?:gemini cli|to resume this session|loaded cached credentials|tips for getting started|using:\s*gemini|╭|✦|✧)/i;
 const PERMISSION_RE = /(?:allow|deny|approve|reject|permission|grant|trust|always allow)/i;
 const COMPLETION_RE = /(?:task completed|finished|done|exit code\s+0)/i;
 const FAILURE_RE = /(?:error:|failed|exception|exit code\s+[1-9])/i;
@@ -29,7 +30,7 @@ function logGeminiReady(message: string): void {
 export const geminiAdapter: CliAdapter = {
   id: 'gemini',
   label: 'Gemini CLI',
-  postReadySettleDelayMs: 500,
+  postReadySettleDelayMs: 3000,
 
   buildLaunchCommand(context: LaunchContext): LaunchCommand {
     const env: Record<string, string> = {
@@ -66,13 +67,14 @@ export const geminiAdapter: CliAdapter = {
 
   detectReady(output: string): ReadyDetectionResult {
     const tail = output.split('\n').slice(-3).join('\n');
-    if (SHELL_PROMPT_RE.test(tail) && !BANNER_RE.test(output)) {
+    const hasGeminiUi = GEMINI_UI_RE.test(output);
+    if (SHELL_PROMPT_RE.test(tail) && !hasGeminiUi) {
       logGeminiReady('rejected reason=shell_prompt_only');
       return { ready: false, confidence: 'low', detail: 'Shell prompt only — Gemini not confirmed' };
     }
 
     if (BANNER_RE.test(output)) {
-      if (PROMPT_BAR_RE.test(output) || READY_KEYWORDS_RE.test(output) || GEMINI_INPUT_HINT_RE.test(output)) {
+      if (hasGeminiUi && (PROMPT_BAR_RE.test(output) || READY_KEYWORDS_RE.test(output) || GEMINI_INPUT_HINT_RE.test(output))) {
         logGeminiReady('accepted reason=banner_and_prompt');
         return { ready: true, confidence: 'high', detail: 'Gemini banner and input prompt detected' };
       }
@@ -81,7 +83,7 @@ export const geminiAdapter: CliAdapter = {
       return { ready: false, confidence: 'low', detail: 'Gemini banner detected, waiting for prompt' };
     }
 
-    if (GEMINI_PROMPT_MARKER_RE.test(output)) {
+    if (hasGeminiUi && GEMINI_PROMPT_MARKER_RE.test(output)) {
       logGeminiReady('accepted reason=gemini_prompt_marker');
       return { ready: true, confidence: 'medium', detail: 'Gemini-specific prompt marker detected' };
     }
