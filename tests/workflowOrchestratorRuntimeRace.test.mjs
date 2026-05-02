@@ -1,0 +1,105 @@
+import assert from 'node:assert/strict';
+
+globalThis.EventSource = class {
+  addEventListener() {}
+  close() {}
+};
+
+const { WorkflowOrchestrator } = await import('../.tmp-tests/lib/workflow/WorkflowOrchestrator.js');
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function definition() {
+  return {
+    id: 'race-definition',
+    name: 'Runtime race regression',
+    createdAt: new Date(0).toISOString(),
+    updatedAt: new Date(0).toISOString(),
+    nodes: [
+      {
+        id: 'task',
+        kind: 'task',
+        roleId: 'task',
+        config: {
+          prompt: 'Run the race regression',
+          mode: 'build',
+        },
+      },
+      {
+        id: 'agent-a',
+        kind: 'agent',
+        roleId: 'builder',
+        config: {
+          cli: 'codex',
+          executionMode: 'interactive_pty',
+          terminalId: 'term-a',
+        },
+      },
+    ],
+    edges: [{ fromNodeId: 'task', toNodeId: 'agent-a', condition: 'always' }],
+  };
+}
+
+function createFastCompletingRuntimeManager() {
+  const listeners = new Set();
+  return {
+    subscribe(listener) {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+    getSessionForNode() {
+      return undefined;
+    },
+    async validateSessionForReuse() {
+      return { status: 'stale', details: 'test' };
+    },
+    async ensureRuntimeReadyForTask(args) {
+      return this.startNodeRun(args);
+    },
+    async startNodeRun(args) {
+      const session = {
+        sessionId: 'session-fast',
+        terminalId: args.terminalId,
+        cliId: args.cliId,
+        executionMode: args.executionMode,
+        createdAt: Date.now(),
+      };
+      for (const listener of listeners) {
+        listener({ type: 'session_created', sessionId: session.sessionId, nodeId: args.nodeId, missionId: args.missionId });
+        listener({ type: 'session_completed', sessionId: session.sessionId, nodeId: args.nodeId, outcome: 'success' });
+      }
+      await sleep(10);
+      return session;
+    },
+    async reinjectTask() {},
+    async sendTask() {},
+    async sendInput() {},
+    async stopRuntime() {},
+    async writeBootstrapToTerminal() {},
+  };
+}
+
+async function run(name, fn) {
+  try {
+    await fn();
+    console.log(`PASS ${name}`);
+  } catch (err) {
+    console.error(`FAIL ${name}`);
+    console.error(err);
+    process.exitCode = 1;
+  }
+}
+
+await run('orchestrator handles runtime completion before runtime_attached', async () => {
+  const orchestrator = new WorkflowOrchestrator();
+  orchestrator.setRuntimeManager(createFastCompletingRuntimeManager());
+
+  orchestrator.startRun(definition(), { runId: 'race-run' });
+  await sleep(50);
+
+  const run = orchestrator.getRun('race-run');
+  assert.equal(run?.status, 'completed');
+  assert.equal(run?.nodeStates['agent-a']?.state, 'completed');
+});

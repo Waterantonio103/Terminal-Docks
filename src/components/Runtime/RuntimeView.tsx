@@ -42,6 +42,7 @@ const MIN_NODE_WIDTH = 280;
 const MIN_NODE_HEIGHT = 220;
 const GRID_GAP_X = 80;
 const GRID_GAP_Y = 60;
+const NODE_SPAWN_PADDING = 32;
 const GRID_SIZE = 24;
 const ACTIVE_STATUSES = new Set<string>([
   'launching', 'connecting', 'spawning', 'terminal_started',
@@ -73,22 +74,47 @@ function layoutKeyFor(session: EnrichedRuntimeSession, index: number): string {
   return session.nodeId || session.terminalId || `runtime-${index}`;
 }
 
+function layoutsOverlap(a: RuntimeNodeLayout, b: RuntimeNodeLayout, padding = 0): boolean {
+  return (
+    a.x < b.x + b.width + padding &&
+    a.x + a.width + padding > b.x &&
+    a.y < b.y + b.height + padding &&
+    a.y + a.height + padding > b.y
+  );
+}
+
+function isLayoutAvailable(layout: RuntimeNodeLayout, occupied: RuntimeNodeLayout[]): boolean {
+  return !occupied.some(candidate => layoutsOverlap(layout, candidate, NODE_SPAWN_PADDING));
+}
+
 function computeDefaultLayout(
   session: EnrichedRuntimeSession,
   index: number,
-  occupied: Set<string>,
+  occupied: RuntimeNodeLayout[],
 ): RuntimeNodeLayout {
   const position = session.position;
-  let x = typeof position?.x === 'number' ? position.x : 60 + (index % 3) * (DEFAULT_NODE_WIDTH + GRID_GAP_X);
-  let y = typeof position?.y === 'number' ? position.y : 70 + Math.floor(index / 3) * (DEFAULT_NODE_HEIGHT + GRID_GAP_Y);
-  let guard = 0;
-  while (occupied.has(`${Math.round(x)}:${Math.round(y)}`) && guard < 20) {
-    x += 32;
-    y += 28;
-    guard += 1;
+  const preferred: RuntimeNodeLayout = {
+    x: typeof position?.x === 'number' ? position.x : 60 + (index % 3) * (DEFAULT_NODE_WIDTH + GRID_GAP_X),
+    y: typeof position?.y === 'number' ? position.y : 70 + Math.floor(index / 3) * (DEFAULT_NODE_HEIGHT + GRID_GAP_Y),
+    width: DEFAULT_NODE_WIDTH,
+    height: DEFAULT_NODE_HEIGHT,
+  };
+  if (isLayoutAvailable(preferred, occupied)) return preferred;
+
+  for (let row = 0; row < 80; row += 1) {
+    for (let col = 0; col < 4; col += 1) {
+      const candidate: RuntimeNodeLayout = {
+        x: 60 + col * (DEFAULT_NODE_WIDTH + GRID_GAP_X),
+        y: 70 + row * (DEFAULT_NODE_HEIGHT + GRID_GAP_Y),
+        width: DEFAULT_NODE_WIDTH,
+        height: DEFAULT_NODE_HEIGHT,
+      };
+      if (isLayoutAvailable(candidate, occupied)) return candidate;
+    }
   }
-  occupied.add(`${Math.round(x)}:${Math.round(y)}`);
-  return { x, y, width: DEFAULT_NODE_WIDTH, height: DEFAULT_NODE_HEIGHT };
+
+  const bottom = occupied.reduce((max, layout) => Math.max(max, layout.y + layout.height), 70);
+  return { x: 60, y: bottom + GRID_GAP_Y, width: DEFAULT_NODE_WIDTH, height: DEFAULT_NODE_HEIGHT };
 }
 
 function runtimePaneFor(session: EnrichedRuntimeSession): Pane {
@@ -99,10 +125,12 @@ function runtimePaneFor(session: EnrichedRuntimeSession): Pane {
     gridPos: { x: 0, y: 0, w: 12, h: 12 },
     data: {
       terminalId: session.terminalId,
+      runtimeSessionId: session.sessionId,
       nodeId: session.nodeId,
       roleId: session.roleId,
       cli: (session.cli ?? 'claude') as WorkflowAgentCli,
       executionMode: session.executionMode ?? 'interactive_pty',
+      runtimeManaged: true,
     },
   };
 }
@@ -332,20 +360,23 @@ export function RuntimeView() {
 
   useEffect(() => {
     persistLayouts(prev => {
-      const occupied = new Set<string>();
-      for (const layout of Object.values(prev)) {
-        occupied.add(`${Math.round(layout.x)}:${Math.round(layout.y)}`);
-      }
-
-      let next: Record<string, RuntimeNodeLayout> | null = null;
+      const occupied: RuntimeNodeLayout[] = [];
+      let next: Record<string, RuntimeNodeLayout> = { ...prev };
+      let changed = false;
       for (let index = 0; index < sessions.length; index += 1) {
         const session = sessions[index];
         const key = layoutKeyFor(session, index);
-        if ((next ?? prev)[key]) continue;
-        if (!next) next = { ...prev };
-        next[key] = computeDefaultLayout(session, index, occupied);
+        const existing = next[key];
+        if (existing && isLayoutAvailable(existing, occupied)) {
+          occupied.push(existing);
+          continue;
+        }
+        const layout = computeDefaultLayout(session, index, occupied);
+        next[key] = layout;
+        occupied.push(layout);
+        changed = true;
       }
-      return next ?? prev;
+      return changed ? next : prev;
     });
   }, [sessions, persistLayouts]);
 

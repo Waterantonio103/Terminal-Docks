@@ -374,6 +374,26 @@ export interface DbTask {
 export type SidebarTabType = 'files' | 'tasks' | 'swarm' | 'agents' | 'nodetree' | 'settings';
 export type LayoutMode = 'grid' | 'tabs';
 
+export interface DebugSessionTab {
+  terminalId: string;
+  missionId: string;
+  nodeId?: string | null;
+  label: string;
+  cli?: WorkflowAgentCli | null;
+}
+
+export interface DebugRunHistoryItem {
+  debugRunId: string;
+  suiteName: string;
+  mode: string;
+  status: string;
+  startedAt: number;
+  updatedAt: number;
+  reportPath?: string;
+  lastMessage?: string;
+  sessions: DebugSessionTab[];
+}
+
 export interface CustomThemeColors {
   // UI Colors
   '--bg-app'?: string;
@@ -398,6 +418,8 @@ interface WorkspaceState {
   layoutMode: LayoutMode;
   sidebarOpen: boolean;
   activeSidebarTab: SidebarTabType;
+  debugSidebarWidth: number;
+  debugRunHistory: DebugRunHistoryItem[];
   appMode: AppMode;
   workspaceDir: string | null;
   theme: ThemeType;
@@ -413,6 +435,8 @@ interface WorkspaceState {
   nodeRuntimeBindings: Record<string, NodeRuntimeBinding>;
   toggleSidebar: () => void;
   setActiveSidebarTab: (tab: SidebarTabType) => void;
+  setDebugSidebarWidth: (width: number) => void;
+  upsertDebugRunHistory: (item: DebugRunHistoryItem) => void;
   setAppMode: (mode: AppMode) => void;
   setLayoutMode: (mode: LayoutMode) => void;
   setActivePaneId: (id: string | null) => void;
@@ -452,16 +476,22 @@ interface WorkspaceState {
   loadPlannedDag: (planned: any) => void;
 }
 
-function findHighestAvailableSpot(panes: Pane[], w: number, h: number): GridPos {
+function gridRectsOverlap(a: GridPos, b: GridPos, padding = 0): boolean {
+  return (
+    a.x < b.x + b.w + padding &&
+    a.x + a.w + padding > b.x &&
+    a.y < b.y + b.h + padding &&
+    a.y + a.h + padding > b.y
+  );
+}
+
+function findHighestAvailableSpot(panes: Pane[], w: number, h: number, padding = 1): GridPos {
   const GRID_COLUMNS = 100;
   let y = 0;
   while (y < 2000) {
     for (let x = 0; x <= GRID_COLUMNS - w; x++) {
       const rect = { x, y, w, h };
-      const hasCollision = panes.some(p => {
-        const o = p.gridPos;
-        return rect.x < o.x + o.w && rect.x + rect.w > o.x && rect.y < o.y + o.h && rect.y + rect.h > o.y;
-      });
+      const hasCollision = panes.some(p => gridRectsOverlap(rect, p.gridPos, padding));
       if (!hasCollision) return rect;
     }
     y += 1;
@@ -488,6 +518,8 @@ export const useWorkspaceStore = create<WorkspaceState>()(
       layoutMode: 'grid',
       sidebarOpen: true,
       activeSidebarTab: 'files',
+      debugSidebarWidth: 360,
+      debugRunHistory: [],
       appMode: 'workflow',
       workspaceDir: null,
       theme: getInitialTheme(),
@@ -503,6 +535,17 @@ export const useWorkspaceStore = create<WorkspaceState>()(
       nodeRuntimeBindings: {},
 
       setActiveSidebarTab: (tab) => set({ activeSidebarTab: tab }),
+      setDebugSidebarWidth: (width) => set({
+        debugSidebarWidth: Math.max(280, Math.min(720, Math.round(width))),
+      }),
+      upsertDebugRunHistory: (item) => set((state) => {
+        const deduped = state.debugRunHistory.filter(run => run.debugRunId !== item.debugRunId);
+        return {
+          debugRunHistory: [item, ...deduped]
+            .sort((a, b) => b.updatedAt - a.updatedAt)
+            .slice(0, 12),
+        };
+      }),
       setAppMode: (mode) => set({ appMode: mode }),
       setLayoutMode: (mode) => set({ layoutMode: mode }),
       setActivePaneId: (id) => set({ activePaneId: id }),
@@ -594,7 +637,7 @@ export const useWorkspaceStore = create<WorkspaceState>()(
         
         set((state) => {
           const panes = selectActivePanes(state);
-          const gridPos = findHighestAvailableSpot(panes, 50, 80);
+          const gridPos = findHighestAvailableSpot(panes, 48, 80, 2);
           
           const newPane: Pane = {
             id: paneId,
@@ -883,7 +926,7 @@ export const useWorkspaceStore = create<WorkspaceState>()(
     }),
     {
       name: 'workspace-storage',
-      version: 11,
+      version: 12,
       migrate: (persistedState: any, version: number) => {
         if (version <= 2) {
           const tabs = (persistedState as any).tabs || [];
@@ -982,6 +1025,13 @@ export const useWorkspaceStore = create<WorkspaceState>()(
             activePaneId: null,
           };
         }
+        if (version < 12) {
+          return {
+            ...persistedState,
+            debugSidebarWidth: 360,
+            debugRunHistory: [],
+          };
+        }
         return persistedState;
       },
       partialize: (state) => ({
@@ -1009,6 +1059,11 @@ export const useWorkspaceStore = create<WorkspaceState>()(
         activePaneId: state.activePaneId,
         layoutMode: state.layoutMode,
         sidebarOpen: state.sidebarOpen,
+        debugSidebarWidth: state.debugSidebarWidth,
+        debugRunHistory: state.debugRunHistory.slice(0, 12).map(run => ({
+          ...run,
+          sessions: run.sessions.slice(0, 24),
+        })),
         appMode: state.appMode,
         workspaceDir: state.workspaceDir,
         theme: state.theme,

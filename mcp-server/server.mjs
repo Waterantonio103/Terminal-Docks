@@ -44,7 +44,10 @@ function createMcpServer(getSessionId) {
 }
 
 const app = express();
-app.use(cors());
+app.use(cors({
+  allowedHeaders: ['Content-Type', 'Accept', 'mcp-session-id'],
+  exposedHeaders: ['mcp-session-id'],
+}));
 app.use(express.json());
 
 app.get('/health', (_req, res) => res.json({ ok: true, version: '2.0.0-phase9' }));

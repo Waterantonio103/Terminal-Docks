@@ -40,6 +40,13 @@ function classifyFailure({ missionId, nodeIds }) {
 
 async function runTemplate(debugRun, templateName) {
   const { mission, nodeIds, terminalIds } = buildMissionTemplate({ debugRun, templateName, yolo: false });
+  const sessions = mission.nodes.map(node => ({
+    missionId: mission.missionId,
+    nodeId: node.id,
+    terminalId: node.terminal.terminalId,
+    label: node.terminal.terminalTitle,
+    cli: node.terminal.cli,
+  }));
   seedDebugMission(mission);
   addDebugRunMission(debugRun.id, mission.missionId);
   db.prepare(`UPDATE compiled_missions SET status = 'running', updated_at = CURRENT_TIMESTAMP WHERE mission_id = ?`).run(mission.missionId);
@@ -79,7 +86,7 @@ async function runTemplate(debugRun, templateName) {
   if (status === 'failed') {
     writeDebugEvent(debugRun.id, 'debug_test_failed', { templateName, missionId: mission.missionId, failureCategory });
   }
-  return { testName: templateName, status, failureCategory, missionId: mission.missionId, nodeIds, terminalIds };
+  return { testName: templateName, status, failureCategory, missionId: mission.missionId, nodeIds, terminalIds, sessions };
 }
 
 export function registerDebugSuiteTools(server, getSessionId) {

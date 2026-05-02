@@ -264,6 +264,7 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
   const tabs = useWorkspaceStore(state => state.tabs);
   const results = useWorkspaceStore(state => state.results);
   const addPane = useWorkspaceStore(state => state.addPane);
+  const setAppMode = useWorkspaceStore(state => state.setAppMode);
   const updatePaneDataByTerminalId = useWorkspaceStore(state => state.updatePaneDataByTerminalId);
   const setNodeTerminalBinding = useWorkspaceStore(state => state.setNodeTerminalBinding);
   const nodeRuntimeBindings = useWorkspaceStore(state => state.nodeRuntimeBindings);
@@ -1186,6 +1187,7 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
       // TS Orchestrator is the canonical runtime brain.
       const { missionOrchestrator } = await import('../../lib/workflow/MissionOrchestrator');
       await missionOrchestrator.launchMission(mission);
+      setAppMode('runtime');
 
       const unsubFailures = (await import('../../lib/workflow/WorkflowOrchestrator')).workflowOrchestrator.subscribeForRun(missionId, (event) => {
         if (event.type !== 'node_failed') return;
@@ -1203,7 +1205,7 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
       setValidationTone('error');
       setValidationMessage(error instanceof Error ? error.message : String(error));
     }
-  }, [registry, state.document, workspaceDir, graph.id, openTerminals, tabs, addPane, applyOperator, setNodeTerminalBinding]);
+  }, [registry, state.document, workspaceDir, graph.id, openTerminals, tabs, addPane, setAppMode, applyOperator, setNodeTerminalBinding]);
 
   const viewRuntimeMapping = useCallback(() => {
     try {

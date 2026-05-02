@@ -164,6 +164,7 @@ export class WorkflowOrchestrator {
 
   private unlistenRuntimeManager?: () => void;
   private mcpUnsubscribers = new Map<string, () => void>();
+  private pendingRuntimeSessions = new Map<string, { runId: string; nodeId: string }>();
 
   setRuntimeManager(manager: RuntimeManagerPort): void {
     if (this.unlistenRuntimeManager) {
@@ -176,11 +177,12 @@ export class WorkflowOrchestrator {
   }
 
   private handleRuntimeManagerEvent(event: import('../runtime/RuntimeTypes.js').RuntimeManagerEvent): void {
-    const run = this.findRunBySessionId(event.sessionId);
+    const run = this.findRunForRuntimeEvent(event);
     if (!run) return;
 
     switch (event.type) {
       case 'session_created':
+        this.pendingRuntimeSessions.set(event.sessionId, { runId: run.runId, nodeId: event.nodeId });
         this.wireMcpForSession(run.runId, event.sessionId);
         break;
 
@@ -190,6 +192,7 @@ export class WorkflowOrchestrator {
           attempt: run.nodeStates[event.nodeId]?.attempt || 1,
           outcome: event.outcome,
         });
+        this.pendingRuntimeSessions.delete(event.sessionId);
         break;
 
       case 'session_state_changed':
@@ -347,6 +350,20 @@ export class WorkflowOrchestrator {
     for (const run of this.runs.values()) {
       if (run.runtimeSessions[sessionId]) return run;
     }
+    return undefined;
+  }
+
+  private findRunForRuntimeEvent(event: import('../runtime/RuntimeTypes.js').RuntimeManagerEvent): WorkflowRun | undefined {
+    const attachedRun = this.findRunBySessionId(event.sessionId);
+    if (attachedRun) return attachedRun;
+
+    const pending = this.pendingRuntimeSessions.get(event.sessionId);
+    if (pending) return this.runs.get(pending.runId);
+
+    if (event.type === 'session_created') {
+      return this.runs.get(event.missionId);
+    }
+
     return undefined;
   }
 

@@ -22,6 +22,7 @@ import type {
   RuntimeManagerEvent,
   RuntimeManagerSnapshot,
   RuntimeReuseExpectation,
+  RuntimeSessionDescriptor,
   RuntimeSessionState,
   SendTaskArgs,
   SendInputArgs,
@@ -192,6 +193,7 @@ class TerminalLock {
 
 class RuntimeManager {
   private sessions = new Map<string, RuntimeSession>();
+  private retainedSessions = new Map<string, RuntimeSessionDescriptor>();
   private sessionsByNode = new Map<string, string>();
   private terminalOwners = new Map<string, string>();
   private listeners = new Set<ManagerListener>();
@@ -396,6 +398,8 @@ class RuntimeManager {
     console.log(
       `[runtime] create cli=${args.cliId} model=${normalizeModelForReuse(args.modelId ?? args.model) ?? '<default>'} yolo=${Boolean(args.yolo)} executionMode=${args.executionMode} workspace=${args.workspaceDir ?? '<none>'}`,
     );
+
+    this.forgetRetainedSessionsForRuntime(args.missionId, args.nodeId, args.terminalId);
 
     const session = new RuntimeSession(adapter, {
       missionId: args.missionId,
@@ -1008,9 +1012,30 @@ class RuntimeManager {
         createdAt: d.createdAt,
       };
     });
+    const liveSessionIds = new Set(sessions.map(s => s.sessionId));
+    const retainedSessions = Array.from(this.retainedSessions.values())
+      .filter(d => !liveSessionIds.has(d.sessionId))
+      .map(d => ({
+        sessionId: d.sessionId,
+        missionId: d.missionId,
+        nodeId: d.nodeId,
+        attempt: d.attempt,
+        role: d.role,
+        agentId: d.agentId,
+        cliId: d.cliId,
+        executionMode: d.executionMode,
+        terminalId: d.terminalId,
+        paneId: d.paneId,
+        workspaceDir: d.workspaceDir,
+        state: d.state,
+        lastHeartbeatAt: d.lastHeartbeatAt,
+        lastError: d.lastError,
+        activePermission: d.activePermission,
+        createdAt: d.createdAt,
+      }));
 
     return {
-      sessions,
+      sessions: [...sessions, ...retainedSessions],
       activeCount: sessions.filter(s =>
         !isRuntimeSessionTerminal(s.state),
       ).length,
@@ -1969,9 +1994,33 @@ class RuntimeManager {
 
     return Array.from(this.sessions.values()).find(session =>
       session.cliId === 'codex' &&
+      !isRuntimeSessionTerminal(session.state) &&
       session.terminalId === args.terminalId &&
       (session.workspaceDir ?? null) === (args.workspaceDir ?? null),
     );
+  }
+
+  private retainSessionForRuntimeView(session: RuntimeSession): void {
+    if (session.missionId.startsWith('adhoc-')) return;
+    this.retainedSessions.set(session.sessionId, session.toDescriptor());
+
+    const entries = Array.from(this.retainedSessions.entries());
+    const maxRetained = 48;
+    if (entries.length <= maxRetained) return;
+    for (const [sessionId] of entries.slice(0, entries.length - maxRetained)) {
+      this.retainedSessions.delete(sessionId);
+    }
+  }
+
+  private forgetRetainedSessionsForRuntime(missionId: string, nodeId: string, terminalId: string): void {
+    for (const [sessionId, descriptor] of this.retainedSessions.entries()) {
+      if (
+        descriptor.terminalId === terminalId ||
+        (descriptor.missionId === missionId && descriptor.nodeId === nodeId)
+      ) {
+        this.retainedSessions.delete(sessionId);
+      }
+    }
   }
 
   private retireSession(session: RuntimeSession): void {
@@ -2181,6 +2230,12 @@ class RuntimeManager {
   }
 
   private async failRuntimeForMissingPty(session: RuntimeSession, error: unknown): Promise<void> {
+    if (isRuntimeSessionTerminal(session.state)) {
+      console.warn(
+        `[runtime] ignoring missing PTY for terminal session session=${session.sessionId} state=${session.state}`,
+      );
+      return;
+    }
     const message = error instanceof Error ? error.message : String(error);
     const reason = `Terminal process disappeared during runtime launch or injection: ${message}`;
     session.markFailed(reason);
@@ -2383,9 +2438,12 @@ class RuntimeManager {
     this.releaseTerminalOwnership(session.terminalId, session.sessionId);
     if (session.terminalId) {
       this.captureTerminalLogArtifact(session);
-      terminalOutputBus.clear(session.terminalId);
+      if (session.missionId.startsWith('adhoc-')) {
+        terminalOutputBus.clear(session.terminalId);
+      }
     }
 
+    this.retainSessionForRuntimeView(session);
     this.sessions.delete(session.sessionId);
     const nodeKey = `${session.missionId}:${session.nodeId}:${session.attempt}`;
     if (this.sessionsByNode.get(nodeKey) === session.sessionId) {
@@ -2460,6 +2518,7 @@ class RuntimeManager {
     }
     this.ptyCleanupFns.clear();
     this.sessions.clear();
+    this.retainedSessions.clear();
     this.sessionsByNode.clear();
     this.terminalOwners.clear();
     this.listeners.clear();

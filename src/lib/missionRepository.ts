@@ -57,6 +57,118 @@ export interface NodeEdgeInput {
   condition: string;
 }
 
+let mcpSessionPromise: Promise<string> | null = null;
+let mcpRequestSeq = 0;
+
+function nextMcpRequestId(): string {
+  mcpRequestSeq += 1;
+  return `ui-${Date.now()}-${mcpRequestSeq}`;
+}
+
+async function readMcpResponse(response: Response): Promise<any> {
+  const contentType = response.headers.get('content-type') ?? '';
+
+  if (contentType.includes('text/event-stream')) {
+    const reader = response.body?.getReader();
+    if (!reader) return {};
+    const decoder = new TextDecoder();
+    let buffer = '';
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const events = buffer.split('\n\n');
+        buffer = events.pop() ?? '';
+        for (const event of events) {
+          const dataLines = event
+            .split(/\r?\n/)
+            .filter(line => line.startsWith('data:'))
+            .map(line => line.slice(5).trim());
+          if (!dataLines.length) continue;
+          return JSON.parse(dataLines.join('\n'));
+        }
+      }
+    } finally {
+      reader.cancel().catch(() => {});
+    }
+    return {};
+  }
+
+  const rawBody = await response.text();
+  if (!rawBody) return {};
+  try {
+    return JSON.parse(rawBody);
+  } catch {
+    if (!response.ok) throw new Error(rawBody || `MCP request failed: HTTP ${response.status}`);
+    throw new Error(rawBody || 'MCP returned a non-JSON response');
+  }
+}
+
+async function resolveMcpBaseUrl(): Promise<string> {
+  try {
+    return await invoke<string>('get_mcp_base_url');
+  } catch {
+    return 'http://localhost:3741';
+  }
+}
+
+async function initializeMcpSession(baseUrl: string): Promise<string> {
+  const response = await fetch(`${baseUrl}/mcp`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Accept': 'application/json, text/event-stream',
+    },
+    body: JSON.stringify({
+      jsonrpc: '2.0',
+      id: nextMcpRequestId(),
+      method: 'initialize',
+      params: {
+        protocolVersion: '2024-11-05',
+        capabilities: {},
+        clientInfo: { name: 'Terminal Docks UI', version: '1.0.0' },
+      },
+    }),
+  });
+
+  const sessionId = response.headers.get('mcp-session-id');
+  const body = await readMcpResponse(response);
+  if (!response.ok || body.error) {
+    throw new Error(body.error?.message || `MCP initialize failed: HTTP ${response.status}`);
+  }
+  if (!sessionId) throw new Error('MCP initialize did not return a session id');
+
+  const initialized = await fetch(`${baseUrl}/mcp`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Accept': 'application/json, text/event-stream',
+      'mcp-session-id': sessionId,
+    },
+    body: JSON.stringify({
+      jsonrpc: '2.0',
+      method: 'notifications/initialized',
+    }),
+  });
+  if (!initialized.ok) {
+    const body = await readMcpResponse(initialized);
+    throw new Error(body.error?.message || `MCP initialized notification failed: HTTP ${initialized.status}`);
+  }
+
+  return sessionId;
+}
+
+function getMcpSession(baseUrl: string): Promise<string> {
+  if (!mcpSessionPromise) {
+    mcpSessionPromise = initializeMcpSession(baseUrl).catch(err => {
+      mcpSessionPromise = null;
+      throw err;
+    });
+  }
+  return mcpSessionPromise;
+}
+
 export const missionRepository = {
   getMissionSnapshot(missionId: string): Promise<MissionSnapshot> {
     return invoke<MissionSnapshot>('get_mission_snapshot', { missionId });
@@ -99,20 +211,19 @@ export const missionRepository = {
   },
 
   async invokeMcp(method: string, params: any): Promise<string> {
-    let baseUrl = 'http://localhost:3741';
-    try {
-      baseUrl = await invoke<string>('get_mcp_base_url');
-    } catch {}
+    const baseUrl = await resolveMcpBaseUrl();
+    let sessionId = await getMcpSession(baseUrl);
 
-    const response = await fetch(`${baseUrl}/mcp`, {
+    const callTool = () => fetch(`${baseUrl}/mcp`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'mcp-session-id': 'ui-session', // Constant ID for UI-triggered tools
+        'Accept': 'application/json, text/event-stream',
+        'mcp-session-id': sessionId,
       },
       body: JSON.stringify({
         jsonrpc: '2.0',
-        id: Date.now(),
+        id: nextMcpRequestId(),
         method: 'tools/call',
         params: {
           name: method,
@@ -121,7 +232,16 @@ export const missionRepository = {
       }),
     });
 
-    const body = await response.json();
+    let response = await callTool();
+    let body = await readMcpResponse(response);
+    const message = body.error?.message;
+    if (!response.ok && typeof message === 'string' && /not initialized|invalid session/i.test(message)) {
+      mcpSessionPromise = null;
+      sessionId = await getMcpSession(baseUrl);
+      response = await callTool();
+      body = await readMcpResponse(response);
+    }
+    if (!response.ok) throw new Error(body.error?.message || `MCP request failed: HTTP ${response.status}`);
     if (body.error) throw new Error(body.error.message || JSON.stringify(body.error));
     
     // Extract the text content from MCP result

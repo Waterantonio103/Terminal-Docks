@@ -9,7 +9,7 @@
     "preview": "vite preview",
     "tauri": "tauri",
     "mcp:install": "npm install --prefix mcp-server",
-    "test:graph": "tsc -p tsconfig.graph-tests.json && node ./tests/graphCompiler.test.mjs",
+    "test:graph": "tsc -p tsconfig.graph-tests.json && node ./tests/graphCompiler.test.mjs && node ./tests/workflowOrchestratorRuntimeRace.test.mjs",
     "test:mcp": "node ./tests/mcpGraphMode.test.mjs",
     "test:smoke": "tsc -p tsconfig.graph-tests.json && node ./tests/missionFlow.smoke.mjs",
     "test:prompt-parity": "node ./tests/promptToolParity.test.mjs",

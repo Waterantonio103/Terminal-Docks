@@ -209,6 +209,7 @@ function buildAdaptiveSeedFlowGraph(options: {
 export function LauncherPane() {
   const allPanes = useWorkspaceStore(selectActivePanes);
   const addPane = useWorkspaceStore(s => s.addPane);
+  const setAppMode = useWorkspaceStore(s => s.setAppMode);
   const updatePaneData = useWorkspaceStore(s => s.updatePaneData);
   const workspaceDir = useWorkspaceStore(s => s.workspaceDir);
   const globalGraph = useWorkspaceStore(s => s.globalGraph);
@@ -516,6 +517,7 @@ export function LauncherPane() {
           missionId: pendingLaunch.missionId,
           mission: pendingLaunch.mission,
         });
+        setAppMode('runtime');
 
         const modeLabel = pendingLaunch.mission.metadata.authoringMode ?? 'graph';
         setStatus(`Launched ${pendingLaunch.startTerminalIds.length} start node(s) in ${modeLabel} mode. Mission Control opened.`);
