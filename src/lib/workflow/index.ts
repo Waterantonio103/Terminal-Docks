@@ -122,3 +122,8 @@ export {
   WorkflowOrchestrator,
   workflowOrchestrator,
 } from './WorkflowOrchestrator.js';
+
+export {
+  MissionOrchestrator,
+  missionOrchestrator,
+} from './MissionOrchestrator.js';

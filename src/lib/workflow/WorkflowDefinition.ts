@@ -18,6 +18,7 @@ import type {
   EdgeCondition,
   ExecutionMode,
   LaunchMode,
+  RetryPolicy,
   TaskRequirements,
   WorkflowNodeKind,
 } from './WorkflowTypes.js';
@@ -53,6 +54,7 @@ export interface WorkflowNodeDefinition {
     readonly profileId?: string;
     readonly capabilities?: CapabilityEntry[];
     readonly requirements?: TaskRequirements;
+    readonly retryPolicy?: RetryPolicy;
     readonly parentId?: string;
     readonly extent?: 'parent';
     readonly width?: number;

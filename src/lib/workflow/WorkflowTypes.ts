@@ -86,6 +86,26 @@ export interface TaskRequirements {
   parallelSafe?: boolean;
 }
 
+export type FailureCategory =
+  | 'runtime_launch_failed'
+  | 'cli_ready_timeout'
+  | 'task_ack_timeout'
+  | 'tool_error'
+  | 'patch_failed'
+  | 'test_failed'
+  | 'security_rejected'
+  | 'review_rejected'
+  | 'human_cancelled'
+  | 'unknown';
+
+export interface RetryPolicy {
+  maxAttempts: number;
+  retryOn: FailureCategory[];
+  backoffMs: number;
+  rerouteRoles?: string[];
+  requireHumanAfterAttempts?: number;
+}
+
 // ──────────────────────────────────────────────
 // Node Lifecycle States
 //
@@ -148,7 +168,7 @@ export interface PermissionRequest {
 // Artifact Types
 // ──────────────────────────────────────────────
 
-export type ArtifactKind = 'file_change' | 'summary' | 'reference';
+export type ArtifactKind = 'file_change' | 'summary' | 'reference' | 'scout_context' | 'patch' | 'test_result' | 'risk_report' | 'review_verdict';
 
 export interface Artifact {
   id: string;

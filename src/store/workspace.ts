@@ -1,6 +1,8 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import { generateId } from '../lib/graphUtils.js';
+import type { RetryPolicy } from '../lib/workflow/WorkflowTypes.js';
+export type { RetryPolicy };
 
 export function arrayMove<T>(array: T[], fromIndex: number, toIndex: number): T[] {
   const newArray = [...array];
@@ -9,7 +11,7 @@ export function arrayMove<T>(array: T[], fromIndex: number, toIndex: number): T[
   return newArray;
 }
 
-export type PaneType = 'terminal' | 'editor' | 'taskboard' | 'activityfeed' | 'launcher' | 'missioncontrol' | 'nodetree';
+export type PaneType = 'terminal' | 'editor' | 'taskboard' | 'activityfeed' | 'launcher' | 'missioncontrol' | 'nodetree' | 'inbox';
 export type AppMode = 'workflow' | 'runtime' | 'workspace';
 export type WorkflowNodeStatus =
   | 'idle'
@@ -80,6 +82,9 @@ export interface WorkflowNode {
     profileId?: string;
     capabilities?: WorkerCapability[];
     requirements?: TaskRequirements;
+    retryPolicy?: RetryPolicy;
+    acceptanceCriteria?: string[];
+    outputContract?: string;
     parentId?: string;
     extent?: 'parent';
     width?: number;
@@ -124,6 +129,8 @@ export interface CompiledMissionNode {
   roleId: string;
   profileId?: string;
   instructionOverride: string;
+  acceptanceCriteria?: string[];
+  outputContract?: string;
   capabilities?: WorkerCapability[];
   requirements?: TaskRequirements;
   terminal: CompiledMissionTerminalBinding;
@@ -441,6 +448,7 @@ interface WorkspaceState {
   removeNodeTerminalBinding: (nodeId: string) => void;
   addMissionArtifact: (missionId: string, nodeId: string, artifact: MissionArtifact) => void;
   createRuntimeTerminal: (opts: { nodeId: string; roleId: string; cli: WorkflowAgentCli; executionMode: WorkflowExecutionMode; title: string }) => { paneId: string; terminalId: string };
+  loadPlannedDag: (planned: any) => void;
 }
 
 function findHighestAvailableSpot(panes: Pane[], w: number, h: number): GridPos {
@@ -497,8 +505,8 @@ export const useWorkspaceStore = create<WorkspaceState>()(
       setAppMode: (mode) => set({ appMode: mode }),
       setLayoutMode: (mode) => set({ layoutMode: mode }),
       setActivePaneId: (id) => set({ activePaneId: id }),
-      setGlobalGraph: (graph) => set({
-        globalGraph: {
+      setGlobalGraph: (graph) => {
+        const cleanGraph = {
           ...graph,
           nodes: graph.nodes.map(node => ({
             ...node,
@@ -508,8 +516,12 @@ export const useWorkspaceStore = create<WorkspaceState>()(
               cli: typeof node.config.cli === 'string' ? node.config.cli.replace(/\0/g, '').trim() as WorkflowAgentCli : node.config.cli,
             } : undefined
           }))
-        }
-      }),
+        };
+        set({ globalGraph: cleanGraph });
+        import('@tauri-apps/api/core').then(({ invoke }) => {
+          invoke('save_workflow_definition', { id: 'global-editor', graphJson: JSON.stringify(cleanGraph) }).catch(console.error);
+        });
+      },
       setShowSettings: (open) => set({ showSettings: open }),
       setTheme: (theme) => set({ theme }),
       setCustomThemeColor: (key, value) => set((s) => ({
@@ -846,6 +858,27 @@ export const useWorkspaceStore = create<WorkspaceState>()(
       renameTab: (id, name) => set((state) => ({
         tabs: state.tabs.map(t => t.id === id ? { ...t, name } : t),
       })),
+
+      loadPlannedDag: (planned) => {
+        import('../lib/workflow/PlanningRouter.js').then(({ convertPlannedDagToWorkflowGraph }) => {
+          const graph = convertPlannedDagToWorkflowGraph(planned);
+          const cleanGraph = {
+            ...graph,
+            nodes: graph.nodes.map(node => ({
+              ...node,
+              config: node.config ? {
+                ...node.config,
+                workspaceDir: typeof node.config.workspaceDir === 'string' ? node.config.workspaceDir.replace(/\0/g, '').trim() : node.config.workspaceDir,
+                cli: typeof node.config.cli === 'string' ? node.config.cli.replace(/\0/g, '').trim() as WorkflowAgentCli : node.config.cli,
+              } : undefined
+            }))
+          };
+          set({ globalGraph: cleanGraph, activeSidebarTab: 'nodetree' });
+          import('@tauri-apps/api/core').then(({ invoke }) => {
+            invoke('save_workflow_definition', { id: 'global-editor', graphJson: JSON.stringify(cleanGraph) }).catch(console.error);
+          });
+        });
+      },
     }),
     {
       name: 'workspace-storage',

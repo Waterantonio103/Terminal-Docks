@@ -62,6 +62,8 @@ import { mcpBus } from '../workers/mcpEventBus.js';
 import { detectCliFromTerminalOutput } from '../cliDetection.js';
 import { useWorkspaceStore } from '../../store/workspace.js';
 import { emit } from '@tauri-apps/api/event';
+import { terminalOutputBus } from './TerminalOutputBus.js';
+import { missionRepository } from '../missionRepository.js';
 
 // ──────────────────────────────────────────────
 // Constants
@@ -690,6 +692,10 @@ class RuntimeManager {
     );
   }
 
+  async startNodeRun(args: CreateRuntimeArgs): Promise<RuntimeSession> {
+    return this.ensureRuntimeReadyForTask(args);
+  }
+
   private async ensureRuntimeReadyForTaskInner(
     args: CreateRuntimeArgs,
     strategy: CliRuntimeStrategy,
@@ -760,11 +766,13 @@ class RuntimeManager {
         });
         console.log(`[runtime] workflow run: unconditionally destroying terminal=${terminalId}`);
         await this.destroyAndWaitForTerminal(terminalId);
+        terminalOutputBus.clear(terminalId);
       } else if (needsPtyDestroy) {
         const active = await isTerminalActive(terminalId);
         if (active) {
           console.warn(`[runtime] terminal ${terminalId} still active after stopping sessions; destroying for fresh launch`);
           await this.destroyAndWaitForTerminal(terminalId);
+          terminalOutputBus.clear(terminalId);
         }
       }
     }
@@ -1014,15 +1022,21 @@ class RuntimeManager {
       }
     });
 
-    listen<{ id: string; data: string }>('pty-data', event => {
-      if (event.payload.id !== terminalId) return;
+    const unlistenOutputBus = terminalOutputBus.subscribe(terminalId, event => {
       const session = this.sessions.get(sessionId);
       if (!session || isRuntimeSessionTerminal(session.state)) return;
 
       session.updateHeartbeat();
       this.emit({ type: 'heartbeat', sessionId, nodeId: session.nodeId, at: Date.now() });
 
-      const perm = session.adapter.detectPermissionRequest(event.payload.data);
+      this.emit({
+        type: 'output_captured',
+        sessionId,
+        nodeId: session.nodeId,
+        text: event.text,
+      });
+
+      const perm = session.adapter.detectPermissionRequest(event.text);
       if (perm && session.state !== 'awaiting_permission') {
         const request = {
           ...perm.request,
@@ -1039,20 +1053,15 @@ class RuntimeManager {
         });
       }
 
-      const comp = session.adapter.detectCompletion(event.payload.data);
+      const comp = session.adapter.detectCompletion(event.text);
       if (comp && session.state === 'running') {
         // MCP tool 'complete_task' is the authority.
       }
-    }).then(fn => {
-      if (disposed) {
-        fn();
-      } else {
-        const existing = this.ptyCleanupFns.get(sessionId);
-        this.ptyCleanupFns.set(sessionId, () => {
-          existing?.();
-          fn();
-        });
-      }
+    });
+    const existingPtyCleanup = this.ptyCleanupFns.get(sessionId);
+    this.ptyCleanupFns.set(sessionId, () => {
+      existingPtyCleanup?.();
+      unlistenOutputBus();
     });
 
     listen<{ id: string }>('pty-exit', async event => {
@@ -2195,6 +2204,10 @@ class RuntimeManager {
     }
 
     this.releaseTerminalOwnership(session.terminalId, session.sessionId);
+    if (session.terminalId) {
+      this.captureTerminalLogArtifact(session);
+      terminalOutputBus.clear(session.terminalId);
+    }
 
     this.sessions.delete(session.sessionId);
     const nodeKey = `${session.missionId}:${session.nodeId}:${session.attempt}`;
@@ -2202,6 +2215,42 @@ class RuntimeManager {
       this.sessionsByNode.delete(nodeKey);
     }
     this.notifySnapshot();
+  }
+
+  private captureTerminalLogArtifact(session: RuntimeSession): void {
+    if (session.missionId.startsWith('adhoc-')) return;
+    const terminalLog = terminalOutputBus.getTail(session.terminalId, 32_000);
+    if (!terminalLog) return;
+
+    const artifactId = `log-${session.sessionId}`;
+    missionRepository.writeArtifact({
+      id: artifactId,
+      missionId: session.missionId,
+      nodeId: session.nodeId,
+      kind: 'terminal_log',
+      title: `Terminal log — ${session.cliId} attempt ${session.attempt}`,
+      contentText: terminalLog,
+      metadataJson: JSON.stringify({
+        sessionId: session.sessionId,
+        cliId: session.cliId,
+        attempt: session.attempt,
+        role: session.role,
+        terminalId: session.terminalId,
+        finalState: session.state,
+        error: session.lastError ?? null,
+      }),
+    }).catch(() => {});
+
+    missionRepository.appendWorkflowEvent({
+      missionId: session.missionId,
+      nodeId: session.nodeId,
+      sessionId: session.sessionId,
+      terminalId: session.terminalId,
+      eventType: 'terminal_log_captured',
+      severity: 'info',
+      message: `Terminal log artifact captured for session ${session.sessionId} (${terminalLog.length} chars).`,
+      payloadJson: JSON.stringify({ artifactId, charCount: terminalLog.length }),
+    }).catch(() => {});
   }
 
   private emit(event: RuntimeManagerEvent): void {

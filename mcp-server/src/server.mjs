@@ -3,28 +3,26 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import express from 'express';
 import cors from 'cors';
 import { randomUUID } from 'crypto';
-import { initDb } from './src/db/index.mjs';
-import { sessions, clients } from './src/state.mjs';
-import { registerTaskTools } from './src/tools/tasks.mjs';
-import { registerArtifactTools } from './src/tools/artifacts.mjs';
-import { registerLockTools } from './src/tools/locks.mjs';
-import { registerCommunicationTools } from './src/tools/communication.mjs';
-import { registerQualityTools } from './src/tools/quality.mjs';
-import { registerWorkflowTools } from './src/tools/workflow.mjs';
-import { registerAgentTools } from './src/tools/agents.mjs';
-import { registerAdapterTools } from './src/tools/adapters.mjs';
-import { registerInboxTools } from './src/tools/inbox.mjs';
-import { registerResources } from './src/resources/index.mjs';
-import { registerPrompts } from './src/prompts/index.mjs';
+import { initDb } from './db/index.mjs';
+import { sessions, broadcast, clients, agentEvents, recentAgentEvents, resetInMemoryRuntime } from './state.mjs';
+import { logSession } from './utils/index.mjs';
+import { registerTaskTools } from './tools/tasks.mjs';
+import { registerArtifactTools } from './tools/artifacts.mjs';
+import { registerLockTools } from './tools/locks.mjs';
+import { registerCommunicationTools } from './tools/communication.mjs';
+import { registerQualityTools } from './tools/quality.mjs';
+import { registerWorkflowTools } from './tools/workflow.mjs';
+import { registerAgentTools } from './tools/agents.mjs';
+import { registerAdapterTools } from './tools/adapters.mjs';
+import { registerInboxTools } from './tools/inbox.mjs';
+import { registerResources } from './resources/index.mjs';
+import { registerPrompts } from './prompts/index.mjs';
 
 // Initialize DB
 initDb();
 
 function createMcpServer(getSessionId) {
-  const server = new McpServer({ 
-    name: 'starlink-mcp', 
-    version: '2.0.0' 
-  });
+  const server = new McpServer({ name: 'starlink-mcp', version: '2.0.0' });
 
   registerTaskTools(server, getSessionId);
   registerArtifactTools(server, getSessionId);
@@ -45,7 +43,7 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-app.get('/health', (_req, res) => res.json({ ok: true, version: '2.0.0-phase9' }));
+app.get('/health', (_req, res) => res.json({ ok: true }));
 
 app.get('/events', (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
@@ -84,5 +82,5 @@ app.get('/mcp', async (req, res) => {
 
 const PORT = parseInt(process.env.MCP_PORT || '3741');
 app.listen(PORT, () => {
-  console.log(`MCP Server (Phase 9 Modular) listening on port ${PORT}`);
+  console.log(`MCP Server (Phase 9) listening on port ${PORT}`);
 });

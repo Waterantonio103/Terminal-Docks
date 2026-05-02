@@ -12,6 +12,7 @@ import { openUrl } from '@tauri-apps/plugin-opener';
 import { useWorkspaceStore, Pane } from '../../store/workspace';
 import { ChevronDown, ChevronUp, X } from 'lucide-react';
 import { detectRuntimeAction } from '../../lib/runtimeActivity';
+import { terminalOutputBus } from '../../lib/runtime/TerminalOutputBus';
 
 interface ContextMenuState { x: number; y: number }
 
@@ -199,7 +200,7 @@ export function TerminalPane({ pane, dragEndSeq }: { pane: Pane; dragEndSeq?: nu
       return true;
     });
 
-    let unlisten: UnlistenFn | null = null;
+    let unlisten: (() => void) | null = null;
     let refitUnlisten: UnlistenFn | null = null;
 
     const initPty = async () => {
@@ -212,18 +213,19 @@ export function TerminalPane({ pane, dragEndSeq }: { pane: Pane; dragEndSeq?: nu
       const graphNode = storeSnap.globalGraph.nodes.find(n => n.config?.terminalId === terminalId);
       const cli = graphNode?.config?.cli ?? pane.data?.cli;
 
-      unlisten = await listen<{ id: string; data: number[] }>('pty-out', (event) => {
-        if (event.payload.id === terminalId) {
-          const bytes = new Uint8Array(event.payload.data);
-          term.write(bytes);
-          const chunk = new TextDecoder().decode(bytes);
-          if (boundNodeId) {
-            emit('workflow-node-action', {
-              nodeId: boundNodeId,
-              terminalId,
-              action: detectRuntimeAction(chunk),
-            }).catch(() => {});
-          }
+      await terminalOutputBus.start();
+      const replayChunks = terminalOutputBus.getChunksSince(terminalId, 0);
+      for (const chunk of replayChunks) {
+        term.write(chunk.bytes);
+      }
+      unlisten = terminalOutputBus.subscribe(terminalId, (chunk) => {
+        term.write(chunk.bytes);
+        if (boundNodeId) {
+          emit('workflow-node-action', {
+            nodeId: boundNodeId,
+            terminalId,
+            action: detectRuntimeAction(chunk.text),
+          }).catch(() => {});
         }
       });
 

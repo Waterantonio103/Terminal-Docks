@@ -9,6 +9,7 @@
  */
 
 import { invoke } from '@tauri-apps/api/core';
+import { terminalOutputBus } from './TerminalOutputBus.js';
 
 // ──────────────────────────────────────────────
 // PTY Lifecycle
@@ -70,6 +71,9 @@ export async function destroyTerminal(terminalId: string): Promise<void> {
 }
 
 export async function getRecentTerminalOutput(terminalId: string, maxBytes = 4096): Promise<string> {
+  const buffered = terminalOutputBus.getTail(terminalId, maxBytes);
+  if (buffered) return buffered;
+
   try {
     return await invoke<string>('get_pty_recent_output', { id: terminalId, maxBytes });
   } catch {

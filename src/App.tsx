@@ -8,7 +8,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { homeDir } from '@tauri-apps/api/path';
 import { Window } from '@tauri-apps/api/window';
-import { PanelLeft, TerminalSquare, FileCode2, KanbanSquare, Activity, Plus, Rocket, Monitor, Minus, Square, X, Network, FolderTree, LayoutGrid, Maximize, Settings } from 'lucide-react';
+import { PanelLeft, TerminalSquare, FileCode2, KanbanSquare, Activity, Plus, Rocket, Monitor, Minus, Square, X, Network, FolderTree, LayoutGrid, Maximize, Settings, Inbox } from 'lucide-react';
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { detectRoleFromText, normalizeCli } from './lib/cliDetection';
 import { refreshCliDetectionForTerminals } from './lib/terminalCliRuntime';
@@ -44,14 +44,18 @@ const PANE_ICONS: Record<PaneType, React.ReactNode> = {
   launcher:       <Rocket size={13} />,
   missioncontrol: <Monitor size={13} />,
   nodetree:       <Network size={13} />,
+  inbox:          <Inbox size={13} />,
 };
 
 import { runtimeManager } from './lib/runtime/RuntimeManager';
+import { runtimeExecutor } from './lib/runtime/RuntimeExecutor';
+import { terminalOutputBus } from './lib/runtime/TerminalOutputBus';
 import { workflowOrchestrator } from './lib/workflow/WorkflowOrchestrator';
 
 function App() {
   useEffect(() => {
-    workflowOrchestrator.setRuntimeManager(runtimeManager);
+    terminalOutputBus.start().catch(console.error);
+    workflowOrchestrator.setRuntimeManager(runtimeExecutor);
     runtimeManager.startListening().catch(console.error);
   }, []);
 
@@ -290,6 +294,7 @@ function ModeRail() {
   const setAppMode = useWorkspaceStore((s) => s.setAppMode);
   const setShowSettings = useWorkspaceStore((s) => s.setShowSettings);
   const showSettings = useWorkspaceStore((s) => s.showSettings);
+  const addPane = useWorkspaceStore((s) => s.addPane);
 
   return (
     <nav className="w-12 shrink-0 h-full bg-bg-titlebar border-r border-border-panel flex flex-col items-center py-2 gap-1 relative">
@@ -302,6 +307,12 @@ function ModeRail() {
           {appMode === mode.id && <span className="absolute left-0 top-1/2 -translate-y-1/2 w-0.5 h-5 bg-accent-primary rounded-r-full" />}
         </button>
       ))}
+
+      <div className="mt-4 border-t border-border-panel pt-4 flex flex-col gap-1">
+         <button onClick={() => addPane('inbox', 'Delegation Inbox')} title="Inbox" className="w-9 h-9 flex items-center justify-center rounded-lg text-text-muted hover:text-text-primary hover:bg-bg-surface transition-all">
+           <Inbox size={18} />
+         </button>
+      </div>
 
       <div className="mt-auto pb-2 flex flex-col items-center gap-1">
         <button onClick={() => setShowSettings(!showSettings)} title="Settings" className={`relative w-9 h-9 flex items-center justify-center rounded-lg transition-all ${showSettings ? 'text-accent-primary bg-accent-primary/10' : 'text-text-muted hover:text-text-secondary hover:bg-bg-surface'}`}>

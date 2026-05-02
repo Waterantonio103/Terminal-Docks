@@ -1,8 +1,8 @@
 import { invoke } from '@tauri-apps/api/core';
-import { registry } from './registry';
-import type { McpServerEvent } from './types';
-import { useWorkspaceStore, type MissionArtifact } from '../../store/workspace';
-import { generateId } from '../graphUtils';
+import { registry } from './registry.js';
+import type { McpServerEvent } from './types.js';
+import { useWorkspaceStore, type MissionArtifact } from '../../store/workspace.js';
+import { generateId } from '../graphUtils.js';
 
 type Handler = (ev: McpServerEvent) => void;
 

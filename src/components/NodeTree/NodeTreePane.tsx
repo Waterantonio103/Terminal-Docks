@@ -23,10 +23,13 @@ import { applyNodeEditorOperator } from '../../lib/node-system/operators';
 import type { MaterializedNode, NodeInstance, Point2D } from '../../lib/node-system/types';
 import { detectRoleForPane } from '../../lib/cliDetection';
 import { runtimeManager } from '../../lib/runtime/RuntimeManager';
+import { runtimeExecutor } from '../../lib/runtime/RuntimeExecutor';
+import { terminalOutputBus } from '../../lib/runtime/TerminalOutputBus';
 import { supportsHeadless } from '../../lib/cliIdentity';
 import { useWorkspaceStore, type MissionAgent, type Pane, type ResultEntry, type WorkflowAgentCli, type WorkflowExecutionMode, type WorkflowGraph } from '../../store/workspace';
 import { discoverModelsForCli, supportsModelDiscovery } from '../../lib/models/modelDiscoveryService';
 import type { CliId, CliModel, ModelDiscoveryResult } from '../../lib/models/modelTypes';
+import { useMissionSnapshot } from '../../hooks/useMissionSnapshot';
 
 type ValidationTone = 'idle' | 'ok' | 'error';
 type ResizeEdge = 'n' | 's' | 'e' | 'w' | 'ne' | 'nw' | 'se' | 'sw';
@@ -210,14 +213,6 @@ function groupModelsByProvider(models: CliModel[]): Array<{ provider: string; mo
   return Array.from(groups.entries()).map(([provider, groupedModels]) => ({ provider, models: groupedModels }));
 }
 
-function decodePtyChunk(data: number[]): string {
-  try {
-    return stripAnsi(new TextDecoder().decode(new Uint8Array(data)));
-  } catch {
-    return '';
-  }
-}
-
 function extractArtifactHints(result: ResultEntry): string[] {
   if (result.type === 'url') {
     const url = result.content.trim();
@@ -288,6 +283,7 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
   const suppressContextMenuRef = useRef(false);
   const lastGraphSnapshotRef = useRef(JSON.stringify(graph));
   const isUserChangeRef = useRef(false);
+  const missionSnapshot = useMissionSnapshot(activeMissionId);
 
   // Sync pane.data.cli from the persisted graph node configs before any useEffect
   // (including TerminalPane's initPty) can fire. useLayoutEffect runs synchronously
@@ -657,7 +653,20 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
       const missionId = activeMissionId || `adhoc-${generateId().slice(0, 8)}`;
       
       try {
-        const session = await runtimeManager.createRuntimeForNode({
+        // For interactive PTY, add the pane first so TerminalPane can spawn
+        // before the executor tries to write to it.
+        if (executionMode === 'interactive_pty') {
+          addPane('terminal', title, {
+            terminalId,
+            nodeId,
+            roleId: role,
+            cli,
+            cliSource: 'heuristic',
+            executionMode,
+          });
+        }
+
+        const session = await runtimeExecutor.startNodeRun({
           missionId,
           nodeId,
           attempt: Number(node?.properties.attempt ?? 0) + 1,
@@ -672,22 +681,11 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
           yolo: Boolean(node?.properties.yolo),
         });
 
-        // For interactive PTY, add the pane first so the PTY can spawn before
-        // launchCli tries to write to it (the ad-hoc pipeline polls until ready).
         if (executionMode === 'interactive_pty') {
-          addPane('terminal', title, {
-            terminalId,
-            nodeId,
-            roleId: role,
-            cli,
-            cliSource: 'heuristic',
-            executionMode,
-            runtimeSessionId: session.sessionId
+          useWorkspaceStore.getState().updatePaneDataByTerminalId(terminalId, {
+            runtimeSessionId: session.sessionId,
           });
         }
-
-        // Launch it immediately
-        await runtimeManager.launchCli(session.sessionId);
 
         // Update persistent node properties in a single batch if possible (though applyOperator is currently single-op)
         applyOperator({ type: 'set_node_property', nodeId, key: 'terminalId', value: terminalId });
@@ -812,14 +810,13 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
   }, [activeTree.nodes, inspectorCommand, inspectorNodeId, refreshTerminalOutput]);
 
   useEffect(() => {
-    let unlistenPtyOut: (() => void) | undefined;
     let unlistenAgentRunOutput: (() => void) | undefined;
     let unmounted = false;
-    listen<{ id: string; data: number[] }>('pty-out', event => {
+    void terminalOutputBus.start();
+    const unlistenTerminalOutput = (terminalId: string) => terminalOutputBus.subscribe(terminalId, event => {
       if (unmounted) return;
-      const chunk = decodePtyChunk(event.payload.data);
+      const chunk = stripAnsi(event.text);
       if (!chunk) return;
-      const terminalId = event.payload.id;
       setRuntimeOutputByTerminalId(previous => {
         const merged = `${previous[terminalId] ?? ''}${chunk}`;
         const next = merged.length > MAX_RUNTIME_SNIPPET_BYTES
@@ -827,10 +824,8 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
           : merged;
         return { ...previous, [terminalId]: next };
       });
-    }).then(unlisten => {
-      unlistenPtyOut = unlisten;
-      if (unmounted) unlisten();
     });
+    const terminalOutputUnsubscribers = boundAgentTerminalIds.map(unlistenTerminalOutput);
     listen<{
       runId: string;
       missionId: string;
@@ -856,10 +851,10 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
     });
     return () => {
       unmounted = true;
-      if (unlistenPtyOut) unlistenPtyOut();
+      for (const unlisten of terminalOutputUnsubscribers) unlisten();
       if (unlistenAgentRunOutput) unlistenAgentRunOutput();
     };
-  }, [activeMissionId]);
+  }, [activeMissionId, boundAgentTerminalIds]);
 
   useEffect(() => {
     if (boundAgentTerminalIds.length === 0) return;
@@ -1121,14 +1116,10 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
       await invoke('seed_mission_to_db', { missionId, graph: mission });
 
       // TS Orchestrator is the canonical runtime brain.
-      const { workflowOrchestrator } = await import('../../lib/workflow/WorkflowOrchestrator');
-      const { compiledMissionToDefinition } = await import('../../lib/workflow/index');
-      workflowOrchestrator.startRun(
-        compiledMissionToDefinition(mission),
-        { runId: missionId }
-      );
+      const { missionOrchestrator } = await import('../../lib/workflow/MissionOrchestrator');
+      await missionOrchestrator.launchMission(mission);
 
-      const unsubFailures = workflowOrchestrator.subscribeForRun(missionId, (event) => {
+      const unsubFailures = (await import('../../lib/workflow/WorkflowOrchestrator')).workflowOrchestrator.subscribeForRun(missionId, (event) => {
         if (event.type !== 'node_failed') return;
         setValidationTone('error');
         setValidationMessage(`Node ${event.nodeId} failed: ${event.error ?? 'activation pipeline error'}`);
@@ -1745,7 +1736,8 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
 
   const inspectedNode = inspectorNodeId ? activeTree.nodes[inspectorNodeId] : null;
   const inspectedRuntimeAgent = inspectorNodeId ? missionAgentByNodeId.get(inspectorNodeId) : undefined;
-  const inspectedTerminalId = String(inspectedNode?.properties.terminalId ?? inspectedRuntimeAgent?.terminalId ?? '').trim();
+  const inspectedSnapshotNode = inspectorNodeId ? missionSnapshot?.nodes.find(n => n.nodeId === inspectorNodeId) : undefined;
+  const inspectedTerminalId = String(inspectedSnapshotNode?.terminalId ?? inspectedNode?.properties.terminalId ?? inspectedRuntimeAgent?.terminalId ?? '').trim();
   const inspectedTerminal = openTerminals.find(terminal => terminal.id === inspectedTerminalId);
   const inspectedExecutionMode = SELECTABLE_EXECUTION_MODES.includes(inspectedNode?.properties.executionMode as WorkflowExecutionMode)
     ? inspectedNode?.properties.executionMode as WorkflowExecutionMode
@@ -1893,7 +1885,11 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
             const isFrame = materializedNode.node.type === 'workflow.frame';
             const runtimeAgent = missionAgentByNodeId.get(materializedNode.node.id);
             const runtimeBinding = nodeRuntimeBindings[materializedNode.node.id];
+            
+            const snapshotNode = missionSnapshot?.nodes.find(n => n.nodeId === materializedNode.node.id);
+            
             const runtimeStatus = String(
+              snapshotNode?.status ??
               runtimeAgent?.status ??
               runtimeBinding?.adapterStatus ??
               materializedNode.node.properties.status ??
@@ -1905,11 +1901,15 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
               ''
             ).trim();
             const terminalId = String(
+              snapshotNode?.terminalId ??
               runtimeAgent?.terminalId ??
               materializedNode.node.properties.terminalId ??
               runtimeBinding?.terminalId ??
               ''
             ).trim();
+            
+            const attemptCount = snapshotNode?.attempt ?? Number(materializedNode.node.properties.attempt ?? 0);
+            
             const terminal = openTerminals.find(entry => entry.id === terminalId);
             const runtimeCli = String(
               materializedNode.node.properties.cli ??
@@ -1940,8 +1940,9 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
                        (materializedNode.node.label ?? registry.get(materializedNode.node.type).label)}
                     </div>
                   </div>
-                  <div className={`text-[10px] uppercase tracking-wide px-2 py-1 rounded border ${workflowStatusTone(runtimeStatus, 'graph')}`}>
-                    {workflowStatusLabel(runtimeStatus)}
+                  <div className={`flex items-center gap-1.5 text-[10px] uppercase tracking-wide px-2 py-1 rounded border ${workflowStatusTone(runtimeStatus, 'graph')}`}>
+                    {attemptCount > 0 && <span className="opacity-70">#{attemptCount}</span>}
+                    <span>{workflowStatusLabel(runtimeStatus)}</span>
                   </div>
                 </div>
 

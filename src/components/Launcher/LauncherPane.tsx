@@ -229,6 +229,31 @@ export function LauncherPane() {
   const [editCliCommand, setEditCliCommand] = useState('');
   const [editCliArgs, setEditCliArgs] = useState('');
 
+  const loadPlannedDag = useWorkspaceStore(s => s.loadPlannedDag);
+
+  async function handlePlan() {
+    if (!task.trim()) {
+      setStatus('Error: Enter a task description first.');
+      return;
+    }
+
+    setBusy(true);
+    setStatus(null);
+
+    try {
+      const { planMission } = await import('../../lib/workflow/PlanningRouter');
+      const missionId = generateId();
+      const planned = planMission(task.trim(), missionId);
+      
+      loadPlannedDag(planned);
+      setStatus('Plan generated and loaded into Node Graph. Review and edit before launching.');
+    } catch (error) {
+      setStatus(`Error: ${error}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   useEffect(() => {
     invoke<string>('get_mcp_url').then(url => setMcpUrl(url)).catch(() => {});
   }, []);
@@ -482,12 +507,8 @@ export function LauncherPane() {
         }
 
         // TS Orchestrator is the canonical runtime brain.
-        const { workflowOrchestrator } = await import('../../lib/workflow/WorkflowOrchestrator');
-        const { compiledMissionToDefinition } = await import('../../lib/workflow/index');
-        workflowOrchestrator.startRun(
-          compiledMissionToDefinition(pendingLaunch.mission),
-          { runId: pendingLaunch.missionId }
-        );
+        const { missionOrchestrator } = await import('../../lib/workflow/MissionOrchestrator');
+        await missionOrchestrator.launchMission(pendingLaunch.mission);
 
         addPane('missioncontrol', 'Mission Control', {
           taskDescription: task.trim(),
@@ -768,6 +789,14 @@ export function LauncherPane() {
         >
           <Plug size={12} />
           Connect
+        </button>
+        <button
+          onClick={handlePlan}
+          disabled={busy || !task.trim()}
+          className="flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-medium border border-border-panel text-text-secondary hover:text-text-primary hover:border-accent-primary hover:bg-bg-surface transition-colors disabled:opacity-40"
+        >
+          <GitBranch size={12} />
+          Plan
         </button>
         <button
           onClick={handleLaunch}

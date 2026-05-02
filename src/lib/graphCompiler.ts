@@ -629,6 +629,8 @@ export function compileMission({
       roleId,
       profileId: trimToUndefined(node.data?.profileId),
       instructionOverride: roleInstructions,
+      acceptanceCriteria: Array.isArray(node.data?.acceptanceCriteria) ? node.data.acceptanceCriteria : undefined,
+      outputContract: trimToUndefined(node.data?.outputContract),
       capabilities: normalizeCapabilities(node.data?.capabilities),
       requirements: normalizeTaskRequirements(node.data?.requirements),
       terminal: {

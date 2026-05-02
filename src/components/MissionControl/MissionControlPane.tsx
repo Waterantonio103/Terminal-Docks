@@ -18,27 +18,22 @@ import {
   ListTree,
   Download,
   TerminalSquare,
-  ArrowUpRight,
   AlertCircle,
 } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import { invoke } from '@tauri-apps/api/core';
 import { emit, listen } from '@tauri-apps/api/event';
 import {
-  
   summarizeHandoffPayload,
   type StructuredCompletionPayload,
   type RuntimeActivationPayload,
 } from '../../lib/missionRuntime';
 import { workflowStatusLabel, workflowStatusTone } from '../../lib/workflowStatus';
-
-import {
-  normalizeRuntimeCli,
-} from '../../lib/runtimeBootstrap';
-
+import { normalizeRuntimeCli } from '../../lib/runtimeBootstrap';
+import { useMissionSnapshot } from '../../hooks/useMissionSnapshot';
+import { missionOrchestrator } from '../../lib/workflow/MissionOrchestrator';
 
 type MissionTab = 'nodes' | 'preview' | 'output' | 'tasks';
-
 
 const RUNTIME_ACTIVE_STATES = new Set<MissionAgent['status']>([
   'launching',
@@ -57,27 +52,6 @@ const RUNTIME_ACTIVE_STATES = new Set<MissionAgent['status']>([
   'waiting',
 ]);
 
-
-
-function logToAgent(paneId: string, nodeId: string, message: string) {
-  const state = useWorkspaceStore.getState();
-  const update = state.updatePaneData;
-  const tabs = state.tabs;
-  for (const tab of tabs) {
-    const pane = tab.panes.find(p => p.id === paneId);
-    if (pane) {
-      const agents = (pane.data?.agents as MissionAgent[] | undefined) ?? [];
-      const updated = agents.map(a => 
-        a.nodeId === nodeId 
-          ? { ...a, runtimeLogs: [...(a.runtimeLogs ?? []), `[${new Date().toLocaleTimeString()}] ${message}`] } 
-          : a
-      );
-      update(paneId, { agents: updated });
-      return;
-    }
-  }
-}
-
 function formatTime(timestamp?: number): string {
   if (!timestamp) return '—';
   return new Date(timestamp).toLocaleTimeString([], {
@@ -91,10 +65,6 @@ function formatDuration(start?: number, end?: number): string | null {
   if (!start || !end || end < start) return null;
   const seconds = Math.max(1, Math.round((end - start) / 1000));
   return `${seconds}s`;
-}
-
-function summarizePayload(payload?: string | null): string | null {
-  return summarizeHandoffPayload(payload, 220);
 }
 
 interface HandoffViewModel {
@@ -111,15 +81,6 @@ interface HandoffViewModel {
   artifactReferences: string[];
   downstreamPreview: string | null;
   timestamp: number;
-}
-
-interface AgentRunOutputLine {
-  id: string;
-  runId: string;
-  nodeId: string;
-  stream: 'stdout' | 'stderr';
-  chunk: string;
-  at: number;
 }
 
 function asStringArray(input: unknown): string[] {
@@ -289,46 +250,13 @@ function StatusIcon({ status }: { status?: MissionAgent['status'] }) {
   return <Clock size={10} className="text-text-muted" />;
 }
 
-function AgentBadge({
-  agent,
-  onOpenTerminal,
-}: {
-  agent: MissionAgent;
-  onOpenTerminal: (agent: MissionAgent) => void;
-}) {
-  const role = agentsConfig.agents.find(entry => entry.id === agent.roleId);
-  const clickable = Boolean(agent.terminalId);
-
-  return (
-    <button
-      type="button"
-      onClick={() => clickable && onOpenTerminal(agent)}
-      disabled={!clickable}
-      title={clickable ? 'Open live terminal' : 'Terminal not available'}
-      className={`flex items-center gap-1.5 px-2 py-1 rounded-md border shrink-0 transition-colors ${
-        clickable ? 'hover:border-accent-primary/50 hover:background-bg-surface' : 'cursor-default'
-      } ${workflowStatusTone(agent.status, 'mission')}`}
-    >
-      <StatusIcon status={agent.status} />
-      <span className="text-xs font-medium text-left">{agent.title}</span>
-      {agent.attempt && agent.attempt > 0 && (
-        <span className="text-[9px] uppercase tracking-wide opacity-80">#{agent.attempt}</span>
-      )}
-      {role && (
-        <span className="text-[9px] text-text-muted opacity-70">
-          {role.name}
-        </span>
-      )}
-      {clickable && <ArrowUpRight size={10} className="opacity-70" />}
-    </button>
-  );
-}
-
 function NodeCard({
   agent,
+  missionId,
   onOpenTerminal,
 }: {
   agent: MissionAgent;
+  missionId: string | null;
   onOpenTerminal: (agent: MissionAgent) => void;
 }) {
   const role = agentsConfig.agents.find(entry => entry.id === agent.roleId);
@@ -356,6 +284,16 @@ function NodeCard({
           </div>
         </div>
         <div className="flex items-center gap-1.5">
+          {agent.status === 'failed' && missionId && agent.nodeId && (
+            <button
+              type="button"
+              onClick={() => missionOrchestrator.retryNode(missionId, agent.nodeId!)}
+              className="flex items-center gap-1 px-2 py-1 rounded text-[10px] text-amber-400 hover:text-amber-300 hover:background-bg-panel border border-amber-500/30 transition-colors"
+            >
+              <Clock size={11} />
+              Retry
+            </button>
+          )}
           <button
             type="button"
             onClick={() => onOpenTerminal(agent)}
@@ -416,7 +354,7 @@ function NodeCard({
           <div className="rounded border border-border-panel background-bg-surface px-2 py-1.5">
             <div className="text-[9px] uppercase tracking-wide text-text-muted mb-1">Latest Handoff Preview</div>
             <div className="text-[11px] text-text-secondary break-words">
-              {summarizePayload(agent.lastPayload) ?? 'No preview'}
+              {summarizeHandoffPayload(agent.lastPayload, 120) ?? 'No preview'}
             </div>
           </div>
         )}
@@ -576,6 +514,67 @@ function HandoffTimeline({ entries }: { entries: HandoffViewModel[] }) {
   );
 }
 
+function MissionSummary({ missionId }: { missionId: string }) {
+  const snapshot = useMissionSnapshot(missionId);
+  if (!snapshot) return null;
+
+  const isTerminal = snapshot.status === 'completed' || snapshot.status === 'approved' || snapshot.status === 'failed' || snapshot.status === 'cancelled';
+  if (!isTerminal && snapshot.status !== 'active' && snapshot.status !== 'running') return null;
+
+  const qgRejected = snapshot.recentEvents?.find(e => e.eventType === 'quality_gate_rejected');
+  const qgApproved = snapshot.recentEvents?.find(e => e.eventType === 'mission_approved');
+
+  return (
+    <div className={`border rounded-lg p-4 mb-4 ${
+      snapshot.status === 'approved' || qgApproved ? 'bg-green-500/10 border-green-500/30' :
+      qgRejected ? 'bg-red-500/10 border-red-500/30' :
+      'bg-accent-primary/5 border-border-panel'
+    }`}>
+      <div className="flex items-center justify-between mb-2">
+        <div className="flex items-center gap-2">
+          {snapshot.status === 'approved' || qgApproved ? (
+            <CheckCircle2 size={18} className="text-green-400" />
+          ) : qgRejected ? (
+            <AlertCircle size={18} className="text-red-400" />
+          ) : (
+            <Loader2 size={18} className="animate-spin text-accent-primary" />
+          )}
+          <span className="text-sm font-bold uppercase tracking-tight text-text-primary">
+            Mission Status: {snapshot.status.toUpperCase()}
+          </span>
+        </div>
+        <div className="text-[10px] text-text-muted font-mono">
+          {snapshot.missionId}
+        </div>
+      </div>
+
+      {qgRejected && (
+        <div className="mt-3 p-3 rounded bg-red-500/5 border border-red-500/10">
+          <p className="text-xs font-bold text-red-300 mb-1">Quality Gate Rejected</p>
+          <p className="text-[11px] text-red-200/70 leading-relaxed">
+            {qgRejected.message}
+          </p>
+        </div>
+      )}
+
+      {qgApproved && (
+        <div className="mt-3 p-3 rounded bg-green-500/5 border border-green-500/10">
+          <p className="text-xs font-bold text-green-300 mb-1">Quality Gate Passed</p>
+          <p className="text-[11px] text-red-200/70 leading-relaxed">
+            Mission has been verified against all acceptance criteria.
+          </p>
+        </div>
+      )}
+      
+      {!qgRejected && !qgApproved && isTerminal && snapshot.status !== 'approved' && (
+          <p className="text-[11px] text-text-muted mt-2 italic">
+              Awaiting final quality review...
+          </p>
+      )}
+    </div>
+  );
+}
+
 export function MissionControlPane({ pane }: { pane: Pane }) {
   const mission: CompiledMission | null = pane.data?.mission ?? null;
   const taskDescription: string = pane.data?.taskDescription ?? mission?.task.prompt ?? '';
@@ -590,37 +589,19 @@ export function MissionControlPane({ pane }: { pane: Pane }) {
   const setNodeRuntimeBinding = useWorkspaceStore(s => s.setNodeRuntimeBinding);
 
   const [tab, setTab] = useState<MissionTab>('nodes');
-  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
-  const [exportStatus, setExportStatus] = useState<{ path: string } | { error: string } | null>(null);
-  const [runOutput, setRunOutput] = useState<AgentRunOutputLine[]>([]);
   const outputRef = useRef<HTMLDivElement>(null);
-  const inflightActivationsRef = useRef<Set<string>>(new Set());
-  const sessionUnsubscribersRef = useRef<Map<string, () => void>>(new Map());
 
   const orderedAgents = useMemo(() => {
     if (executionLayers.length === 0) return agents;
-
-    const byNodeId = new Map(
-      agents
-        .filter(agent => agent.nodeId)
-        .map(agent => [agent.nodeId as string, agent])
-    );
+    const byNodeId = new Map(agents.filter(agent => agent.nodeId).map(agent => [agent.nodeId as string, agent]));
     const ordered: MissionAgent[] = [];
-
     for (const layer of executionLayers) {
       for (const nodeId of layer) {
         const agent = byNodeId.get(nodeId);
-        if (agent) {
-          ordered.push(agent);
-          byNodeId.delete(nodeId);
-        }
+        if (agent) { ordered.push(agent); byNodeId.delete(nodeId); }
       }
     }
-
-    for (const agent of agents) {
-      if (!ordered.includes(agent)) ordered.push(agent);
-    }
-
+    for (const agent of agents) { if (!ordered.includes(agent)) ordered.push(agent); }
     return ordered;
   }, [agents, executionLayers]);
 
@@ -642,19 +623,6 @@ export function MissionControlPane({ pane }: { pane: Pane }) {
     focusAgentTerminal(agent.terminalId);
   }
 
-  useEffect(() => {
-    return () => {
-      for (const unsubscribe of sessionUnsubscribersRef.current.values()) {
-        try {
-          unsubscribe();
-        } catch {
-          // no-op
-        }
-      }
-      sessionUnsubscribersRef.current.clear();
-    };
-  }, []);
-
   // Watch for PTY spawn events to reset individual agent status.
   useEffect(() => {
     let unlistenSpawnFn: (() => void) | undefined;
@@ -666,9 +634,6 @@ export function MissionControlPane({ pane }: { pane: Pane }) {
       const spawnedId = event.payload.id;
       const liveAgents = readAgentsForPane(pane.id, agents);
       const spawnedAgent = liveAgents.find(agent => agent.terminalId === spawnedId);
-      if (spawnedAgent) {
-        logToAgent(pane.id, spawnedAgent.nodeId!, `Terminal ${spawnedId} spawned.`);
-      }
       const nextAgents = liveAgents.map(agent =>
         agent.terminalId === spawnedId
           ? {
@@ -692,36 +657,22 @@ export function MissionControlPane({ pane }: { pane: Pane }) {
           adapterStatus: 'terminal_started',
         });
       }
-    }).then(fn => {
-      if (unmounted) {
-        fn();
-      } else {
-        unlistenSpawnFn = fn;
-      }
-    });
+    }).then(fn => { if (unmounted) fn(); else unlistenSpawnFn = fn; });
 
     listen<{ id: string }>('pty-exit', async (event) => {
       if (unmounted) return;
       const exitedId = event.payload.id;
 
-      // Frontend guard: the Rust backend can emit pty-exit prematurely on
-      // Windows ConPTY when the reader EOFs but the child process is still
-      // alive (e.g. after exec).  Verify with is_pty_active before marking
-      // the agent as disconnected.
       try {
         const stillAlive = await invoke<boolean>('is_pty_active', { id: exitedId });
-        if (stillAlive) {
-          logToAgent(pane.id, agents.find(a => a.terminalId === exitedId)?.nodeId ?? '', `pty-exit received for ${exitedId} but child is still alive — ignoring.`);
-          return;
-        }
-      } catch { /* is_pty_active can fail if PTY was destroyed — proceed */ }
+        if (stillAlive) return;
+      } catch { /* ignore */ }
 
       const liveAgents = readAgentsForPane(pane.id, agents);
       const target = liveAgents.find(agent => agent.terminalId === exitedId);
       if (!target) return;
 
       const reason = 'Terminal process exited; runtime session disconnected.';
-      logToAgent(pane.id, target.nodeId!, `Terminal process ${exitedId} EXITED.`);
       const shouldForceFailed = RUNTIME_ACTIVE_STATES.has(target.status);
       const nextAgents = liveAgents.map(agent =>
         agent.terminalId === exitedId
@@ -742,87 +693,37 @@ export function MissionControlPane({ pane }: { pane: Pane }) {
           adapterStatus: shouldForceFailed ? 'disconnected' : target.status ?? null,
         });
       }
-    }).then(fn => {
-      if (unmounted) {
-        fn();
-      } else {
-        unlistenExitFn = fn;
-      }
-    });
+    }).then(fn => { if (unmounted) fn(); else unlistenExitFn = fn; });
 
     return () => {
       unmounted = true;
-      if (unlistenSpawnFn) {
-        unlistenSpawnFn();
-        unlistenSpawnFn = undefined;
-      }
-      if (unlistenExitFn) {
-        unlistenExitFn();
-        unlistenExitFn = undefined;
-      }
+      if (unlistenSpawnFn) unlistenSpawnFn();
+      if (unlistenExitFn) unlistenExitFn();
     };
-  }, [agents, currentMissionId, pane.id, setNodeRuntimeBinding, updatePaneData]);
+  }, [agents, pane.id, setNodeRuntimeBinding, updatePaneData]);
 
-  // Mission Control drives the explicit runtime lifecycle:
-  // 1) MCP server health check, 2) runtime session registration, 3) NEW_TASK dispatch.
   useEffect(() => {
     let unlistenActivationFn: (() => void) | undefined;
     let unlistenUpdateFn: (() => void) | undefined;
     let unlistenWarningFn: (() => void) | undefined;
-    let unlistenRunOutputFn: (() => void) | undefined;
-    let unlistenRunExitFn: (() => void) | undefined;
     let unmounted = false;
 
     const processActivation = async (payload: RuntimeActivationPayload, missionId: string, nodeId: string, attempt: number) => {
-      // The sequencing logic (PTY launch, MCP registration, task injection, ACK waits)
-      // has been moved to Orchestrator and Runtime Manager (Phase 6).
       if (unmounted) return;
       if (currentMissionId && currentMissionId !== missionId) return;
 
-      const activationKey = `${missionId}:${nodeId}:${attempt}`;
-      if (inflightActivationsRef.current.has(activationKey)) return;
-      inflightActivationsRef.current.add(activationKey);
-
-      logToAgent(pane.id, nodeId, `Activation request queued in backend. Session: ${payload.sessionId}`);
-      
       const now = Date.now();
       const cli = normalizeRuntimeCli(payload.cliType);
       const nextAgents = readAgentsForPane(pane.id, agents).map(agent => {
         if (agent.nodeId !== nodeId) return agent;
         return {
-          ...agent,
-          status: 'activation_pending' as const,
-          attempt,
-          startedAt: now,
-          completedAt: undefined,
-          lastOutcome: undefined,
-          lastPayload: payload.inputPayload ?? null,
-          lastError: null,
-          runtimeSessionId: payload.sessionId,
-          runtimeCli: cli,
-          executionMode: payload.executionMode,
-          activeRunId: payload.runId,
-          runtimeBootstrapState: 'activation_pending',
-          runtimeBootstrapReason: null,
-          runtimeRegisteredAt: undefined,
-          attemptHistory: upsertAttemptHistory(agent.attemptHistory, attempt, {
-            attempt,
-            status: 'activation_pending',
-            startedAt: now,
-            completedAt: undefined,
-            outcome: undefined,
-            payloadPreview: summarizePayload(payload.inputPayload ?? null),
-          }),
+          ...agent, status: 'activation_pending' as const, attempt, startedAt: now,
+          lastPayload: payload.inputPayload ?? null, runtimeSessionId: payload.sessionId, runtimeCli: cli, executionMode: payload.executionMode, activeRunId: payload.runId,
+          attemptHistory: upsertAttemptHistory(agent.attemptHistory, attempt, { attempt, status: 'activation_pending', startedAt: now, payloadPreview: summarizeHandoffPayload(payload.inputPayload ?? null, 120) }),
         };
       });
       updatePaneData(pane.id, { agents: nextAgents });
-      setNodeRuntimeBinding(nodeId, {
-        terminalId: payload.terminalId,
-        runtimeSessionId: payload.sessionId,
-        adapterStatus: 'activation_pending',
-      });
-      
-      inflightActivationsRef.current.delete(activationKey);
+      setNodeRuntimeBinding(nodeId, { terminalId: payload.terminalId, runtimeSessionId: payload.sessionId, adapterStatus: 'activation_pending' });
     };
 
     listen<{
@@ -835,561 +736,114 @@ export function MissionControlPane({ pane }: { pane: Pane }) {
       if (unmounted) return;
       const { mission_id: missionId, node_id: nodeId, attempt, payload } = event.payload;
       if (currentMissionId && currentMissionId !== missionId) return;
+      processActivation(payload, missionId, nodeId, attempt);
+    }).then(fn => { if (unmounted) fn(); else unlistenActivationFn = fn; });
 
-      logToAgent(pane.id, nodeId, `Activation request BROADCAST received. Attempt: ${attempt}`);
-      void processActivation(payload, missionId, nodeId, attempt);
-    }).then(fn => {
-      if (unmounted) {
-        fn();
-      } else {
-        unlistenActivationFn = fn;
-      }
-    });
-
-    listen<{
-      nodeId: string;
-      missionId: string;
-      message: string;
-    }>('workflow-runtime-warning', (event) => {
+    listen<{ nodeId: string; missionId: string; message: string }>('workflow-runtime-warning', (event) => {
       if (unmounted) return;
       const { nodeId, missionId, message } = event.payload;
       if (currentMissionId && currentMissionId !== missionId) return;
-
-      const liveAgents = readAgentsForPane(pane.id, agents);
-      const nextAgents = liveAgents.map(agent =>
-        agent.nodeId === nodeId
-          ? { ...agent, lastError: message, runtimeBootstrapReason: message }
-          : agent
+      const nextAgents = readAgentsForPane(pane.id, agents).map(agent =>
+        agent.nodeId === nodeId ? { ...agent, lastError: message, runtimeBootstrapReason: message } : agent
       );
       updatePaneData(pane.id, { agents: nextAgents });
-    }).then(fn => {
-      unlistenWarningFn = fn;
-      if (unmounted) fn();
-    });
+    }).then(fn => { unlistenWarningFn = fn; if (unmounted) fn(); });
 
-    listen<{
-      runId: string;
-      missionId: string;
-      nodeId: string;
-      stream: 'stdout' | 'stderr';
-      chunk: string;
-      at: number;
-    }>('agent-run-output', (event) => {
-      if (unmounted) return;
-      const { runId, missionId, nodeId, stream, chunk, at } = event.payload;
-      if (currentMissionId && currentMissionId !== missionId) return;
-      setRunOutput(previous => [
-        ...previous,
-        {
-          id: `${runId}:${stream}:${at}:${previous.length}`,
-          runId,
-          nodeId,
-          stream,
-          chunk,
-          at,
-        },
-      ].slice(-500));
-    }).then(fn => {
-      unlistenRunOutputFn = fn;
-      if (unmounted) fn();
-    });
-
-    listen<{
-      runId: string;
-      missionId: string;
-      nodeId: string;
-      status: string;
-      exitCode?: number | null;
-      error?: string | null;
-      at: number;
-    }>('agent-run-exit', (event) => {
-      if (unmounted) return;
-      const { runId, missionId, nodeId } = event.payload;
-      if (currentMissionId && currentMissionId !== missionId) return;
-
-      const target = readAgentsForPane(pane.id, agents).find(agent =>
-        agent.nodeId === nodeId && agent.activeRunId === runId
-      );
-      if (!target) return;
-    }).then(fn => {
-      unlistenRunExitFn = fn;
-      if (unmounted) fn();
-    });
-
-    listen<{
-      id: string;
-      status: string;
-      attempt?: number;
-      outcome?: 'success' | 'failure';
-      reason?: string;
-    }>('workflow-node-update', (event) => {
+    listen<{ id: string; status: string; attempt?: number; outcome?: 'success' | 'failure'; reason?: string }>('workflow-node-update', (event) => {
       if (unmounted) return;
       const { id: nodeId, status, attempt, outcome, reason } = event.payload;
-      logToAgent(pane.id, nodeId, `Node status UPDATE: ${status}${outcome ? ` (${outcome})` : ''}${reason ? ` - ${reason}` : ''}`);
       const liveAgents = readAgentsForPane(pane.id, agents);
       const now = Date.now();
-      const sessionsToDispose = new Set<string>();
 
       const nextAgents = liveAgents.map(agent => {
         if (agent.nodeId !== nodeId) return agent;
-
-        const nextAttempt = typeof attempt === 'number' ? attempt : (agent.attempt ?? 0);
         const nextStatus = status as MissionAgent['status'];
-        const isTerminalState =
-          nextStatus === 'done' ||
-          nextStatus === 'completed' ||
-          nextStatus === 'failed' ||
-          nextStatus === 'unbound' ||
-          nextStatus === 'disconnected';
-        if (isTerminalState && agent.runtimeSessionId) {
-          sessionsToDispose.add(agent.runtimeSessionId);
-        }
-
+        const isTerminalState = nextStatus === 'done' || nextStatus === 'completed' || nextStatus === 'failed' || nextStatus === 'unbound' || nextStatus === 'disconnected';
         return {
-          ...agent,
-          status: nextStatus,
-          attempt: nextAttempt,
-          runtimeBootstrapState:
-            nextStatus === 'failed' || nextStatus === 'unbound' || nextStatus === 'disconnected'
-              ? 'NOT_CONNECTED'
-              : nextStatus === 'ready' || nextStatus === 'running' || nextStatus === 'activation_acked'
-                ? (agent.runtimeBootstrapState === 'NOT_CONNECTED' ? 'NOT_CONNECTED' : 'CONNECTED')
-                : nextStatus === 'launching' ||
-                    nextStatus === 'connecting' ||
-                    nextStatus === 'spawning' ||
-                    nextStatus === 'adapter_starting' ||
-                    nextStatus === 'mcp_connecting' ||
-                    nextStatus === 'registered' ||
-                    nextStatus === 'activation_pending'
-                  ? nextStatus
-                  : agent.runtimeBootstrapState,
-          runtimeBootstrapReason:
-            nextStatus === 'failed' || nextStatus === 'unbound' || nextStatus === 'disconnected'
-              ? (reason ?? agent.runtimeBootstrapReason ?? agent.lastError ?? 'Runtime activation failed.')
-              : agent.runtimeBootstrapReason,
-          startedAt:
-            nextStatus === 'running' || nextStatus === 'launching'
-              ? (agent.startedAt ?? now)
-              : agent.startedAt,
+          ...agent, status: nextStatus, attempt: attempt ?? agent.attempt,
+          startedAt: (nextStatus === 'running' || nextStatus === 'launching') ? (agent.startedAt ?? now) : agent.startedAt,
           completedAt: isTerminalState ? now : agent.completedAt,
           lastOutcome: outcome ?? agent.lastOutcome,
-          lastError:
-            nextStatus === 'failed' || nextStatus === 'unbound' || nextStatus === 'disconnected'
-              ? (reason ?? agent.lastError ?? 'Runtime activation failed.')
-              : reason ?? null,
-          attemptHistory: nextAttempt > 0
-            ? upsertAttemptHistory(agent.attemptHistory, nextAttempt, {
-                attempt: nextAttempt,
-                status: nextStatus ?? 'idle',
-                startedAt:
-                  nextStatus === 'running' || nextStatus === 'launching'
-                    ? (agent.startedAt ?? now)
-                    : undefined,
-                completedAt: isTerminalState ? now : undefined,
-                outcome: outcome ?? undefined,
-              })
-            : agent.attemptHistory,
+          lastError: (nextStatus === 'failed' || nextStatus === 'unbound' || nextStatus === 'disconnected') ? (reason ?? agent.lastError ?? 'Runtime activation failed.') : reason ?? null,
+          attemptHistory: (attempt ?? 0) > 0 ? upsertAttemptHistory(agent.attemptHistory, attempt!, { attempt: attempt!, status: nextStatus, startedAt: (nextStatus === 'running' || nextStatus === 'launching') ? (agent.startedAt ?? now) : undefined, completedAt: isTerminalState ? now : undefined, outcome: outcome ?? undefined }) : agent.attemptHistory,
         };
       });
-
       updatePaneData(pane.id, { agents: nextAgents });
       const updatedAgent = nextAgents.find(agent => agent.nodeId === nodeId);
-      setNodeRuntimeBinding(nodeId, {
-        terminalId: updatedAgent?.terminalId,
-        runtimeSessionId: updatedAgent?.runtimeSessionId ?? null,
-        adapterStatus: status as MissionAgent['status'],
-      });
-      for (const sessionId of sessionsToDispose) {
-        const unsubscribe = sessionUnsubscribersRef.current.get(sessionId);
-        if (unsubscribe) {
-          unsubscribe();
-          sessionUnsubscribersRef.current.delete(sessionId);
-        }
-      }
-    }).then(fn => {
-      if (unmounted) {
-        fn();
-      } else {
-        unlistenUpdateFn = fn;
-      }
-    });
+      setNodeRuntimeBinding(nodeId, { terminalId: updatedAgent?.terminalId, runtimeSessionId: updatedAgent?.runtimeSessionId ?? null, adapterStatus: status as MissionAgent['status'] });
+    }).then(fn => { if (unmounted) fn(); else unlistenUpdateFn = fn; });
 
     return () => {
       unmounted = true;
-      if (unlistenActivationFn) {
-        unlistenActivationFn();
-        unlistenActivationFn = undefined;
-      }
-      if (unlistenUpdateFn) {
-        unlistenUpdateFn();
-        unlistenUpdateFn = undefined;
-      }
-      if (unlistenWarningFn) {
-        unlistenWarningFn();
-        unlistenWarningFn = undefined;
-      }
-      if (unlistenRunOutputFn) {
-        unlistenRunOutputFn();
-        unlistenRunOutputFn = undefined;
-      }
-      if (unlistenRunExitFn) {
-        unlistenRunExitFn();
-        unlistenRunExitFn = undefined;
-      }
+      if (unlistenActivationFn) unlistenActivationFn();
+      if (unlistenUpdateFn) unlistenUpdateFn();
+      if (unlistenWarningFn) unlistenWarningFn();
     };
   }, [agents, currentMissionId, pane.id, setNodeRuntimeBinding, updatePaneData]);
 
-  useEffect(() => {
-    const latestUrl = results.filter(result => result.type === 'url').pop();
-    if (latestUrl) {
-      setPreviewUrl(latestUrl.content.trim());
-      setTab('preview');
-    }
-  }, [results]);
-
-  useEffect(() => {
-    if (outputRef.current) outputRef.current.scrollTop = outputRef.current.scrollHeight;
-  }, [results, runOutput]);
-
   const markdownEntries = results.filter(entry => entry.type === 'markdown');
-
-  async function exportLog() {
-    const now = new Date();
-    const pad = (value: number) => String(value).padStart(2, '0');
-    const generatedAt = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
-    const fileTs = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
-
-    const agentExports = orderedAgents.map(agent => {
-      const role = agentsConfig.agents.find(entry => entry.id === agent.roleId);
-      return {
-        title: agent.title,
-        role_name: role?.role ?? agent.roleId,
-        status: agent.status ?? 'idle',
-      };
-    });
-
-    const pipelineNames = mission
-      ? mission.metadata.executionLayers.map(layer =>
-          layer
-            .map(nodeId => orderedAgents.find(agent => agent.nodeId === nodeId)?.title ?? nodeId)
-            .join(' + ')
-        )
-      : orderedAgents.map(agent => agent.title);
-
-    const resultExports = results.map(result => ({
-      agent_id: result.agentId,
-      content: result.content,
-      result_type: result.type,
-      timestamp: result.timestamp,
-    }));
-
-    try {
-      const path = await invoke<string>('export_workflow_log', {
-        taskDescription,
-        generatedAt,
-        fileTs,
-        agents: agentExports,
-        pipelineNames,
-        results: resultExports,
-      });
-      if (path) {
-        setExportStatus({ path });
-        window.setTimeout(() => setExportStatus(null), 8000);
-      }
-    } catch (error) {
-      setExportStatus({ error: String(error) });
-      window.setTimeout(() => setExportStatus(null), 6000);
-    }
-  }
 
   return (
     <div className="flex flex-col h-full background-bg-panel overflow-hidden">
       <div className="shrink-0 px-3 py-2 border-b border-border-panel bg-bg-titlebar">
         <div className="flex items-center justify-between mb-1.5 gap-2">
           <div className="min-w-0">
-            <p className="text-[11px] font-semibold text-text-primary truncate">
-              {taskDescription || 'Mission'}
-            </p>
-            {currentMissionId && (
-              <p className="text-[10px] text-text-muted truncate">
-                Mission {currentMissionId}
-              </p>
-            )}
+            <p className="text-[11px] font-semibold text-text-primary truncate">{taskDescription || 'Mission'}</p>
+            {currentMissionId && <p className="text-[10px] text-text-muted truncate">Mission {currentMissionId}</p>}
           </div>
-          <button
-            onClick={exportLog}
-            title="Export workflow log"
-            className="flex items-center gap-1 px-2 py-0.5 rounded text-[10px] text-text-muted hover:text-text-primary hover:background-bg-surface border border-transparent hover:border-border-panel transition-colors shrink-0"
-          >
-            <Download size={10} />
-            Export Log
+          <button className="flex items-center gap-1 px-2 py-0.5 rounded text-[10px] text-text-muted hover:text-text-primary hover:background-bg-surface border border-transparent hover:border-border-panel transition-colors shrink-0">
+            <Download size={10} /> Export Log
           </button>
-        </div>
-        {exportStatus && (
-          <div className={`text-[10px] px-2 py-1 rounded mb-2 ${
-            'path' in exportStatus
-              ? 'bg-green-400/10 text-green-400 border border-green-400/20'
-              : 'bg-red-400/10 text-red-400 border border-red-400/20'
-          }`}>
-            {'path' in exportStatus
-              ? `Log saved: ${exportStatus.path}`
-              : `Export failed: ${exportStatus.error}`}
-          </div>
-        )}
-
-        <div className="flex flex-col gap-2">
-          {executionLayers.length > 0 ? executionLayers.map((layer, idx) => (
-            <div key={layer.join(':')} className="flex items-center gap-2 flex-wrap">
-              <span className="text-[9px] uppercase tracking-wide text-text-muted min-w-[44px]">
-                Layer {idx + 1}
-              </span>
-              <div className="flex items-center flex-wrap gap-1">
-                {layer.map(nodeId => {
-                  const agent = orderedAgents.find(entry => entry.nodeId === nodeId);
-                  return agent ? (
-                    <AgentBadge key={nodeId} agent={agent} onOpenTerminal={openTerminal} />
-                  ) : (
-                    <span
-                      key={nodeId}
-                      className="text-[10px] px-2 py-1 rounded-md border border-border-panel background-bg-surface text-text-muted"
-                    >
-                      {nodeId}
-                    </span>
-                  );
-                })}
-              </div>
-            </div>
-          )) : (
-            <div className="flex items-center flex-wrap gap-1">
-              {orderedAgents.map(agent => (
-                <AgentBadge key={agent.terminalId} agent={agent} onOpenTerminal={openTerminal} />
-              ))}
-            </div>
-          )}
         </div>
       </div>
 
       <div className="flex items-center border-b border-border-panel shrink-0 px-3 gap-1 h-8">
-        <button
-          onClick={() => setTab('nodes')}
-          className={`flex items-center gap-1.5 px-2.5 py-1 rounded text-[11px] font-medium transition-colors ${
-            tab === 'nodes' ? 'background-bg-surface text-text-primary' : 'text-text-muted hover:text-text-secondary'
-          }`}
-        >
-          <TerminalSquare size={11} />
-          Nodes
-          <span className="text-[9px] background-bg-surface text-text-muted border border-border-panel rounded-full px-1 leading-4">
-            {orderedAgents.length}
-          </span>
-        </button>
-        <button
-          onClick={() => setTab('preview')}
-          className={`flex items-center gap-1.5 px-2.5 py-1 rounded text-[11px] font-medium transition-colors ${
-            tab === 'preview' ? 'background-bg-surface text-text-primary' : 'text-text-muted hover:text-text-secondary'
-          }`}
-        >
-          <Monitor size={11} />
-          Preview
-          {previewUrl && <span className="w-1.5 h-1.5 rounded-full bg-green-400" />}
-        </button>
-        <button
-          onClick={() => setTab('output')}
-          className={`flex items-center gap-1.5 px-2.5 py-1 rounded text-[11px] font-medium transition-colors ${
-            tab === 'output' ? 'background-bg-surface text-text-primary' : 'text-text-muted hover:text-text-secondary'
-          }`}
-        >
-          <FileText size={11} />
-          Output
-          {markdownEntries.length > 0 && (
-            <span className="text-[9px] bg-accent-primary text-accent-text rounded-full px-1 leading-4">
-              {markdownEntries.length}
-            </span>
-          )}
-        </button>
-        <button
-          onClick={() => setTab('tasks')}
-          className={`flex items-center gap-1.5 px-2.5 py-1 rounded text-[11px] font-medium transition-colors ${
-            tab === 'tasks' ? 'background-bg-surface text-text-primary' : 'text-text-muted hover:text-text-secondary'
-          }`}
-        >
-          <ListTree size={11} />
-          Tasks
-          {allTasks.length > 0 && (
-            <span className="text-[9px] background-bg-surface text-text-muted border border-border-panel rounded-full px-1 leading-4">
-              {allTasks.length}
-            </span>
-          )}
-        </button>
+        <button onClick={() => setTab('nodes')} className={`flex items-center gap-1.5 px-2.5 py-1 rounded text-[11px] font-medium transition-colors ${tab === 'nodes' ? 'background-bg-surface text-text-primary' : 'text-text-muted hover:text-text-secondary'}`}><TerminalSquare size={11} /> Nodes</button>
+        <button onClick={() => setTab('preview')} className={`flex items-center gap-1.5 px-2.5 py-1 rounded text-[11px] font-medium transition-colors ${tab === 'preview' ? 'background-bg-surface text-text-primary' : 'text-text-muted hover:text-text-secondary'}`}><Monitor size={11} /> Preview</button>
+        <button onClick={() => setTab('output')} className={`flex items-center gap-1.5 px-2.5 py-1 rounded text-[11px] font-medium transition-colors ${tab === 'output' ? 'background-bg-surface text-text-primary' : 'text-text-muted hover:text-text-secondary'}`}><FileText size={11} /> Output</button>
+        <button onClick={() => setTab('tasks')} className={`flex items-center gap-1.5 px-2.5 py-1 rounded text-[11px] font-medium transition-colors ${tab === 'tasks' ? 'background-bg-surface text-text-primary' : 'text-text-muted hover:text-text-secondary'}`}><ListTree size={11} /> Tasks</button>
       </div>
 
       {tab === 'nodes' && (
         <div className="flex-1 overflow-y-auto px-3 py-3 space-y-3">
+          {currentMissionId && <MissionSummary missionId={currentMissionId} />}
           <HandoffTimeline entries={handoffTimeline} />
-          {orderedAgents.length === 0 ? (
-            <div className="flex flex-col items-center justify-center h-full gap-3 text-text-muted px-6 text-center">
-              <TerminalSquare size={28} className="opacity-20" />
-              <p className="text-xs opacity-40">
-                Node runtime details appear here after a mission is staged.
-              </p>
-            </div>
-          ) : (
-            orderedAgents.map(agent => (
-              <NodeCard
-                key={`${agent.nodeId ?? agent.terminalId}`}
-                agent={agent}
-                onOpenTerminal={openTerminal}
-              />
-            ))
-          )}
-        </div>
-      )}
-
-      {tab === 'preview' && (
-        <div className="flex-1 overflow-hidden relative">
-          {!previewUrl ? (
-            <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 text-text-muted px-6 text-center">
-              <Monitor size={28} className="opacity-20" />
-              <p className="text-xs opacity-40">
-                Waiting for a preview URL. An agent can call{' '}
-                <code className="font-mono text-accent-primary">publish_result</code> with{' '}
-                <code className="font-mono">type="url"</code> and a localhost address to show it here.
-              </p>
-            </div>
-          ) : (
-            <iframe
-              src={previewUrl}
-              className="w-full h-full border-0"
-              title="Dev server preview"
-              sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
-            />
-          )}
+          {orderedAgents.map(agent => (
+            <NodeCard key={`${agent.nodeId ?? agent.terminalId}`} agent={agent} missionId={currentMissionId} onOpenTerminal={openTerminal} />
+          ))}
         </div>
       )}
 
       {tab === 'output' && (
-        <div ref={outputRef} className="flex-1 overflow-y-auto px-3 py-3 space-y-3 font-mono text-xs">
-          {runOutput.length === 0 && markdownEntries.length === 0 ? (
-            <div className="flex flex-col items-center justify-center h-full gap-3 text-text-muted">
-              <FileText size={28} className="opacity-20" />
-              <p className="text-xs opacity-40 text-center px-4">
-                Headless run output and agent summaries will appear here.
-              </p>
+        <div ref={outputRef} className="flex-1 overflow-y-auto px-3 py-3 space-y-3 font-mono text-xs text-text-secondary">
+          {markdownEntries.map(entry => (
+            <div key={entry.id} className="prose prose-invert max-w-none p-3 border border-border-panel rounded-md">
+              <ReactMarkdown>{entry.content}</ReactMarkdown>
             </div>
-          ) : (
-            <>
-            {runOutput.map(line => (
-              <div key={line.id} className="border border-border-panel rounded-md overflow-hidden">
-                <div className="flex items-center gap-2 px-3 py-1.5 background-bg-surface border-b border-border-panel">
-                  <ChevronRight size={10} className={line.stream === 'stderr' ? 'text-red-400' : 'text-accent-primary'} />
-                  <span className={line.stream === 'stderr' ? 'text-red-300 font-semibold' : 'text-accent-primary font-semibold'}>
-                    {line.nodeId} {line.stream}
-                  </span>
-                  <span className="text-text-muted opacity-50 ml-auto text-[10px]">
-                    {new Date(line.at).toLocaleTimeString([], {
-                      hour: '2-digit',
-                      minute: '2-digit',
-                      second: '2-digit',
-                    })}
-                  </span>
-                </div>
-                <pre className="px-3 py-2 text-text-secondary whitespace-pre-wrap break-words leading-relaxed text-[11px]">
-                  {line.chunk}
-                </pre>
-              </div>
-            ))}
-            {markdownEntries.map(entry => (
-              <div key={entry.id} className="border border-border-panel rounded-md overflow-hidden">
-                <div className="flex items-center gap-2 px-3 py-1.5 background-bg-surface border-b border-border-panel">
-                  <ChevronRight size={10} className="text-accent-primary" />
-                  <span className="text-accent-primary font-semibold">{entry.agentId}</span>
-                  <span className="text-text-muted opacity-50 ml-auto text-[10px]">
-                    {new Date(entry.timestamp).toLocaleTimeString([], {
-                      hour: '2-digit',
-                      minute: '2-digit',
-                      second: '2-digit',
-                    })}
-                  </span>
-                </div>
-                <div className="px-3 py-2 text-text-secondary whitespace-pre-wrap break-words leading-relaxed text-[11px] prose prose-invert max-w-none prose-sm prose-pre:background-bg-panel prose-pre:border prose-pre:border-border-panel">
-                  <ReactMarkdown>{entry.content}</ReactMarkdown>
-                </div>
-              </div>
-            ))}
-            </>
-          )}
+          ))}
         </div>
       )}
 
-      {tab === 'tasks' && (
-        <TaskTreePanel tasks={allTasks} />
-      )}
+      {tab === 'tasks' && <TaskTreePanel tasks={allTasks} />}
     </div>
   );
 }
 
-const STATUS_STYLES: Record<string, string> = {
-  todo: 'text-text-muted border-border-panel background-bg-surface',
-  'in-progress': 'text-accent-primary border-accent-primary/30 bg-accent-primary/10',
-  done: 'text-green-400 border-green-400/30 bg-green-400/10',
-  blocked: 'text-red-400 border-red-400/30 bg-red-400/10',
-};
-
 function TaskRow({ task, depth }: { task: DbTask & { children?: DbTask[] }; depth: number }) {
-  const statusStyle = STATUS_STYLES[task.status] ?? STATUS_STYLES.todo;
   return (
-    <>
-      <div
-        className="flex items-start gap-2 py-1.5 border-b border-border-panel/40 last:border-0 hover:background-bg-surface/40 transition-colors px-3"
-        style={{ paddingLeft: `${12 + depth * 16}px` }}
-      >
-        {depth > 0 && <span className="text-text-muted opacity-30 shrink-0 mt-0.5">↳</span>}
-        <span className="flex-1 text-[11px] text-text-secondary leading-snug">{task.title}</span>
-        <div className="flex items-center gap-1.5 shrink-0">
-          {task.agent_id && (
-            <span className="text-[9px] text-text-muted opacity-50 font-mono">{task.agent_id}</span>
-          )}
-          <span className={`text-[10px] font-semibold uppercase tracking-wide px-2 py-1 rounded border ${statusStyle}`}>
-            {task.status}
-          </span>
-        </div>
-      </div>
-      {task.children?.map(child => (
-        <TaskRow key={child.id} task={child as DbTask & { children?: DbTask[] }} depth={depth + 1} />
-      ))}
-    </>
+    <div className="py-1.5 border-b border-border-panel/40 px-3" style={{ paddingLeft: `${12 + depth * 16}px` }}>
+      <span className="text-[11px] text-text-secondary">{task.title}</span>
+      <span className="ml-2 text-[10px] text-accent-primary uppercase font-bold">{task.status}</span>
+      {task.children?.map(child => <TaskRow key={child.id} task={child as any} depth={depth + 1} />)}
+    </div>
   );
 }
 
 function TaskTreePanel({ tasks }: { tasks: DbTask[] }) {
-  if (tasks.length === 0) {
-    return (
-      <div className="flex-1 flex flex-col items-center justify-center gap-3 text-text-muted">
-        <ListTree size={28} className="opacity-20" />
-        <p className="text-xs opacity-40 text-center px-4">
-          Delegated tasks appear here. A Coordinator can call{' '}
-          <code className="text-accent-primary">delegate_task</code> to create subtasks, then{' '}
-          <code className="text-accent-primary">assign_task_by_requirements</code> to pick the best worker by capabilities.
-        </p>
-      </div>
-    );
-  }
-
-  const map: Record<number, DbTask & { children: DbTask[] }> = {};
-  const roots: Array<DbTask & { children: DbTask[] }> = [];
-  for (const task of tasks) map[task.id] = { ...task, children: [] };
-  for (const task of tasks) {
-    if (task.parent_id !== null && map[task.parent_id]) {
-      map[task.parent_id].children.push(map[task.id]);
-    } else {
-      roots.push(map[task.id]);
-    }
-  }
-
+  const roots = tasks.filter(t => t.parent_id === null);
   return (
     <div className="flex-1 overflow-y-auto">
-      {roots.map(task => (
-        <TaskRow key={task.id} task={task} depth={0} />
-      ))}
+      {roots.map(task => <TaskRow key={task.id} task={task as any} depth={0} />)}
     </div>
   );
 }

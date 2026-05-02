@@ -16,6 +16,7 @@ import type {
   Artifact,
   CompletionOutcome,
   EdgeCondition,
+  FailureCategory,
   NodeLifecycleState,
   PermissionDecision,
   PermissionRequest,
@@ -65,11 +66,7 @@ import { mcpBus } from '../workers/mcpEventBus.js';
 // ──────────────────────────────────────────────
 
 export interface RuntimeManagerPort {
-  createRuntimeForNode(args: import('../runtime/RuntimeTypes.js').CreateRuntimeArgs): Promise<import('../runtime/RuntimeSession.js').RuntimeSession>;
-
   getSessionForNode(missionId: string, nodeId: string, attempt: number): import('../runtime/RuntimeSession.js').RuntimeSession | undefined;
-
-  launchCli(sessionId: string, externalPayload?: unknown): Promise<void>;
 
   validateSessionForReuse(
     sessionId: string,
@@ -77,6 +74,8 @@ export interface RuntimeManagerPort {
   ): Promise<import('../runtime/RuntimeTypes.js').SessionLivenessResult>;
 
   ensureRuntimeReadyForTask(args: import('../runtime/RuntimeTypes.js').CreateRuntimeArgs): Promise<import('../runtime/RuntimeSession.js').RuntimeSession>;
+
+  startNodeRun(args: import('../runtime/RuntimeTypes.js').CreateRuntimeArgs): Promise<import('../runtime/RuntimeSession.js').RuntimeSession>;
 
   reinjectTask(sessionId: string): Promise<void>;
 
@@ -412,7 +411,7 @@ export class WorkflowOrchestrator {
   // Node Activation
   // ──────────────────────────────────────────
 
-  private activateNodeInternal(run: WorkflowRun, nodeId: string): void {
+  public activateNodeInternal(run: WorkflowRun, nodeId: string): void {
     const nodeDef = this.getNodeDefinition(run, nodeId);
     if (!nodeDef) {
       this.emit({
@@ -461,7 +460,7 @@ export class WorkflowOrchestrator {
 
       // Group 5: Single entry point for runtime readiness.
       // Handles reuse, stale cleanup, and new launch.
-      const result = await this.runtimeManager!.ensureRuntimeReadyForTask({
+      const result = await this.runtimeManager!.startNodeRun({
         missionId: run.runId,
         nodeId,
         attempt,
@@ -829,11 +828,10 @@ export class WorkflowOrchestrator {
 
   // ──────────────────────────────────────────
   // Run Completion Check
-    // ──────────────────────────────────────────
+  // ──────────────────────────────────────────
 
-  private checkRunCompletion(run: WorkflowRun): void {
+  public checkRunCompletion(run: WorkflowRun): void {
     if (run.status !== 'running') return;
-
     const nodeStates = Object.values(run.nodeStates);
     const allTerminal = nodeStates.every(
       (ns) =>
@@ -981,19 +979,67 @@ export class WorkflowOrchestrator {
   // Failure Helpers
     // ──────────────────────────────────────────
 
-  private failNodeInternal(run: WorkflowRun, nodeId: string, error?: string): void {
-    failNode(run, nodeId, error);
-    this.emit({
-      type: 'node_failed',
-      runId: run.runId,
-      nodeId,
-      error,
-      attempt: getNodeState(run, nodeId)?.attempt ?? 1,
-      timestamp: Date.now(),
-    });
+  public failNodeInternal(run: WorkflowRun, nodeId: string, error?: string, category: FailureCategory = 'unknown'): void {
+    const nodeState = getNodeState(run, nodeId);
+    if (!nodeState) return;
 
-    this.routeToDownstream(run, nodeId, 'failure');
-    this.checkRunCompletion(run);
+    const nodeDef = this.getNodeDefinition(run, nodeId);
+    const policy = nodeDef?.config.retryPolicy;
+
+    const currentAttempt = nodeState.attempt;
+    const maxAttempts = policy?.maxAttempts ?? 1;
+    const canRetry = policy && 
+                    currentAttempt < maxAttempts && 
+                    (policy.retryOn.includes(category) || policy.retryOn.includes('unknown'));
+
+    if (canRetry) {
+      this.emit({
+        type: 'node_failed',
+        runId: run.runId,
+        nodeId,
+        error: `${error} (Retry ${currentAttempt}/${maxAttempts} scheduled)`,
+        attempt: currentAttempt,
+        timestamp: Date.now(),
+      });
+
+      // Schedule retry with backoff
+      const backoff = policy.backoffMs ?? 1000;
+      setTimeout(() => {
+        const refreshedRun = this.runs.get(run.runId);
+        if (refreshedRun && refreshedRun.status === 'running') {
+            this.activateNodeInternal(refreshedRun, nodeId);
+        }
+      }, backoff);
+    } else {
+      failNode(run, nodeId, error);
+      this.emit({
+        type: 'node_failed',
+        runId: run.runId,
+        nodeId,
+        error,
+        attempt: currentAttempt,
+        timestamp: Date.now(),
+      });
+
+      // Reroute logic (Phase 12)
+      if (policy?.rerouteRoles && policy.rerouteRoles.length > 0) {
+          this.handleReroute(run, nodeId, policy.rerouteRoles);
+      }
+
+      this.routeToDownstream(run, nodeId, 'failure');
+      this.checkRunCompletion(run);
+    }
+  }
+
+  private handleReroute(run: WorkflowRun, failedNodeId: string, roles: string[]): void {
+      // For now, just log reroute attempt
+      this.emit({
+          type: 'error',
+          runId: run.runId,
+          nodeId: failedNodeId,
+          error: `Reroute requested to roles: ${roles.join(', ')}. (Reroute logic pending implementation)`,
+          timestamp: Date.now(),
+      });
   }
 
   failNode(runId: string, nodeId: string, error?: string): void {

@@ -75,7 +75,11 @@
       "Bash(opencode models *)",
       "Bash(codex *)",
       "Bash(taskkill *)",
-      "PowerShell(Stop-Process *)"
+      "PowerShell(Stop-Process *)",
+      "Bash(Get-ChildItem -Path \"C:\\\\VSCODE\\\\terminal-docks\" -Force)",
+      "Bash(Select-Object Name, FullName)",
+      "Bash(xargs wc *)",
+      "Bash(Get-ChildItem *)"
     ]
   }
 }

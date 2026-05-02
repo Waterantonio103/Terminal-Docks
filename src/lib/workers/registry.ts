@@ -1,4 +1,4 @@
-import type { ReadyState, WorkerKind, WorkerSession } from './types';
+import type { ReadyState, WorkerKind, WorkerSession } from './types.js';
 
 type Listener = (snapshot: RegistrySnapshot) => void;
 

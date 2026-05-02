@@ -18,6 +18,9 @@
     "src/lib/runtimeActivity.ts",
     "src/lib/workflowPresets.ts",
     "src/lib/cliAdapters.ts",
-    "src/lib/workflowRuntimePlanning.ts"
+    "src/lib/workflowRuntimePlanning.ts",
+    "src/lib/runtime/TerminalOutputBus.ts",
+    "src/lib/runtime/RuntimeTypes.ts",
+    "src/lib/workflow/*.ts"
   ]
 }

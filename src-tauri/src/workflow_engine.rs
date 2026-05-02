@@ -604,6 +604,39 @@ fn runtime_agent_run_id(mission_id: &str, node_id: &str, attempt: u32) -> String
     format!("run:{mission_id}:{node_id}:{attempt}")
 }
 
+fn populate_canonical_from_mission(app: &AppHandle, mission: &CompiledMission, status: &str) {
+    let state = app.state::<crate::db::DbState>();
+    let db_lock = match state.db.lock() {
+        Ok(lock) => lock,
+        Err(_) => return,
+    };
+    let Some(conn) = db_lock.as_ref() else {
+        return;
+    };
+    crate::db::upsert_mission_canonical(
+        conn,
+        &mission.mission_id,
+        &mission.task.prompt,
+        mission.task.workspace_dir.as_deref(),
+        status,
+    );
+    for edge in &mission.edges {
+        let condition = match &edge.condition {
+            WorkflowEdgeCondition::Always => "always",
+            WorkflowEdgeCondition::OnSuccess => "on_success",
+            WorkflowEdgeCondition::OnFailure => "on_failure",
+        };
+        crate::db::upsert_node_edge_direct(
+            conn,
+            &edge.id,
+            &mission.mission_id,
+            &edge.from_node_id,
+            &edge.to_node_id,
+            condition,
+        );
+    }
+}
+
 fn persist_compiled_mission(app: &AppHandle, mission: &CompiledMission, status: &str) {
     let serialized = match serde_json::to_string(mission) {
         Ok(value) => value,
@@ -656,6 +689,14 @@ fn persist_node_runtime(
         NodeOutcome::Failure => "failure",
     });
 
+    let previous_status: Option<String> = conn
+        .query_row(
+            "SELECT status FROM mission_node_runtime WHERE mission_id = ?1 AND node_id = ?2",
+            params![mission_id, node_id],
+            |row| row.get(0),
+        )
+        .ok();
+
     let _ = conn.execute(
         "INSERT INTO mission_node_runtime
            (mission_id, node_id, role_id, status, attempt, current_wave_id, last_outcome, last_payload, updated_at)
@@ -679,6 +720,36 @@ fn persist_node_runtime(
             last_payload
         ],
     );
+
+    if previous_status.as_deref() != Some(status) {
+        let canonical_status = crate::db::canonical_workflow_node_status(status);
+        let payload = serde_json::json!({
+            "nodeId": node_id,
+            "roleId": role_id,
+            "from": previous_status,
+            "to": status,
+            "canonicalStatus": canonical_status,
+            "attempt": attempt,
+            "currentWaveId": current_wave_id,
+            "lastOutcome": last_outcome_str,
+        })
+        .to_string();
+        crate::db::append_workflow_event_direct(
+            conn,
+            mission_id,
+            Some(node_id),
+            None,
+            None,
+            "node_status_changed",
+            if status == "failed" || status == "unbound" || status == "disconnected" {
+                "warning"
+            } else {
+                "info"
+            },
+            &format!("Node {node_id} status changed to {status}."),
+            Some(&payload),
+        );
+    }
 }
 
 fn persist_runtime_session(
@@ -700,6 +771,14 @@ fn persist_runtime_session(
     let Some(conn) = db_lock.as_ref() else {
         return;
     };
+
+    let previous_status: Option<String> = conn
+        .query_row(
+            "SELECT status FROM agent_runtime_sessions WHERE session_id = ?1",
+            params![session_id],
+            |row| row.get(0),
+        )
+        .ok();
 
     let _ = conn.execute(
         "INSERT INTO agent_runtime_sessions
@@ -725,6 +804,36 @@ fn persist_runtime_session(
             status
         ],
     );
+
+    if previous_status.as_deref() != Some(status) {
+        let canonical_status = crate::db::canonical_runtime_session_status(status);
+        let payload = serde_json::json!({
+            "sessionId": session_id,
+            "agentId": agent_id,
+            "nodeId": node_id,
+            "attempt": attempt,
+            "runId": run_id,
+            "from": previous_status,
+            "to": status,
+            "canonicalStatus": canonical_status,
+        })
+        .to_string();
+        crate::db::append_workflow_event_direct(
+            conn,
+            mission_id,
+            Some(node_id),
+            Some(session_id),
+            Some(terminal_id),
+            "runtime_status_changed",
+            if status == "failed" || status == "disconnected" {
+                "warning"
+            } else {
+                "info"
+            },
+            &format!("Runtime session {session_id} status changed to {status}."),
+            Some(&payload),
+        );
+    }
 }
 
 fn persist_initial_agent_run(app: &AppHandle, payload: &RuntimeActivationPayload) {
@@ -785,12 +894,84 @@ fn mark_runtime_session_status(
         return;
     };
 
+    let previous: Option<(String, String, String)> = conn
+        .query_row(
+            "SELECT status, session_id, terminal_id FROM agent_runtime_sessions
+             WHERE mission_id = ?1 AND node_id = ?2 AND attempt = ?3
+             ORDER BY updated_at DESC LIMIT 1",
+            params![mission_id, node_id, attempt],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .ok();
+
+    let terminal_states = ["completed", "done", "failed", "cancelled", "disconnected"];
+    let active_states = [
+        "registered",
+        "ready",
+        "activation_acked",
+        "activated",
+        "running",
+        "handoff_pending",
+        "waiting",
+    ];
     let _ = conn.execute(
         "UPDATE agent_runtime_sessions
-         SET status = ?1, updated_at = CURRENT_TIMESTAMP
+         SET status = ?1,
+             started_at = CASE
+               WHEN started_at IS NULL AND ?5 = 1 THEN CURRENT_TIMESTAMP
+               ELSE started_at
+             END,
+             ended_at = CASE
+               WHEN ?6 = 1 THEN CURRENT_TIMESTAMP
+               ELSE ended_at
+             END,
+             failure_reason = CASE
+               WHEN ?7 = 1 THEN COALESCE(failure_reason, ?8)
+               ELSE failure_reason
+             END,
+             updated_at = CURRENT_TIMESTAMP
          WHERE mission_id = ?2 AND node_id = ?3 AND attempt = ?4",
-        params![status, mission_id, node_id, attempt],
+        params![
+            status,
+            mission_id,
+            node_id,
+            attempt,
+            active_states.contains(&status),
+            terminal_states.contains(&status),
+            status == "failed" || status == "disconnected",
+            status,
+        ],
     );
+
+    if let Some((previous_status, session_id, terminal_id)) = previous {
+        if previous_status != status {
+            let canonical_status = crate::db::canonical_runtime_session_status(status);
+            let payload = serde_json::json!({
+                "sessionId": session_id,
+                "nodeId": node_id,
+                "attempt": attempt,
+                "from": previous_status,
+                "to": status,
+                "canonicalStatus": canonical_status,
+            })
+            .to_string();
+            crate::db::append_workflow_event_direct(
+                conn,
+                mission_id,
+                Some(node_id),
+                Some(&session_id),
+                Some(&terminal_id),
+                "runtime_status_changed",
+                if status == "failed" || status == "disconnected" {
+                    "warning"
+                } else {
+                    "info"
+                },
+                &format!("Runtime session {session_id} status changed to {status}."),
+                Some(&payload),
+            );
+        }
+    }
 }
 
 fn clear_runtime_sessions_for_mission(app: &AppHandle, mission_id: &str) {
@@ -1759,6 +1940,7 @@ pub fn start_mission_graph(
             mission_id, graph.mission_id
         ));
     }
+    populate_canonical_from_mission(&app, &graph, "active");
     start_mission(&app, graph);
     Ok(())
 }
@@ -1794,6 +1976,7 @@ pub fn seed_mission_to_db(
             None,
         );
     }
+    populate_canonical_from_mission(&app, &graph, "active");
     Ok(())
 }
 
