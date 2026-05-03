@@ -116,6 +116,21 @@ export async function registerTerminalMetadata(args: {
 // ──────────────────────────────────────────────
 
 let cachedMcpBaseUrl: string | null = null;
+const DEFAULT_MCP_HEALTH_TIMEOUT_MS = 5_000;
+
+export interface McpHealthCheckOptions {
+  timeoutMs?: number;
+  baseUrl?: string;
+}
+
+export interface McpHealthCheckResult {
+  ok: boolean;
+  baseUrl: string;
+  status?: number;
+  timedOut: boolean;
+  error?: string;
+  durationMs: number;
+}
 
 export async function getMcpBaseUrl(): Promise<string> {
   if (cachedMcpBaseUrl) return cachedMcpBaseUrl;
@@ -135,14 +150,43 @@ export async function getMcpUrl(): Promise<string> {
   }
 }
 
-export async function checkMcpHealth(): Promise<boolean> {
-  const baseUrl = await getMcpBaseUrl();
+export async function checkMcpHealthDetailed(options: McpHealthCheckOptions = {}): Promise<McpHealthCheckResult> {
+  const startedAt = Date.now();
+  const baseUrl = options.baseUrl ?? await getMcpBaseUrl();
+  const timeoutMs = Math.max(1, options.timeoutMs ?? DEFAULT_MCP_HEALTH_TIMEOUT_MS);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+
   try {
-    const response = await fetch(`${baseUrl}/health`, { method: 'GET' });
-    return response.ok;
-  } catch {
-    return false;
+    const response = await fetch(`${baseUrl}/health`, {
+      method: 'GET',
+      signal: controller.signal,
+      cache: 'no-store',
+    });
+    return {
+      ok: response.ok,
+      baseUrl,
+      status: response.status,
+      timedOut: false,
+      durationMs: Date.now() - startedAt,
+    };
+  } catch (err) {
+    const name = err instanceof Error ? err.name : '';
+    const timedOut = controller.signal.aborted || name === 'AbortError';
+    return {
+      ok: false,
+      baseUrl,
+      timedOut,
+      error: timedOut ? `mcp_health_timeout after ${timeoutMs}ms` : (err instanceof Error ? err.message : String(err)),
+      durationMs: Date.now() - startedAt,
+    };
+  } finally {
+    clearTimeout(timer);
   }
+}
+
+export async function checkMcpHealth(options: McpHealthCheckOptions = {}): Promise<boolean> {
+  return (await checkMcpHealthDetailed(options)).ok;
 }
 
 // ──────────────────────────────────────────────
@@ -166,16 +210,38 @@ export interface McpRegistrationRequest {
   executionMode?: string;
 }
 
-export async function registerMcpSession(request: McpRegistrationRequest): Promise<{ ok: boolean; message?: string; error?: string }> {
+export async function registerMcpSession(
+  request: McpRegistrationRequest,
+  options: { timeoutMs?: number } = {},
+): Promise<{ ok: boolean; message?: string; error?: string }> {
   try {
-    const result = await invoke<{ ok?: boolean; message?: string; error?: string }>('mcp_register_runtime_session', {
+    const invokePromise = invoke<{ ok?: boolean; message?: string; error?: string }>('mcp_register_runtime_session', {
       payload: request,
     });
+    const result = options.timeoutMs
+      ? await promiseWithTimeout(
+          invokePromise,
+          options.timeoutMs,
+          () => ({ ok: false, error: `mcp_registration_timeout after ${options.timeoutMs}ms` }),
+        )
+      : await invokePromise;
     return { ok: result.ok ?? false, message: result.message, error: result.error };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     return { ok: false, error: msg };
   }
+}
+
+function promiseWithTimeout<T>(promise: Promise<T>, timeoutMs: number, onTimeout: () => T): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  return Promise.race([
+    promise,
+    new Promise<T>(resolve => {
+      timer = setTimeout(() => resolve(onTimeout()), timeoutMs);
+    }),
+  ]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
 }
 
 // ──────────────────────────────────────────────

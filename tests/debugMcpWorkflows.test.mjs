@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 const tempRoot = mkdtempSync(join(tmpdir(), 'terminal-docks-debug-workflows-'));
 process.env.MCP_DB_PATH = join(tempRoot, 'tasks.db');
+const concreteOutputRoot = join(process.cwd(), 'docks-testing', 'debug-validator-test');
 
 function textPayload(result) {
   assert.equal(result.isError, undefined);
@@ -15,6 +16,8 @@ try {
   const { initDb, db } = await import('../mcp-server/src/db/index.mjs');
   const { createDebugRun, getDebugRun, listDebugEvents } = await import('../mcp-server/src/debug/state.mjs');
   const { registerDebugWorkflowTools } = await import('../mcp-server/src/debug/tools/workflows.mjs');
+  const { registerWorkflowTools } = await import('../mcp-server/src/tools/workflow.mjs');
+  const { registerCommunicationTools } = await import('../mcp-server/src/tools/communication.mjs');
 
   initDb();
 
@@ -29,6 +32,8 @@ try {
     },
   };
   registerDebugWorkflowTools(server, () => 'test-session');
+  registerWorkflowTools(server, () => 'test-session');
+  registerCommunicationTools(server, () => 'test-session');
 
   const workflow = textPayload(await tools.get('debug_create_test_workflow').handler({
     debugRunId,
@@ -121,10 +126,123 @@ try {
   const updatedRun = getDebugRun(debugRunId);
   assert.deepEqual(updatedRun.missionIds, [workflow.missionId, tripleWorkflow.missionId]);
 
+  const customWorkflow = textPayload(await tools.get('debug_create_custom_workflow').handler({
+    debugRunId,
+    workflowName: 'scout-builder-branch-smoke',
+    taskPrompt: 'Scout the repo, then route to one Codex builder.',
+    agents: [
+      { id: 'scout', roleId: 'scout', title: 'Scout' },
+      { id: 'builder', roleId: 'builder', title: 'Builder' },
+    ],
+    edges: [
+      { fromNodeId: 'scout', toNodeId: 'builder', condition: 'on_success' },
+    ],
+  }));
+  assert.deepEqual(customWorkflow.nodeIds, ['scout', 'builder']);
+  assert.deepEqual(customWorkflow.startNodeIds, ['scout']);
+  assert.deepEqual(customWorkflow.executionLayers, [['scout'], ['builder']]);
+
+  const customMissionRow = db.prepare('SELECT mission_json FROM compiled_missions WHERE mission_id = ?').get(customWorkflow.missionId);
+  const customMission = JSON.parse(customMissionRow.mission_json);
+  assert.equal(customMission.metadata.customWorkflow, true);
+  assert.equal(customMission.metadata.codexOnly, true);
+  assert.deepEqual(customMission.nodes.map(node => node.terminal.cli), ['codex', 'codex']);
+
+  textPayload(await tools.get('debug_run_workflow').handler({
+    debugRunId,
+    missionId: customWorkflow.missionId,
+    timeoutMs: 1000,
+  }));
+  const scoutActivation = textPayload(await tools.get('debug_activate_node').handler({
+    debugRunId,
+    missionId: customWorkflow.missionId,
+    nodeId: 'scout',
+  }));
+  assert.equal(scoutActivation.status, 'running');
+
+  const scoutComplete = textPayload(await tools.get('complete_task').handler({
+    missionId: customWorkflow.missionId,
+    nodeId: 'scout',
+    attempt: 1,
+    outcome: 'success',
+    title: 'Scout complete',
+    summary: 'Repo inspection complete. Builder has enough context.',
+    keyFindings: ['Custom workflow routed through Codex nodes.'],
+  }));
+  assert.deepEqual(scoutComplete.routed.map(route => route.targetNodeId), ['builder']);
+
+  const builderRuntimeQueued = textPayload(await tools.get('debug_run_node').handler({
+    debugRunId,
+    missionId: customWorkflow.missionId,
+    nodeId: 'builder',
+  }));
+  assert.equal(builderRuntimeQueued.status, 'queued');
+  const builderActivation = textPayload(await tools.get('debug_activate_node').handler({
+    debugRunId,
+    missionId: customWorkflow.missionId,
+    nodeId: 'builder',
+  }));
+  assert.equal(builderActivation.status, 'running');
+
+  const inbox = JSON.parse((await tools.get('read_inbox').handler({
+    missionId: customWorkflow.missionId,
+    nodeId: 'builder',
+    afterSeq: 0,
+  })).content[0].text);
+  assert.equal(inbox.messages.length, 1);
+  assert.match(inbox.messages[0].content, /Scout complete/);
+
+  textPayload(await tools.get('complete_task').handler({
+    missionId: customWorkflow.missionId,
+    nodeId: 'builder',
+    attempt: 1,
+    outcome: 'success',
+    title: 'Builder complete',
+    summary: 'Builder produced the requested output.',
+  }));
+
+  const customRuntimes = db.prepare('SELECT node_id, status, last_outcome FROM mission_node_runtime WHERE mission_id = ? ORDER BY node_id ASC')
+    .all(customWorkflow.missionId);
+  assert.deepEqual(customRuntimes.map(row => [row.node_id, row.status, row.last_outcome]), [
+    ['builder', 'completed', 'success'],
+    ['scout', 'completed', 'success'],
+  ]);
+
+  rmSync(concreteOutputRoot, { recursive: true, force: true });
+  mkdirSync(concreteOutputRoot, { recursive: true });
+  writeFileSync(join(concreteOutputRoot, 'index.html'), '<!doctype html><title>Runnable</title>');
+  writeFileSync(join(concreteOutputRoot, 'README.md'), '# Runnable output\n\nOpen index.html.');
+  const runnableValidation = textPayload(await tools.get('debug_validate_concrete_output').handler({
+    debugRunId,
+    missionId: customWorkflow.missionId,
+    outputPath: 'docks-testing/debug-validator-test',
+    expectedFiles: ['index.html', 'README.md'],
+    mustBeRunnable: true,
+    disallowMarkdownOnly: true,
+    openFile: 'index.html',
+  }));
+  assert.equal(runnableValidation.ok, true);
+  assert.deepEqual(runnableValidation.missingFiles, []);
+
+  rmSync(concreteOutputRoot, { recursive: true, force: true });
+  mkdirSync(concreteOutputRoot, { recursive: true });
+  writeFileSync(join(concreteOutputRoot, 'result.md'), '# Only markdown');
+  const markdownOnlyValidation = textPayload(await tools.get('debug_validate_concrete_output').handler({
+    debugRunId,
+    missionId: customWorkflow.missionId,
+    outputPath: 'docks-testing/debug-validator-test',
+    expectedFiles: ['result.md'],
+    mustBeRunnable: true,
+    disallowMarkdownOnly: true,
+  }));
+  assert.equal(markdownOnlyValidation.ok, false);
+  assert.ok(markdownOnlyValidation.notes.some(note => /documentation-only|No runnable/i.test(note)));
+
   const reset = textPayload(await tools.get('debug_reset_test_state').handler({ debugRunId }));
-  assert.deepEqual(reset.missionIds, [workflow.missionId, tripleWorkflow.missionId]);
+  assert.deepEqual(reset.missionIds, [workflow.missionId, tripleWorkflow.missionId, customWorkflow.missionId]);
   assert.equal(db.prepare('SELECT COUNT(*) AS count FROM compiled_missions WHERE mission_id = ?').get(workflow.missionId).count, 0);
   assert.equal(db.prepare('SELECT COUNT(*) AS count FROM compiled_missions WHERE mission_id = ?').get(tripleWorkflow.missionId).count, 0);
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM compiled_missions WHERE mission_id = ?').get(customWorkflow.missionId).count, 0);
   assert.deepEqual(getDebugRun(debugRunId).missionIds, []);
 
   const events = listDebugEvents(debugRunId);
@@ -134,4 +252,5 @@ try {
   console.log('PASS debug MCP workflow tools create, run, wait, and reset debug missions');
 } finally {
   try { rmSync(tempRoot, { recursive: true, force: true }); } catch {}
+  try { rmSync(concreteOutputRoot, { recursive: true, force: true }); } catch {}
 }

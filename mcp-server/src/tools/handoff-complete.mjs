@@ -109,6 +109,95 @@ function matchingOutgoingTargets(mission, fromNodeId, outcome) {
     .filter(entry => entry.targetNode);
 }
 
+function markRuntimeCompletion({
+  missionId,
+  nodeId,
+  attempt,
+  outcome,
+  structuredCompletion,
+}) {
+  const status = outcome === 'failure' ? 'failed' : 'completed';
+  const payload = JSON.stringify(structuredCompletion ?? null);
+  const sessionRows = db.prepare(
+    `SELECT session_id FROM agent_runtime_sessions
+      WHERE mission_id = ? AND node_id = ? AND attempt = ?`
+  ).all(missionId, nodeId, attempt);
+
+  db.prepare(
+    `UPDATE mission_node_runtime
+        SET status = ?,
+            last_outcome = ?,
+            last_payload = ?,
+            updated_at = CURRENT_TIMESTAMP
+      WHERE mission_id = ? AND node_id = ? AND attempt = ?`
+  ).run(status, outcome, payload, missionId, nodeId, attempt);
+
+  db.prepare(
+    `UPDATE agent_runtime_sessions
+        SET status = ?,
+            updated_at = CURRENT_TIMESTAMP
+      WHERE mission_id = ? AND node_id = ? AND attempt = ?`
+  ).run(status, missionId, nodeId, attempt);
+
+  for (const row of sessionRows) {
+    if (sessions[row.session_id]) {
+      sessions[row.session_id].status = status;
+      sessions[row.session_id].updatedAt = Date.now();
+    }
+  }
+
+  refreshMissionTerminalStatus(missionId);
+}
+
+function refreshMissionTerminalStatus(missionId) {
+  const record = loadCompiledMissionRecord(missionId);
+  const nodeIds = record?.mission?.nodes?.map(node => node.id) ?? [];
+  if (nodeIds.length === 0) return;
+
+  const rows = db.prepare(
+    `SELECT node_id, status, last_outcome
+       FROM mission_node_runtime
+      WHERE mission_id = ?`
+  ).all(missionId);
+  if (rows.length < nodeIds.length) return;
+
+  const runtimeByNode = new Map(rows.map(row => [row.node_id, row]));
+  const terminalStatuses = new Set(['completed', 'failed', 'cancelled']);
+  const allTerminal = nodeIds.every(nodeId => terminalStatuses.has(runtimeByNode.get(nodeId)?.status));
+  if (!allTerminal) return;
+
+  const hasFailure = nodeIds.some(nodeId => {
+    const runtime = runtimeByNode.get(nodeId);
+    return runtime?.status === 'failed' || runtime?.last_outcome === 'failure' || runtime?.status === 'cancelled';
+  });
+  const nextStatus = hasFailure ? 'failed' : 'completed';
+
+  const current = db.prepare(
+    `SELECT status
+       FROM compiled_missions
+      WHERE mission_id = ?`
+  ).get(missionId);
+  if (current?.status === nextStatus) return;
+
+  db.prepare(
+    `UPDATE compiled_missions
+        SET status = ?,
+            updated_at = CURRENT_TIMESTAMP
+      WHERE mission_id = ?`
+  ).run(nextStatus, missionId);
+
+  appendWorkflowEvent({
+    missionId,
+    type: 'workflow_completed',
+    severity: hasFailure ? 'warning' : 'info',
+    message: `Workflow ${missionId} reached ${nextStatus} state.`,
+    payload: {
+      status: nextStatus,
+      nodeCount: nodeIds.length,
+    },
+  });
+}
+
 function persistGraphHandoff({
   sid,
   missionId,
@@ -254,6 +343,16 @@ export function executeHandoffTask(args, sid) {
     payload: structuredCompletion,
   });
 
+  if (missionId && fromNodeId && Number.isInteger(fromAttempt)) {
+    markRuntimeCompletion({
+      missionId,
+      nodeId: fromNodeId,
+      attempt: fromAttempt,
+      outcome: normalizedOutcome,
+      structuredCompletion,
+    });
+  }
+
   return makeToolText(JSON.stringify({ taskId, status: 'handoff_recorded', eventBody }, null, 2));
 }
 
@@ -341,6 +440,14 @@ export function executeCompleteTask(args, sid) {
     severity: normalizedOutcome === 'failure' ? 'warning' : 'info',
     message: `Node ${nodeId} completed with outcome ${normalizedOutcome}.`,
     payload: { outcome: normalizedOutcome, routed }
+  });
+
+  markRuntimeCompletion({
+    missionId,
+    nodeId,
+    attempt,
+    outcome: normalizedOutcome,
+    structuredCompletion,
   });
 
   return makeToolText(JSON.stringify({ status: 'completed', routed }, null, 2));

@@ -2424,6 +2424,20 @@ pub fn get_mission_activations(
     Ok(payloads)
 }
 
+fn activation_status_rank(status: &str) -> u8 {
+    match status {
+        "adapter_starting" | "connecting" => 1,
+        "mcp_connecting" => 2,
+        "registered" => 3,
+        "ready" | "dispatched" | "activated" => 4,
+        "activation_pending" => 5,
+        "activation_acked" => 6,
+        "running" => 7,
+        "completed" | "done" | "failed" | "disconnected" | "cancelled" => 8,
+        _ => 0,
+    }
+}
+
 #[tauri::command]
 pub fn get_runtime_activation(
     app: AppHandle,
@@ -2474,7 +2488,11 @@ pub fn get_runtime_activation(
                 if let Some(active_mission) = missions.get(&mission_id) {
                     let key = (node_id.clone(), attempt);
                     if let Some(pending) = active_mission.pending_runtime_activations.get(&key) {
-                        value.status = pending.status.clone();
+                        if activation_status_rank(&pending.status)
+                            >= activation_status_rank(&value.status)
+                        {
+                            value.status = pending.status.clone();
+                        }
                         value.activation_id = Some(pending.payload.activation_id.clone());
                         value.run_id = Some(pending.payload.run_id.clone());
                         value.status_reason = pending

@@ -25,6 +25,9 @@ const SUITES = {
   ],
 };
 
+const HANDLER_HARNESS_WARNING =
+  'debug_run_suite is a handler-level smoke harness. It seeds debug missions and durable lifecycle rows, but it does not exercise the live UI, NodeTree authoring, RuntimeManager, PTYs, or real CLI agents. Do not count these results as prompt-level UX/backend workflow success.';
+
 function classifyFailure({ missionId, nodeIds }) {
   const events = db.prepare(
     `SELECT type, message, payload_json FROM workflow_events WHERE mission_id = ? ORDER BY id ASC LIMIT 500`
@@ -59,6 +62,8 @@ async function runTemplate(debugRun, templateName) {
       debugRunId: debugRun.id,
       suiteName: debugRun.suiteName,
       startNodeIds: mission.metadata?.startNodeIds ?? [],
+      runnerMode: 'handler_harness',
+      liveRuntimeLaunched: false,
     },
   });
   for (const nodeId of mission.metadata?.startNodeIds ?? []) {
@@ -79,14 +84,34 @@ async function runTemplate(debugRun, templateName) {
     status,
     failureCategory,
     notes: status === 'passed'
-      ? 'Debug workflow was created, queued, and emitted durable lifecycle evidence.'
+      ? `Debug workflow was created, queued, and emitted durable lifecycle evidence. ${HANDLER_HARNESS_WARNING}`
       : `Lifecycle assertion failed: ${failureCategory}`,
-    evidence: { missionId: mission.missionId, nodeIds, terminalIds },
+    evidence: {
+      missionId: mission.missionId,
+      nodeIds,
+      terminalIds,
+      runnerMode: 'handler_harness',
+      liveRuntimeLaunched: false,
+      concreteRunnableOutputValidated: false,
+      warning: HANDLER_HARNESS_WARNING,
+    },
   });
   if (status === 'failed') {
     writeDebugEvent(debugRun.id, 'debug_test_failed', { templateName, missionId: mission.missionId, failureCategory });
   }
-  return { testName: templateName, status, failureCategory, missionId: mission.missionId, nodeIds, terminalIds, sessions };
+  return {
+    testName: templateName,
+    status,
+    failureCategory,
+    missionId: mission.missionId,
+    nodeIds,
+    terminalIds,
+    sessions,
+    runnerMode: 'handler_harness',
+    liveRuntimeLaunched: false,
+    concreteRunnableOutputValidated: false,
+    warning: HANDLER_HARNESS_WARNING,
+  };
 }
 
 export function registerDebugSuiteTools(server, getSessionId) {
@@ -95,13 +120,30 @@ export function registerDebugSuiteTools(server, getSessionId) {
     inputSchema: {
       debugRunId: z.string().min(1),
       suiteName: z.enum(Object.keys(SUITES)).optional(),
+      requireLiveRuntime: z.boolean().optional(),
     },
-  }, async ({ debugRunId, suiteName }) => {
+  }, async ({ debugRunId, suiteName, requireLiveRuntime = false }) => {
     const checked = requireDebugRun(debugRunId);
     if (!checked.ok) return checked.response;
     const selectedSuite = suiteName ?? checked.debugRun.suiteName;
     const templates = SUITES[selectedSuite];
     if (!templates) return jsonResponse({ suiteName: selectedSuite, status: 'blocked', reason: `Unknown suite: ${selectedSuite}` });
+    if (requireLiveRuntime) {
+      const reason = 'debug_run_suite cannot satisfy requireLiveRuntime=true because it is a handler-level harness. Use the app UI or live workflow harness to create and run real RuntimeManager/PTY-backed workflows, then use Debug MCP observability tools to collect evidence.';
+      writeDebugEvent(debugRunId, 'debug_guardrail_blocked_action', {
+        action: 'debug_run_suite',
+        reason,
+        suiteName: selectedSuite,
+      });
+      return jsonResponse({
+        debugRunId,
+        suiteName: selectedSuite,
+        status: 'blocked',
+        reason,
+        runnerMode: 'handler_harness',
+        liveRuntimeLaunched: false,
+      });
+    }
     updateDebugRunStatus(debugRunId, 'running');
     const results = [];
     for (const templateName of templates) {
@@ -113,7 +155,16 @@ export function registerDebugSuiteTools(server, getSessionId) {
       lastFailure: results.find(result => result.status === 'failed')?.failureCategory ?? null,
     });
     auditTool(debugRunId, 'debug_run_suite', getSessionId?.(), { suiteName: selectedSuite, status });
-    return jsonResponse({ debugRunId, suiteName: selectedSuite, status, results });
+    return jsonResponse({
+      debugRunId,
+      suiteName: selectedSuite,
+      status,
+      runnerMode: 'handler_harness',
+      liveRuntimeLaunched: false,
+      concreteRunnableOutputValidated: false,
+      warning: HANDLER_HARNESS_WARNING,
+      results,
+    });
   });
 
   server.registerTool('debug_rerun_last_suite', {

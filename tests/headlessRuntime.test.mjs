@@ -6,6 +6,7 @@ import {
   buildCodexInteractiveLaunchCommand,
 } from '../.tmp-tests/lib/cliCommandBuilders.js';
 import { codexAdapter } from '../.tmp-tests/lib/runtime/adapters/codex.js';
+import { checkMcpHealthDetailed } from '../.tmp-tests/lib/runtime/TerminalRuntime.js';
 import { buildStartAgentRunRequest } from '../.tmp-tests/lib/runtimeDispatcher.js';
 
 function payload(overrides = {}) {
@@ -36,6 +37,16 @@ function payload(overrides = {}) {
 function run(name, fn) {
   try {
     fn();
+    console.log(`PASS ${name}`);
+  } catch (error) {
+    console.error(`FAIL ${name}`);
+    throw error;
+  }
+}
+
+async function runAsync(name, fn) {
+  try {
+    await fn();
     console.log(`PASS ${name}`);
   } catch (error) {
     console.error(`FAIL ${name}`);
@@ -152,12 +163,33 @@ run('codex shell fallback flattens the bootstrap prompt before shell quoting', (
 run('codex follow-up task signal is tiny and session-aware', () => {
   assert.equal(
     buildCodexFollowupTaskSignal(),
-    'NEW_TASK. call get_current_task(), execute it, then complete_task().',
+    'NEW_TASK. call get_current_task(), execute it, then call complete_task as the final MCP action. Do not stop after a normal final answer.',
   );
   assert.equal(
     buildCodexFollowupTaskSignal({ sessionId: 'session-123' }),
-    'NEW_TASK. call get_current_task({ sessionId: "session-123" }), execute it, then complete_task().',
+    'NEW_TASK. call get_current_task({ sessionId: "session-123" }), execute it, then call complete_task as the final MCP action. Do not stop after a normal final answer.',
   );
+  assert.equal(
+    buildCodexFollowupTaskSignal({ sessionId: 'session-123', missionId: 'mission-1', nodeId: 'builder', attempt: 2 }),
+    'NEW_TASK. call get_task_details({ missionId: "mission-1", nodeId: "builder" }), execute it, then call complete_task({ missionId: "mission-1", nodeId: "builder", attempt: 2, outcome: "success" or "failure", summary: "<concise summary>" }) as the final MCP action. Do not stop after a normal final answer.',
+  );
+});
+
+run('codex activation prompt uses registered graph task tool', () => {
+  const input = codexAdapter.buildActivationInput(
+    [
+      '### MISSION_CONTROL_ACTIVATION_REQUEST ###',
+      '--- ENVELOPE ---',
+      '{"signal":"NEW_TASK","missionId":"mission-1","nodeId":"builder","sessionId":"session-123","attempt":2}',
+      '--- END ENVELOPE ---',
+    ].join('\n'),
+  );
+
+  assert.match(input.paste, /get_task_details/);
+  assert.doesNotMatch(input.paste, /get_current_task/);
+  assert.match(input.paste, /missionId: "mission-1"/);
+  assert.match(input.paste, /nodeId: "builder"/);
+  assert.match(input.paste, /attempt: 2/);
 });
 
 run('codex permission detector ignores ordinary status output', () => {
@@ -181,6 +213,23 @@ run('codex permission detector accepts MCP tool approval prompts', () => {
   assert.match(request?.request.rawPrompt ?? '', /connect_agent/);
 });
 
+run('codex completion detector ignores contract instructions', () => {
+  assert.equal(
+    codexAdapter.detectCompletion('Use complete_task only after your contribution or verification is done.'),
+    null,
+  );
+  assert.equal(
+    codexAdapter.detectCompletion('A normal final answer does not complete the node or advance the workflow.'),
+    null,
+  );
+});
+
+run('codex completion detector recognizes completed turn footer', () => {
+  const completion = codexAdapter.detectCompletion('\n────────────────\n─ Worked for 1m 02s ─\n');
+  assert.equal(completion?.detected, true);
+  assert.equal(completion?.outcome, 'success');
+});
+
 run('local HTTP runtimes share the headless adapter request path', () => {
   const { request, error } = buildStartAgentRunRequest(payload({ cliType: 'ollama' }), 'hello', {
     customEnv: { TD_LOCAL_HTTP_MODEL: 'qwen2.5-coder' },
@@ -194,4 +243,27 @@ run('local HTTP runtimes share the headless adapter request path', () => {
   assert.equal(request.env.TD_LOCAL_HTTP_URL, 'http://localhost:11434/v1/chat/completions');
   assert.equal(request.env.TD_LOCAL_HTTP_MODEL, 'qwen2.5-coder');
   assert.equal(request.prompt, 'hello');
+});
+
+await runAsync('MCP health check times out stalled fetches', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (_url, init = {}) => new Promise((_resolve, reject) => {
+    init.signal?.addEventListener('abort', () => {
+      const err = new Error('aborted');
+      err.name = 'AbortError';
+      reject(err);
+    });
+  });
+
+  try {
+    const result = await checkMcpHealthDetailed({
+      baseUrl: 'http://127.0.0.1:3741',
+      timeoutMs: 10,
+    });
+    assert.equal(result.ok, false);
+    assert.equal(result.timedOut, true);
+    assert.match(result.error ?? '', /mcp_health_timeout/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });

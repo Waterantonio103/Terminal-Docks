@@ -245,7 +245,7 @@ function parseArtifactMetadata(metadataJson: string | null | undefined): Record<
 function snapshotArtifactPath(artifact: import('../../hooks/useMissionSnapshot').ArtifactRecord): string | undefined {
   if (artifact.contentUri?.trim()) return artifact.contentUri.trim();
   const metadata = parseArtifactMetadata(artifact.metadataJson);
-  const path = metadata.path;
+  const path = metadata.path ?? metadata.outputPath;
   return typeof path === 'string' && path.trim() ? path.trim() : undefined;
 }
 

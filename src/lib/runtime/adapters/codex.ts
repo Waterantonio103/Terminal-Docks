@@ -20,8 +20,26 @@ const MCP_PERMISSION_PROMPT_RE =
   /Allow\s+the\s+.+?\s+MCP\s+server\s+to\s+run\s+tool\s+"[^"]+"\?\s*[\s\S]*(?:\b1\.\s*Allow\b|\bAlways\s+allow\b|\benter\s+to\s+submit\b)/i;
 const GENERIC_PERMISSION_PROMPT_RE =
   /(?:allow|approve|grant)\s+(?:this\s+)?(?:command|tool|operation|request|permission)\??\s*[\s\S]*(?:\b1\.\s*Allow\b|\bAlways\s+allow\b|\by\/n\b|\[y\/n\])/i;
-const COMPLETION_RE = /(?:task completed|finished|done|exit code\s+0)/i;
-const FAILURE_RE = /(?:error:|failed|exception|exit code\s+[1-9])/i;
+const COMPLETION_RE = /(?:\btask\s+(?:completed|complete)\b|turn\.completed|exit code\s+0|(?:^|\n)\s*[─-]+\s*worked for\b|\bworked for\s+\d+\s*(?:s|m|h))/i;
+const FAILURE_RE = /(?:\btask\s+failed\b|\bfatal error\b|\buncaught exception\b|exit code\s+[1-9])/i;
+
+function escapeInstructionValue(value: string): string {
+  return value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+}
+
+function extractActivationField(signal: string, key: string): string | null {
+  const quoted = new RegExp(`"${key}"\\s*:\\s*"([^"]+)"`).exec(signal);
+  if (quoted?.[1]) return quoted[1];
+  const yamlish = new RegExp(`${key}\\s*:\\s*"([^"]+)"`).exec(signal);
+  return yamlish?.[1] ?? null;
+}
+
+function extractActivationNumber(signal: string, key: string): number | null {
+  const match = new RegExp(`"?${key}"?\\s*:\\s*(\\d+)`).exec(signal);
+  if (!match?.[1]) return null;
+  const value = Number(match[1]);
+  return Number.isInteger(value) && value > 0 ? value : null;
+}
 
 export const codexAdapter: CliAdapter = {
   id: 'codex',
@@ -101,7 +119,7 @@ export const codexAdapter: CliAdapter = {
   },
 
   buildInitialPrompt(context: TaskContext): string {
-    return `NEW_TASK. call get_current_task({ sessionId: "${context.sessionId}" }), execute it, then complete_task().`;
+    return `NEW_TASK. call get_task_details({ missionId: "${escapeInstructionValue(context.missionId)}", nodeId: "${escapeInstructionValue(context.nodeId)}" }), execute it, then call complete_task as the final MCP action. Do not stop after a normal final answer.`;
   },
 
   detectPermissionRequest(output: string): PermissionDetectionResult | null {
@@ -182,8 +200,20 @@ export const codexAdapter: CliAdapter = {
 
     if (signal.includes('### MISSION_CONTROL_ACTIVATION_REQUEST ###')) {
       const sessionIdMatch = signal.match(/sessionId:\s*"([^"]+)"/);
-      if (sessionIdMatch) {
-        target = `NEW_TASK. call get_current_task({ sessionId: "${sessionIdMatch[1]}" }), execute it, then complete_task().`;
+      const missionId = extractActivationField(signal, 'missionId');
+      const nodeId = extractActivationField(signal, 'nodeId');
+      const attempt = extractActivationNumber(signal, 'attempt') ?? 1;
+
+      if (missionId && nodeId) {
+        const escapedMissionId = escapeInstructionValue(missionId);
+        const escapedNodeId = escapeInstructionValue(nodeId);
+        target =
+          `NEW_TASK. call get_task_details({ missionId: "${escapedMissionId}", nodeId: "${escapedNodeId}" }), ` +
+          'execute this graph node, then call ' +
+          `complete_task({ missionId: "${escapedMissionId}", nodeId: "${escapedNodeId}", attempt: ${attempt}, outcome: "success" or "failure", summary: "<concise summary>" }) ` +
+          'as the final MCP action. Do not stop after a normal final answer.';
+      } else if (sessionIdMatch) {
+        target = `NEW_TASK. call get_current_task({ sessionId: "${escapeInstructionValue(sessionIdMatch[1])}" }), execute it, then call complete_task as the final MCP action. Do not stop after a normal final answer.`;
       }
     }
 

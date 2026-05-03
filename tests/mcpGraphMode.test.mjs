@@ -7,8 +7,10 @@ const tempRoot = mkdtempSync(join(tmpdir(), 'terminal-docks-mcp-'));
 process.env.MCP_DB_PATH = join(tempRoot, 'tasks.db');
 process.env.MCP_DISABLE_HTTP = '1';
 
-const { buildTaskDetails } = await import('../mcp-server/src/tools/task-details.mjs');
+const { db } = await import('../mcp-server/src/db/index.mjs');
+const { buildTaskDetails, ackAndEmitTaskFetch } = await import('../mcp-server/src/tools/task-details.mjs');
 const { executeHandoffTask, executeCompleteTask } = await import('../mcp-server/src/tools/handoff-complete.mjs');
+const { executeGetCurrentTask } = await import('../mcp-server/src/tools/tasks.mjs');
 const {
   validateGraphHandoff,
   executeReceiveMessages,
@@ -149,6 +151,72 @@ try {
     assert.ok(details.legalNextTargets.every(target => target.targetRoleId === 'reviewer'));
     assert.equal(details.node.status, 'running');
     assert.equal(details.node.attempt, 1);
+    assert.equal(details.completionContract.requiredTool, 'complete_task');
+    assert.match(details.completionContract.note, /Natural-language final answers do not complete/);
+  });
+
+  await run('get_current_task resolves the bound runtime session', async () => {
+    resetStarlinkState();
+    seedCompiledMission(demoMission());
+    seedMissionNodeRuntime({
+      missionId: 'mission-graph',
+      nodeId: 'builder',
+      roleId: 'builder',
+      status: 'running',
+      attempt: 1,
+      currentWaveId: 'root:mission-graph',
+    });
+    seedAgentRuntimeSession({
+      sessionId: 'session:mission-graph:builder:1',
+      agentId: 'agent:mission-graph:builder:term-builder',
+      missionId: 'mission-graph',
+      nodeId: 'builder',
+      attempt: 1,
+      terminalId: 'term-builder',
+      status: 'running',
+    });
+
+    const result = executeGetCurrentTask({ sessionId: 'session:mission-graph:builder:1' }, 'transport-session');
+    assert.equal(result.isError, undefined);
+    const details = JSON.parse(result.content[0].text);
+    assert.equal(details.missionId, 'mission-graph');
+    assert.equal(details.nodeId, 'builder');
+    assert.equal(details.completionContract.requiredTool, 'complete_task');
+  });
+
+  await run('get_task_details ack persists activation state', async () => {
+    resetStarlinkState();
+    seedCompiledMission(demoMission());
+    seedMissionNodeRuntime({
+      missionId: 'mission-graph',
+      nodeId: 'builder',
+      roleId: 'builder',
+      status: 'ready',
+      attempt: 1,
+      currentWaveId: 'root:mission-graph',
+    });
+    seedAgentRuntimeSession({
+      sessionId: 'session:mission-graph:builder:1',
+      agentId: 'agent:mission-graph:builder:term-builder',
+      missionId: 'mission-graph',
+      nodeId: 'builder',
+      attempt: 1,
+      terminalId: 'term-builder',
+      status: 'ready',
+    });
+
+    const details = buildTaskDetails('mission-graph', 'builder');
+    assert.ok(details);
+    ackAndEmitTaskFetch(details, 'transport-session');
+
+    const sessionRow = db.prepare(
+      'SELECT status FROM agent_runtime_sessions WHERE session_id = ?',
+    ).get('session:mission-graph:builder:1');
+    const nodeRow = db.prepare(
+      'SELECT status FROM mission_node_runtime WHERE mission_id = ? AND node_id = ?',
+    ).get('mission-graph', 'builder');
+    assert.equal(sessionRow.status, 'activation_acked');
+    assert.equal(nodeRow.status, 'activation_acked');
   });
 
   await run('validateGraphHandoff rejects off-graph routes and bad outcomes', async () => {

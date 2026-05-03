@@ -42,6 +42,7 @@ export type OrchestratorEvent =
   | { type: 'task_injected'; runId: string; nodeId: string; attempt: number; timestamp: number }
   | { type: 'task_acked'; runId: string; nodeId: string; attempt: number; timestamp: number }
   | { type: 'downstream_activated'; runId: string; sourceNodeId: string; targetNodeId: string; timestamp: number }
+  | { type: 'downstream_activation_skipped'; runId: string; sourceNodeId: string; targetNodeId: string; reason: string; timestamp: number }
   | { type: 'fan_in_pending'; runId: string; targetNodeId: string; pendingFromNodes: string[]; timestamp: number }
   | { type: 'error'; runId: string; nodeId?: string; error: string; timestamp: number };
 

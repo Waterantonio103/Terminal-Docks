@@ -297,24 +297,27 @@ export class WorkflowOrchestrator {
       return;
     }
 
+    let explicitHandoff: HandoffRecord | null = null;
+
     // Phase 11: Validation of legal targets
     if (targetNodeId) {
       const legalTargets = getLegalTargetsForNode(run, nodeId, outcome);
-      const isLegal = legalTargets.some(t => t.toNodeId === targetNodeId);
-      if (!isLegal) {
+      const legalTarget = legalTargets.find(t => t.toNodeId === targetNodeId);
+      if (!legalTarget) {
         console.warn(`[Orchestrator] Illegal handoff attempt from ${nodeId} to ${targetNodeId}. Target is not a downstream neighbor in the graph.`);
-        // We could fail the node here, but for now we'll just ignore the explicit target and do normal routing
+        // Ignore the explicit target and fall back to normal routing.
       } else {
         // Explicit legal handoff
-        recordHandoff(run, {
+        explicitHandoff = {
           fromNodeId: nodeId,
           targetNodeId,
           fromAttempt: report.attempt,
           outcome,
           payload: report.downstreamPayload,
-          condition: (legalTargets.find(t => t.toNodeId === targetNodeId)?.condition || 'always') as import('./WorkflowTypes.js').EdgeCondition,
+          condition: (legalTarget.condition || 'always') as import('./WorkflowTypes.js').EdgeCondition,
           timestamp: Date.now(),
-        });
+        };
+        recordHandoff(run, explicitHandoff);
       }
     }
 
@@ -329,17 +332,12 @@ export class WorkflowOrchestrator {
     });
 
     // Determine next nodes
-    if (targetNodeId) {
-      // If explicit target was provided (and legal), we ONLY activate that one?
-      // Or we activate ALL matched downstream nodes?
-      // Rule says: handoff_task = explicit target choice when branching is needed
-      this.activateNodeInternal(run, targetNodeId);
+    if (explicitHandoff) {
+      // Explicit handoff is still subject to fan-in readiness.
+      this.activateDownstreamNode(run, explicitHandoff.targetNodeId, nodeId, explicitHandoff);
     } else {
       // Normal completion: activate all downstream nodes matching outcome
-      const nextTargets = getLegalTargetsForNode(run, nodeId, outcome);
-      for (const target of nextTargets) {
-        this.activateNodeInternal(run, target.toNodeId);
-      }
+      this.routeToDownstream(run, nodeId, outcome, report.downstreamPayload);
     }
 
     // Check if run is complete
@@ -806,6 +804,19 @@ export class WorkflowOrchestrator {
     }
 
     if (targetDef.kind !== 'agent') return;
+
+    const targetState = getNodeState(run, targetNodeId);
+    if (!targetState || targetState.state !== 'idle') {
+      this.emit({
+        type: 'downstream_activation_skipped',
+        runId: run.runId,
+        sourceNodeId,
+        targetNodeId,
+        reason: targetState ? `Target node is already ${targetState.state}.` : 'Target node state not found.',
+        timestamp: Date.now(),
+      });
+      return;
+    }
 
     if (!this.checkFanIn(run, targetNodeId)) {
       const pending = this.getPendingParentIds(run, targetNodeId);

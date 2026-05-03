@@ -42,6 +42,46 @@ function definition() {
   };
 }
 
+function fanInDefinition() {
+  const agent = (id, roleId = 'builder') => ({
+    id,
+    kind: 'agent',
+    roleId,
+    config: {
+      cli: 'codex',
+      executionMode: 'interactive_pty',
+      terminalId: `term-${id}`,
+    },
+  });
+
+  return {
+    id: 'fan-in-definition',
+    name: 'Explicit handoff fan-in regression',
+    createdAt: new Date(0).toISOString(),
+    updatedAt: new Date(0).toISOString(),
+    nodes: [
+      {
+        id: 'task',
+        kind: 'task',
+        roleId: 'task',
+        config: {
+          prompt: 'Run the fan-in regression',
+          mode: 'build',
+        },
+      },
+      agent('parent-a', 'scout'),
+      agent('parent-b', 'scout'),
+      agent('merge', 'builder'),
+    ],
+    edges: [
+      { fromNodeId: 'task', toNodeId: 'parent-a', condition: 'always' },
+      { fromNodeId: 'task', toNodeId: 'parent-b', condition: 'always' },
+      { fromNodeId: 'parent-a', toNodeId: 'merge', condition: 'on_success' },
+      { fromNodeId: 'parent-b', toNodeId: 'merge', condition: 'on_success' },
+    ],
+  };
+}
+
 function createFastCompletingRuntimeManager() {
   const listeners = new Set();
   return {
@@ -102,4 +142,37 @@ await run('orchestrator handles runtime completion before runtime_attached', asy
   const run = orchestrator.getRun('race-run');
   assert.equal(run?.status, 'completed');
   assert.equal(run?.nodeStates['agent-a']?.state, 'completed');
+});
+
+await run('explicit MCP handoff waits for all fan-in parents', async () => {
+  const orchestrator = new WorkflowOrchestrator();
+
+  orchestrator.startRun(fanInDefinition(), { runId: 'fan-in-run' });
+  let run = orchestrator.getRun('fan-in-run');
+  assert.equal(run?.nodeStates.merge?.state, 'idle');
+
+  orchestrator.handleNodeCompletion('fan-in-run', {
+    nodeId: 'parent-a',
+    attempt: 1,
+    outcome: 'success',
+    summary: 'parent a done',
+    targetNodeId: 'merge',
+  });
+
+  run = orchestrator.getRun('fan-in-run');
+  assert.equal(run?.nodeStates['parent-a']?.state, 'completed');
+  assert.equal(run?.nodeStates.merge?.state, 'idle');
+
+  orchestrator.handleNodeCompletion('fan-in-run', {
+    nodeId: 'parent-b',
+    attempt: 1,
+    outcome: 'success',
+    summary: 'parent b done',
+    targetNodeId: 'merge',
+  });
+
+  run = orchestrator.getRun('fan-in-run');
+  assert.equal(run?.nodeStates['parent-b']?.state, 'completed');
+  assert.equal(run?.nodeStates.merge?.state, 'launching_runtime');
+  assert.equal(run?.nodeStates.merge?.attempt, 1);
 });

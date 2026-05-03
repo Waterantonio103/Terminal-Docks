@@ -17,6 +17,14 @@ import { registerInboxTools } from './src/tools/inbox.mjs';
 import { registerDebugTools } from './src/debug/index.mjs';
 import { registerResources } from './src/resources/index.mjs';
 import { registerPrompts } from './src/prompts/index.mjs';
+import { executeHandoffTask } from './src/tools/handoff-complete.mjs';
+import {
+  resetStarlinkState,
+  seedCompiledMission,
+  seedMissionNodeRuntime,
+  seedAgentRuntimeSession,
+  executeReceiveMessages as executeReceiveMessagesHelper,
+} from './src/utils/test-helpers.mjs';
 
 // Initialize DB
 initDb();
@@ -209,6 +217,128 @@ function registerRuntimeBootstrap(body) {
   return { ok: true, sessionId };
 }
 
+function getRecentAgentEvents(sessionId = null) {
+  return recentAgentEvents.filter(event => !sessionId || event.sessionId === sessionId);
+}
+
+function ackTaskPush({ sessionId, missionId, nodeId, taskSeq }) {
+  const existing = db.prepare(
+    'SELECT acked_at FROM task_pushes WHERE session_id = ? AND mission_id = ? AND node_id = ? AND task_seq = ?'
+  ).get(sessionId, missionId, nodeId, taskSeq);
+  if (!existing || existing.acked_at) return false;
+  const result = db.prepare(
+    'UPDATE task_pushes SET acked_at = CURRENT_TIMESTAMP WHERE session_id = ? AND mission_id = ? AND node_id = ? AND task_seq = ?'
+  ).run(sessionId, missionId, nodeId, taskSeq);
+  return result.changes > 0;
+}
+
+function executeConnectAgent(args = {}, sessionId = 'unknown') {
+  const sid = sessionId ?? 'unknown';
+  sessions[sid] = {
+    ...(sessions[sid] ?? {}),
+    role: args.role ?? null,
+    profileId: args.profileId ?? args.role ?? null,
+    agentId: args.agentId ?? sid,
+    terminalId: args.terminalId ?? null,
+    cli: args.cli ?? null,
+    capabilities: Array.isArray(args.capabilities) ? args.capabilities : undefined,
+    workingDir: args.workingDir ?? null,
+    missionId: args.missionId ?? null,
+    nodeId: args.nodeId ?? null,
+    attempt: args.attempt ?? null,
+    status: 'ready',
+    connectedAt: sessions[sid]?.connectedAt ?? Date.now(),
+    updatedAt: Date.now(),
+  };
+  emitAgentEvent({
+    type: 'agent:ready',
+    sessionId: sid,
+    missionId: args.missionId,
+    nodeId: args.nodeId,
+    attempt: args.attempt,
+    role: args.role ?? null,
+    agentId: args.agentId ?? sid,
+    at: Date.now(),
+  });
+  return { ok: true, sessionId: sid };
+}
+
+function executeRuntimeBootstrapRegistration(args = {}) {
+  const sessionId = String(args.sessionId || '');
+  const missionId = String(args.missionId || '');
+  const nodeId = String(args.nodeId || '');
+  const attempt = Number(args.attempt);
+  if (!sessionId || !missionId || !nodeId || !Number.isInteger(attempt) || attempt < 1) {
+    return { ok: false, code: 'invalid_runtime_bootstrap', message: 'runtime_bootstrap requires sessionId, missionId, nodeId, and positive attempt.' };
+  }
+
+  const runtime = db.prepare(
+    'SELECT attempt FROM mission_node_runtime WHERE mission_id = ? AND node_id = ?'
+  ).get(missionId, nodeId);
+  if (runtime && runtime.attempt !== attempt) {
+    return { ok: false, code: 'stale_attempt', currentAttempt: runtime.attempt };
+  }
+
+  db.prepare(
+    `INSERT INTO agent_runtime_sessions
+       (session_id, agent_id, mission_id, node_id, attempt, terminal_id, status, run_id, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, 'registered', ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+     ON CONFLICT(session_id) DO UPDATE SET
+       agent_id = excluded.agent_id,
+       mission_id = excluded.mission_id,
+       node_id = excluded.node_id,
+       attempt = excluded.attempt,
+       terminal_id = excluded.terminal_id,
+       status = 'registered',
+       run_id = excluded.run_id,
+       updated_at = CURRENT_TIMESTAMP`
+  ).run(
+    sessionId,
+    args.agentId ?? sessionId,
+    missionId,
+    nodeId,
+    attempt,
+    args.terminalId ?? '',
+    args.runId ?? null,
+  );
+
+  executeConnectAgent({
+    ...args,
+    missionId,
+    nodeId,
+    attempt,
+    status: 'registered',
+  }, sessionId);
+  sessions[sessionId].status = 'registered';
+  return { ok: true, sessionId };
+}
+
+function executeRuntimeDisconnect({ sessionId, missionId, nodeId, attempt, reason } = {}) {
+  if (!sessionId) return { ok: false, code: 'missing_session' };
+  if (sessions[sessionId]) {
+    sessions[sessionId].status = 'disconnected';
+    sessions[sessionId].updatedAt = Date.now();
+  }
+  db.prepare(
+    'UPDATE agent_runtime_sessions SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE session_id = ?'
+  ).run('disconnected', sessionId);
+  emitAgentEvent({
+    type: 'agent:disconnected',
+    sessionId,
+    missionId,
+    nodeId,
+    attempt,
+    reason,
+    at: Date.now(),
+  });
+  return { ok: true, sessionId };
+}
+
+function executeReceiveMessages(args = {}, sessionId = 'unknown') {
+  emitAgentEvent({ type: 'agent:heartbeat', sessionId: sessionId ?? 'unknown', at: Date.now() });
+  return executeReceiveMessagesHelper(args, sessionId);
+}
+
 app.post('/internal/push', (req, res) => {
   const expected = process.env.MCP_INTERNAL_PUSH_TOKEN;
   if (!expected) return res.status(503).json({ ok: false, error: 'Internal push token not configured' });
@@ -311,6 +441,29 @@ app.get('/mcp', async (req, res) => {
 });
 
 const PORT = parseInt(process.env.MCP_PORT || '3741');
-app.listen(PORT, () => {
-  console.log(`MCP Server (Phase 9 Modular) listening on port ${PORT}`);
-});
+let httpServer = null;
+if (process.env.MCP_DISABLE_HTTP !== '1') {
+  httpServer = app.listen(PORT, () => {
+    console.log(`MCP Server (Phase 9 Modular) listening on port ${PORT}`);
+  });
+}
+
+export {
+  app,
+  httpServer,
+  createMcpServer,
+  resetStarlinkState,
+  emitAgentEvent,
+  agentEvents,
+  getRecentAgentEvents,
+  recordTaskPush,
+  ackTaskPush,
+  executeConnectAgent,
+  executeRuntimeBootstrapRegistration,
+  executeRuntimeDisconnect,
+  executeReceiveMessages,
+  executeHandoffTask,
+  seedCompiledMission,
+  seedMissionNodeRuntime,
+  seedAgentRuntimeSession,
+};

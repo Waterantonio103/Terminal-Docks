@@ -16,8 +16,8 @@ const BANNER_RE = /\bclaude (code|assistant)\b/i;
 const SHELL_PROMPT_RE = /(?:\$|>|#)\s*$/m;
 const PERMISSION_RE = /(?:allow|approve|grant|deny|reject).*(?:\?|y\/n|\[y\/n\]|\b1\.)/is;
 
-const COMPLETION_RE = /(?:task completed|finished|done|exit code\s+0)/i;
-const FAILURE_RE = /(?:error:|failed|exception|exit code\s+[1-9])/i;
+const COMPLETION_RE = /(?:\btask\s+(?:completed|complete)\b|turn\.completed|exit code\s+0)/i;
+const FAILURE_RE = /(?:\btask\s+failed\b|\bfatal error\b|\buncaught exception\b|exit code\s+[1-9])/i;
 
 export const claudeAdapter: CliAdapter = {
   id: 'claude',

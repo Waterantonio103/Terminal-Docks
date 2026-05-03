@@ -92,6 +92,11 @@ export function buildTaskDetails(missionId, nodeId) {
       inbox: [],
       pendingPushes: [],
       upstreamContext: {},
+      completionContract: {
+        requiredTool: 'complete_task',
+        authority: 'MCP task:completed event',
+        note: 'Natural-language final answers do not complete a graph node. Call complete_task with missionId, nodeId, attempt, outcome, and summary as the final MCP action.',
+      },
       workspaceDir: null,
       assignment: null,
     };
@@ -180,6 +185,11 @@ export function buildTaskDetails(missionId, nodeId) {
     inbox,
     pendingPushes,
     upstreamContext,
+    completionContract: {
+      requiredTool: 'complete_task',
+      authority: 'MCP task:completed event',
+      note: 'Natural-language final answers do not complete a graph node. Call complete_task with missionId, nodeId, attempt, outcome, and summary as the final MCP action.',
+    },
     workspaceDir: record.mission.task?.workspaceDir ?? null,
     assignment: {
       missionId,
@@ -200,19 +210,48 @@ export function ackAndEmitTaskFetch(details, callerSessionId) {
   const targetSid = details.runtimeSession?.sessionId ?? callerSessionId ?? null;
   const currentAttempt = Number(details.node?.attempt ?? 0);
   if (!targetSid || !Number.isInteger(currentAttempt) || currentAttempt < 1) return;
+  const nodeId = details.nodeId ?? details.node?.id;
+  if (!nodeId) return;
 
   ackTaskPush({
     sessionId: targetSid,
     missionId: details.missionId,
-    nodeId: details.nodeId ?? details.node?.id,
+    nodeId,
     taskSeq: currentAttempt,
   });
+
+  const ackableStatuses = [
+    'adapter_starting',
+    'mcp_connecting',
+    'registered',
+    'ready',
+    'activation_pending',
+    'activated',
+    'dispatched',
+  ];
+  db.prepare(
+    `UPDATE agent_runtime_sessions
+        SET status = 'activation_acked', updated_at = CURRENT_TIMESTAMP
+      WHERE session_id = ?
+        AND mission_id = ?
+        AND node_id = ?
+        AND attempt = ?
+        AND status IN (${ackableStatuses.map(() => '?').join(',')})`
+  ).run(targetSid, details.missionId, nodeId, currentAttempt, ...ackableStatuses);
+  db.prepare(
+    `UPDATE mission_node_runtime
+        SET status = 'activation_acked', updated_at = CURRENT_TIMESTAMP
+      WHERE mission_id = ?
+        AND node_id = ?
+        AND attempt = ?
+        AND status IN (${ackableStatuses.map(() => '?').join(',')})`
+  ).run(details.missionId, nodeId, currentAttempt, ...ackableStatuses);
 
   emitAgentEvent({
     type: 'activation:acked',
     sessionId: targetSid,
     missionId: details.missionId,
-    nodeId: details.nodeId ?? details.node?.id,
+    nodeId,
     attempt: currentAttempt,
     taskSeq: currentAttempt,
     at: Date.now(),
@@ -223,7 +262,7 @@ export function ackAndEmitTaskFetch(details, callerSessionId) {
       type: 'activation:acked',
       sessionId: callerSessionId,
       missionId: details.missionId,
-      nodeId: details.nodeId ?? details.node?.id,
+      nodeId,
       attempt: currentAttempt,
       taskSeq: currentAttempt,
       at: Date.now(),

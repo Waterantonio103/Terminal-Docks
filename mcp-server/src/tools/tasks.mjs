@@ -5,6 +5,75 @@ import { broadcast, sessions, emitAgentEvent, messageQueues, projects } from '..
 import { buildTaskDetails, ackAndEmitTaskFetch } from './task-details.mjs';
 import { summarizeSession, normalizeCapabilityId, evaluateWorkerForRequirements } from '../utils/sessions.mjs';
 
+function normalizeSessionId(value) {
+  return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
+function addSessionCandidate(candidates, value) {
+  const normalized = normalizeSessionId(value);
+  if (normalized && !candidates.includes(normalized)) candidates.push(normalized);
+}
+
+function resolveCurrentTaskBinding(requestedSessionId, callerSessionId) {
+  const candidates = [];
+  addSessionCandidate(candidates, requestedSessionId);
+  addSessionCandidate(candidates, callerSessionId);
+
+  for (let index = 0; index < candidates.length; index += 1) {
+    const candidate = candidates[index];
+    const session = sessions[candidate];
+    if (session) {
+      addSessionCandidate(candidates, session.runtimeSessionId);
+      addSessionCandidate(candidates, session.aliasOf);
+      if (session.missionId && session.nodeId) {
+        return {
+          sessionId: normalizeSessionId(session.runtimeSessionId) ?? candidate,
+          missionId: session.missionId,
+          nodeId: session.nodeId,
+        };
+      }
+    }
+
+    const row = db.prepare(
+      `SELECT session_id, mission_id, node_id
+         FROM agent_runtime_sessions
+        WHERE session_id = ?
+        ORDER BY updated_at DESC
+        LIMIT 1`
+    ).get(candidate);
+    if (row?.mission_id && row?.node_id) {
+      return {
+        sessionId: row.session_id,
+        missionId: row.mission_id,
+        nodeId: row.node_id,
+      };
+    }
+  }
+
+  return null;
+}
+
+export function executeGetCurrentTask(args = {}, callerSessionId = 'unknown') {
+  const binding = resolveCurrentTaskBinding(args.sessionId, callerSessionId);
+  if (!binding) {
+    return makeToolText(
+      'No current runtime session is bound. Use get_task_details({ missionId, nodeId }) instead.',
+      true,
+    );
+  }
+
+  const details = buildTaskDetails(binding.missionId, binding.nodeId);
+  if (!details) {
+    return makeToolText(
+      `Task details not found for runtime session ${binding.sessionId}. Use get_task_details({ missionId, nodeId }) with explicit IDs.`,
+      true,
+    );
+  }
+
+  ackAndEmitTaskFetch(details, callerSessionId);
+  return { content: [{ type: 'text', text: JSON.stringify(details, null, 2) }] };
+}
+
 export function registerTaskTools(server, getSessionId) {
   // Project tools
   server.registerTool('list_projects', {
@@ -168,4 +237,10 @@ export function registerTaskTools(server, getSessionId) {
     ackAndEmitTaskFetch(details, getSessionId());
     return { content: [{ type: 'text', text: JSON.stringify(details, null, 2) }] };
   });
+
+  server.registerTool('get_current_task', {
+    title: 'Get Current Task',
+    description: 'Compatibility alias for runtime-launched agents. Resolves the current mission/node from the bound runtime session, then returns get_task_details output and acknowledges the task activation.',
+    inputSchema: { sessionId: z.string().optional() }
+  }, async (args = {}) => executeGetCurrentTask(args, getSessionId() ?? 'unknown'));
 }

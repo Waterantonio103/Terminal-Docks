@@ -154,6 +154,7 @@ export type RuntimeManagerEvent =
   | { type: 'permission_resolved'; sessionId: string; nodeId: string; permissionId: string; decision: PermissionDecision }
   | { type: 'task_injected'; sessionId: string; nodeId: string; attempt: number }
   | { type: 'task_acked'; sessionId: string; nodeId: string; attempt: number }
+  | { type: 'completion_contract_missing'; sessionId: string; nodeId: string; outcome: 'success' | 'failure'; action: 'renudge' | 'failed'; summary?: string; error?: string }
   | { type: 'output_captured'; sessionId: string; nodeId: string; text: string }
   | { type: 'heartbeat'; sessionId: string; nodeId: string; at: number }
   | { type: 'artifact_published'; sessionId: string; nodeId: string; artifact: { id: string; kind: import('../workflow/WorkflowTypes.js').ArtifactKind; label: string; content?: string; path?: string; timestamp: number } };

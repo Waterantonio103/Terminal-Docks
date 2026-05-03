@@ -18,8 +18,8 @@ const SHELL_PROMPT_RE = /(?:^|\n)\s*(?:[A-Za-z]:\\[^>\r\n]*>|PS [^>\r\n]*>|[$#])
 const READY_KEYWORDS_RE = /\b(ready|welcome|type your|enter your (?:prompt|message|query))\b/i;
 const GEMINI_UI_RE = /(?:gemini cli|to resume this session|loaded cached credentials|tips for getting started|using:\s*gemini|╭|✦|✧)/i;
 const PERMISSION_RE = /(?:allow|approve|grant|trust|deny|reject).*(?:\?|y\/n|\[y\/n\]|\b1\.|always allow)/is;
-const COMPLETION_RE = /(?:task completed|finished|done|exit code\s+0)/i;
-const FAILURE_RE = /(?:error:|failed|exception|exit code\s+[1-9])/i;
+const COMPLETION_RE = /(?:\btask\s+(?:completed|complete)\b|turn\.completed|exit code\s+0)/i;
+const FAILURE_RE = /(?:\btask\s+failed\b|\bfatal error\b|\buncaught exception\b|exit code\s+[1-9])/i;
 const GEMINI_INPUT_HINT_RE = /\b(type|enter|input|paste|write)\b.*\b(prompt|message|query|input)\b/i;
 const GEMINI_PROMPT_MARKER_RE = /(?:gemini[^\n]{0,80}(?:>|\uff1e|❯|Input:|Prompt:))|(?:^|\n)\s*(?:>|\uff1e|❯|Input:|Prompt:)\s*(?:$|\n)|(?:type|enter|input|paste|write)\b.*\b(prompt|message|query|input)\b/i;
 

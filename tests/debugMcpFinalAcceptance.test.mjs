@@ -48,6 +48,9 @@ try {
     'debug_wait_for_status',
     'debug_wait_for_event',
     'debug_wait_for_terminal_contains',
+    'debug_validate_concrete_output',
+    'debug_create_custom_workflow',
+    'debug_activate_node',
     'debug_reset_test_state',
     'debug_run_suite',
     'debug_rerun_last_suite',
@@ -103,6 +106,18 @@ try {
   }));
   assert.equal(simpleSuite.status, 'completed');
   assert.equal(simpleSuite.results.length, 6);
+  assert.equal(simpleSuite.runnerMode, 'handler_harness');
+  assert.equal(simpleSuite.liveRuntimeLaunched, false);
+  assert.match(simpleSuite.warning, /handler-level smoke harness/);
+
+  const liveRequiredSuite = textPayload(await tools.get('debug_run_suite').handler({
+    debugRunId: diagnose.debugRunId,
+    suiteName: 'simple_workflows',
+    requireLiveRuntime: true,
+  }));
+  assert.equal(liveRequiredSuite.status, 'blocked');
+  assert.equal(liveRequiredSuite.liveRuntimeLaunched, false);
+  assert.match(liveRequiredSuite.reason, /cannot satisfy requireLiveRuntime=true/);
 
   const consecutiveRun = textPayload(await tools.get('debug_start_run').handler({
     suiteName: 'consecutive_runs',

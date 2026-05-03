@@ -141,6 +141,8 @@ try {
     });
 
     assert.match(prompt, /Treat `get_task_details` as the canonical source of truth/);
+    assert.match(prompt, /MCP `complete_task` is the completion authority/);
+    assert.match(prompt, /as your final MCP action/);
     assert.match(prompt, /missionId="smoke-mission"/);
     assert.match(prompt, /fromNodeId="builder-node"/);
     assert.match(prompt, /fromAttempt=1/);

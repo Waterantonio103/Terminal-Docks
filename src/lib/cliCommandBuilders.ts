@@ -258,12 +258,32 @@ export function buildCodexInteractiveLaunchArgs({
   ];
 }
 
-export function buildCodexFollowupTaskSignal({ sessionId }: { sessionId?: string | null } = {}): string {
-  if (sessionId?.trim()) {
-    const escaped = sessionId.trim().replace(/"/g, '\\"');
-    return `NEW_TASK. call get_current_task({ sessionId: "${escaped}" }), execute it, then complete_task().`;
+function escapeInlineInstruction(value: string): string {
+  return value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+}
+
+export function buildCodexFollowupTaskSignal({
+  sessionId,
+  missionId,
+  nodeId,
+  attempt,
+}: {
+  sessionId?: string | null;
+  missionId?: string | null;
+  nodeId?: string | null;
+  attempt?: number | null;
+} = {}): string {
+  if (missionId?.trim() && nodeId?.trim()) {
+    const escapedMissionId = escapeInlineInstruction(missionId.trim());
+    const escapedNodeId = escapeInlineInstruction(nodeId.trim());
+    const safeAttempt = Number.isInteger(attempt) && Number(attempt) > 0 ? Number(attempt) : 1;
+    return `NEW_TASK. call get_task_details({ missionId: "${escapedMissionId}", nodeId: "${escapedNodeId}" }), execute it, then call complete_task({ missionId: "${escapedMissionId}", nodeId: "${escapedNodeId}", attempt: ${safeAttempt}, outcome: "success" or "failure", summary: "<concise summary>" }) as the final MCP action. Do not stop after a normal final answer.`;
   }
-  return 'NEW_TASK. call get_current_task(), execute it, then complete_task().';
+  if (sessionId?.trim()) {
+    const escaped = escapeInlineInstruction(sessionId.trim());
+    return `NEW_TASK. call get_current_task({ sessionId: "${escaped}" }), execute it, then call complete_task as the final MCP action. Do not stop after a normal final answer.`;
+  }
+  return 'NEW_TASK. call get_current_task(), execute it, then call complete_task as the final MCP action. Do not stop after a normal final answer.';
 }
 
 export function buildPtyLaunchCommand(cliId: string, options: { model?: string | null; yolo?: boolean }): string {

@@ -32,9 +32,10 @@ import type {
 } from './RuntimeTypes.js';
 import { isRuntimeSessionTerminal } from './RuntimeTypes.js';
 import { getCliAdapter } from './adapters/index.js';
+import type { CompletionDetectionResult } from './adapters/CliAdapter.js';
 
 import {
-  checkMcpHealth,
+  checkMcpHealthDetailed,
   destroyTerminal,
   getMcpBaseUrl,
   getMcpUrl,
@@ -77,8 +78,15 @@ const CLI_READY_WAIT_MS = 20_000;
 const PASTE_SUBMIT_GAP_MS = 150;
 const PRE_CLEAR_SETTLE_MS = 300;
 const BOOTSTRAP_EVENT_TIMEOUT_MS = 8_000;
+const MCP_HEALTH_TIMEOUT_MS = 5_000;
+const MCP_HEALTH_RETRY_ATTEMPTS = 3;
+const MCP_HEALTH_RETRY_DELAY_MS = 1_000;
+const MCP_REGISTRATION_TIMEOUT_MS = 8_000;
 const TASK_ACK_TIMEOUT_MS = 60_000;
 const BOOTSTRAP_INJECTION_TIMEOUT_MS = 10_000;
+const MISSING_MCP_COMPLETION_RENUDGE_MS = 4_000;
+const MISSING_MCP_COMPLETION_FAIL_MS = 90_000;
+const RUNTIME_COMPLETION_POLL_MS = 2_000;
 const CODEX_IDLE_WAIT_MS = 1_000;
 const CODEX_IDLE_TIMEOUT_MS = 8_000;
 const CODEX_BOOTSTRAP_RETRY_DELAY_MS = 3_500;
@@ -200,6 +208,14 @@ class RuntimeManager {
   private snapshotListeners = new Set<SnapshotListener>();
   private ptyCleanupFns = new Map<string, () => void>();
   private suppressedPtyExitUntil = new Map<string, number>();
+  private completionContractTimers = new Map<string, {
+    nudgeTimer?: ReturnType<typeof setTimeout>;
+    failTimer?: ReturnType<typeof setTimeout>;
+  }>();
+  private runtimeCompletionPollers = new Map<string, {
+    timer: ReturnType<typeof setInterval>;
+    inFlight: boolean;
+  }>();
   private terminalLocks = new TerminalLock();
   private nativeListenerUnsub?: () => void;
   private disposed = false;
@@ -895,7 +911,12 @@ class RuntimeManager {
     const activationPayload = this.buildActivationPayload(session);
     const baseUrl = await getMcpBaseUrl();
     const signal = session.cliId === 'codex'
-      ? buildCodexFollowupTaskSignal()
+      ? buildCodexFollowupTaskSignal({
+          sessionId: session.sessionId,
+          missionId: session.missionId,
+          nodeId: session.nodeId,
+          attempt: session.attempt,
+        })
       : buildNewTaskSignal({
           missionId: session.missionId,
           nodeId: session.nodeId,
@@ -938,6 +959,7 @@ class RuntimeManager {
       );
 
       session.transitionTo('running');
+      this.startRuntimeCompletionPoller(session);
 
       await acknowledgeActivation({
         missionId: session.missionId,
@@ -1183,7 +1205,7 @@ class RuntimeManager {
 
       const comp = session.adapter.detectCompletion(event.text);
       if (comp && session.state === 'running') {
-        // MCP tool 'complete_task' is the authority.
+        this.scheduleMissingMcpCompletionWatchdog(session, comp);
       }
     });
     const existingPtyCleanup = this.ptyCleanupFns.get(sessionId);
@@ -1226,15 +1248,17 @@ class RuntimeManager {
             directPty: true,
           })
         : 'Terminal process exited.';
+      const shouldFailForMissingCompletion = !isRuntimeSessionTerminal(session.state);
       session.markDisconnected(reason);
 
-      if (session.state === 'running' || session.state === 'awaiting_ack' || session.state === 'awaiting_permission') {
-        session.markFailed(reason);
+      if (shouldFailForMissingCompletion) {
+        const failureReason = `pty_exited_without_completion: ${reason}`;
+        session.markFailed(failureReason);
         this.emit({
           type: 'session_failed',
           sessionId,
           nodeId: session.nodeId,
-          error: reason,
+          error: failureReason,
         });
       }
 
@@ -1242,8 +1266,8 @@ class RuntimeManager {
         missionId: session.missionId,
         nodeId: session.nodeId,
         attempt: session.attempt,
-        status: 'disconnected',
-        reason,
+        status: shouldFailForMissingCompletion ? 'failed' : 'disconnected',
+        reason: shouldFailForMissingCompletion ? `pty_exited_without_completion: ${reason}` : reason,
       });
 
       await notifyMcpDisconnected({
@@ -1268,6 +1292,240 @@ class RuntimeManager {
       unlistenSpawn?.();
       unlistenExit?.();
     };
+  }
+
+  private scheduleMissingMcpCompletionWatchdog(
+    session: RuntimeSession,
+    completion: CompletionDetectionResult,
+  ): void {
+    if (this.completionContractTimers.has(session.sessionId)) return;
+    if (session.missionId.startsWith('adhoc-')) return;
+
+    const nudgeTimer = setTimeout(() => {
+      this.renudgeMissingMcpCompletion(session.sessionId, completion).catch(err => {
+        console.warn(`[runtime] missing completion nudge failed session=${session.sessionId}`, err);
+      });
+    }, MISSING_MCP_COMPLETION_RENUDGE_MS);
+
+    const failTimer = setTimeout(() => {
+      this.failMissingMcpCompletion(session.sessionId, completion).catch(err => {
+        console.warn(`[runtime] missing completion failure handling failed session=${session.sessionId}`, err);
+      });
+    }, MISSING_MCP_COMPLETION_FAIL_MS);
+
+    this.completionContractTimers.set(session.sessionId, { nudgeTimer, failTimer });
+  }
+
+  private clearCompletionContractWatchdog(sessionId: string): void {
+    const timers = this.completionContractTimers.get(sessionId);
+    if (!timers) return;
+    if (timers.nudgeTimer) clearTimeout(timers.nudgeTimer);
+    if (timers.failTimer) clearTimeout(timers.failTimer);
+    this.completionContractTimers.delete(sessionId);
+  }
+
+  private startRuntimeCompletionPoller(session: RuntimeSession): void {
+    if (session.missionId.startsWith('adhoc-')) return;
+    if (this.runtimeCompletionPollers.has(session.sessionId)) return;
+
+    const sessionId = session.sessionId;
+    const timer = setInterval(() => {
+      const entry = this.runtimeCompletionPollers.get(sessionId);
+      const current = this.sessions.get(sessionId);
+      if (!entry || !current || isRuntimeSessionTerminal(current.state) || !this.isCurrentOwner(current)) {
+        this.clearRuntimeCompletionPoller(sessionId);
+        return;
+      }
+      if (entry.inFlight) return;
+
+      entry.inFlight = true;
+      this.settleSessionFromRuntimeRecord(sessionId, 'runtime_completion_poll')
+        .catch(error => {
+          console.warn(`[runtime] runtime completion poll failed session=${sessionId}`, error);
+        })
+        .finally(() => {
+          const latest = this.runtimeCompletionPollers.get(sessionId);
+          if (latest) latest.inFlight = false;
+        });
+    }, RUNTIME_COMPLETION_POLL_MS);
+
+    this.runtimeCompletionPollers.set(sessionId, { timer, inFlight: false });
+  }
+
+  private clearRuntimeCompletionPoller(sessionId: string): void {
+    const poller = this.runtimeCompletionPollers.get(sessionId);
+    if (!poller) return;
+    clearInterval(poller.timer);
+    this.runtimeCompletionPollers.delete(sessionId);
+  }
+
+  private async renudgeMissingMcpCompletion(
+    sessionId: string,
+    completion: CompletionDetectionResult,
+  ): Promise<void> {
+    const session = this.sessions.get(sessionId);
+    if (!session || !this.isCurrentOwner(session) || isRuntimeSessionTerminal(session.state)) return;
+    if (await this.settleSessionFromRuntimeRecord(sessionId, 'missing_mcp_completion_pre_nudge')) return;
+
+    this.emit({
+      type: 'completion_contract_missing',
+      sessionId,
+      nodeId: session.nodeId,
+      outcome: completion.outcome,
+      action: 'renudge',
+      summary: completion.summary,
+    });
+
+    missionRepository.appendWorkflowEvent({
+      missionId: session.missionId,
+      nodeId: session.nodeId,
+      sessionId: session.sessionId,
+      terminalId: session.terminalId,
+      eventType: 'missing_mcp_completion_nudge',
+      severity: 'warning',
+      message: `Agent output appeared complete but MCP complete_task has not succeeded for ${session.nodeId}.`,
+      payloadJson: JSON.stringify({
+        outcome: completion.outcome,
+        summary: completion.summary ?? null,
+      }),
+    }).catch(() => {});
+
+    if (!session.isTerminal) return;
+    const prompt = [
+      `Terminal Docks still has missionId="${session.missionId}" nodeId="${session.nodeId}" attempt=${session.attempt} marked running.`,
+      'A normal final answer does not complete a graph node.',
+      `Call the Terminal Docks MCP tool complete_task with missionId="${session.missionId}", nodeId="${session.nodeId}", attempt=${session.attempt}, outcome="success" or "failure", and a concise summary now.`,
+    ].join(' ');
+    await this.injectInteractivePrompt(session, prompt, true);
+  }
+
+  private async failMissingMcpCompletion(
+    sessionId: string,
+    completion: CompletionDetectionResult,
+  ): Promise<void> {
+    const session = this.sessions.get(sessionId);
+    if (!session || !this.isCurrentOwner(session) || isRuntimeSessionTerminal(session.state)) return;
+    if (await this.settleSessionFromRuntimeRecord(sessionId, 'missing_mcp_completion_pre_fail')) return;
+
+    const reason = `missing_mcp_completion: CLI output indicated "${completion.outcome}" but MCP complete_task did not arrive within ${MISSING_MCP_COMPLETION_FAIL_MS}ms.`;
+    session.markFailed(reason);
+    this.emit({
+      type: 'completion_contract_missing',
+      sessionId,
+      nodeId: session.nodeId,
+      outcome: completion.outcome,
+      action: 'failed',
+      summary: completion.summary,
+      error: reason,
+    });
+    this.emit({
+      type: 'session_failed',
+      sessionId,
+      nodeId: session.nodeId,
+      error: reason,
+    });
+
+    await acknowledgeActivation({
+      missionId: session.missionId,
+      nodeId: session.nodeId,
+      attempt: session.attempt,
+      status: 'failed',
+      reason,
+    }).catch(() => {});
+    await emit('workflow-node-update', {
+      id: session.nodeId,
+      status: 'failed',
+      attempt: session.attempt,
+      message: reason,
+    }).catch(() => {});
+
+    missionRepository.appendWorkflowEvent({
+      missionId: session.missionId,
+      nodeId: session.nodeId,
+      sessionId: session.sessionId,
+      terminalId: session.terminalId,
+      eventType: 'missing_mcp_completion',
+      severity: 'error',
+      message: reason,
+      payloadJson: JSON.stringify({
+        outcome: completion.outcome,
+        summary: completion.summary ?? null,
+      }),
+    }).catch(() => {});
+
+    this.cleanupSession(session);
+    if (session.terminalId) {
+      this.destroyAndWaitForTerminal(session.terminalId).catch(err =>
+        console.warn(`[runtime] PTY destroy after missing completion failed terminal=${session.terminalId}`, err),
+      );
+    }
+  }
+
+  private async settleSessionFromRuntimeRecord(sessionId: string, source: string): Promise<boolean> {
+    const session = this.sessions.get(sessionId);
+    if (!session || !this.isCurrentOwner(session)) return false;
+    if (isRuntimeSessionTerminal(session.state)) return true;
+
+    try {
+      const { invoke } = await import('@tauri-apps/api/core');
+      type ActivationRecord = { status?: string; status_reason?: string | null };
+      const record = await invoke<ActivationRecord | null>('get_runtime_activation', {
+        missionId: session.missionId,
+        nodeId: session.nodeId,
+        attempt: session.attempt,
+      });
+      const status = record?.status?.toLowerCase() ?? '';
+      if (status !== 'completed' && status !== 'done' && status !== 'failed') return false;
+
+      this.clearCompletionContractWatchdog(session.sessionId);
+      const outcome: 'success' | 'failure' = status === 'failed' ? 'failure' : 'success';
+      const message = `Recovered ${session.nodeId} completion from runtime database after missed MCP event (${source}).`;
+
+      missionRepository.appendWorkflowEvent({
+        missionId: session.missionId,
+        nodeId: session.nodeId,
+        sessionId: session.sessionId,
+        terminalId: session.terminalId,
+        eventType: 'runtime_completion_recovered',
+        severity: outcome === 'failure' ? 'warning' : 'info',
+        message,
+        payloadJson: JSON.stringify({
+          source,
+          status,
+          statusReason: record?.status_reason ?? null,
+        }),
+      }).catch(() => {});
+
+      if (outcome === 'success') {
+        session.markCompleted();
+        this.emit({
+          type: 'session_completed',
+          sessionId: session.sessionId,
+          nodeId: session.nodeId,
+          outcome,
+        });
+      } else {
+        const reason = record?.status_reason || `Runtime database reports node ${session.nodeId} failed.`;
+        session.markFailed(reason);
+        this.emit({
+          type: 'session_failed',
+          sessionId: session.sessionId,
+          nodeId: session.nodeId,
+          error: reason,
+        });
+      }
+
+      this.cleanupSession(session);
+      if (session.cliId === 'codex' && session.terminalId) {
+        this.destroyAndWaitForTerminal(session.terminalId).catch(err =>
+          console.warn(`[codex] PTY destroy after recovered completion failed terminal=${session.terminalId}`, err),
+        );
+      }
+      return true;
+    } catch (error) {
+      console.warn(`[runtime] failed to inspect runtime activation record session=${sessionId}`, error);
+      return false;
+    }
   }
 
   // ── Terminal Ownership ──────────────────────────────────────────
@@ -1491,9 +1749,31 @@ class RuntimeManager {
       status: 'mcp_connecting',
     });
 
-    const mcpHealthy = await checkMcpHealth();
-    if (!mcpHealthy) {
-      throw new Error('MCP server unavailable during activation handshake.');
+    let mcpHealth = await checkMcpHealthDetailed({ timeoutMs: MCP_HEALTH_TIMEOUT_MS });
+    for (let attempt = 1; !mcpHealth.ok && attempt < MCP_HEALTH_RETRY_ATTEMPTS; attempt += 1) {
+      console.warn(
+        `[runtime] MCP health check failed for node=${session.nodeId} session=${session.sessionId}; ` +
+        `retrying ${attempt + 1}/${MCP_HEALTH_RETRY_ATTEMPTS}`,
+        mcpHealth,
+      );
+      await sleep(MCP_HEALTH_RETRY_DELAY_MS);
+      mcpHealth = await checkMcpHealthDetailed({ timeoutMs: MCP_HEALTH_TIMEOUT_MS });
+    }
+    if (!mcpHealth.ok) {
+      const category = mcpHealth.timedOut ? 'mcp_health_timeout' : 'mcp_health_unavailable';
+      const detail = mcpHealth.error ?? (mcpHealth.status ? `HTTP ${mcpHealth.status}` : 'unknown error');
+      const message = `${category}: MCP health preflight failed after ${MCP_HEALTH_RETRY_ATTEMPTS} attempt(s) at ${mcpHealth.baseUrl}/health (${detail}); continuing to runtime registration.`;
+      console.warn(`[runtime] ${message}`);
+      missionRepository.appendWorkflowEvent({
+        missionId: session.missionId,
+        nodeId: session.nodeId,
+        sessionId: session.sessionId,
+        terminalId: session.terminalId,
+        eventType: 'mcp_health_preflight_failed',
+        severity: 'warning',
+        message,
+        payloadJson: JSON.stringify(mcpHealth),
+      }).catch(() => {});
     }
 
     if (activationPayload.executionMode === 'manual') {
@@ -1587,10 +1867,14 @@ class RuntimeManager {
       BOOTSTRAP_EVENT_TIMEOUT_MS,
     );
 
-    const registration = await registerMcpSession(bootstrapRequest as import('./TerminalRuntime.js').McpRegistrationRequest);
+    const registration = await registerMcpSession(
+      bootstrapRequest as import('./TerminalRuntime.js').McpRegistrationRequest,
+      { timeoutMs: MCP_REGISTRATION_TIMEOUT_MS },
+    );
     if (!registration?.ok) {
       void mcpReadyPromise.catch(() => {});
-      throw new Error(registration?.message ?? registration?.error ?? 'Runtime registration was rejected by MCP.');
+      const reason = registration?.message ?? registration?.error ?? 'Runtime registration was rejected by MCP.';
+      throw new Error(reason.includes('mcp_registration_timeout') ? reason : `mcp_registration_failed: ${reason}`);
     }
     console.log(`[runtime] MCP registration result session=${session.sessionId} ok=${registration.ok} message=${registration.message ?? ''}`);
 
@@ -1740,6 +2024,7 @@ class RuntimeManager {
       await ackPromise;
 
       session.transitionTo('running');
+      this.startRuntimeCompletionPoller(session);
 
       await acknowledgeActivation({
         missionId: session.missionId,
@@ -2420,6 +2705,9 @@ class RuntimeManager {
   }
 
   private cleanupSession(session: RuntimeSession): void {
+    this.clearCompletionContractWatchdog(session.sessionId);
+    this.clearRuntimeCompletionPoller(session.sessionId);
+
     const ptyCleanup = this.ptyCleanupFns.get(session.sessionId);
     if (ptyCleanup) {
       ptyCleanup();
@@ -2517,6 +2805,12 @@ class RuntimeManager {
       try { cleanup(); } catch { /* swallow */ }
     }
     this.ptyCleanupFns.clear();
+    for (const sessionId of this.completionContractTimers.keys()) {
+      this.clearCompletionContractWatchdog(sessionId);
+    }
+    for (const sessionId of this.runtimeCompletionPollers.keys()) {
+      this.clearRuntimeCompletionPoller(sessionId);
+    }
     this.sessions.clear();
     this.retainedSessions.clear();
     this.sessionsByNode.clear();

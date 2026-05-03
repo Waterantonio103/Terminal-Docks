@@ -17,8 +17,8 @@ const PROMPT_RE = /(?:>|\uff1e|❯|Input:|Prompt:|\$)\s*$/m;
 const SHELL_PROMPT_RE = /(?:\$|>|#)\s*$/m;
 const READY_KEYWORDS_RE = /\b(ready|listening|connected|type|enter)\b/i;
 const PERMISSION_RE = /(?:allow|approve|grant|trust|deny|reject).*(?:\?|y\/n|\[y\/n\]|\b1\.)/is;
-const COMPLETION_RE = /(?:task completed|finished|done|exit code\s+0)/i;
-const FAILURE_RE = /(?:error:|failed|exception|exit code\s+[1-9])/i;
+const COMPLETION_RE = /(?:\btask\s+(?:completed|complete)\b|turn\.completed|exit code\s+0)/i;
+const FAILURE_RE = /(?:\btask\s+failed\b|\bfatal error\b|\buncaught exception\b|exit code\s+[1-9])/i;
 
 export const opencodeAdapter: CliAdapter = {
   id: 'opencode',
