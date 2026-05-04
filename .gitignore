@@ -1,11 +1,15 @@
 # Logs
 logs
 *.log
+*.out
+*.err
+*.bak
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
+.tmp-*
 
 node_modules
 dist
@@ -13,12 +17,11 @@ dist
 dist-ssr
 *.local
 
-src-tauri/
-!src-tauri/
-src-tauri/*
-!src-tauri/examples/
-src-tauri/examples/*
-!src-tauri/examples/cli_probe.rs
+# Tauri / Rust build output
+src-tauri/target*/
+src-tauri/gen/schemas
+src-tauri/.terminal-docks/
+src-tauri/example*.md
 
 # Editor directories and files
 .vscode/*
@@ -34,6 +37,19 @@ src-tauri/examples/*
 # AI related
 .ai/
 ai/
+AGENTS.md
+CLAUDE.md
+
+# Local MCP state
+.mcp/*.db*
+
+# Root-level scratch scripts/tests belong in tools/ or tests/ if they become real
+/fix*.mjs
+/fix*.cjs
+/replace.cjs
+/strip.mjs
+/test_*.mjs
+/test_*.rs
 
 # Documentation and Metadata
 docs/

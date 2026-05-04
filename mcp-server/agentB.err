@@ -1,8 +1,0 @@
-Agent B error [TypeError: fetch failed] {
-  [cause]: AggregateError [ECONNREFUSED]: 
-      at internalConnectMultiple (node:net:1142:49)
-      at afterConnectMultiple (node:net:1723:7) {
-    code: 'ECONNREFUSED',
-    [errors]: [ [Error], [Error] ]
-  }
-}
