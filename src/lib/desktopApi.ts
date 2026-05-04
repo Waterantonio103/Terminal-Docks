@@ -1,4 +1,6 @@
 // Wrapper for desktop API, replacing Tauri
+export type UnlistenFn = () => void;
+
 export async function invoke<T>(cmd: string, payload?: any): Promise<T> {
   // @ts-ignore
   if (window.desktopApi) {
@@ -10,7 +12,7 @@ export async function invoke<T>(cmd: string, payload?: any): Promise<T> {
   return null as any;
 }
 
-export async function listen<T>(event: string, cb: (event: { payload: T, event: string }) => void) {
+export async function listen<T>(event: string, cb: (event: { payload: T, event: string }) => void): Promise<UnlistenFn> {
   // @ts-ignore
   if (window.desktopApi) {
     // @ts-ignore

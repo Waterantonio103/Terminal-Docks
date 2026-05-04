@@ -1,0 +1,5 @@
+Codex
+
+Running npm run test:providers
+error: failed to apply patch
+exit code 1

@@ -1,4 +1,4 @@
-import {  invoke  } from './desktopApi';
+import {  invoke  } from './desktopApi.js';
 import { notifyTaskCompleted } from './workers/bootstrap.js';
 import type { WorkerAdapter, WorkerSession } from './workers/types.js';
 
@@ -337,4 +337,3 @@ export function attachExitDetector(
     }
   });
 }
-

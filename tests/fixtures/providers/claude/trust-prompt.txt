@@ -1,0 +1,6 @@
+Claude Code workspace trust
+
+Grant access to this project directory?
+/workspace
+
+Approve to continue.

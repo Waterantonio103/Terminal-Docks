@@ -1,0 +1,3 @@
+Connect to MCP before task activation. MCP URL: http://localhost:3741/mcp. Use role="builder" agentId="agent-1" terminalId="term-1" missionId: "mission-1" nodeId: "builder" attempt=2.
+
+This bootstrap prompt intentionally contains additional instructions and line breaks so the adapter can shorten it before bracketed paste delivery.

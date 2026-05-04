@@ -18,11 +18,19 @@ const SHELL_PROMPT_RE = /(?:\$|>|#)\s*$/m;
 const READY_KEYWORDS_RE = /\b(ready|listening|connected|type|enter)\b/i;
 const PERMISSION_RE = /(?:allow|deny|approve|reject|permission|grant|trust)/i;
 const COMPLETION_RE = /(?:task completed|finished|done|exit code\s+0)/i;
-const FAILURE_RE = /(?:error:|failed|exception|exit code\s+[1-9])/i;
+const FAILURE_RE = /(?:error:|failed|exception|exit code\s+[1-9]|interrupted|cancelled|canceled|aborted)/i;
 
 export const codexAdapter: CliAdapter = {
   id: 'codex',
   label: 'Codex',
+  capabilities: {
+    supportsHeadless: true,
+    supportsMcpConfig: true,
+    supportsHardToolRestrictions: true,
+    supportsPermissions: true,
+    requiresTrustPromptHandling: true,
+    completionAuthority: 'process_exit',
+  },
 
   // Codex's interactive TUI has an input-readiness race that causes PTY
   // injection to truncate the first ~80–120 bytes regardless of settle delay.
@@ -46,11 +54,10 @@ export const codexAdapter: CliAdapter = {
 
     if (context.executionMode === 'headless' || context.executionMode === 'streaming_headless') {
       return {
-        command: '',
-        args: [],
+        command: 'codex',
+        args: ['exec', '--json', '--skip-git-repo-check', '-a', 'never', '-'],
         env,
-        promptDelivery: 'unsupported',
-        unsupportedReason: 'Headless command builder for "codex" is not configured yet. Switch this node to interactive PTY or use a custom command template.',
+        promptDelivery: 'stdin',
       };
     }
 
@@ -94,8 +101,13 @@ export const codexAdapter: CliAdapter = {
   detectPermissionRequest(output: string): PermissionDetectionResult | null {
     if (!PERMISSION_RE.test(output)) return null;
 
-    const lines = output.split('\n').filter(l => l.trim());
-    const promptLine = lines[lines.length - 1] ?? '';
+    const lines = output.split('\n').map(l => l.trim()).filter(Boolean);
+    const promptLine = [...lines].reverse().find(line => (
+      !/^\[/.test(line) &&
+      !/^press\b/i.test(line) &&
+      !/^approve to continue/i.test(line) &&
+      /allow|approve|permission|grant|trust|bash|command|edit|read|network|install/i.test(line)
+    )) ?? lines[lines.length - 1] ?? '';
 
     let category: PermissionRequest['category'] = 'unknown';
     if (/bash|command|shell|exec|run\s/i.test(promptLine)) category = 'shell_execution';
@@ -132,16 +144,17 @@ export const codexAdapter: CliAdapter = {
   normalizeOutput(output: string): RuntimeOutputEvent[] {
     const events: RuntimeOutputEvent[] = [];
     const ts = Date.now();
+    const readyPromptVisible = PROMPT_RE.test(output) || READY_KEYWORDS_RE.test(output);
 
     if (BANNER_RE.test(output)) {
       events.push({ kind: 'banner', cli: 'codex', timestamp: ts, confidence: 'high' });
     }
 
-    if (PROMPT_RE.test(output) || READY_KEYWORDS_RE.test(output)) {
+    if (readyPromptVisible) {
       events.push({ kind: 'ready', cli: 'codex', timestamp: ts, confidence: 'medium' });
     }
 
-    if (SHELL_PROMPT_RE.test(output)) {
+    if (!readyPromptVisible && SHELL_PROMPT_RE.test(output)) {
       events.push({ kind: 'process_exit', cli: 'codex', timestamp: ts, detail: 'shell-prompt-visible' });
     }
 

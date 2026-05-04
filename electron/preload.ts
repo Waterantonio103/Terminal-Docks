@@ -1,5 +1,7 @@
 import { contextBridge, ipcRenderer } from 'electron';
 
+console.log('Preload script loading...');
+
 contextBridge.exposeInMainWorld('desktopApi', {
   invoke: (cmd: string, payload?: any) => ipcRenderer.invoke('invoke', cmd, payload),
   on: (event: string, cb: (data: any) => void) => {

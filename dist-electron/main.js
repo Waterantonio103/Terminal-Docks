@@ -1,7 +1,8 @@
-import { app, BrowserWindow, ipcMain } from 'electron';
+import { app, BrowserWindow, ipcMain, dialog, clipboard, shell } from 'electron';
 import * as path from 'path';
 import { spawn } from 'child_process';
 import { fileURLToPath } from 'url';
+import * as os from 'os';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 let mainWindow = null;
@@ -10,6 +11,7 @@ function createWindow() {
     mainWindow = new BrowserWindow({
         width: 1200,
         height: 800,
+        frame: false,
         webPreferences: {
             preload: path.join(__dirname, 'preload.js'),
             contextIsolation: true,
@@ -85,6 +87,45 @@ app.on('before-quit', () => {
 });
 // IPC handler for invoke calls
 ipcMain.handle('invoke', async (event, cmd, payload) => {
+    const win = BrowserWindow.fromWebContents(event.sender);
+    // Handle window controls and system APIs directly in Electron
+    if (cmd === 'window_minimize') {
+        win?.minimize();
+        return;
+    }
+    if (cmd === 'window_toggle_maximize') {
+        if (win?.isMaximized()) {
+            win.unmaximize();
+        }
+        else {
+            win?.maximize();
+        }
+        return;
+    }
+    if (cmd === 'window_close') {
+        win?.close();
+        return;
+    }
+    if (cmd === 'get_home_dir') {
+        return os.homedir();
+    }
+    if (cmd === 'dialog_open') {
+        const result = await dialog.showOpenDialog(mainWindow, payload?.options || {});
+        if (result.canceled)
+            return null;
+        return result.filePaths;
+    }
+    if (cmd === 'write_clipboard') {
+        clipboard.writeText(payload.text);
+        return;
+    }
+    if (cmd === 'read_clipboard') {
+        return clipboard.readText();
+    }
+    if (cmd === 'open_url') {
+        shell.openExternal(payload.url);
+        return;
+    }
     return new Promise((resolve, reject) => {
         const id = Date.now().toString() + Math.random().toString();
         // Set up one-time listener for the response

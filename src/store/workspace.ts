@@ -366,8 +366,11 @@ export interface CustomThemeColors {
   '--bg-app'?: string;
   '--bg-panel'?: string;
   '--bg-surface'?: string;
+  '--bg-titlebar'?: string;
+  '--border-panel'?: string;
   '--accent-primary'?: string;
   '--accent-subtle'?: string;
+  '--accent-hover'?: string;
   '--text-primary'?: string;
   // Syntax Colors
   '--syntax-keyword'?: string;
@@ -772,7 +775,7 @@ export const useWorkspaceStore = create<WorkspaceState>()(
         const panes = selectActivePanes(state);
         const pane = panes.find(p => p.id === id);
         if (pane?.type === 'terminal' && pane.data?.terminalId) {
-          import('../lib/desktopApi').then(({ invoke }) => {
+          import('../lib/desktopApi.js').then(({ invoke }) => {
             invoke('destroy_pty', { id: pane.data?.terminalId }).catch(console.error);
           });
         }
@@ -915,7 +918,7 @@ export const useWorkspaceStore = create<WorkspaceState>()(
         if (tab) {
           tab.panes.forEach(pane => {
             if (pane.type === 'terminal' && pane.data?.terminalId) {
-              import('../lib/desktopApi').then(({ invoke }) => {
+              import('../lib/desktopApi.js').then(({ invoke }) => {
                 invoke('destroy_pty', { id: pane.data?.terminalId }).catch(console.error);
               });
             }

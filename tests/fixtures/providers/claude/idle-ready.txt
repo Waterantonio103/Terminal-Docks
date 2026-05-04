@@ -1,0 +1,5 @@
+Claude Code
+
+Welcome back, agent-1
+MCP server terminal-docks connected
+Ready for your next prompt.

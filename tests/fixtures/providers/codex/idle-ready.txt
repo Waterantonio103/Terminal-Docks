@@ -1,0 +1,8 @@
+Codex
+
+Model: gpt-5
+Workspace: /workspace
+MCP: terminal-docks connected
+
+Ready for input
+>

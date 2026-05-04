@@ -1,0 +1,6 @@
+Codex security prompt
+
+Do you trust this workspace?
+/workspace
+
+[y] trust and continue  [n] cancel

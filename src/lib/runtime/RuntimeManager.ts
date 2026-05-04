@@ -23,6 +23,8 @@ import type {
   StopRuntimeArgs,
   ResolvePermissionArgs,
   SessionLivenessResult,
+  RuntimeManagerBridge,
+  RuntimeManagerBridgeSession,
 } from './RuntimeTypes.js';
 import { getCliAdapter } from './adapters/index.js';
 
@@ -44,8 +46,6 @@ import { buildStartAgentRunRequest } from '../runtimeDispatcher.js';
 import { getRuntimeBootstrapContract, buildRuntimeBootstrapRegistrationRequest } from '../runtimeBootstrap.js';
 import { mcpBus } from '../workers/mcpEventBus.js';
 import { detectCliFromTerminalOutput } from '../cliDetection.js';
-import { useWorkspaceStore } from '../../store/workspace.js';
-import {  emit  } from '../desktopApi';
 
 // ──────────────────────────────────────────────
 // Constants
@@ -75,9 +75,18 @@ class RuntimeManager {
   private sessionsByNode = new Map<string, string>();
   private listeners = new Set<ManagerListener>();
   private snapshotListeners = new Set<SnapshotListener>();
+  private bridge: RuntimeManagerBridge = {};
   private ptyCleanupFns = new Map<string, () => void>();
   private nativeListenerUnsub?: () => void;
   private disposed = false;
+
+  constructor(bridge?: RuntimeManagerBridge) {
+    if (bridge) this.bridge = bridge;
+  }
+
+  setBridge(bridge: RuntimeManagerBridge | null | undefined): void {
+    this.bridge = bridge ?? {};
+  }
 
   async startListening(): Promise<void> {
     if (this.nativeListenerUnsub) return;
@@ -119,8 +128,8 @@ class RuntimeManager {
       }
     });
 
-    // Acknowledge headless run exits that complete without going through MCP.
-    // Skipped for interactive CLIs (claude/ollama/lmstudio) which complete via MCP tools.
+    // Acknowledge process exits that complete without going through MCP.
+    // Providers that require MCP tool completion declare that in adapter metadata.
     listen<{
       runId: string;
       missionId: string;
@@ -138,8 +147,8 @@ class RuntimeManager {
       const session = this.sessions.get(sessionKey[1]);
       if (!session) return;
 
-      const isInteractiveCli = session.cliId === 'claude' || session.cliId === 'ollama' || session.cliId === 'lmstudio';
-      if (status === 'completed' && isInteractiveCli) return;
+      const usesMcpCompletion = session.adapter.capabilities.completionAuthority === 'mcp_tool';
+      if (status === 'completed' && usesMcpCompletion) return;
       if (session.state === 'completed' || session.state === 'failed') return;
 
       const reason = status === 'completed'
@@ -198,23 +207,7 @@ class RuntimeManager {
         to,
       });
 
-      // UI Bridge: Sync to Workspace Store (only when status actually changes to avoid re-render loops)
-      const existingBinding = useWorkspaceStore.getState().nodeRuntimeBindings[session.nodeId];
-      if (existingBinding?.adapterStatus !== to || existingBinding?.runtimeSessionId !== session.sessionId) {
-        const existingTerminalId = existingBinding?.terminalId;
-        useWorkspaceStore.getState().setNodeRuntimeBinding(session.nodeId, {
-          terminalId: session.terminalId || existingTerminalId || '',
-          runtimeSessionId: session.sessionId,
-          adapterStatus: to as any,
-        });
-      }
-
-      // UI Bridge: Emit legacy Tauri event for NodeTreePane
-      emit('workflow-node-update', {
-        id: session.nodeId,
-        status: to,
-        attempt: session.attempt,
-      }).catch(() => {});
+      this.bridge.onSessionStateChanged?.(this.toBridgeSession(session), from, to);
 
       this.notifySnapshot();
     });
@@ -879,10 +872,7 @@ class RuntimeManager {
           await sleep(CLI_LAUNCH_DELAY_MS);
           try {
             await writeToTerminal(session.terminalId, `${session.cliId}\r`);
-            useWorkspaceStore.getState().updatePaneDataByTerminalId(session.terminalId, {
-              cliSource: 'connect_agent',
-              cli: session.cliId,
-            });
+            this.bridge.markCliAttachedToTerminal?.(this.toBridgeSession(session));
           } catch {
             // PTY still not available — user can interact with the terminal manually
           }
@@ -946,10 +936,7 @@ class RuntimeManager {
         await sleep(CLI_LAUNCH_DELAY_MS);
         await writeToTerminal(session.terminalId, `${session.cliId}\r`);
         await sleep(CLI_STARTUP_WAIT_MS);
-        useWorkspaceStore.getState().updatePaneDataByTerminalId(session.terminalId, {
-          cliSource: 'connect_agent',
-          cli: session.cliId,
-        });
+        this.bridge.markCliAttachedToTerminal?.(this.toBridgeSession(session));
       }
     }
 
@@ -1375,29 +1362,11 @@ class RuntimeManager {
   }
 
   private getTerminalRuntimeConfig(terminalId: string): Record<string, unknown> {
-    const state = useWorkspaceStore.getState();
-    for (const tab of state.tabs) {
-      const terminalPane = tab.panes.find(candidate =>
-        candidate.type === 'terminal' && candidate.data?.terminalId === terminalId,
-      );
-      if (terminalPane) {
-        return {
-          customCommand: terminalPane.data?.customCliCommand ?? null,
-          customArgs: Array.isArray(terminalPane.data?.customCliArgs) ? terminalPane.data?.customCliArgs : null,
-          customEnv: terminalPane.data?.customCliEnv ?? null,
-        };
-      }
-    }
-    return {};
+    return this.bridge.getTerminalRuntimeConfig?.(terminalId) ?? {};
   }
 
   private bindRuntimeToTerminalPane(session: RuntimeSession): void {
-    useWorkspaceStore.getState().updatePaneDataByTerminalId(session.terminalId, {
-      runtimeSessionId: session.sessionId,
-      nodeId: session.nodeId,
-      roleId: session.role,
-      cli: session.cliId,
-    });
+    this.bridge.bindRuntimeToTerminalPane?.(this.toBridgeSession(session));
   }
 
   private async waitForTerminalReady(terminalId: string, timeoutMs: number): Promise<boolean> {
@@ -1410,17 +1379,15 @@ class RuntimeManager {
   }
 
   private hasDifferentLiveSessionOnTerminal(current: RuntimeSession): boolean {
-    const state = useWorkspaceStore.getState();
-    const allPanes = state.tabs.flatMap(t => t.panes);
-    const pane = allPanes.find(p => p.data?.terminalId === current.terminalId);
-    const paneSessionId = typeof pane?.data?.runtimeSessionId === 'string' ? pane.data.runtimeSessionId : null;
+    const terminalState = this.bridge.getTerminalState?.(current.terminalId);
+    const paneSessionId = typeof terminalState?.paneRuntimeSessionId === 'string'
+      ? terminalState.paneRuntimeSessionId
+      : null;
     if (paneSessionId && paneSessionId !== current.sessionId && this.sessions.has(paneSessionId)) {
       return true;
     }
 
-    for (const binding of Object.values(state.nodeRuntimeBindings)) {
-      if (!binding || binding.terminalId !== current.terminalId) continue;
-      const sessionId = binding.runtimeSessionId;
+    for (const sessionId of terminalState?.liveRuntimeSessionIds ?? []) {
       if (typeof sessionId !== 'string') continue;
       if (sessionId !== current.sessionId && this.sessions.has(sessionId)) {
         return true;
@@ -1430,12 +1397,9 @@ class RuntimeManager {
   }
 
   private async shouldLaunchCliInTerminal(session: RuntimeSession): Promise<boolean> {
-    const state = useWorkspaceStore.getState();
-    const allPanes = state.tabs.flatMap(t => t.panes);
-    const pane = allPanes.find(p => p.data?.terminalId === session.terminalId);
-
-    const paneCli = typeof pane?.data?.cli === 'string' ? pane.data.cli : null;
-    const paneCliSource = typeof pane?.data?.cliSource === 'string' ? pane.data.cliSource : null;
+    const terminalState = this.bridge.getTerminalState?.(session.terminalId);
+    const paneCli = typeof terminalState?.cli === 'string' ? terminalState.cli : null;
+    const paneCliSource = typeof terminalState?.cliSource === 'string' ? terminalState.cliSource : null;
 
     const isKnownRunning = (paneCliSource === 'stdout' || paneCliSource === 'connect_agent') && paneCli === session.cliId;
     if (isKnownRunning) return false;
@@ -1452,6 +1416,17 @@ class RuntimeManager {
     if (detected.cli && detected.cli === session.cliId) return false;
 
     return true;
+  }
+
+  private toBridgeSession(session: RuntimeSession): RuntimeManagerBridgeSession {
+    return {
+      sessionId: session.sessionId,
+      nodeId: session.nodeId,
+      attempt: session.attempt,
+      terminalId: session.terminalId,
+      role: session.role,
+      cliId: session.cliId,
+    };
   }
 
   private cleanupSession(session: RuntimeSession): void {

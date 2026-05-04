@@ -1,0 +1,6 @@
+Codex
+
+Applied patch to src/lib/runtime/adapters/codex.ts
+Ran npm run test:providers
+
+task completed

@@ -1197,7 +1197,7 @@ fn request_node_activation_locked(
     );
     // Record activation in task_pushes so MCP tools surface it as a pending
     // activation before the adapter ACKs. This is the canonical MCP-visible
-    // activation record — not the Tauri event, not the PTY prompt injection.
+    // activation record — not the desktop event, not the PTY prompt injection.
     persist_task_push(app, &session_id, mission_id, node_id, attempt);
     persist_initial_agent_run(app, &payload);
     emit_node_status(app, node_id, "activation_pending", Some(attempt), None, None);

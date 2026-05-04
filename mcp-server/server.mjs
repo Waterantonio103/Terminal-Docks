@@ -9,137 +9,16 @@ import { EventEmitter } from 'node:events';
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import { fileURLToPath, pathToFileURL } from 'url';
 import { dirname, resolve } from 'path';
-import Database from 'better-sqlite3';
+import { createMcpPersistence } from './persistence.mjs';
+import { createMcpServiceStore } from './services.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 // ── SQLite ──────────────────────────────────────────────────────────────────
-// Shared with the Rust process via MCP_DB_PATH env var so both read the same
-// tasks.db. Falls back to a local file when running standalone.
-const dbPath = process.env.MCP_DB_PATH || resolve(__dirname, '../.mcp/tasks.db');
-try { mkdirSync(dirname(dbPath), { recursive: true }); } catch {}
-
-const db = new Database(dbPath);
-db.pragma('journal_mode = WAL');
-db.pragma('foreign_keys = ON');
-
-db.exec(`
-  CREATE TABLE IF NOT EXISTS tasks (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    title TEXT NOT NULL,
-    description TEXT,
-    status TEXT NOT NULL DEFAULT 'todo',
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    parent_id INTEGER,
-    agent_id TEXT,
-    from_role TEXT,
-    target_role TEXT,
-    payload TEXT,
-    mission_id TEXT,
-    node_id TEXT,
-    FOREIGN KEY(parent_id) REFERENCES tasks(id)
-  );
-  CREATE TABLE IF NOT EXISTS file_locks (
-    file_path TEXT PRIMARY KEY,
-    agent_id TEXT NOT NULL,
-    locked_at DATETIME DEFAULT CURRENT_TIMESTAMP
-  );
-  CREATE TABLE IF NOT EXISTS session_log (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_id TEXT NOT NULL,
-    event_type TEXT NOT NULL,
-    content TEXT,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    mission_id TEXT,
-    node_id TEXT,
-    recipient_node_id TEXT,
-    is_read BOOLEAN DEFAULT 0
-  );
-  CREATE TABLE IF NOT EXISTS workspace_context (
-    key TEXT PRIMARY KEY,
-    value TEXT,
-    updated_by TEXT,
-    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-  );
-  CREATE TABLE IF NOT EXISTS compiled_missions (
-    mission_id TEXT PRIMARY KEY,
-    graph_id TEXT NOT NULL,
-    mission_json TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'active',
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-  );
-  CREATE TABLE IF NOT EXISTS mission_node_runtime (
-    mission_id TEXT NOT NULL,
-    node_id TEXT NOT NULL,
-    role_id TEXT NOT NULL,
-    status TEXT NOT NULL,
-    attempt INTEGER NOT NULL DEFAULT 0,
-    current_wave_id TEXT,
-    last_outcome TEXT,
-    last_payload TEXT,
-    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    PRIMARY KEY (mission_id, node_id)
-  );
-  CREATE TABLE IF NOT EXISTS agent_runtime_sessions (
-    session_id TEXT PRIMARY KEY,
-    agent_id TEXT NOT NULL,
-    mission_id TEXT NOT NULL,
-    node_id TEXT NOT NULL,
-    attempt INTEGER NOT NULL,
-    terminal_id TEXT NOT NULL,
-    status TEXT NOT NULL,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-  );
-  CREATE TABLE IF NOT EXISTS mission_timeline (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    mission_id TEXT NOT NULL,
-    event_type TEXT NOT NULL,
-    payload TEXT,
-    run_version INTEGER,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-  );
-  CREATE TABLE IF NOT EXISTS task_pushes (
-    session_id TEXT NOT NULL,
-    mission_id TEXT NOT NULL,
-    node_id TEXT NOT NULL,
-    task_seq INTEGER NOT NULL,
-    attempt INTEGER,
-    pushed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    acked_at DATETIME,
-    PRIMARY KEY (session_id, mission_id, node_id, task_seq)
-  );
-  CREATE TABLE IF NOT EXISTS adapter_registrations (
-    adapter_id TEXT PRIMARY KEY,
-    session_id TEXT NOT NULL,
-    terminal_id TEXT NOT NULL,
-    node_id TEXT NOT NULL,
-    mission_id TEXT NOT NULL,
-    role TEXT NOT NULL,
-    cli TEXT NOT NULL,
-    cwd TEXT,
-    lifecycle TEXT NOT NULL DEFAULT 'registered',
-    registered_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-  );
-`);
-
-// Migrate existing DBs created before Phase 1 (handoff columns).
-// SQLite lacks IF NOT EXISTS on ADD COLUMN, so we swallow duplicate-column errors.
-for (const col of ['from_role TEXT', 'target_role TEXT', 'payload TEXT', 'mission_id TEXT', 'node_id TEXT']) {
-  try { db.exec(`ALTER TABLE tasks ADD COLUMN ${col}`); }
-  catch (e) { if (!String(e).includes('duplicate column')) throw e; }
-}
-
-for (const col of ['mission_id TEXT', 'node_id TEXT', 'recipient_node_id TEXT', 'is_read BOOLEAN DEFAULT 0']) {
-  try { db.exec(`ALTER TABLE session_log ADD COLUMN ${col}`); }
-  catch (e) { if (!String(e).includes('duplicate column')) throw e; }
-}
-
-// agent_runtime_sessions: Rust adds run_id but MCP schema predates it.
-try { db.exec(`ALTER TABLE agent_runtime_sessions ADD COLUMN run_id TEXT`); }
-catch (e) { if (!String(e).includes('duplicate column')) throw e; }
+// App mode shares the Rust-owned DB via MCP_DB_PATH and MCP_SCHEMA_OWNER=backend.
+// Standalone tests/manual MCP runs use the compatibility bootstrap in persistence.mjs.
+const { db, dbPath } = createMcpPersistence({ serverDir: __dirname });
+const services = createMcpServiceStore(db);
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 function loadAgentRoster() {
@@ -153,7 +32,7 @@ function loadAgentRoster() {
 
 function logSession(sessionId, eventType, content) {
   try {
-    db.prepare('INSERT INTO session_log (session_id, event_type, content) VALUES (?, ?, ?)').run(sessionId, eventType, content ?? null);
+    services.logSession(sessionId, eventType, content);
   } catch {}
 }
 
@@ -283,9 +162,7 @@ function allowedOutcomesForCondition(condition) {
 }
 
 function loadCompiledMissionRecord(missionId) {
-  const row = db.prepare(
-    "SELECT mission_id, graph_id, mission_json, status, datetime(created_at, 'localtime') AS created_at, datetime(updated_at, 'localtime') AS updated_at FROM compiled_missions WHERE mission_id = ?"
-  ).get(missionId);
+  const row = services.loadCompiledMissionRecord(missionId);
   if (!row) return null;
 
   const mission = parseJsonSafe(row.mission_json);
@@ -306,15 +183,11 @@ function getMissionNode(mission, nodeId) {
 }
 
 function getMissionNodeRuntime(missionId, nodeId) {
-  return db.prepare(
-    "SELECT mission_id, node_id, role_id, status, attempt, current_wave_id, last_outcome, last_payload, datetime(updated_at, 'localtime') AS updated_at FROM mission_node_runtime WHERE mission_id = ? AND node_id = ?"
-  ).get(missionId, nodeId) ?? null;
+  return services.getMissionNodeRuntime(missionId, nodeId);
 }
 
 function getRuntimeSessionByAttempt(missionId, nodeId, attempt) {
-  return db.prepare(
-    "SELECT session_id, agent_id, mission_id, node_id, attempt, terminal_id, status, datetime(created_at, 'localtime') AS created_at, datetime(updated_at, 'localtime') AS updated_at FROM agent_runtime_sessions WHERE mission_id = ? AND node_id = ? AND attempt = ? ORDER BY updated_at DESC LIMIT 1"
-  ).get(missionId, nodeId, attempt) ?? null;
+  return services.getRuntimeSessionByAttempt(missionId, nodeId, attempt);
 }
 
 function requireRuntimeSessionForAttempt(missionId, nodeId, attempt) {
@@ -406,6 +279,7 @@ export function buildTaskDetails(missionId, nodeId) {
       task: null,
       node: {
         id: nodeId,
+        nodeId,
         roleId: runtime.role_id ?? 'agent',
         instructionOverride: '',
         status: runtime.status ?? 'running',
@@ -440,27 +314,19 @@ export function buildTaskDetails(missionId, nodeId) {
     runtime && Number.isInteger(runtime.attempt) && runtime.attempt > 0
       ? getRuntimeSessionByAttempt(missionId, nodeId, runtime.attempt)
       : null;
-  const recentTasks = db.prepare(
-    "SELECT id, title, description, status, datetime(created_at, 'localtime') AS created_at, parent_id, agent_id, from_role, target_role, payload, mission_id, node_id FROM tasks WHERE mission_id = ? AND node_id = ? ORDER BY id DESC LIMIT 10"
-  ).all(missionId, nodeId).map(task => ({
+  const recentTasks = services.listRecentTasksForNode({ missionId, nodeId }).map(task => ({
     ...task,
     payload_json: parseJsonSafe(task.payload),
   }));
 
-  const inbox = db.prepare(
-    "SELECT id, session_id, event_type, content, datetime(created_at, 'localtime') AS created_at, is_read FROM session_log WHERE mission_id = ? AND recipient_node_id = ? ORDER BY id DESC LIMIT 20"
-  ).all(missionId, nodeId).map(message => ({
+  const inbox = services.listNodeInbox({ missionId, nodeId, limit: 20 }).map(message => ({
     ...message,
     content_json: parseJsonSafe(message.content),
   }));
 
   const pendingPushes = runtimeSession
-    ? db.prepare(
-        `SELECT mission_id, node_id, task_seq, attempt, datetime(pushed_at, 'localtime') AS pushed_at
-           FROM task_pushes
-          WHERE session_id = ? AND mission_id = ? AND node_id = ? AND acked_at IS NULL
-          ORDER BY task_seq ASC`
-      ).all(runtimeSession.session_id, missionId, nodeId)
+    ? services.getPendingTaskPushes(runtimeSession.session_id)
+        .filter(push => push.mission_id === missionId && push.node_id === nodeId)
     : [];
 
   const upstreamContext = extractUpstreamContext(inbox);
@@ -476,6 +342,7 @@ export function buildTaskDetails(missionId, nodeId) {
     task: record.mission.task ?? null,
     node: {
       id: node.id,
+      nodeId: node.id,
       roleId: node.roleId,
       instructionOverride: node.instructionOverride ?? '',
       status: runtime?.status ?? 'idle',
@@ -754,38 +621,28 @@ export function appendAdaptivePatch({ missionId, runVersion, patch }) {
     },
   };
 
-  db.prepare(
-    `INSERT INTO compiled_missions (mission_id, graph_id, mission_json, status, created_at, updated_at)
-     VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-     ON CONFLICT(mission_id) DO UPDATE SET
-       graph_id = excluded.graph_id,
-       mission_json = excluded.mission_json,
-       status = excluded.status,
-       updated_at = CURRENT_TIMESTAMP`
-  ).run(missionId, record.graphId, JSON.stringify(nextMission), 'active');
+  services.upsertCompiledMission({
+    missionId,
+    graphId: record.graphId,
+    mission: nextMission,
+    status: 'active',
+  });
 
   for (const node of patchNodes) {
-    db.prepare(
-      `INSERT INTO mission_node_runtime
-         (mission_id, node_id, role_id, status, attempt, current_wave_id, last_outcome, last_payload, updated_at)
-       VALUES (?, ?, ?, 'idle', 0, NULL, NULL, NULL, CURRENT_TIMESTAMP)
-       ON CONFLICT(mission_id, node_id) DO NOTHING`
-    ).run(missionId, node.id, node.roleId);
+    services.insertIdleMissionNodeRuntime({ missionId, nodeId: node.id, roleId: node.roleId });
   }
 
-  db.prepare(
-    'INSERT INTO mission_timeline (mission_id, event_type, payload, run_version, created_at) VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)'
-  ).run(
+  services.insertMissionTimeline({
     missionId,
-    'patch_applied',
-    JSON.stringify({
+    eventType: 'patch_applied',
+    payload: {
       appendedNodeIds: patchNodes.map(node => node.id),
       appendedEdgeIds: patchEdges.map(edge => edge.id ?? null),
       previousRunVersion: currentVersion,
       runVersion: nextVersion,
-    }),
-    nextVersion,
-  );
+    },
+    runVersion: nextVersion,
+  });
 
   return {
     mission: nextMission,
@@ -796,10 +653,178 @@ export function appendAdaptivePatch({ missionId, runVersion, patch }) {
   };
 }
 
+const TOOL_RESPONSE_SCHEMA = 'mcp_tool_response_v1';
+
+const NonEmptyString = z.string().trim().min(1);
+const CliName = z.enum(['claude', 'gemini', 'opencode', 'codex', 'custom', 'generic', 'ollama', 'lmstudio']);
+const CapabilityEntry = z.union([
+  z.enum(WORKER_CAPABILITY_IDS),
+  z.object({
+    id: z.enum(WORKER_CAPABILITY_IDS),
+    level: z.number().int().min(0).max(3).optional(),
+    verifiedBy: z.enum(['profile', 'runtime']).optional(),
+  }).strict(),
+]);
+
+const ConnectAgentInput = {
+  role: NonEmptyString,
+  agentId: NonEmptyString,
+  terminalId: NonEmptyString.optional(),
+  cli: CliName.optional(),
+  profileId: NonEmptyString.optional(),
+  capabilities: z.array(CapabilityEntry).optional(),
+  workingDir: NonEmptyString.optional(),
+};
+
+const GetTaskDetailsInput = {
+  missionId: NonEmptyString,
+  nodeId: NonEmptyString,
+};
+
+const CompletionPayloadInput = z.object({
+  status: z.enum(['success', 'failure']).optional(),
+  summary: z.string().optional(),
+  artifactReferences: z.array(z.string()).optional(),
+  filesChanged: z.array(z.string()).optional(),
+  keyFindings: z.array(z.string()).optional(),
+  downstreamPayload: z.any().optional(),
+}).strict();
+
+const HandoffTaskSchema = z.object({
+  fromRole: NonEmptyString.optional(),
+  targetRole: NonEmptyString.optional(),
+  title: NonEmptyString,
+  description: z.string().optional(),
+  payload: z.any().optional(),
+  completion: CompletionPayloadInput.optional(),
+  parentTaskId: z.number().int().optional(),
+  missionId: NonEmptyString.optional(),
+  fromNodeId: NonEmptyString.optional(),
+  fromAttempt: z.number().int().positive().optional(),
+  targetNodeId: NonEmptyString.optional(),
+  outcome: z.enum(['success', 'failure']).optional(),
+}).strict().superRefine((args, ctx) => {
+  const graphMode = Boolean(args.missionId || args.fromNodeId || args.fromAttempt || args.targetNodeId || args.outcome);
+  if (graphMode) {
+    for (const field of ['missionId', 'fromNodeId', 'fromAttempt', 'targetNodeId', 'outcome']) {
+      if (args[field] === undefined) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: [field], message: `${field} is required in graph mode` });
+      }
+    }
+    return;
+  }
+  for (const field of ['fromRole', 'targetRole']) {
+    if (args[field] === undefined) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: [field], message: `${field} is required in legacy role mode` });
+    }
+  }
+});
+
+const CompleteTaskInput = {
+  missionId: NonEmptyString,
+  nodeId: NonEmptyString,
+  attempt: z.number().int().positive(),
+  outcome: z.enum(['success', 'failure']),
+  title: z.string().optional(),
+  summary: z.string().optional(),
+  rawOutput: z.string().optional(),
+  logRef: z.string().optional(),
+  filesChanged: z.array(z.string()).optional(),
+  artifactReferences: z.array(z.string()).optional(),
+  keyFindings: z.array(z.string()).optional(),
+  downstreamPayload: z.any().optional(),
+  parentTaskId: z.number().int().optional(),
+};
+
+const AssignTaskInput = {
+  taskId: z.number().int(),
+  targetSessionId: NonEmptyString,
+  agentId: NonEmptyString.optional(),
+};
+
+const SendMessageSchema = z.object({
+  targetSessionId: NonEmptyString.optional(),
+  targetNodeId: NonEmptyString.optional(),
+  missionId: NonEmptyString.optional(),
+  message: NonEmptyString,
+}).strict().superRefine((args, ctx) => {
+  if (Boolean(args.targetSessionId) === Boolean(args.targetNodeId)) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['targetSessionId'],
+      message: 'Provide exactly one target: targetSessionId or targetNodeId',
+    });
+  }
+  if (args.targetNodeId && !args.missionId) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['missionId'],
+      message: 'missionId is required when targetNodeId is provided',
+    });
+  }
+});
+
+export const BASELINE_TOOL_CONTRACTS = Object.freeze({
+  connect_agent: z.object(ConnectAgentInput).strict(),
+  get_task_details: z.object(GetTaskDetailsInput).strict(),
+  handoff_task: HandoffTaskSchema,
+  complete_task: z.object(CompleteTaskInput).strict(),
+  assign_task: z.object(AssignTaskInput).strict(),
+  send_message: SendMessageSchema,
+});
+
 function makeToolText(text, isError = false) {
   return isError
     ? { isError: true, content: [{ type: 'text', text }] }
     : { content: [{ type: 'text', text }] };
+}
+
+function makeToolJson(payload, isError = false) {
+  return makeToolText(JSON.stringify(payload, null, 2), isError);
+}
+
+export function buildToolSuccess(tool, data, message = null) {
+  return makeToolJson({
+    schema: TOOL_RESPONSE_SCHEMA,
+    ok: true,
+    tool,
+    message,
+    data,
+  });
+}
+
+export function buildToolError(tool, code, message, details = null) {
+  return makeToolJson({
+    schema: TOOL_RESPONSE_SCHEMA,
+    ok: false,
+    tool,
+    error: {
+      code,
+      message,
+      details,
+    },
+  }, true);
+}
+
+function formatZodIssues(error) {
+  return error.issues.map(issue => ({
+    path: issue.path.join('.'),
+    message: issue.message,
+    code: issue.code,
+  }));
+}
+
+function validateToolArgs(tool, args) {
+  const schema = BASELINE_TOOL_CONTRACTS[tool];
+  const parsed = schema.safeParse(args ?? {});
+  if (parsed.success) return { args: parsed.data };
+  const details = formatZodIssues(parsed.error);
+  const message = details
+    .map(issue => issue.path ? `${issue.path}: ${issue.message}` : issue.message)
+    .join('; ');
+  return {
+    error: buildToolError(tool, 'bad_input', `${tool} received invalid input: ${message}`, details),
+  };
 }
 
 function resetInMemoryRuntime() {
@@ -847,61 +872,29 @@ export function recordTaskPush({ sessionId, missionId, nodeId, taskSeq, attempt 
   if (typeof nodeId !== 'string' || !nodeId) return { inserted: false, reason: 'missing_node' };
   if (!Number.isInteger(taskSeq) || taskSeq <= 0) return { inserted: false, reason: 'invalid_task_seq' };
 
-  const existing = db.prepare(
-    'SELECT task_seq FROM task_pushes WHERE session_id = ? AND mission_id = ? AND node_id = ? AND task_seq = ?'
-  ).get(sessionId, missionId, nodeId, taskSeq);
-  if (existing) return { inserted: false, reason: 'duplicate' };
-
-  db.prepare(
-    `INSERT INTO task_pushes (session_id, mission_id, node_id, task_seq, attempt, pushed_at)
-     VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`
-  ).run(sessionId, missionId, nodeId, taskSeq, attempt);
-  return { inserted: true };
+  return services.recordTaskPush({ sessionId, missionId, nodeId, taskSeq, attempt });
 }
 
 export function getPendingTaskPushes(sessionId) {
-  return db.prepare(
-    `SELECT mission_id, node_id, task_seq, attempt, datetime(pushed_at, 'localtime') AS pushed_at
-       FROM task_pushes
-      WHERE session_id = ? AND acked_at IS NULL
-      ORDER BY task_seq ASC`
-  ).all(sessionId);
+  return services.getPendingTaskPushes(sessionId);
 }
 
 export function ackTaskPush({ sessionId, missionId, nodeId, taskSeq }) {
-  const info = db.prepare(
-    `UPDATE task_pushes SET acked_at = CURRENT_TIMESTAMP
-      WHERE session_id = ? AND mission_id = ? AND node_id = ? AND task_seq = ? AND acked_at IS NULL`
-  ).run(sessionId, missionId, nodeId, taskSeq);
-  return info.changes > 0;
+  return services.ackTaskPush({ sessionId, missionId, nodeId, taskSeq });
 }
 
 export function resetStarlinkState() {
-  db.exec(`
-    DELETE FROM tasks;
-    DELETE FROM file_locks;
-    DELETE FROM session_log;
-    DELETE FROM workspace_context;
-    DELETE FROM compiled_missions;
-    DELETE FROM mission_node_runtime;
-    DELETE FROM agent_runtime_sessions;
-    DELETE FROM mission_timeline;
-    DELETE FROM task_pushes;
-    DELETE FROM adapter_registrations;
-  `);
+  services.resetAll();
   resetInMemoryRuntime();
 }
 
 export function seedCompiledMission(mission, status = 'active') {
-  db.prepare(
-    `INSERT INTO compiled_missions (mission_id, graph_id, mission_json, status, created_at, updated_at)
-     VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-     ON CONFLICT(mission_id) DO UPDATE SET
-       graph_id = excluded.graph_id,
-       mission_json = excluded.mission_json,
-       status = excluded.status,
-       updated_at = CURRENT_TIMESTAMP`
-  ).run(mission.missionId, mission.graphId, JSON.stringify(mission), status);
+  services.upsertCompiledMission({
+    missionId: mission.missionId,
+    graphId: mission.graphId,
+    mission,
+    status,
+  });
   return loadCompiledMissionRecord(mission.missionId);
 }
 
@@ -915,19 +908,16 @@ export function seedMissionNodeRuntime({
   lastOutcome = null,
   lastPayload = null,
 }) {
-  db.prepare(
-    `INSERT INTO mission_node_runtime
-       (mission_id, node_id, role_id, status, attempt, current_wave_id, last_outcome, last_payload, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-     ON CONFLICT(mission_id, node_id) DO UPDATE SET
-       role_id = excluded.role_id,
-       status = excluded.status,
-       attempt = excluded.attempt,
-       current_wave_id = excluded.current_wave_id,
-       last_outcome = excluded.last_outcome,
-       last_payload = excluded.last_payload,
-       updated_at = CURRENT_TIMESTAMP`
-  ).run(missionId, nodeId, roleId, status, attempt, currentWaveId, lastOutcome, lastPayload);
+  services.upsertMissionNodeRuntime({
+    missionId,
+    nodeId,
+    roleId,
+    status,
+    attempt,
+    currentWaveId,
+    lastOutcome,
+    lastPayload,
+  });
 }
 
 export function seedAgentRuntimeSession({
@@ -939,30 +929,88 @@ export function seedAgentRuntimeSession({
   terminalId,
   status = 'activated',
 }) {
-  db.prepare(
-    `INSERT INTO agent_runtime_sessions
-       (session_id, agent_id, mission_id, node_id, attempt, terminal_id, status, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-     ON CONFLICT(session_id) DO UPDATE SET
-       agent_id = excluded.agent_id,
-       mission_id = excluded.mission_id,
-       node_id = excluded.node_id,
-       attempt = excluded.attempt,
-       terminal_id = excluded.terminal_id,
-       status = excluded.status,
-       updated_at = CURRENT_TIMESTAMP`
-  ).run(sessionId, agentId, missionId, nodeId, attempt, terminalId, status);
+  services.upsertRuntimeSession({ sessionId, agentId, missionId, nodeId, attempt, terminalId, status });
+}
+
+export function seedAgentRun({
+  runId,
+  missionId,
+  nodeId,
+  attempt = 1,
+  sessionId,
+  agentId = 'agent',
+  cli = 'codex',
+  executionMode = 'headless',
+  cwd = null,
+  command = 'codex',
+  args = [],
+  env = {},
+  promptPath = null,
+  stdoutPath = null,
+  stderrPath = null,
+  transcriptPath = null,
+  status = 'running',
+  exitCode = null,
+  error = null,
+  startedAt = null,
+  completedAt = null,
+}) {
+  services.upsertAgentRun({
+    runId,
+    missionId,
+    nodeId,
+    attempt,
+    sessionId,
+    agentId,
+    cli,
+    executionMode,
+    cwd,
+    command,
+    args,
+    env,
+    promptPath,
+    stdoutPath,
+    stderrPath,
+    transcriptPath,
+    status,
+    exitCode,
+    error,
+    startedAt,
+    completedAt,
+  });
 }
 
 export function getBroadcastHistory() {
   return [...broadcastHistory];
 }
 
+export function executeListAgentRuns({ missionId, status, limit = 50 } = {}) {
+  const rows = services.listAgentRuns({ missionId, status, limit });
+  return makeToolText(JSON.stringify(rows, null, 2));
+}
+
+export function executeInspectAgentRun({ runId } = {}) {
+  if (typeof runId !== 'string' || !runId.trim()) {
+    return makeToolText('inspect_agent_run requires runId.', true);
+  }
+  const row = services.inspectAgentRun(runId.trim());
+  if (!row) return makeToolText(`Agent run ${runId.trim()} was not found.`, true);
+  return makeToolText(JSON.stringify(row, null, 2));
+}
+
+export function executeListRuntimeSessions({ missionId, status, limit = 50 } = {}) {
+  const rows = services.listRuntimeSessions({ missionId, status, limit });
+  return makeToolText(JSON.stringify(rows, null, 2));
+}
+
 export function executeConnectAgent(
-  { role, agentId, terminalId, cli, profileId, capabilities, workingDir },
+  input = {},
   sessionId = 'unknown',
   options = {},
 ) {
+  const validation = validateToolArgs('connect_agent', input);
+  if (validation.error) return validation.error;
+  const { role, agentId, terminalId, cli, profileId, capabilities, workingDir } = validation.args;
   const {
     silent = false,
     source = 'connect',
@@ -1072,7 +1120,15 @@ export function executeConnectAgent(
     });
   }
 
-  return makeToolText(`Successfully connected to CometAI Starlink.\nSession ID: ${sid}\nStatus: Online`);
+  return buildToolSuccess(
+    'connect_agent',
+    {
+      sessionId: sid,
+      status: 'online',
+      session: summarizeSession(sid, sessions[sid] ?? {}),
+    },
+    `Successfully connected to CometAI Starlink. Session ID: ${sid}. Status: Online`,
+  );
 }
 
 function validateRuntimeBootstrapRegistration({ sessionId, missionId, nodeId, attempt }) {
@@ -1089,22 +1145,11 @@ function validateRuntimeBootstrapRegistration({ sessionId, missionId, nodeId, at
     return { ok: false, code: 'invalid_attempt', message: 'Runtime bootstrap requires attempt >= 1.' };
   }
 
-  let nodeRuntime = db.prepare(
-    `SELECT status, attempt
-       FROM mission_node_runtime
-      WHERE mission_id = ? AND node_id = ?`
-  ).get(missionId, nodeId);
+  let nodeRuntime = services.getMissionNodeRuntimeStatusAttempt(missionId, nodeId);
 
   if (!nodeRuntime) {
     // Ad-hoc mission: create runtime row on the fly and proceed permissively.
-    db.prepare(
-      `INSERT INTO mission_node_runtime (mission_id, node_id, role_id, status, attempt, updated_at)
-       VALUES (?, ?, 'agent', 'running', ?, CURRENT_TIMESTAMP)
-       ON CONFLICT(mission_id, node_id) DO UPDATE SET
-         status = excluded.status,
-         attempt = excluded.attempt,
-         updated_at = CURRENT_TIMESTAMP`
-    ).run(missionId, nodeId, attempt);
+    services.upsertAdhocMissionNodeRuntime({ missionId, nodeId, attempt });
     nodeRuntime = { status: 'running', attempt };
   } else {
     const currentAttempt = Number(nodeRuntime.attempt ?? 0);
@@ -1125,23 +1170,11 @@ function validateRuntimeBootstrapRegistration({ sessionId, missionId, nodeId, at
     }
   }
 
-  const runtimeSession = db.prepare(
-    `SELECT session_id, attempt
-       FROM agent_runtime_sessions
-      WHERE session_id = ? AND mission_id = ? AND node_id = ?
-      ORDER BY updated_at DESC
-      LIMIT 1`
-  ).get(sessionId, missionId, nodeId);
+  const runtimeSession = services.getRuntimeSessionForBootstrap({ sessionId, missionId, nodeId });
 
   if (!runtimeSession) {
     // Ad-hoc mission: create the session row so the rest of the pipeline can proceed.
-    db.prepare(
-      `INSERT INTO agent_runtime_sessions (session_id, agent_id, mission_id, node_id, attempt, terminal_id, status)
-       VALUES (?, 'agent', ?, ?, ?, '', 'registered')
-       ON CONFLICT(session_id) DO UPDATE SET
-         status = excluded.status,
-         updated_at = CURRENT_TIMESTAMP`
-    ).run(sessionId, missionId, nodeId, attempt);
+    services.upsertAdhocRuntimeSession({ sessionId, missionId, nodeId, attempt });
   } else {
     const recordedAttempt = Number(runtimeSession.attempt ?? 0);
     if (recordedAttempt !== attempt) {
@@ -1200,11 +1233,7 @@ export function executeRuntimeBootstrapRegistration({
     },
   );
 
-  db.prepare(
-    `UPDATE agent_runtime_sessions
-        SET status = 'registered', updated_at = CURRENT_TIMESTAMP
-      WHERE session_id = ?`
-  ).run(sessionId);
+  services.updateRuntimeSessionStatus({ sessionId, status: 'registered' });
 
   return {
     ok: true,
@@ -1233,11 +1262,7 @@ export function executeRuntimeDisconnect({
     delete sessions[sid];
   }
 
-  db.prepare(
-    `UPDATE agent_runtime_sessions
-        SET status = 'disconnected', updated_at = CURRENT_TIMESTAMP
-      WHERE session_id = ?`
-  ).run(sid);
+  services.updateRuntimeSessionStatus({ sessionId: sid, status: 'disconnected' });
 
   logSession(
     sid,
@@ -1273,14 +1298,10 @@ export function executeReceiveMessages({ missionId, nodeId, afterSeq, ackThrough
     const fromSeq = Number.isInteger(afterSeq) && afterSeq > 0 ? afterSeq : 0;
     const ackSeq = Number.isInteger(ackThroughSeq) && ackThroughSeq > 0 ? ackThroughSeq : null;
     if (ackSeq !== null) {
-      db.prepare(
-        "UPDATE session_log SET is_read = 1 WHERE mission_id = ? AND recipient_node_id = ? AND event_type = 'message' AND id <= ?"
-      ).run(missionId, nodeId, ackSeq);
+      services.ackNodeMessages({ missionId, nodeId, throughSeq: ackSeq });
     }
 
-    const messages = db.prepare(
-      "SELECT id, session_id, event_type, content, datetime(created_at, 'localtime') AS created_at, mission_id, node_id, recipient_node_id, is_read FROM session_log WHERE mission_id = ? AND recipient_node_id = ? AND event_type = 'message' AND id > ? ORDER BY id ASC LIMIT 100"
-    ).all(missionId, nodeId, fromSeq).map(message => ({
+    const messages = services.listNodeMessagesAfter({ missionId, nodeId, afterSeq: fromSeq }).map(message => ({
       seq: message.id,
       sessionId: message.session_id,
       createdAt: message.created_at,
@@ -1317,6 +1338,96 @@ export function executeReceiveMessages({ missionId, nodeId, afterSeq, ackThrough
     .map(message => `[${new Date(message.timestamp).toISOString()}] from ${message.from}:\n${message.text}`)
     .join('\n\n');
   return makeToolText(text);
+}
+
+export function executeGetTaskDetails(input = {}, sessionId) {
+  const validation = validateToolArgs('get_task_details', input);
+  if (validation.error) return validation.error;
+  const { missionId, nodeId } = validation.args;
+
+  const details = buildTaskDetails(missionId, nodeId);
+  if (!details) {
+    return buildToolError(
+      'get_task_details',
+      'not_found',
+      `Mission ${missionId} or node ${nodeId} could not be found. Confirm the NEW_TASK payload and active mission.`,
+    );
+  }
+
+  const sid = sessionId ?? null;
+  if (sid) {
+    const targetSid = details.runtimeSession?.sessionId ?? sid;
+    const currentAttempt = Number(details.node?.attempt ?? 0);
+    if (details.runtimeSession?.sessionId && Number.isInteger(currentAttempt) && currentAttempt > 0) {
+      ackTaskPush({
+        sessionId: details.runtimeSession.sessionId,
+        missionId,
+        nodeId,
+        taskSeq: currentAttempt,
+      });
+    }
+    emitAgentEvent({
+      type: 'activation:acked',
+      sessionId: targetSid,
+      missionId,
+      nodeId,
+      attempt: currentAttempt,
+      taskSeq: currentAttempt,
+    });
+
+    if (targetSid !== sid) {
+      emitAgentEvent({
+        type: 'activation:acked',
+        sessionId: sid,
+        missionId,
+        nodeId,
+        attempt: currentAttempt,
+        taskSeq: currentAttempt,
+      });
+    }
+  }
+
+  return buildToolSuccess('get_task_details', details, 'Task details loaded.');
+}
+
+export function executeSendMessage(input = {}, sessionId) {
+  const validation = validateToolArgs('send_message', input);
+  if (validation.error) return validation.error;
+  const { targetSessionId, targetNodeId, missionId, message } = validation.args;
+  const hasTargetNode = typeof targetNodeId === 'string' && targetNodeId.trim();
+
+  const from = sessionId ?? 'unknown';
+
+  if (hasTargetNode) {
+    services.insertNodeMessage({
+      sessionId: from,
+      content: message,
+      missionId,
+      recipientNodeId: targetNodeId,
+    });
+    broadcast('Starlink', `Message queued: ${from} -> node ${targetNodeId}`, 'message');
+    return buildToolSuccess(
+      'send_message',
+      { delivered: true, targetType: 'node', missionId, targetNodeId },
+      `Message delivered to node ${targetNodeId}.`,
+    );
+  }
+
+  if (!sessions[targetSessionId]) {
+    return buildToolError(
+      'send_message',
+      'not_found',
+      `Session ${targetSessionId} not found. Use list_sessions to see active sessions.`,
+    );
+  }
+  if (!messageQueues[targetSessionId]) messageQueues[targetSessionId] = [];
+  messageQueues[targetSessionId].push({ from, text: message, timestamp: Date.now() });
+  broadcast('Starlink', `Message queued: ${from} -> session ${targetSessionId}`, 'message');
+  return buildToolSuccess(
+    'send_message',
+    { delivered: true, targetType: 'session', targetSessionId },
+    `Message delivered to session ${targetSessionId}.`,
+  );
 }
 
 function normalizeCompletionStatus(value) {
@@ -1410,10 +1521,18 @@ function persistGraphHandoff({
   let taskId = null;
 
   if (targetNodeId && targetRole !== 'done') {
-    const info = db.prepare(
-      'INSERT INTO tasks (title, description, agent_id, parent_id, status, from_role, target_role, payload, mission_id, node_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
-    ).run(title, description ?? null, targetRole, parentTaskId ?? null, 'todo', fromRole, targetRole, payloadStr, missionId, targetNodeId);
-    taskId = info.lastInsertRowid;
+    taskId = services.createTask({
+      title,
+      description: description ?? null,
+      agentId: targetRole,
+      parentTaskId: parentTaskId ?? null,
+      status: 'todo',
+      fromRole,
+      targetRole,
+      payload: payloadStr,
+      missionId,
+      nodeId: targetNodeId,
+    });
 
     const handoffMessage = JSON.stringify({
       taskId,
@@ -1429,9 +1548,13 @@ function persistGraphHandoff({
       payload: payloadStr,
       completion: structuredCompletion,
     });
-    db.prepare(
-      "INSERT INTO session_log (session_id, event_type, content, mission_id, node_id, recipient_node_id, is_read) VALUES (?, 'message', ?, ?, ?, ?, 0)"
-    ).run(sid, handoffMessage, missionId, fromNodeId, targetNodeId);
+    services.insertNodeMessage({
+      sessionId: sid,
+      content: handoffMessage,
+      missionId,
+      nodeId: fromNodeId,
+      recipientNodeId: targetNodeId,
+    });
   }
 
   const eventBody = {
@@ -1462,17 +1585,63 @@ function persistGraphHandoff({
     }), 'task_update');
   }
 
-  return { taskId, eventBody };
+  return {
+    taskId,
+    eventBody,
+    content: [{
+      type: 'text',
+      text: taskId === null
+        ? 'Handoff recorded without creating a task.'
+        : `Handoff recorded as task ${taskId}.`,
+    }],
+  };
 }
 
 export function executeHandoffTask(
-  { fromRole: rawFrom, targetRole: rawTarget, title, description, payload, completion, parentTaskId, missionId, fromNodeId, targetNodeId, outcome, fromAttempt },
+  input = {},
   sessionId = 'unknown',
 ) {
+  const inputValidation = validateToolArgs('handoff_task', input);
+  if (inputValidation.error) return inputValidation.error;
+  const {
+    fromRole: rawFrom,
+    targetRole: rawTarget,
+    title,
+    description,
+    payload,
+    completion,
+    parentTaskId,
+    missionId,
+    fromNodeId,
+    targetNodeId,
+    outcome,
+    fromAttempt,
+  } = inputValidation.args;
   const sid = sessionId ?? 'unknown';
+  const isGraphMode = Boolean(missionId || fromNodeId || targetNodeId);
+  let graphValidation = null;
+  if (isGraphMode) {
+    const validation = validateGraphHandoff({
+      missionId,
+      fromNodeId,
+      targetNodeId,
+      outcome,
+      fromRole: rawFrom,
+      targetRole: rawTarget,
+      fromAttempt,
+    });
+    if (validation.error) {
+      return buildToolError('handoff_task', 'invalid_handoff', validation.error);
+    }
+    graphValidation = validation;
+  }
 
   let fromRole = rawFrom?.trim().toLowerCase() ?? null;
   let targetRole = rawTarget?.trim().toLowerCase() ?? null;
+  if (graphValidation) {
+    fromRole ??= String(graphValidation.fromNode.roleId).trim().toLowerCase();
+    targetRole ??= String(graphValidation.targetNode.roleId).trim().toLowerCase();
+  }
 
   const normalizedOutcome = outcome?.trim().toLowerCase() ?? 'success';
   const structuredCompletion = buildStructuredCompletionPayload({
@@ -1486,10 +1655,18 @@ export function executeHandoffTask(
 
   let taskId = null;
   if (targetRole && targetRole !== 'done') {
-    const info = db.prepare(
-      'INSERT INTO tasks (title, description, agent_id, parent_id, status, from_role, target_role, payload, mission_id, node_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
-    ).run(title, description ?? null, targetRole, parentTaskId ?? null, 'todo', fromRole, targetRole, payloadStr, missionId ?? null, targetNodeId ?? null);
-    taskId = info.lastInsertRowid;
+    taskId = services.createTask({
+      title,
+      description: description ?? null,
+      agentId: targetRole,
+      parentTaskId: parentTaskId ?? null,
+      status: 'todo',
+      fromRole,
+      targetRole,
+      payload: payloadStr,
+      missionId: missionId ?? null,
+      nodeId: targetNodeId ?? null,
+    });
   }
 
   if (missionId && targetNodeId) {
@@ -1507,9 +1684,13 @@ export function executeHandoffTask(
       payload: payloadStr,
       completion: structuredCompletion,
     });
-    db.prepare(
-      "INSERT INTO session_log (session_id, event_type, content, mission_id, node_id, recipient_node_id, is_read) VALUES (?, 'message', ?, ?, ?, ?, 0)"
-    ).run(sid, handoffMessage, missionId, fromNodeId ?? null, targetNodeId);
+    services.insertNodeMessage({
+      sessionId: sid,
+      content: handoffMessage,
+      missionId,
+      nodeId: fromNodeId ?? null,
+      recipientNodeId: targetNodeId,
+    });
   }
 
   const eventBody = {
@@ -1557,20 +1738,29 @@ export function executeHandoffTask(
   // Cross-emit on the pre-registered runtime session ID so the TS orchestrator's
   // mcpBus subscriber (which uses the runtime session ID, not the transport UUID) fires.
   if (missionId && fromNodeId && Number.isInteger(fromAttempt) && fromAttempt > 0) {
-    const runtimeSessionRow = db.prepare(
-      `SELECT session_id FROM agent_runtime_sessions WHERE mission_id = ? AND node_id = ? AND attempt = ? LIMIT 1`
-    ).get(missionId, fromNodeId, fromAttempt);
+    const runtimeSessionRow = services.getRuntimeSessionIdByAttempt({ missionId, nodeId: fromNodeId, attempt: fromAttempt });
     if (runtimeSessionRow && runtimeSessionRow.session_id !== sid) {
       emitAgentEvent({ ...handoffEvent, sessionId: runtimeSessionRow.session_id });
     }
   }
 
-  return { taskId, eventBody };
+  return buildToolSuccess(
+    'handoff_task',
+    { taskId, eventBody },
+    taskId === null
+      ? 'Handoff recorded without creating a task.'
+      : `Handoff recorded as task ${taskId}.`,
+  );
 }
 
 
 export function executeCompleteTask(
-  {
+  input = {},
+  sessionId = 'unknown',
+) {
+  const validation = validateToolArgs('complete_task', input);
+  if (validation.error) return validation.error;
+  const {
     missionId,
     nodeId,
     attempt,
@@ -1584,26 +1774,21 @@ export function executeCompleteTask(
     keyFindings,
     downstreamPayload,
     parentTaskId,
-  },
-  sessionId = 'unknown',
-) {
+  } = validation.args;
   const sid = sessionId ?? 'unknown';
   const normalizedOutcome = normalizeCompletionStatus(outcome);
-  if (!missionId || !nodeId || !Number.isInteger(attempt) || attempt < 1 || !normalizedOutcome) {
-    return makeToolText('complete_task requires missionId, nodeId, positive attempt, and outcome "success" or "failure".', true);
-  }
 
   const record = loadCompiledMissionRecord(missionId);
   if (!record || record.status !== 'active') {
-    return makeToolText(`Active compiled mission ${missionId} was not found.`, true);
+    return buildToolError('complete_task', 'not_found', `Active compiled mission ${missionId} was not found.`);
   }
   const node = getMissionNode(record.mission, nodeId);
   if (!node) {
-    return makeToolText(`Node ${nodeId} is not part of mission ${missionId}.`, true);
+    return buildToolError('complete_task', 'invalid_node', `Node ${nodeId} is not part of mission ${missionId}.`);
   }
   const runtimeCheck = nodeRuntimeIsRunning(missionId, nodeId, attempt);
   if (runtimeCheck.error) {
-    return makeToolText(runtimeCheck.error, true);
+    return buildToolError('complete_task', 'invalid_runtime', runtimeCheck.error);
   }
 
   const completion = {
@@ -1696,14 +1881,12 @@ export function executeCompleteTask(
   // The TS orchestrator subscribes via mcpBus using the pre-registered runtime session ID
   // (e.g. "claude:abc:xyz"), but getSessionId() returns the MCP transport UUID. Cross-emit
   // on the runtime session ID so the orchestrator's wireMcpForSession handler fires.
-  const runtimeSessionRow = db.prepare(
-    `SELECT session_id FROM agent_runtime_sessions WHERE mission_id = ? AND node_id = ? AND attempt = ? LIMIT 1`
-  ).get(missionId, nodeId, attempt);
+  const runtimeSessionRow = services.getRuntimeSessionIdByAttempt({ missionId, nodeId, attempt });
   if (runtimeSessionRow && runtimeSessionRow.session_id !== sid) {
     emitAgentEvent({ ...completionEvent, sessionId: runtimeSessionRow.session_id });
   }
 
-  return makeToolText(JSON.stringify({
+  return buildToolSuccess('complete_task', {
     status: 'completed',
     missionId,
     nodeId,
@@ -1711,7 +1894,7 @@ export function executeCompleteTask(
     outcome: normalizedOutcome,
     routed,
     terminal: routed.length === 0,
-  }, null, 2));
+  }, 'Task completion recorded.');
 }
 
 const PORT = parseInt(process.env.MCP_PORT || '3741');
@@ -1772,10 +1955,7 @@ function broadcast(from, content, type = 'message') {
 const sessions = {};
 
 function sessionLoadForAssignment(sessionId) {
-  const row = db.prepare(
-    "SELECT COUNT(1) AS active_count FROM tasks WHERE agent_id = ? AND status IN ('todo', 'in-progress')"
-  ).get(sessionId);
-  return Number(row?.active_count ?? 0);
+  return services.countActiveTasksForAgent(sessionId);
 }
 
 function fileContentionForScope(fileScope, ownerSessionId) {
@@ -1891,6 +2071,44 @@ export function executeRegisterWorkerCapabilities(
   return makeToolText(JSON.stringify(summarizeSession(sid, session), null, 2));
 }
 
+export function executeAssignTask(input = {}, sessionId = 'unknown') {
+  const validation = validateToolArgs('assign_task', input);
+  if (validation.error) return validation.error;
+  const { taskId, targetSessionId, agentId } = validation.args;
+
+  const row = services.getTaskForAssignment(taskId);
+  if (!row) return buildToolError('assign_task', 'not_found', `Task ${taskId} not found.`);
+  if (!sessions[targetSessionId]) {
+    return buildToolError(
+      'assign_task',
+      'not_connected',
+      `Session ${targetSessionId} is not connected. Call list_sessions for active ids.`,
+    );
+  }
+
+  const assignee = typeof agentId === 'string' && agentId.trim() ? agentId.trim() : targetSessionId;
+  services.updateTaskAgent({ taskId, agentId: assignee });
+
+  if (!messageQueues[targetSessionId]) messageQueues[targetSessionId] = [];
+  messageQueues[targetSessionId].push({
+    from: 'Supervisor',
+    text: `[ASSIGNED] Task ${taskId}: ${row.title}\n${row.description ?? ''}\npayload: ${row.payload ?? '(none)'}`,
+    timestamp: Date.now(),
+  });
+
+  const sid = sessionId ?? 'unknown';
+  logSession(sid, 'assign_task', JSON.stringify({ taskId, targetSessionId, agentId: assignee }));
+  broadcast(sid, JSON.stringify({ taskId, targetSessionId, agentId: assignee, title: row.title }), 'task_assigned');
+  broadcast('Starlink', JSON.stringify({ id: taskId, agentId: assignee, status: row.status }), 'task_update');
+  broadcast('Starlink', `Assigned task ${taskId} -> session ${targetSessionId} (${assignee})`);
+
+  return buildToolSuccess(
+    'assign_task',
+    { status: 'assigned', taskId, targetSessionId, agentId: assignee },
+    `Task ${taskId} assigned to ${assignee} (session ${targetSessionId}).`,
+  );
+}
+
 export function executeAssignTaskByRequirements(
   {
     taskId,
@@ -1907,7 +2125,7 @@ export function executeAssignTaskByRequirements(
   sessionId = 'unknown',
 ) {
   const sid = sessionId ?? 'unknown';
-  const task = db.prepare('SELECT id, title, description, payload, status, agent_id FROM tasks WHERE id = ?').get(taskId);
+  const task = services.getTaskForAssignment(taskId);
   if (!task) return makeToolText(`Task ${taskId} not found.`, true);
 
   const required = Array.from(
@@ -1987,7 +2205,7 @@ export function executeAssignTaskByRequirements(
 
   const winner = eligible[0];
   const assignee = (typeof agentId === 'string' && agentId.trim()) ? agentId.trim() : winner.sessionId;
-  db.prepare('UPDATE tasks SET agent_id = ? WHERE id = ?').run(assignee, taskId);
+  services.updateTaskAgent({ taskId, agentId: assignee });
 
   if (!messageQueues[winner.sessionId]) messageQueues[winner.sessionId] = [];
   messageQueues[winner.sessionId].push({
@@ -2043,9 +2261,7 @@ export function seedFileLock({ filePath, agentId, sessionId = null }) {
     sessionId,
     lockedAt: Date.now(),
   };
-  db.prepare(
-    'INSERT INTO file_locks (file_path, agent_id, locked_at) VALUES (?, ?, CURRENT_TIMESTAMP) ON CONFLICT(file_path) DO UPDATE SET agent_id = excluded.agent_id, locked_at = CURRENT_TIMESTAMP'
-  ).run(filePath, agentId);
+  services.upsertFileLock({ filePath, agentId });
 }
 
 // Factory: creates a McpServer with all tools registered.
@@ -2084,14 +2300,7 @@ function createMcpServer(getSessionId) {
     }
   }, async ({ status, agentId } = {}) => {
     bc('Listing tasks');
-    let query = 'SELECT * FROM tasks';
-    const conditions = [];
-    const params = [];
-    if (status) { conditions.push('status = ?'); params.push(status); }
-    if (agentId) { conditions.push('agent_id = ?'); params.push(agentId); }
-    if (conditions.length) query += ' WHERE ' + conditions.join(' AND ');
-    query += ' ORDER BY id DESC';
-    const tasks = db.prepare(query).all(...params);
+    const tasks = services.listTasks({ status, agentId });
     return { content: [{ type: 'text', text: JSON.stringify(tasks) }] };
   });
 
@@ -2100,8 +2309,7 @@ function createMcpServer(getSessionId) {
     description: 'Create a new task',
     inputSchema: { title: z.string(), description: z.string().optional(), agentId: z.string().optional() }
   }, async ({ title, description, agentId }) => {
-    const info = db.prepare('INSERT INTO tasks (title, description, agent_id) VALUES (?, ?, ?)').run(title, description ?? null, agentId ?? null);
-    const taskId = info.lastInsertRowid;
+    const taskId = services.createTask({ title, description: description ?? null, agentId: agentId ?? null });
     broadcast(getSessionId() ?? 'Agent', JSON.stringify({ id: taskId, title, agentId, status: 'todo' }), 'task_update');
     bc(`Created task ${taskId}`);
     return { content: [{ type: 'text', text: `Task created with id ${taskId}` }] };
@@ -2112,7 +2320,7 @@ function createMcpServer(getSessionId) {
     description: "Update a task's status",
     inputSchema: { taskId: z.number(), status: z.string() }
   }, async ({ taskId, status }) => {
-    const info = db.prepare('UPDATE tasks SET status = ? WHERE id = ?').run(status, taskId);
+    const info = services.updateTaskStatus({ taskId, status });
     if (info.changes === 0) return { isError: true, content: [{ type: 'text', text: `Task ${taskId} not found` }] };
     broadcast(getSessionId() ?? 'Agent', JSON.stringify({ id: taskId, status }), 'task_update');
     bc(`Updated task ${taskId} (status: ${status})`);
@@ -2131,10 +2339,13 @@ function createMcpServer(getSessionId) {
     }
   }, async ({ title, description, agentId, parentTaskId }) => {
     const sid = getSessionId() ?? 'unknown';
-    const info = db.prepare(
-      'INSERT INTO tasks (title, description, agent_id, parent_id, status) VALUES (?, ?, ?, ?, ?)'
-    ).run(title, description ?? null, agentId ?? null, parentTaskId ?? null, 'todo');
-    const taskId = info.lastInsertRowid;
+    const taskId = services.createTask({
+      title,
+      description: description ?? null,
+      agentId: agentId ?? null,
+      parentTaskId: parentTaskId ?? null,
+      status: 'todo',
+    });
     logSession(sid, 'delegate_task', JSON.stringify({ taskId, title, agentId, parentTaskId }));
     broadcast(agentId ?? sid, JSON.stringify({ id: taskId, title, agentId, parentTaskId, status: 'todo' }), 'task_update');
     bc(`Delegated task ${taskId}: "${title}" → ${agentId ?? 'unassigned'}`);
@@ -2146,9 +2357,7 @@ function createMcpServer(getSessionId) {
     description: 'Returns all tasks as a nested tree showing parent→child delegation hierarchy. Call this to understand current workload and delegation status before planning.',
     inputSchema: {}
   }, async () => {
-    const allTasks = db.prepare(
-      "SELECT id, title, description, status, agent_id, parent_id, from_role, target_role, payload, datetime(created_at, 'localtime') as created_at FROM tasks ORDER BY id"
-    ).all();
+    const allTasks = services.listTaskTreeRows();
     const map = {};
     const roots = [];
     for (const t of allTasks) map[t.id] = { ...t, children: [] };
@@ -2168,9 +2377,7 @@ function createMcpServer(getSessionId) {
     description: 'Returns recent coordination events persisted across sessions. Call this on reconnect after a crash or restart to understand what was happening — what tasks were delegated, who announced what, and which files were locked.',
     inputSchema: { limit: z.number().int().min(1).max(200).optional() }
   }, async ({ limit } = {}) => {
-    const events = db.prepare(
-      "SELECT session_id, event_type, content, datetime(created_at, 'localtime') as created_at FROM session_log ORDER BY id DESC LIMIT ?"
-    ).all(limit ?? 50);
+    const events = services.listSessionHistory({ limit: limit ?? 50 });
     if (events.length === 0) return { content: [{ type: 'text', text: 'No session history found.' }] };
     const text = events.reverse().map(e =>
       `[${e.created_at}] ${e.session_id.slice(0, 8)}… ${e.event_type}: ${e.content ?? ''}`
@@ -2185,51 +2392,7 @@ function createMcpServer(getSessionId) {
       missionId: z.string().describe('The active mission ID'),
       nodeId: z.string().describe('Your specific node ID in the graph')
     }
-  }, async ({ missionId, nodeId }) => {
-    const details = buildTaskDetails(missionId, nodeId);
-    if (!details) {
-      return {
-        isError: true,
-        content: [{ type: 'text', text: `Mission ${missionId} or node ${nodeId} could not be found. Confirm the NEW_TASK payload and active mission.` }]
-      };
-    }
-    
-    const sid = getSessionId();
-    if (sid) {
-      const targetSid = details.runtimeSession?.sessionId ?? sid;
-      const currentAttempt = Number(details.node?.attempt ?? 0);
-      if (details.runtimeSession?.sessionId && Number.isInteger(currentAttempt) && currentAttempt > 0) {
-        ackTaskPush({
-          sessionId: details.runtimeSession.sessionId,
-          missionId,
-          nodeId,
-          taskSeq: currentAttempt,
-        });
-      }
-      emitAgentEvent({ 
-        type: 'activation:acked', 
-        sessionId: targetSid, 
-        missionId, 
-        nodeId, 
-        attempt: currentAttempt,
-        taskSeq: currentAttempt,
-      });
-      
-      // Also emit for the SSE session itself just in case
-      if (targetSid !== sid) {
-        emitAgentEvent({ 
-          type: 'activation:acked', 
-          sessionId: sid, 
-          missionId, 
-          nodeId, 
-          attempt: currentAttempt,
-          taskSeq: currentAttempt,
-        });
-      }
-    }
-
-    return { content: [{ type: 'text', text: JSON.stringify(details, null, 2) }] };
-  });
+  }, async (args) => executeGetTaskDetails(args, getSessionId()));
 
   // ── Activation inspection ──────────────────────────────────────────────────
   // list_task_activations provides a unified view of all activation records for
@@ -2248,12 +2411,7 @@ function createMcpServer(getSessionId) {
       return { isError: true, content: [{ type: 'text', text: `Mission ${missionId} not found.` }] };
     }
 
-    const nodeRuntimes = db.prepare(
-      `SELECT node_id, role_id, status, attempt, current_wave_id, last_outcome,
-              datetime(updated_at, 'localtime') AS updated_at
-         FROM mission_node_runtime WHERE mission_id = ?
-        ORDER BY updated_at DESC`
-    ).all(missionId);
+    const nodeRuntimes = services.listMissionNodeRuntimes(missionId);
 
     const activations = nodeRuntimes.map(runtime => {
       const session = runtime.attempt > 0
@@ -2261,14 +2419,11 @@ function createMcpServer(getSessionId) {
         : null;
 
       const pushes = session
-        ? db.prepare(
-            `SELECT task_seq, attempt,
-                    datetime(pushed_at, 'localtime') AS pushed_at,
-                    datetime(acked_at, 'localtime') AS acked_at
-               FROM task_pushes
-              WHERE session_id = ? AND mission_id = ? AND node_id = ?
-              ORDER BY task_seq ASC`
-          ).all(session.session_id, missionId, runtime.node_id)
+        ? services.listTaskPushesForSessionNode({
+            sessionId: session.session_id,
+            missionId,
+            nodeId: runtime.node_id,
+          })
         : [];
 
       const hasPendingPush = pushes.some(p => p.acked_at === null);
@@ -2474,10 +2629,7 @@ function createMcpServer(getSessionId) {
   }, async ({ key, value, updatedBy }) => {
     const sid = getSessionId() ?? 'unknown';
     const serialized = typeof value === 'string' ? value : JSON.stringify(value);
-    db.prepare(
-      'INSERT INTO workspace_context (key, value, updated_by, updated_at) VALUES (?, ?, ?, CURRENT_TIMESTAMP) ' +
-      'ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_by=excluded.updated_by, updated_at=excluded.updated_at'
-    ).run(key, serialized, updatedBy ?? sid);
+    services.upsertWorkspaceContext({ key, value: serialized, updatedBy: updatedBy ?? sid });
     broadcast(updatedBy ?? sid, JSON.stringify({ key }), 'workspace_context_update');
     bc(`Context updated: ${key}`);
     return { content: [{ type: 'text', text: `Workspace context[${key}] updated.` }] };
@@ -2490,17 +2642,7 @@ function createMcpServer(getSessionId) {
       keys: z.array(z.string()).optional().describe('Optional subset of section keys to return. Omit for all.'),
     }
   }, async ({ keys } = {}) => {
-    let rows;
-    if (Array.isArray(keys) && keys.length > 0) {
-      const placeholders = keys.map(() => '?').join(',');
-      rows = db.prepare(
-        `SELECT key, value, updated_by, datetime(updated_at, 'localtime') as updated_at FROM workspace_context WHERE key IN (${placeholders})`
-      ).all(...keys);
-    } else {
-      rows = db.prepare(
-        `SELECT key, value, updated_by, datetime(updated_at, 'localtime') as updated_at FROM workspace_context ORDER BY key`
-      ).all();
-    }
+    const rows = services.listWorkspaceContext(keys);
     if (rows.length === 0) return { content: [{ type: 'text', text: 'Workspace context is empty.' }] };
     const parsed = {};
     for (const r of rows) {
@@ -2519,32 +2661,7 @@ function createMcpServer(getSessionId) {
       targetSessionId: z.string().min(1).describe('Session id of the agent instance that should own this task'),
       agentId: z.string().optional().describe('Optional friendly name of the assignee (role id or instance name)'),
     }
-  }, async ({ taskId, targetSessionId, agentId }) => {
-    const row = db.prepare('SELECT id, title, description, payload, status FROM tasks WHERE id = ?').get(taskId);
-    if (!row) return { isError: true, content: [{ type: 'text', text: `Task ${taskId} not found.` }] };
-    if (!sessions[targetSessionId]) {
-      return { isError: true, content: [{ type: 'text', text: `Session ${targetSessionId} is not connected. Call list_sessions for active ids.` }] };
-    }
-
-    const assignee = agentId ?? targetSessionId;
-    db.prepare('UPDATE tasks SET agent_id = ? WHERE id = ?').run(assignee, taskId);
-
-    // Deliver the assignment directly to the target session inbox.
-    if (!messageQueues[targetSessionId]) messageQueues[targetSessionId] = [];
-    messageQueues[targetSessionId].push({
-      from: 'Supervisor',
-      text: `[ASSIGNED] Task ${taskId}: ${row.title}\n${row.description ?? ''}\npayload: ${row.payload ?? '(none)'}`,
-      timestamp: Date.now(),
-    });
-
-    const sid = getSessionId() ?? 'unknown';
-    logSession(sid, 'assign_task', JSON.stringify({ taskId, targetSessionId, agentId: assignee }));
-    broadcast(sid, JSON.stringify({ taskId, targetSessionId, agentId: assignee, title: row.title }), 'task_assigned');
-    broadcast('Starlink', JSON.stringify({ id: taskId, agentId: assignee, status: row.status }), 'task_update');
-    bc(`Assigned task ${taskId} → session ${targetSessionId} (${assignee})`);
-
-    return { content: [{ type: 'text', text: `Task ${taskId} assigned to ${assignee} (session ${targetSessionId}).` }] };
-  });
+  }, async (args) => executeAssignTask(args, getSessionId() ?? 'unknown'));
 
   server.registerTool('assign_task_by_requirements', {
     title: 'Assign Task By Requirements',
@@ -2624,7 +2741,7 @@ function createMcpServer(getSessionId) {
       return { isError: true, content: [{ type: 'text', text: 'lock_file requires missionId/nodeId in graph mode or agentId in legacy mode.' }] };
     }
 
-    const persisted = db.prepare("SELECT file_path, agent_id FROM file_locks WHERE file_path = ?").get(filePath);
+    const persisted = services.getPersistedFileLock(filePath);
     if (persisted && !fileLocks[filePath]) {
       fileLocks[filePath] = { agentId: persisted.agent_id, sessionId: null, lockedAt: Date.now() };
     }
@@ -2632,9 +2749,7 @@ function createMcpServer(getSessionId) {
 
     if (!existing) {
       fileLocks[filePath] = { agentId: ownerId, sessionId: sid, lockedAt: Date.now() };
-      db.prepare(
-        'INSERT INTO file_locks (file_path, agent_id, locked_at) VALUES (?, ?, CURRENT_TIMESTAMP) ON CONFLICT(file_path) DO UPDATE SET agent_id = excluded.agent_id, locked_at = CURRENT_TIMESTAMP'
-      ).run(filePath, ownerId);
+      services.upsertFileLock({ filePath, agentId: ownerId });
       bc(`Lock acquired: ${filePath} by ${ownerId}`);
       broadcast('Starlink', 'lock_update', 'lock_update');
       return { content: [{ type: 'text', text: `Lock acquired: ${filePath}` }] };
@@ -2687,7 +2802,7 @@ function createMcpServer(getSessionId) {
       return { isError: true, content: [{ type: 'text', text: 'unlock_file requires missionId/nodeId in graph mode or agentId in legacy mode.' }] };
     }
 
-    const persisted = db.prepare("SELECT file_path, agent_id FROM file_locks WHERE file_path = ?").get(filePath);
+    const persisted = services.getPersistedFileLock(filePath);
     if (persisted && !fileLocks[filePath]) {
       fileLocks[filePath] = { agentId: persisted.agent_id, sessionId: null, lockedAt: Date.now() };
     }
@@ -2697,7 +2812,7 @@ function createMcpServer(getSessionId) {
       return { isError: true, content: [{ type: 'text', text: `Cannot unlock: owned by "${existing.agentId}".` }] };
     }
     delete fileLocks[filePath];
-    db.prepare('DELETE FROM file_locks WHERE file_path = ?').run(filePath);
+    services.deleteFileLock(filePath);
     bc(`Lock released: ${filePath} by ${ownerId}`);
 
     // Auto-grant to the next live waiter. Skip waiters whose session has gone away.
@@ -2707,9 +2822,7 @@ function createMcpServer(getSessionId) {
       const next = queue.shift();
       if (!sessions[next.sessionId]) continue;
       fileLocks[filePath] = { agentId: next.ownerId, sessionId: next.sessionId, lockedAt: Date.now() };
-      db.prepare(
-        'INSERT INTO file_locks (file_path, agent_id, locked_at) VALUES (?, ?, CURRENT_TIMESTAMP) ON CONFLICT(file_path) DO UPDATE SET agent_id = excluded.agent_id, locked_at = CURRENT_TIMESTAMP'
-      ).run(filePath, next.ownerId);
+      services.upsertFileLock({ filePath, agentId: next.ownerId });
       if (!messageQueues[next.sessionId]) messageQueues[next.sessionId] = [];
       messageQueues[next.sessionId].push({
         from: 'Starlink',
@@ -2733,9 +2846,7 @@ function createMcpServer(getSessionId) {
     description: 'List all currently locked files, who holds them, and when they were locked.',
     inputSchema: {}
   }, async () => {
-    const rows = db.prepare(
-      "SELECT file_path, agent_id, datetime(locked_at, 'localtime') AS locked_at FROM file_locks ORDER BY file_path"
-    ).all();
+    const rows = services.listFileLocks();
     if (rows.length === 0) return { content: [{ type: 'text', text: 'No files currently locked.' }] };
     const text = rows.map(row =>
       `${row.file_path}\n  owner: ${row.agent_id}\n  since: ${row.locked_at}`
@@ -2806,25 +2917,10 @@ function createMcpServer(getSessionId) {
   }, async ({ sessionId, terminalId, nodeId, missionId, role, cli, cwd }) => {
     const adapterId = `adapter:${missionId}:${nodeId}:${sessionId}`;
 
-    db.prepare(
-      `INSERT INTO adapter_registrations
-         (adapter_id, session_id, terminal_id, node_id, mission_id, role, cli, cwd, lifecycle, registered_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'registered', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-       ON CONFLICT(adapter_id) DO UPDATE SET
-         terminal_id = excluded.terminal_id,
-         role = excluded.role,
-         cli = excluded.cli,
-         cwd = excluded.cwd,
-         lifecycle = 'registered',
-         updated_at = CURRENT_TIMESTAMP`
-    ).run(adapterId, sessionId, terminalId, nodeId, missionId, role, cli, cwd ?? null);
+    services.upsertAdapterRegistration({ adapterId, sessionId, terminalId, nodeId, missionId, role, cli, cwd: cwd ?? null });
 
     // Update the runtime session status so Mission Control sees the adapter is live.
-    db.prepare(
-      `UPDATE agent_runtime_sessions
-          SET status = 'registered', updated_at = CURRENT_TIMESTAMP
-        WHERE session_id = ?`
-    ).run(sessionId);
+    services.updateRuntimeSessionStatus({ sessionId, status: 'registered' });
 
     emitAgentEvent({
       type: 'agent:ready',
@@ -2865,24 +2961,12 @@ function createMcpServer(getSessionId) {
   }, async ({ sessionId, missionId, nodeId, attempt, taskSeq }) => {
     const now = new Date().toISOString().replace('T', ' ').slice(0, 19);
 
-    const pushResult = db.prepare(
-      `UPDATE task_pushes
-          SET acked_at = CURRENT_TIMESTAMP
-        WHERE session_id = ? AND mission_id = ? AND node_id = ? AND task_seq = ? AND acked_at IS NULL`
-    ).run(sessionId, missionId, nodeId, taskSeq);
+    const acked = services.ackTaskPush({ sessionId, missionId, nodeId, taskSeq });
 
     const adapterId = `adapter:${missionId}:${nodeId}:${sessionId}`;
-    db.prepare(
-      `UPDATE adapter_registrations
-          SET lifecycle = 'task_acked', updated_at = CURRENT_TIMESTAMP
-        WHERE adapter_id = ?`
-    ).run(adapterId);
+    services.updateAdapterLifecycle({ adapterId, lifecycle: 'task_acked' });
 
-    db.prepare(
-      `UPDATE agent_runtime_sessions
-          SET status = 'activated', updated_at = CURRENT_TIMESTAMP
-        WHERE session_id = ? AND mission_id = ? AND node_id = ? AND attempt = ?`
-    ).run(sessionId, missionId, nodeId, attempt);
+    services.updateRuntimeSessionStatus({ sessionId, status: 'activated', missionId, nodeId, attempt });
 
     emitAgentEvent({
       type: 'activation:acked',
@@ -2894,7 +2978,6 @@ function createMcpServer(getSessionId) {
       at: Date.now(),
     });
 
-    const acked = pushResult.changes > 0;
     return {
       content: [{
         type: 'text',
@@ -2992,6 +3075,34 @@ The Mission Control panel displays published results in real time.
     return { content: [{ type: 'text', text: sid }] };
   });
 
+  server.registerTool('list_runtime_sessions', {
+    title: 'List Runtime Sessions',
+    description: 'Supervisor control-plane query for persisted runtime sessions. Use list_sessions for currently connected MCP peers.',
+    inputSchema: {
+      missionId: z.string().optional(),
+      status: z.string().optional(),
+      limit: z.number().int().min(1).max(200).optional(),
+    }
+  }, async (args = {}) => executeListRuntimeSessions(args));
+
+  server.registerTool('list_agent_runs', {
+    title: 'List Agent Runs',
+    description: 'Supervisor control-plane query for persisted headless/agent run records.',
+    inputSchema: {
+      missionId: z.string().optional(),
+      status: z.string().optional(),
+      limit: z.number().int().min(1).max(200).optional(),
+    }
+  }, async (args = {}) => executeListAgentRuns(args));
+
+  server.registerTool('inspect_agent_run', {
+    title: 'Inspect Agent Run',
+    description: 'Supervisor control-plane query for one persisted headless/agent run record by runId.',
+    inputSchema: {
+      runId: z.string().min(1),
+    }
+  }, async (args = {}) => executeInspectAgentRun(args));
+
   server.registerTool('list_sessions', {
     title: 'List Sessions',
     description: 'List connected sessions. Use detailed=true to inspect profile/capability metadata.',
@@ -3017,33 +3128,13 @@ The Mission Control panel displays published results in real time.
   server.registerTool('send_message', {
     title: 'Send Message',
     description: 'Send a message to another agent session or node.',
-    inputSchema: { 
-      targetSessionId: z.string().uuid().optional(), 
+    inputSchema: {
+      targetSessionId: z.string().min(1).optional(),
       targetNodeId: z.string().optional(),
-      message: z.string() 
+      missionId: z.string().optional().describe('Required when targetNodeId is provided.'),
+      message: z.string().min(1)
     }
-  }, async ({ targetSessionId, targetNodeId, message }) => {
-    if (!targetSessionId && !targetNodeId) {
-      return { isError: true, content: [{ type: 'text', text: 'Must provide either targetSessionId or targetNodeId' }] };
-    }
-    const from = getSessionId() ?? 'unknown';
-
-    if (targetNodeId) {
-      db.prepare("INSERT INTO session_log (session_id, event_type, content, recipient_node_id) VALUES (?, 'message', ?, ?)").run(from, message, targetNodeId);
-      bc(`Message queued: ${from} → node ${targetNodeId}`);
-      return { content: [{ type: 'text', text: `Message delivered to node ${targetNodeId}.` }] };
-    }
-
-    if (targetSessionId) {
-      if (!sessions[targetSessionId]) {
-        return { isError: true, content: [{ type: 'text', text: `Session ${targetSessionId} not found. Use list_sessions to see active sessions.` }] };
-      }
-      if (!messageQueues[targetSessionId]) messageQueues[targetSessionId] = [];
-      messageQueues[targetSessionId].push({ from, text: message, timestamp: Date.now() });
-      bc(`Message queued: ${from} → session ${targetSessionId}`);
-      return { content: [{ type: 'text', text: `Message delivered to session ${targetSessionId}.` }] };
-    }
-  });
+  }, async (args) => executeSendMessage(args, getSessionId() ?? 'unknown'));
 
   server.registerTool('receive_messages', {
     title: 'Receive Messages',
@@ -3365,16 +3456,8 @@ app.post('/internal/push', async (req, res) => {
     if (!sessionId || !missionId || !nodeId || !Number.isInteger(attempt) || attempt < 1 || !Number.isInteger(taskSeq) || taskSeq < 1) {
       return res.status(400).json({ error: 'runtime_task_acked requires sessionId, missionId, nodeId, positive attempt, and positive taskSeq' });
     }
-    db.prepare(
-      `UPDATE task_pushes
-          SET acked_at = CURRENT_TIMESTAMP
-        WHERE session_id = ? AND mission_id = ? AND node_id = ? AND task_seq = ? AND acked_at IS NULL`
-    ).run(sessionId, missionId, nodeId, taskSeq);
-    db.prepare(
-      `UPDATE agent_runtime_sessions
-          SET status = 'activated', updated_at = CURRENT_TIMESTAMP
-        WHERE session_id = ? AND mission_id = ? AND node_id = ? AND attempt = ?`
-    ).run(sessionId, missionId, nodeId, attempt);
+    services.ackTaskPush({ sessionId, missionId, nodeId, taskSeq });
+    services.updateRuntimeSessionStatus({ sessionId, status: 'activated', missionId, nodeId, attempt });
     emitAgentEvent({
       type: 'activation:acked',
       sessionId,
@@ -3401,9 +3484,10 @@ app.post('/internal/push', async (req, res) => {
       artifactReferences: Array.isArray(body.artifactReferences) ? body.artifactReferences : [],
       downstreamPayload: body.downstreamPayload ?? null,
     }, body.sessionId ?? 'local-http-runtime');
-    const text = result?.content?.[0]?.text ?? '';
-    if (text && /requires|not found|not part|not running/i.test(text)) {
-      return res.status(400).json({ error: text });
+    if (result?.isError) {
+      const text = result?.content?.[0]?.text ?? '';
+      const parsed = parseJsonSafe(text, null);
+      return res.status(400).json({ error: parsed?.error?.message ?? text });
     }
     return res.json({ ok: true, result });
   }

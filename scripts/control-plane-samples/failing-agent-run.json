@@ -1,0 +1,16 @@
+{
+  "runId": "run:mission-control-plane-sample:failing:1",
+  "missionId": "mission-control-plane-sample",
+  "nodeId": "failing",
+  "attempt": 1,
+  "sessionId": "session:mission-control-plane-sample:failing:1",
+  "agentId": "agent:mission-control-plane-sample:failing:term-failing",
+  "cli": "custom",
+  "executionMode": "headless",
+  "cwd": null,
+  "command": "__terminal_docks_missing_command__",
+  "args": [],
+  "env": {},
+  "prompt": "Exercise backend command failure handling.",
+  "timeoutMs": 30000
+}

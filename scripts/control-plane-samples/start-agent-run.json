@@ -1,0 +1,16 @@
+{
+  "runId": "run:mission-control-plane-sample:headless:1",
+  "missionId": "mission-control-plane-sample",
+  "nodeId": "headless",
+  "attempt": 1,
+  "sessionId": "session:mission-control-plane-sample:headless:1",
+  "agentId": "agent:mission-control-plane-sample:headless:term-headless",
+  "cli": "custom",
+  "executionMode": "headless",
+  "cwd": null,
+  "command": "node",
+  "args": ["-e", "console.log('terminal-docks control-plane sample')"],
+  "env": {},
+  "prompt": "Run a credential-free control-plane smoke check.",
+  "timeoutMs": 30000
+}

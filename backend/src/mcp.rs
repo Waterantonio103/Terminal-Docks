@@ -6,7 +6,6 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-
 #[derive(Clone, serde::Serialize)]
 pub struct CliRegistrationResult {
     pub cli: String,
@@ -55,7 +54,9 @@ fn merge_json_config(
         serde_json::json!({})
     };
 
-    let obj = root.as_object_mut().ok_or("Config root is not a JSON object")?;
+    let obj = root
+        .as_object_mut()
+        .ok_or("Config root is not a JSON object")?;
     let section = obj
         .entry(key_path)
         .or_insert_with(|| serde_json::json!({}))
@@ -81,8 +82,14 @@ fn register_claude(mcp_url: &str) -> CliRegistrationResult {
     // Use --transport http (streamable-HTTP, Claude Code's current transport).
     // All options must come BEFORE the server name per claude mcp add syntax.
     let args = vec![
-        "mcp", "add", "--transport", "http", "--scope", "user",
-        "terminal-docks", mcp_url,
+        "mcp",
+        "add",
+        "--transport",
+        "http",
+        "--scope",
+        "user",
+        "terminal-docks",
+        mcp_url,
     ];
     let output = Command::new("claude")
         .args(&args)
@@ -93,7 +100,8 @@ fn register_claude(mcp_url: &str) -> CliRegistrationResult {
     match output {
         Ok(o) => {
             let stderr = String::from_utf8_lossy(&o.stderr).to_lowercase();
-            let already = stderr.contains("already exists") || stderr.contains("already registered");
+            let already =
+                stderr.contains("already exists") || stderr.contains("already registered");
             if o.status.success() || already {
                 CliRegistrationResult {
                     cli: "claude".into(),
@@ -119,42 +127,69 @@ fn register_claude(mcp_url: &str) -> CliRegistrationResult {
 fn register_gemini(mcp_url: &str) -> CliRegistrationResult {
     let home = match home_dir() {
         Some(h) => h,
-        None => return CliRegistrationResult {
-            cli: "gemini".into(), success: false,
-            message: "Could not determine home directory".into(),
-        },
+        None => {
+            return CliRegistrationResult {
+                cli: "gemini".into(),
+                success: false,
+                message: "Could not determine home directory".into(),
+            }
+        }
     };
     let config_path = home.join(".gemini").join("settings.json");
     let entry = serde_json::json!({ "httpUrl": mcp_url });
 
     match merge_json_config(&config_path, "mcpServers", "terminal-docks", entry) {
-        Ok(true)  => CliRegistrationResult { cli: "gemini".into(), success: true,
-            message: format!("gemini MCP server registered in {}", config_path.display()) },
-        Ok(false) => CliRegistrationResult { cli: "gemini".into(), success: true,
-            message: "gemini MCP server already registered".into() },
-        Err(e)    => CliRegistrationResult { cli: "gemini".into(), success: false,
-            message: format!("Failed to write gemini config: {}", e) },
+        Ok(true) => CliRegistrationResult {
+            cli: "gemini".into(),
+            success: true,
+            message: format!("gemini MCP server registered in {}", config_path.display()),
+        },
+        Ok(false) => CliRegistrationResult {
+            cli: "gemini".into(),
+            success: true,
+            message: "gemini MCP server already registered".into(),
+        },
+        Err(e) => CliRegistrationResult {
+            cli: "gemini".into(),
+            success: false,
+            message: format!("Failed to write gemini config: {}", e),
+        },
     }
 }
 
 fn register_opencode(mcp_url: &str) -> CliRegistrationResult {
     let home = match home_dir() {
         Some(h) => h,
-        None => return CliRegistrationResult {
-            cli: "opencode".into(), success: false,
-            message: "Could not determine home directory".into(),
-        },
+        None => {
+            return CliRegistrationResult {
+                cli: "opencode".into(),
+                success: false,
+                message: "Could not determine home directory".into(),
+            }
+        }
     };
     let config_path = home.join(".config").join("opencode").join("opencode.json");
     let entry = serde_json::json!({ "type": "remote", "url": mcp_url, "enabled": true });
 
     match merge_json_config(&config_path, "mcp", "terminal-docks", entry) {
-        Ok(true)  => CliRegistrationResult { cli: "opencode".into(), success: true,
-            message: format!("opencode MCP server registered in {}", config_path.display()) },
-        Ok(false) => CliRegistrationResult { cli: "opencode".into(), success: true,
-            message: "opencode MCP server already registered".into() },
-        Err(e)    => CliRegistrationResult { cli: "opencode".into(), success: false,
-            message: format!("Failed to write opencode config: {}", e) },
+        Ok(true) => CliRegistrationResult {
+            cli: "opencode".into(),
+            success: true,
+            message: format!(
+                "opencode MCP server registered in {}",
+                config_path.display()
+            ),
+        },
+        Ok(false) => CliRegistrationResult {
+            cli: "opencode".into(),
+            success: true,
+            message: "opencode MCP server already registered".into(),
+        },
+        Err(e) => CliRegistrationResult {
+            cli: "opencode".into(),
+            success: false,
+            message: format!("Failed to write opencode config: {}", e),
+        },
     }
 }
 
@@ -169,10 +204,13 @@ fn register_aider(_mcp_url: &str) -> CliRegistrationResult {
 fn register_goose(mcp_url: &str) -> CliRegistrationResult {
     let home = match home_dir() {
         Some(h) => h,
-        None => return CliRegistrationResult {
-            cli: "goose".into(), success: false,
-            message: "Could not determine home directory".into(),
-        },
+        None => {
+            return CliRegistrationResult {
+                cli: "goose".into(),
+                success: false,
+                message: "Could not determine home directory".into(),
+            }
+        }
     };
 
     let config_path = if cfg!(target_os = "windows") {
@@ -239,7 +277,10 @@ fn is_opencode_available() -> bool {
 }
 
 fn is_desktop_available(name: &str) -> bool {
-    let home = match home_dir() { Some(h) => h, None => return false };
+    let home = match home_dir() {
+        Some(h) => h,
+        None => return false,
+    };
     let p = if name == "claude-desktop" {
         if cfg!(target_os = "windows") {
             PathBuf::from(std::env::var("APPDATA").unwrap_or_default())
@@ -263,12 +304,12 @@ fn is_desktop_available(name: &str) -> bool {
 
 fn register_with_ai_clis(app_handle: &crate::AppState, mcp_url: &str) {
     let registrations: Vec<(&str, Box<dyn Fn(&str) -> CliRegistrationResult>)> = vec![
-        ("claude",         Box::new(register_claude)),
-        ("gemini",         Box::new(register_gemini)),
-        ("opencode",       Box::new(register_opencode)),
-        ("aider",          Box::new(register_aider)),
-        ("goose",          Box::new(register_goose)),
-        ("interpreter",    Box::new(register_interpreter)),
+        ("claude", Box::new(register_claude)),
+        ("gemini", Box::new(register_gemini)),
+        ("opencode", Box::new(register_opencode)),
+        ("aider", Box::new(register_aider)),
+        ("goose", Box::new(register_goose)),
+        ("interpreter", Box::new(register_interpreter)),
         ("claude-desktop", Box::new(register_claude_desktop)),
     ];
 
@@ -286,7 +327,10 @@ fn register_with_ai_clis(app_handle: &crate::AppState, mcp_url: &str) {
         }
 
         let result = register_fn(mcp_url);
-        println!("[mcp] CLI registration: {} — {}", result.cli, result.message);
+        println!(
+            "[mcp] CLI registration: {} — {}",
+            result.cli, result.message
+        );
         let _ = crate::emit_event("mcp-cli-registered", &result);
     }
 }
@@ -326,7 +370,7 @@ fn generate_push_token() -> String {
         .unwrap_or(0);
     // Fold nanos + per-call counter into a deterministic but non-predictable
     // token. Good enough for a loopback-only handshake; not a cryptographic
-    // secret but we never expose it past the Tauri process boundary.
+    // secret but we never expose it past the desktop/backend process boundary.
     for (i, b) in bytes.iter_mut().enumerate() {
         *b = (((nanos as u64) >> ((i % 8) * 8)) as u8)
             ^ (((i as u64).wrapping_mul(2654435761)) as u8);
@@ -339,7 +383,12 @@ const PORT: u16 = 3741;
 /// Load the persisted auth token, or generate and save a new one.
 /// Persisting across restarts means already-running Claude instances keep working.
 fn load_or_generate_auth_token(app: &crate::AppState) -> String {
-    let token_path = Some(std::env::current_dir().unwrap().join(".mcp").join("mcp_auth.token"));
+    let token_path = Some(
+        std::env::current_dir()
+            .unwrap()
+            .join(".mcp")
+            .join("mcp_auth.token"),
+    );
 
     if let Some(ref path) = token_path {
         if let Ok(token) = fs::read_to_string(path) {
@@ -361,7 +410,12 @@ fn load_or_generate_auth_token(app: &crate::AppState) -> String {
 }
 
 fn load_or_generate_push_token(app: &crate::AppState) -> String {
-    let token_path = Some(std::env::current_dir().unwrap().join(".mcp").join("mcp_push.token"));
+    let token_path = Some(
+        std::env::current_dir()
+            .unwrap()
+            .join(".mcp")
+            .join("mcp_push.token"),
+    );
 
     if let Some(ref path) = token_path {
         if let Ok(token) = fs::read_to_string(path) {
@@ -397,7 +451,7 @@ pub fn init_mcp_server(app: &crate::AppState) -> Result<(), String> {
         .join("mcp-server");
 
     if !server_dir.exists() {
-        // Try parent directory (likely when running from src-tauri)
+        // Try parent directory (likely when running from a backend build output)
         if let Ok(current) = std::env::current_dir() {
             if let Some(parent) = current.parent() {
                 let parent_server_dir = parent.join("mcp-server");
@@ -409,7 +463,10 @@ pub fn init_mcp_server(app: &crate::AppState) -> Result<(), String> {
     }
 
     if !server_dir.exists() {
-        return Err(format!("MCP server directory not found at {:?}", server_dir));
+        return Err(format!(
+            "MCP server directory not found at {:?}",
+            server_dir
+        ));
     }
 
     let db_path = {
@@ -432,6 +489,7 @@ pub fn init_mcp_server(app: &crate::AppState) -> Result<(), String> {
         .arg("server.mjs")
         .current_dir(&server_dir)
         .env("MCP_DB_PATH", &db_path)
+        .env("MCP_SCHEMA_OWNER", "backend")
         .env("MCP_INTERNAL_PUSH_TOKEN", &push_token)
         .env("MCP_AUTH_TOKEN", &auth_token)
         .stdout(Stdio::inherit())
@@ -473,176 +531,203 @@ pub fn init_mcp_server(app: &crate::AppState) -> Result<(), String> {
         // handoff events do not permanently stall workflow graph advancement.
         let mut sse_backoff_ms: u64 = 1_000;
         'sse_reconnect: loop {
-        let response = match ureq::get(&format!("{}/events?token={}", base, token)).call() {
-            Ok(r) => r,
-            Err(e) => {
-                eprintln!("[mcp] SSE connection failed: {}. Retrying in {}ms…", e, sse_backoff_ms);
-                let _ = crate::emit_event(
-                    "workflow-runtime-warning", &serde_json::json!({
-                        "missionId": "system",
-                        "nodeId": "bridge",
-                        "message": format!("SSE bridge disconnected: {}. Reconnecting…", e),
-                    }),
-                );
-                thread::sleep(Duration::from_millis(sse_backoff_ms));
-                sse_backoff_ms = (sse_backoff_ms * 2).min(30_000);
-                continue 'sse_reconnect;
-            }
-        };
-        sse_backoff_ms = 1_000;
+            let response = match ureq::get(&format!("{}/events?token={}", base, token)).call() {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!(
+                        "[mcp] SSE connection failed: {}. Retrying in {}ms…",
+                        e, sse_backoff_ms
+                    );
+                    let _ = crate::emit_event(
+                        "workflow-runtime-warning",
+                        &serde_json::json!({
+                            "missionId": "system",
+                            "nodeId": "bridge",
+                            "message": format!("SSE bridge disconnected: {}. Reconnecting…", e),
+                        }),
+                    );
+                    thread::sleep(Duration::from_millis(sse_backoff_ms));
+                    sse_backoff_ms = (sse_backoff_ms * 2).min(30_000);
+                    continue 'sse_reconnect;
+                }
+            };
+            sse_backoff_ms = 1_000;
 
-        let reader = BufReader::new(response.into_reader());
-        for line in reader.lines().flatten() {
-            if let Some(data) = line.strip_prefix("data: ") {
-                if let Ok(msg) = serde_json::from_str::<McpMessage>(data) {
-                    if msg.msg_type == "handoff" {
-                        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&msg.content) {
-                            let mission_id = value
-                                .get("missionId")
-                                .and_then(|v| v.as_str())
-                                .map(str::to_string);
-                            let from_node_id = value
-                                .get("fromNodeId")
-                                .and_then(|v| v.as_str())
-                                .map(str::to_string);
-                            let from_attempt = value.get("fromAttempt").and_then(|v| v.as_u64());
-
-                            let mission_for_diag = mission_id
-                                .clone()
-                                .unwrap_or_else(|| "unknown".to_string());
-                            let node_for_diag = from_node_id
-                                .clone()
-                                .unwrap_or_else(|| "unknown".to_string());
-
-                            let mut invalid_reasons = Vec::new();
-                            if mission_id.is_none() {
-                                invalid_reasons.push("missing missionId");
-                            }
-                            if from_node_id.is_none() {
-                                invalid_reasons.push("missing fromNodeId");
-                            }
-                            if from_attempt.is_none() {
-                                invalid_reasons.push("missing fromAttempt");
-                            }
-
-                            if !invalid_reasons.is_empty() {
-                                let reason = format!(
-                                    "Rejected handoff envelope: {}",
-                                    invalid_reasons.join(", ")
-                                );
-                                eprintln!("[mcp] {}", reason);
-                                let _ = crate::emit_event(
-                                    "workflow-runtime-warning", &serde_json::json!({
-                                        "missionId": mission_for_diag,
-                                        "nodeId": node_for_diag,
-                                        "message": reason,
-                                    }),
-                                );
-                            } else if let (Some(mid), Ok(event)) = (
-                                mission_id,
-                                serde_json::from_value::<crate::workflow_engine::HandoffEvent>(value),
-                            ) {
-                                crate::workflow_engine::handle_handoff(&app_handle, &mid, event);
-                            } else {
-                                let reason = "Rejected handoff envelope: failed to parse payload.";
-                                eprintln!("[mcp] {}", reason);
-                                let _ = crate::emit_event(
-                                    "workflow-runtime-warning", &serde_json::json!({
-                                        "missionId": mission_for_diag,
-                                        "nodeId": node_for_diag,
-                                        "message": reason,
-                                    }),
-                                );
-                            }
-                        }
-                    } else if msg.msg_type == "adaptive_patch" {
-                        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&msg.content) {
-                            let mission_id = value
-                                .get("missionId")
-                                .and_then(|v| v.as_str())
-                                .map(str::to_string);
-                            let run_version = value
-                                .get("previousRunVersion")
-                                .and_then(|v| v.as_u64());
-                            let patch = value.get("patch").cloned();
-
-                            let mission_for_diag = mission_id
-                                .clone()
-                                .unwrap_or_else(|| "unknown".to_string());
-
-                            let mut invalid_reasons = Vec::new();
-                            if mission_id.is_none() {
-                                invalid_reasons.push("missing missionId");
-                            }
-                            if run_version.is_none() {
-                                invalid_reasons.push("missing previousRunVersion");
-                            }
-                            if patch.is_none() {
-                                invalid_reasons.push("missing patch");
-                            }
-
-                            if !invalid_reasons.is_empty() {
-                                let reason = format!(
-                                    "Rejected adaptive patch envelope: {}",
-                                    invalid_reasons.join(", ")
-                                );
-                                eprintln!("[mcp] {}", reason);
-                                let _ = crate::emit_event(
-                                    "workflow-runtime-warning", &serde_json::json!({
-                                        "missionId": mission_for_diag,
-                                        "nodeId": "adaptive",
-                                        "message": reason,
-                                    }),
-                                );
-                            } else if let (Some(mid), Some(version), Some(patch_value)) =
-                                (mission_id, run_version, patch)
+            let reader = BufReader::new(response.into_reader());
+            for line in reader.lines().flatten() {
+                if let Some(data) = line.strip_prefix("data: ") {
+                    if let Ok(msg) = serde_json::from_str::<McpMessage>(data) {
+                        if msg.msg_type == "handoff" {
+                            if let Ok(value) =
+                                serde_json::from_str::<serde_json::Value>(&msg.content)
                             {
-                                let parsed_patch = serde_json::from_value::<crate::workflow_engine::MissionGraphPatch>(patch_value);
-                                match parsed_patch {
-                                    Ok(patch_payload) => {
-                                        if let Err(error) = crate::workflow_engine::append_mission_patch(
-                                            app_handle.clone(),
-                                            mid.clone(),
-                                            version as u32,
-                                            patch_payload,
-                                        ) {
+                                let mission_id = value
+                                    .get("missionId")
+                                    .and_then(|v| v.as_str())
+                                    .map(str::to_string);
+                                let from_node_id = value
+                                    .get("fromNodeId")
+                                    .and_then(|v| v.as_str())
+                                    .map(str::to_string);
+                                let from_attempt =
+                                    value.get("fromAttempt").and_then(|v| v.as_u64());
+
+                                let mission_for_diag =
+                                    mission_id.clone().unwrap_or_else(|| "unknown".to_string());
+                                let node_for_diag = from_node_id
+                                    .clone()
+                                    .unwrap_or_else(|| "unknown".to_string());
+
+                                let mut invalid_reasons = Vec::new();
+                                if mission_id.is_none() {
+                                    invalid_reasons.push("missing missionId");
+                                }
+                                if from_node_id.is_none() {
+                                    invalid_reasons.push("missing fromNodeId");
+                                }
+                                if from_attempt.is_none() {
+                                    invalid_reasons.push("missing fromAttempt");
+                                }
+
+                                if !invalid_reasons.is_empty() {
+                                    let reason = format!(
+                                        "Rejected handoff envelope: {}",
+                                        invalid_reasons.join(", ")
+                                    );
+                                    eprintln!("[mcp] {}", reason);
+                                    let _ = crate::emit_event(
+                                        "workflow-runtime-warning",
+                                        &serde_json::json!({
+                                            "missionId": mission_for_diag,
+                                            "nodeId": node_for_diag,
+                                            "message": reason,
+                                        }),
+                                    );
+                                } else if let (Some(mid), Ok(event)) = (
+                                    mission_id,
+                                    serde_json::from_value::<crate::workflow_engine::HandoffEvent>(
+                                        value,
+                                    ),
+                                ) {
+                                    crate::workflow_engine::handle_handoff(
+                                        &app_handle,
+                                        &mid,
+                                        event,
+                                    );
+                                } else {
+                                    let reason =
+                                        "Rejected handoff envelope: failed to parse payload.";
+                                    eprintln!("[mcp] {}", reason);
+                                    let _ = crate::emit_event(
+                                        "workflow-runtime-warning",
+                                        &serde_json::json!({
+                                            "missionId": mission_for_diag,
+                                            "nodeId": node_for_diag,
+                                            "message": reason,
+                                        }),
+                                    );
+                                }
+                            }
+                        } else if msg.msg_type == "adaptive_patch" {
+                            if let Ok(value) =
+                                serde_json::from_str::<serde_json::Value>(&msg.content)
+                            {
+                                let mission_id = value
+                                    .get("missionId")
+                                    .and_then(|v| v.as_str())
+                                    .map(str::to_string);
+                                let run_version =
+                                    value.get("previousRunVersion").and_then(|v| v.as_u64());
+                                let patch = value.get("patch").cloned();
+
+                                let mission_for_diag =
+                                    mission_id.clone().unwrap_or_else(|| "unknown".to_string());
+
+                                let mut invalid_reasons = Vec::new();
+                                if mission_id.is_none() {
+                                    invalid_reasons.push("missing missionId");
+                                }
+                                if run_version.is_none() {
+                                    invalid_reasons.push("missing previousRunVersion");
+                                }
+                                if patch.is_none() {
+                                    invalid_reasons.push("missing patch");
+                                }
+
+                                if !invalid_reasons.is_empty() {
+                                    let reason = format!(
+                                        "Rejected adaptive patch envelope: {}",
+                                        invalid_reasons.join(", ")
+                                    );
+                                    eprintln!("[mcp] {}", reason);
+                                    let _ = crate::emit_event(
+                                        "workflow-runtime-warning",
+                                        &serde_json::json!({
+                                            "missionId": mission_for_diag,
+                                            "nodeId": "adaptive",
+                                            "message": reason,
+                                        }),
+                                    );
+                                } else if let (Some(mid), Some(version), Some(patch_value)) =
+                                    (mission_id, run_version, patch)
+                                {
+                                    let parsed_patch =
+                                        serde_json::from_value::<
+                                            crate::workflow_engine::MissionGraphPatch,
+                                        >(patch_value);
+                                    match parsed_patch {
+                                        Ok(patch_payload) => {
+                                            if let Err(error) =
+                                                crate::workflow_engine::append_mission_patch(
+                                                    app_handle.clone(),
+                                                    mid.clone(),
+                                                    version as u32,
+                                                    patch_payload,
+                                                )
+                                            {
+                                                let _ = crate::emit_event(
+                                                    "workflow-runtime-warning",
+                                                    &serde_json::json!({
+                                                        "missionId": mid,
+                                                        "nodeId": "adaptive",
+                                                        "message": format!("Adaptive patch rejected by scheduler: {}", error),
+                                                    }),
+                                                );
+                                            }
+                                        }
+                                        Err(error) => {
                                             let _ = crate::emit_event(
-                                                "workflow-runtime-warning", &serde_json::json!({
+                                                "workflow-runtime-warning",
+                                                &serde_json::json!({
                                                     "missionId": mid,
                                                     "nodeId": "adaptive",
-                                                    "message": format!("Adaptive patch rejected by scheduler: {}", error),
+                                                    "message": format!("Adaptive patch parse error: {}", error),
                                                 }),
                                             );
                                         }
                                     }
-                                    Err(error) => {
-                                        let _ = crate::emit_event(
-                                            "workflow-runtime-warning", &serde_json::json!({
-                                                "missionId": mid,
-                                                "nodeId": "adaptive",
-                                                "message": format!("Adaptive patch parse error: {}", error),
-                                            }),
-                                        );
-                                    }
                                 }
                             }
                         }
+                        let _ = crate::emit_event("mcp-message", &msg);
                     }
-                    let _ = crate::emit_event("mcp-message", &msg);
                 }
             }
-        }
-        // Event loop ended — SSE stream was closed or dropped. Reconnect.
-        eprintln!("[mcp] SSE stream ended. Reconnecting in {}ms…", sse_backoff_ms);
-        let _ = crate::emit_event(
-            "workflow-runtime-warning", &serde_json::json!({
-                "missionId": "system",
-                "nodeId": "bridge",
-                "message": "SSE bridge stream ended unexpectedly. Reconnecting…",
-            }),
-        );
-        thread::sleep(Duration::from_millis(sse_backoff_ms));
-        sse_backoff_ms = (sse_backoff_ms * 2).min(30_000);
+            // Event loop ended — SSE stream was closed or dropped. Reconnect.
+            eprintln!(
+                "[mcp] SSE stream ended. Reconnecting in {}ms…",
+                sse_backoff_ms
+            );
+            let _ = crate::emit_event(
+                "workflow-runtime-warning",
+                &serde_json::json!({
+                    "missionId": "system",
+                    "nodeId": "bridge",
+                    "message": "SSE bridge stream ended unexpectedly. Reconnecting…",
+                }),
+            );
+            thread::sleep(Duration::from_millis(sse_backoff_ms));
+            sse_backoff_ms = (sse_backoff_ms * 2).min(30_000);
         } // end 'sse_reconnect loop
     });
 
@@ -726,7 +811,10 @@ pub fn mcp_register_runtime_session(
         }
         Err(ureq::Error::Status(code, response)) => {
             let body = response.into_string().unwrap_or_default();
-            Err(format!("mcp_register_runtime_session failed with HTTP {}: {}", code, body))
+            Err(format!(
+                "mcp_register_runtime_session failed with HTTP {}: {}",
+                code, body
+            ))
         }
         Err(error) => Err(format!("mcp_register_runtime_session failed: {}", error)),
     }
@@ -800,7 +888,10 @@ pub fn mcp_notify_agent(
         }
         Err(ureq::Error::Status(code, response)) => {
             let body = response.into_string().unwrap_or_default();
-            Err(format!("mcp_notify_agent failed with HTTP {}: {}", code, body))
+            Err(format!(
+                "mcp_notify_agent failed with HTTP {}: {}",
+                code, body
+            ))
         }
         Err(error) => Err(format!("mcp_notify_agent failed: {}", error)),
     }

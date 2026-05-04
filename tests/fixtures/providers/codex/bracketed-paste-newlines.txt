@@ -1,0 +1,4 @@
+### MISSION_CONTROL_ACTIVATION_REQUEST ###
+Please call get_task_details({ missionId: "mission-1", nodeId: "builder" }).
+
+Line breaks in this activation must be flattened before PTY delivery.

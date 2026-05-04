@@ -115,6 +115,10 @@ function extractTaskIdFromHandoffResult(result) {
   return match ? Number(match[1]) : null;
 }
 
+function extractToolData(result) {
+  return JSON.parse(result?.content?.[0]?.text ?? '{}').data;
+}
+
 try {
   await run('get_task_details exposes exact legal same-role targets', async () => {
     resetStarlinkState();
@@ -321,7 +325,7 @@ try {
     }, 'session:mission-graph:builder:1');
 
     assert.equal(result.isError, undefined);
-    const payload = JSON.parse(result.content[0].text);
+    const payload = extractToolData(result);
     assert.equal(payload.status, 'completed');
     assert.deepEqual(
       payload.routed.map(entry => entry.targetNodeId).sort(),

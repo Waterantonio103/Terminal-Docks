@@ -24,6 +24,14 @@ const GEMINI_INPUT_HINT_RE = /\b(type|enter|input|paste|write)\b.*\b(prompt|mess
 export const geminiAdapter: CliAdapter = {
   id: 'gemini',
   label: 'Gemini CLI',
+  capabilities: {
+    supportsHeadless: false,
+    supportsMcpConfig: true,
+    supportsHardToolRestrictions: false,
+    supportsPermissions: true,
+    requiresTrustPromptHandling: true,
+    completionAuthority: 'process_exit',
+  },
 
   buildLaunchCommand(context: LaunchContext): LaunchCommand {
     const env: Record<string, string> = {

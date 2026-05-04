@@ -14,14 +14,22 @@ import type {
 
 const BANNER_RE = /\bclaude (code|assistant)\b/i;
 const SHELL_PROMPT_RE = /(?:\$|>|#)\s*$/m;
-const PERMISSION_RE = /(?:allow|deny|approve|reject|permission|grant access)/i;
+const PERMISSION_RE = /(?:allow|deny|approve|reject|permission|grant access|trust)/i;
 
 const COMPLETION_RE = /(?:task completed|finished|done|exit code\s+0)/i;
-const FAILURE_RE = /(?:error:|failed|exception|exit code\s+[1-9])/i;
+const FAILURE_RE = /(?:error:|failed|exception|exit code\s+[1-9]|interrupted|cancelled|canceled|aborted)/i;
 
 export const claudeAdapter: CliAdapter = {
   id: 'claude',
   label: 'Claude Code',
+  capabilities: {
+    supportsHeadless: true,
+    supportsMcpConfig: true,
+    supportsHardToolRestrictions: false,
+    supportsPermissions: true,
+    requiresTrustPromptHandling: true,
+    completionAuthority: 'mcp_tool',
+  },
 
   buildLaunchCommand(context: LaunchContext): LaunchCommand {
     const env: Record<string, string> = {
@@ -69,8 +77,13 @@ export const claudeAdapter: CliAdapter = {
   detectPermissionRequest(output: string): PermissionDetectionResult | null {
     if (!PERMISSION_RE.test(output)) return null;
 
-    const lines = output.split('\n').filter(l => l.trim());
-    const promptLine = lines[lines.length - 1] ?? '';
+    const lines = output.split('\n').map(l => l.trim()).filter(Boolean);
+    const promptLine = [...lines].reverse().find(line => (
+      !/^\[/.test(line) &&
+      !/^press\b/i.test(line) &&
+      !/^approve to continue/i.test(line) &&
+      /allow|approve|permission|grant|trust|bash|command|edit|read|network|install/i.test(line)
+    )) ?? lines[lines.length - 1] ?? '';
 
     let category: PermissionRequest['category'] = 'unknown';
     if (/bash|command|shell|exec|run\s/i.test(promptLine)) category = 'shell_execution';

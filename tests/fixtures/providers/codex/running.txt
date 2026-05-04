@@ -1,0 +1,8 @@
+Codex
+
+Working on task task-4
+- reading project files
+- applying patch
+- running tests
+
+loading tools...

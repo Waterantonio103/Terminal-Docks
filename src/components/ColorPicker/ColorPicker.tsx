@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { Pipette, Type, Layers, Grid, ChevronDown, AlertCircle } from 'lucide-react';
+import { Pipette, AlertCircle } from 'lucide-react';
 
 interface ColorPickerProps {
   color: string;

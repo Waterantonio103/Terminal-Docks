@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { X, Palette, Monitor, RotateCcw, Check, Sun, Moon, Sparkles, ChevronDown, Trash2, Edit2, Save } from 'lucide-react';
+import { X, Palette, Monitor, RotateCcw, Check, Sun, Moon, Sparkles, ChevronDown, Trash2, Edit2 } from 'lucide-react';
 import { useWorkspaceStore, ThemeType, CustomThemeColors, ThemePreset } from '../../store/workspace';
 import { ColorPicker } from '../ColorPicker/ColorPicker';
 

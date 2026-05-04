@@ -1,146 +1,82 @@
-# CometAI
+# Agent Guide
 
-## Project Overview
+This file is the first stop for AI coding agents working in Terminal Docks.
 
-A fully local, subscription-free **Agentic Development Environment** — a desktop app that combines a multi-pane terminal workspace, AI agent orchestration, a task board, and a built-in code editor in one native window. Inspired by Starlink (cometmind.ai) but runs 100% offline with no accounts, no API keys to a hosted service, and no telemetry.
+## Product Direction
 
-**Compatibility:** This is the macOS dedicated version (macOS only; no Windows compatibility required) 
+Terminal Docks is a local-first multi-agent workflow app. CLI coding agents are
+the execution interface; workflows are authored as graphs; runtime state is
+observable by UI/control planes but owned by runtime services.
 
-## Tech Stack
+Target layering:
 
-| Layer | Choice | Reason |
-|---|---|---|
-| Desktop shell | **Tauri v2** | Native OS integration, small binary, not Electron |
-| Frontend | **React 19** + TypeScript | Component model, concurrent features |
-| Terminal rendering | **`@xterm/xterm`** + `@xterm/addon-webgl` + `@xterm/addon-fit` | GPU-accelerated, widely used; scoped packages (old `xterm` pkg unmaintained) |
-| Shell spawning | **`portable-pty`** (Rust crate, in `src-tauri/`) | Native PTY in Rust — no Node.js sidecar, keeps binary self-contained |
-| State management | **Zustand** | Lightweight, no boilerplate |
-| Styling | **Tailwind CSS** | Utility-first, easy theming via CSS variables |
-| Local task storage | **SQLite** via `rusqlite` (Rust, direct) | Full query control, no plugin abstraction layer |
-| AI agent runner | **Local CLI** (Claude Code, Aider, Continue, etc.) | User-supplied, no hosted dependency |
-
-## Core Features
-
-### 1. Workspace Grid
-- Configurable split layouts: 1-pane, 2-side-by-side, 2×2, 3×4, 4×4 (up to 16 terminals)
-- Drag-and-drop panel resizing and reordering
-- Each pane can be: Terminal, Editor, Task Board, or Agent Activity Feed
-- Workspace configs saved and restored on relaunch
-- Quick Open (`Ctrl+P`) to open any file directly into an editor pane
-
-### 2. Terminal Panes
-- Full PTY terminal backed by `@xterm/xterm` (frontend) + `portable-pty` (Rust backend via Tauri commands/events IPC)
-- Respects user shell (bash, zsh, fish, PowerShell) and dotfiles
-- **OSC 133 command blocks** — shell integration marks command start/end for collapsible, clickable output blocks (Warp-style)
-- Command history with block-level navigation
-- Per-pane working directory and env overrides
-- **Starlink IPC**: PTY stdout streamed to frontend via Tauri `emit()` events; keystrokes sent backend via `invoke()` commands
-
-### 3. AI Agent Integration
-- One-click **Run Task** button: spawns a terminal pane with the user's chosen AI CLI agent pre-loaded (`claude`, `aider`, `continue`, custom script)
-- Automatic context injection: task description, file paths, and prompt template injected as the agent's initial input
-- Agent sessions are just terminal sessions — full interactivity preserved
-- Configurable agent profiles (binary path, args, prompt template, working dir)
-- Simultaneous multi-agent spawn across panes on workspace open
-
-### 4. Task Board (Local Kanban)
-- Kanban board stored in local SQLite — no cloud sync, no account
-- Columns: **Backlog → In Progress → Review → Done**
-- Each task: title, description, agent profile, file context, tags
-- "Run Task" from any card instantly opens an agent-loaded terminal pane
-- Keyboard-driven: add, move, archive cards without mouse
-
-### 5. Built-in Editor Pane
-- **CodeMirror 6**-based editor embedded as a pane type (`@codemirror/state` + `@codemirror/view` + language packs)
-- ~200KB vs Monaco's ~10MB — appropriate for an embedded pane in a WebView
-- Read, edit, save files without leaving the app
-- Syntax highlighting via CodeMirror language packages; no LSP required
-- Opened via Quick Open or by clicking a file path in a terminal block
-
-### 6. Multi-Agent Orchestration ("CometAI Mode")
-- Define agent teams with roles: **builder**, **reviewer**, **scout**, **coordinator**
-- Each agent runs in its own terminal pane
-- **Local mailbox**: agents write to a shared local directory (`.CometAI/mailbox/`) and read each other's outputs; coordinator agent drives sequencing
-- Real-time **Activity Feed** pane: aggregated live log of all agent stdout, tagged by agent name and role
-- Scales from 2 to 16 concurrent agents
-- CometAI config stored as a local JSON file (shareable, version-controllable)
-
-### 7. Themes
-- 20+ built-in themes covering: terminal colors, app chrome, scrollbars, syntax highlighting
-- Theme stored as a CSS variable set — easy to add custom themes via JSON
-- Live theme switching without restart
-
-## Layout & UI Structure
-
-```
-┌─────────────────────────────────────────────────────────┐
-│  [Logo] CometAI    [Layout Picker] [Theme] [⚙]  │  ← App chrome / titlebar
-├──────────┬──────────────────────────────────────────────┤
-│          │  Pane 1 (Terminal / Editor / Board)          │
-│  Sidebar │──────────────────────────────────────────────│
-│          │  Pane 2 (Terminal / Editor / Board)          │
-│  • Tasks │──────────────────────────────────────────────│
-│  • Swarm │  Pane 3                  │  Pane 4           │
-│  • Files │                          │                   │
-│  • Agents│                          │                   │
-└──────────┴──────────────────────────┴───────────────────┘
+```text
+Desktop UI / MCP / tdctl / future CLI
+        |
+Electron IPC / backend JSON-RPC / MCP protocol
+        |
+workflow orchestration + runtime services
+        |
+provider adapters + terminal runtime
+        |
+PTY/backend/persistence
+        |
+CLI agents
 ```
 
-- **Sidebar**: collapsible, contains Task Board nav, CometAI status, file tree, agent profiles
-- **Pane area**: drag-and-drop grid, each pane has a tab bar for type switching
-- **Pane header**: shows pane type icon, current path or task name, Run Task button
-- **Activity Feed**: optional overlay or dedicated pane showing real-time agent output log
+## Non-Negotiable Architecture Rules
 
-## Local-First Principles
+- Keep workflow orchestration graph-first.
+- Do not turn MCP into the orchestration brain. MCP should expose protocol tools over services/state.
+- Do not make React components or Zustand the owner of runtime truth.
+- Keep provider-specific behavior inside provider adapters.
+- Keep PTY/process details below runtime services.
+- Keep schema creation and migrations in the backend persistence owner.
+- Preserve future desktop UI, MCP, and CLI/headless control planes.
 
-- All data (tasks, workspace configs, CometAI configs, themes) stored in `~/.CometAI/` or beside the binary
-- No network requests except those the user's own AI CLI makes
-- No telemetry, no analytics, no crash reporting unless user explicitly opts in
-- Zero account/login required — install and run
+## Where To Work
 
-## Development Commands
+- UI shell and panes: `src/App.tsx`, `src/components/`.
+- UI state only: `src/store/workspace.ts`.
+- Workflow graph/run behavior: `src/lib/workflow/`.
+- Graph compiler/helpers: `src/lib/graphCompiler.ts`, `src/lib/graphUtils.ts`, `src/lib/node-system/`.
+- Runtime lifecycle: `src/lib/runtime/RuntimeManager.ts`, `src/lib/runtime/RuntimeSession.ts`.
+- Provider behavior: `src/lib/runtime/adapters/`.
+- Low-level terminal/backend IPC wrapper: `src/lib/runtime/TerminalRuntime.ts`.
+- Desktop IPC bridge: `electron/`, `src/lib/desktopApi.ts`.
+- Backend workflow, PTY, DB, MCP process: `backend/src/`.
+- MCP facade/tools: `mcp-server/`.
+- Scriptable control plane: `scripts/tdctl.mjs`, `scripts/control-plane-client.mjs`.
+- Tests: `tests/`.
+
+## Change Discipline
+
+- Prefer small, boundary-preserving changes.
+- Update imports when moving files; do not change runtime behavior during organization-only work.
+- Do not introduce provider-specific checks in `RuntimeManager`; add adapter methods or capability metadata.
+- Do not add schema creation to `mcp-server/server.mjs`; update `backend/src/db.rs` first.
+- Do not add UI store imports to runtime or workflow core.
+- Avoid broad refactors unless tests cover the affected behavior.
+
+## Verification
+
+Choose the narrowest relevant command first:
 
 ```bash
-# Install dependencies
-npm install
-
-# Run in dev mode (Tauri + Vite)
-npm run tauri dev
-
-# Build production binary
-npm run tauri build
-
-# Run frontend only (for UI work)
-npm run dev
+npm run build
+npm run test:graph
+npm run test:mcp
+npm run test:runtime-core
+npm run test:providers
+npm run test:control-plane
+npm run test:rust
 ```
 
-## Project Structure
+For changes that affect orchestration across layers, run:
 
-```
-CometAI/
-├── src/                    # React frontend
-│   ├── components/
-│   │   ├── Terminal/       # xterm.js pane wrapper
-│   │   ├── Editor/         # CodeMirror 6 editor pane
-│   │   ├── TaskBoard/      # Kanban board
-│   │   ├── ActivityFeed/   # CometAI log aggregator
-│   │   ├── Sidebar/        # Nav, file tree, agent profiles
-│   │   └── Layout/         # Grid, drag-drop, pane management
-│   ├── store/              # Zustand stores
-│   ├── hooks/              # Custom React hooks
-│   └── themes/             # Theme definitions (CSS vars)
-├── src-tauri/              # Rust/Tauri backend
-│   ├── src/
-│   │   ├── pty.rs          # PTY spawning
-│   │   ├── db.rs           # SQLite task storage
-│   │   └── swarm.rs        # Mailbox file watcher
-│   └── tauri.conf.json
-├── CLAUDE.md               # This file
-└── agents.md               # Agent orchestration design
+```bash
+npm run test:workflow
 ```
 
-
-## macOS Interaction Patterns
-
-- **Viewport Navigation:** Left-click and drag on the background to pan the viewport (node graph and runtime nodes).
-- **Multi-Node Selection:** Use `Shift + Click` to select multiple nodes. Box-drag selection is disabled in favor of this pattern.
+If a command cannot run in the current environment, record the failure and the
+reason in your handoff.

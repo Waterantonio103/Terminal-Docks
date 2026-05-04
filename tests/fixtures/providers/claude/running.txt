@@ -1,0 +1,5 @@
+Thinking...
+
+Reading src/lib/runtime/adapters/claude.ts
+Editing tests/runtimeProviderAdapters.test.mjs
+Running npm run test:providers

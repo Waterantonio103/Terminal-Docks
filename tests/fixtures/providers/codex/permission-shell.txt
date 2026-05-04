@@ -1,0 +1,4 @@
+Codex asks:
+allow bash command npm test?
+
+[y] yes  [n] no

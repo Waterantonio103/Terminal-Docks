@@ -1,0 +1,4 @@
+Claude Code asks:
+approve edit file src/App.tsx?
+
+Press y to approve or n to deny.

@@ -1,5 +1,5 @@
 {
-  "name": "comet-ai",
+  "name": "terminal-docks",
   "private": true,
   "version": "0.1.0",
   "main": "dist-electron/main.js",
@@ -11,13 +11,17 @@
     "electron:dev": "concurrently \"vite\" \"tsc -p electron/tsconfig.json -w\" \"wait-on tcp:1420 && electron .\"",
     "electron:build": "vite build && tsc -p electron/tsconfig.json && electron-builder",
     "mcp:install": "npm install --prefix mcp-server",
+    "tdctl": "node ./scripts/tdctl.mjs",
     "test:graph": "tsc -p tsconfig.graph-tests.json && node ./tests/graphCompiler.test.mjs",
-    "test:mcp": "node ./tests/mcpGraphMode.test.mjs",
+    "test:mcp": "node ./tests/mcpPersistenceOwnership.test.mjs && node ./tests/mcpStableTools.test.mjs && node ./tests/mcpGraphMode.test.mjs",
     "test:smoke": "tsc -p tsconfig.graph-tests.json && node ./tests/missionFlow.smoke.mjs",
     "test:prompt-parity": "node ./tests/promptToolParity.test.mjs",
     "test:headless": "tsc -p tsconfig.graph-tests.json && node ./tests/headlessRuntime.test.mjs",
+    "test:runtime-core": "node ./tests/runtimeManagerHeadless.test.mjs",
+    "test:providers": "node ./tests/runtimeProviderAdapters.test.mjs",
+    "test:control-plane": "node ./tests/controlPlane.test.mjs",
     "test:rust": "cargo test --manifest-path backend/Cargo.toml workflow_engine",
-    "test:workflow": "npm run test:graph && npm run test:mcp && npm run test:smoke && npm run test:prompt-parity && npm run test:headless && npm run test:rust"
+    "test:workflow": "npm run test:graph && npm run test:mcp && npm run test:smoke && npm run test:prompt-parity && npm run test:headless && npm run test:runtime-core && npm run test:providers && npm run test:control-plane && npm run test:rust"
   },
   "dependencies": {
     "@codemirror/lang-javascript": "^6.2.5",
@@ -49,6 +53,7 @@
     "concurrently": "^9.2.1",
     "electron": "^41.3.0",
     "electron-builder": "^26.8.1",
+    "esbuild": "^0.27.7",
     "typescript": "~5.8.3",
     "vite": "^7.0.4",
     "wait-on": "^9.0.5"

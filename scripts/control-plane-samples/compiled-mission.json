@@ -1,0 +1,38 @@
+{
+  "missionId": "mission-control-plane-sample",
+  "graphId": "graph-control-plane-sample",
+  "task": {
+    "nodeId": "builder",
+    "prompt": "Verify the control-plane workflow launch path.",
+    "mode": "build",
+    "workspaceDir": null
+  },
+  "metadata": {
+    "compiledAt": 1710000000000,
+    "sourceGraphId": "graph-control-plane-sample",
+    "startNodeIds": ["builder"],
+    "executionLayers": [["builder"]],
+    "authoringMode": "graph",
+    "presetId": null,
+    "runVersion": 1
+  },
+  "nodes": [
+    {
+      "id": "builder",
+      "roleId": "builder",
+      "profileId": null,
+      "instructionOverride": "Record a pending runtime activation for manual control-plane verification.",
+      "capabilities": [],
+      "requirements": null,
+      "terminal": {
+        "terminalId": "term-builder",
+        "terminalTitle": "Builder",
+        "cli": "custom",
+        "executionMode": "streaming_headless",
+        "paneId": null,
+        "reusedExisting": false
+      }
+    }
+  ],
+  "edges": []
+}

@@ -1,53 +1,133 @@
-# CometAI
+# Terminal Docks
 
-WORK IN PROGRESS — this repository is under active development. Expect incomplete features, API churn and unfinished documentation.
+Terminal Docks is a local-first multi-agent workflow app that uses CLI coding
+agents as the execution interface.
 
-A local, desktop Agentic Development Environment that combines a multi-pane terminal workspace, AI agent orchestration, a task board and an embedded editor. It is implemented with Tauri (Rust) for the backend and React + TypeScript for the frontend.
+The product direction is graph-first workflow authoring: users design a workflow
+as a graph, the app launches CLI agents in PTY/runtime sessions, and control
+planes such as the desktop UI, MCP, and future CLI/headless entry points observe
+and command the same runtime services.
 
-Core ideas
-- Graph-first authoring: design workflows as a node graph (Workflow mode).
-- Runtime / Machine View: observe and interact with live agent sessions (Runtime mode).
-- Workspace: file explorer and editors for code and artifacts (Workspace mode).
+## Architecture Shape
 
-What this repo contains (high level)
-- Frontend: React + TypeScript under `src/` (mode switch, node-graph editor, runtime view, panes).
-- Store: single zustand store at `src/store/workspace.ts` that persists UI state.
-- Terminal: xterm-based PTY panes (`src/components/Terminal/TerminalPane.tsx`) talking to the Rust PTY via Tauri commands/events.
-- Graph & runtime: Node graph editor (`src/components/NodeTree/NodeTreePane.tsx`), runtime view (`src/components/Runtime/RuntimeView.tsx`), and Mission Control (`src/components/MissionControl/MissionControlPane.tsx`) for orchestration.
-- Backend glue: Tauri commands invoked from the frontend (spawn/resize/write PTY, mission APIs) and local runtime adapters in `src-tauri/`.
-- MCP Server: A standalone Node.js MCP server (Starlink) under `mcp-server/` that provides the multi-agent Starlink coordination layer.
+```text
+Desktop UI / MCP / tdctl / future CLI
+        |
+Electron IPC / backend JSON-RPC / MCP protocol
+        |
+workflow orchestration + runtime services
+        |
+provider adapters + terminal runtime
+        |
+PTY/backend/persistence
+        |
+CLI agents
+```
 
-Current functionality (summary)
-- Mode system implemented (workflow / runtime / workspace).
-- Node graph editor: build and edit workflow graphs, compile missions.
-- Terminal panes: PTY spawn, resize, write, and stream output to the frontend (xterm + addons: fit, webgl, search, web-links).
-- Runtime view: renders live runtime nodes (one node = an agent session) and embeds terminal panes for active sessions.
-- Mission control: compiles missions, stages prompts, launches start nodes and drives basic activation lifecycle.
-- Starlink MCP: Multi-agent coordination via Starlink, providing file locking, message passing, and task delegation.
-- Action detection and a basic permission-request signal: PTY output is parsed for activity and permission prompts; UI receives permission requests and can forward decisions to the backend.
+Core rules:
 
-Not yet finished / areas to expect changes
-- Permission handling, audit trail and CLI-specific keystroke adapters are present but being refined.
-- UI and UX are actively iterated (see `docs/ui-change.md` for the design direction).
+- Workflow orchestration stays graph-first.
+- Runtime state is observable by the UI, but not owned by the UI.
+- Provider adapters encapsulate Claude, Codex, Gemini, OpenCode, and other CLI behavior.
+- MCP is a protocol/control-plane facade, not the orchestration brain.
+- Desktop UI, MCP, `tdctl`, and future CLI/headless control planes should converge on the same backend/service boundary.
 
-Development
-- Install deps: `npm install`
-- Run frontend only: `npm run dev`
-- Run full app (Tauri + Vite): `npm run tauri dev`
-- Build production bundle: `npm run build` then `npm run tauri build` (or use `npm run tauri` commands directly)
-- Tests: several project test scripts are available (`npm run test:workflow`, `npm run test:rust`, etc.). See `package.json` for details.
+## What Is In This Repo
 
-Where to look first
-- `src/App.tsx` — app shell, mode rail and top-level wiring
-- `src/store/workspace.ts` — global state, persistence and pane management
-- `src/components/NodeTree/NodeTreePane.tsx` — graph editor and run logic
-- `src/components/Runtime/RuntimeView.tsx` — runtime node rendering and permission popups
-- `src/components/Terminal/TerminalPane.tsx` — xterm integration and PTY wiring
-- `src/components/MissionControl/MissionControlPane.tsx` — mission lifecycle and MCP interactions
-- `mcp-server/server.mjs` — Starlink coordination layer
+- `src/`: React + TypeScript desktop renderer.
+- `src/components/`: UI panes and UI-facing bridges.
+- `src/lib/workflow/`: graph workflow definitions, run state, state machine, and orchestrator.
+- `src/lib/runtime/`: runtime manager, runtime sessions, terminal runtime wrapper, and provider adapters.
+- `src/lib/node-system/`: graph node declarations and editor helpers.
+- `src/store/`: Zustand UI/workspace state.
+- `electron/`: Electron main/preload bridge for the desktop shell.
+- `backend/`: Rust backend for PTY/process, workflow, persistence, MCP registration, and JSON-RPC control.
+- `mcp-server/`: Node MCP server exposing agent-facing coordination tools.
+- `scripts/`: scriptable control-plane helpers such as `tdctl`.
+- `tests/`: graph, runtime, MCP, provider, and control-plane tests.
+- `docs/`: architecture notes, plans, and protocol contracts.
 
+For a more detailed map, see `docs/repository-map.md`.
 
+## Development
 
+Install dependencies:
 
+```bash
+npm install
+npm run mcp:install
+```
 
-<!-- macOS branch update -->
+Run the renderer only:
+
+```bash
+npm run dev
+```
+
+Run the Electron desktop app in development:
+
+```bash
+npm run electron:dev
+```
+
+Build:
+
+```bash
+npm run build
+npm run electron:build
+```
+
+Run the workflow-oriented test suite:
+
+```bash
+npm run test:workflow
+```
+
+Focused test scripts are available in `package.json`:
+
+```bash
+npm run test:graph
+npm run test:mcp
+npm run test:runtime-core
+npm run test:providers
+npm run test:control-plane
+npm run test:rust
+```
+
+Build and test the Rust backend directly:
+
+```bash
+cargo build --manifest-path backend/Cargo.toml
+cargo test --manifest-path backend/Cargo.toml
+```
+
+Use the scriptable control plane:
+
+```bash
+npm run tdctl -- --help
+npm run tdctl -- workflow launch --mission scripts/control-plane-samples/compiled-mission.json
+npm run tdctl -- sessions list
+```
+
+## Where Agents Should Start
+
+Read these first:
+
+- `docs/AGENTS.md`: repo-specific rules for AI coding agents.
+- `docs/architecture.md`: layer ownership and boundary rules.
+- `docs/repository-map.md`: where core concepts live.
+- `docs/control-planes.md`: desktop, backend JSON-RPC, CLI, and MCP control planes.
+- `docs/provider-adapters.md`: provider adapter contract.
+- `docs/persistence-ownership.md`: database/schema ownership.
+- `docs/mcp-tool-contracts.md`: stable MCP tool response contracts.
+
+High-value source entry points:
+
+- `src/App.tsx`: desktop renderer shell.
+- `src/lib/workflow/WorkflowOrchestrator.ts`: graph orchestration layer.
+- `src/lib/runtime/RuntimeManager.ts`: runtime lifecycle owner.
+- `src/lib/runtime/adapters/CliAdapter.ts`: provider adapter interface.
+- `src/lib/runtime/TerminalRuntime.ts`: low-level desktop/backend runtime IPC wrapper.
+- `backend/src/workflow_engine.rs`: backend workflow execution and activation dispatch.
+- `backend/src/db.rs`: canonical SQLite schema ownership.
+- `mcp-server/server.mjs`: MCP protocol facade and tool registration.

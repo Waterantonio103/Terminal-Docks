@@ -133,6 +133,30 @@ export interface LaunchCommand {
   unsupportedReason?: string;
 }
 
+export interface CliAdapterCapabilities {
+  /** The adapter has a supported non-interactive launch path. */
+  supportsHeadless: boolean;
+
+  /** The CLI can consume MCP server configuration and use MCP tools directly. */
+  supportsMcpConfig: boolean;
+
+  /** The adapter can enforce a provider-native allow/deny tool policy at launch. */
+  supportsHardToolRestrictions: boolean;
+
+  /** The adapter can detect and respond to provider permission prompts. */
+  supportsPermissions: boolean;
+
+  /** The CLI may block startup or tool use on a trust prompt for the workspace. */
+  requiresTrustPromptHandling: boolean;
+
+  /**
+   * Authority used when the backing process exits before MCP completion arrives.
+   * `mcp_tool` means a clean process exit is not enough to mark graph work done.
+   * `process_exit` means RuntimeManager should resolve the activation from exit.
+   */
+  completionAuthority: 'mcp_tool' | 'process_exit';
+}
+
 // ---------------------------------------------------------------------------
 // CLI Adapter interface
 // ---------------------------------------------------------------------------
@@ -143,6 +167,9 @@ export interface CliAdapter {
 
   /** Human-readable label, e.g. 'Claude Code'. */
   readonly label: string;
+
+  /** Provider capability metadata consumed by runtime and product surfaces. */
+  readonly capabilities: CliAdapterCapabilities;
 
   /**
    * Build the command to launch this CLI.

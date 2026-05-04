@@ -1,4 +1,4 @@
-import {  invoke  } from '../desktopApi';
+import {  invoke  } from '../desktopApi.js';
 
 export function newSessionId(prefix = 'ws'): string {
   const rand = Math.random().toString(36).slice(2, 10);

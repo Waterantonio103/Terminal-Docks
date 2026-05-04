@@ -207,3 +207,38 @@ export interface RuntimeManagerSnapshot {
   }>;
   activeCount: number;
 }
+
+// ──────────────────────────────────────────────
+// Host/UI Bridge
+//
+// RuntimeManager stays headless by depending on this optional host contract
+// instead of importing React/Zustand or other UI state directly.
+// ──────────────────────────────────────────────
+
+export interface RuntimeManagerBridgeSession {
+  sessionId: string;
+  nodeId: string;
+  attempt: number;
+  terminalId: string;
+  role: string;
+  cliId: CliId;
+}
+
+export interface RuntimeManagerTerminalState {
+  paneRuntimeSessionId?: string | null;
+  cli?: string | null;
+  cliSource?: string | null;
+  liveRuntimeSessionIds?: string[];
+}
+
+export interface RuntimeManagerBridge {
+  onSessionStateChanged?: (
+    session: RuntimeManagerBridgeSession,
+    from: RuntimeSessionState,
+    to: RuntimeSessionState,
+  ) => void;
+  bindRuntimeToTerminalPane?: (session: RuntimeManagerBridgeSession) => void;
+  markCliAttachedToTerminal?: (session: RuntimeManagerBridgeSession) => void;
+  getTerminalRuntimeConfig?: (terminalId: string) => Record<string, unknown>;
+  getTerminalState?: (terminalId: string) => RuntimeManagerTerminalState | null | undefined;
+}

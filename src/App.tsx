@@ -7,8 +7,7 @@ import { useWorkspaceStore, PaneType, McpMessage, DbTask, type AppMode } from '.
 import {  invoke  } from './lib/desktopApi';
 import {  listen  } from './lib/desktopApi';
 import {  homeDir  } from './lib/desktopApi';
-import {  Window  } from './lib/desktopApi';
-import { PanelLeft, TerminalSquare, FileCode2, KanbanSquare, Activity, Palette, Plus, Rocket, Monitor, Minus, Square, X, Network, FolderTree, LayoutGrid, Maximize, Settings } from 'lucide-react';
+import { PanelLeft, TerminalSquare, FileCode2, KanbanSquare, Activity, Plus, Rocket, Monitor, Minus, Square, X, Network, FolderTree, LayoutGrid, Maximize, Settings } from 'lucide-react';
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { detectRoleFromText, normalizeCli } from './lib/cliDetection';
 import { refreshCliDetectionForTerminals } from './lib/terminalCliRuntime';
@@ -17,9 +16,6 @@ import { FatalErrorOverlay } from './components/Diagnostics/FatalErrorOverlay';
 import { SettingsOverlay } from './components/Settings/SettingsOverlay';
 import { clearLastFatalReport, readBreadcrumbs, readLastFatalReport, recordBreadcrumb, stringifyUnknownError, writeFatalReport, type FatalErrorReport } from './lib/diagnostics';
 import './App.css';
-
-// Safe access to window
-const appWindow = typeof window !== 'undefined' ? Window.getCurrent() : null;
 
 // Helper to inject custom theme CSS
 function CustomThemeInjector() {
@@ -65,11 +61,14 @@ const PANE_ICONS: Record<PaneType, React.ReactNode> = {
 
 import { runtimeManager } from './lib/runtime/RuntimeManager';
 import { workflowOrchestrator } from './lib/workflow/WorkflowOrchestrator';
+import { installRuntimeUiBridge } from './components/Runtime/runtimeUiBridge';
 
 function App() {
   useEffect(() => {
+    const uninstallRuntimeUiBridge = installRuntimeUiBridge(runtimeManager);
     workflowOrchestrator.setRuntimeManager(runtimeManager);
     runtimeManager.startListening().catch(console.error);
+    return uninstallRuntimeUiBridge;
   }, []);
 
   const toggleSidebar = useWorkspaceStore((s) => s.toggleSidebar);
@@ -86,16 +85,13 @@ function App() {
   const addResult       = useWorkspaceStore((s) => s.addResult);
   const setTasks        = useWorkspaceStore((s) => s.setTasks);
   const updatePaneDataByTerminalId = useWorkspaceStore((s) => s.updatePaneDataByTerminalId);
-  const updatePaneData = useWorkspaceStore((s) => s.updatePaneData);
   const workspaceDir    = useWorkspaceStore((s) => s.workspaceDir);
   const setWorkspaceDir = useWorkspaceStore((s) => s.setWorkspaceDir);
   const globalGraph     = useWorkspaceStore((s) => s.globalGraph);
   const setGlobalGraph  = useWorkspaceStore((s) => s.setGlobalGraph);
-  const nodeRuntimeBindings = useWorkspaceStore((s) => s.nodeRuntimeBindings);
   const layoutMode   = useWorkspaceStore((s) => s.layoutMode);
   const setLayoutMode = useWorkspaceStore((s) => s.setLayoutMode);
   const showSettings = useWorkspaceStore((s) => s.showSettings);
-  const setShowSettings = useWorkspaceStore((s) => s.setShowSettings);
   const modeLabel = MODE_OPTIONS.find(mode => mode.id === appMode)?.label ?? 'Workflow';
 
   useEffect(() => {
@@ -151,7 +147,7 @@ function App() {
     invoke<DbTask[]>('get_tasks').then(setTasks).catch(() => {});
   }, []);
 
-  const [draggingNew, setDraggingNew] = useState<{ type: PaneType; x: number; y: number; label?: string; data?: any } | null>(null);
+  const [draggingNew] = useState<{ type: PaneType; x: number; y: number; label?: string; data?: any } | null>(null);
 
   useEffect(() => {
     const unlisten = listen<McpMessage>('mcp-message', (event) => {
@@ -213,29 +209,34 @@ function App() {
       {fatalReport && <FatalErrorOverlay report={fatalReport} onDismiss={() => { clearLastFatalReport(); setFatalReport(null); }} />}
       
       <div className="flex items-center h-10 bg-bg-titlebar border-b border-border-panel shrink-0 select-none relative z-50">
-        <div className="flex items-center gap-2 px-3 border-r border-border-panel h-full cursor-pointer hover:bg-bg-surface transition-colors" onClick={toggleSidebar}>
-          <PanelLeft size={16} className={sidebarOpen ? "text-accent-primary" : "text-text-muted"} />
+        {/* Absolute drag layer behind content */}
+        <div className="absolute inset-0 z-0" style={{ WebkitAppRegion: 'drag' } as any} />
+
+        <div className="relative z-10 flex items-center h-full no-drag" style={{ WebkitAppRegion: 'no-drag' } as any}>
+          <div className="flex items-center gap-2 px-3 border-r border-border-panel h-full cursor-pointer hover:bg-bg-surface transition-colors" onClick={toggleSidebar}>
+            <PanelLeft size={16} className={sidebarOpen ? "text-accent-primary" : "text-text-muted"} />
+          </div>
         </div>
 
-        <div className="flex-1 flex justify-center items-center gap-1 h-full relative z-10" style={{ WebkitAppRegion: 'drag' } as any}>
+        <div className="flex-1 flex justify-center items-center gap-1 h-full relative z-10 pointer-events-none">
           {appMode === 'workspace' ? (
-            <div className="flex items-center gap-1 bg-bg-surface border border-border-panel rounded-lg px-1 py-0.5" style={{ WebkitAppRegion: 'no-drag' } as any}>
+            <div className="flex items-center gap-1 bg-bg-surface border border-border-panel rounded-lg px-1 py-0.5 pointer-events-auto no-drag" style={{ WebkitAppRegion: 'no-drag' } as any}>
               <button onClick={() => setLayoutMode('grid')} className={`flex items-center gap-1.5 text-[10px] uppercase font-bold px-2.5 py-1 rounded-md transition-all ${layoutMode === 'grid' ? 'bg-accent-primary text-white shadow-sm' : 'text-text-muted hover:text-text-primary hover:bg-bg-surface-hover'}`}><LayoutGrid size={12} /><span>Panels</span></button>
               <button onClick={() => setLayoutMode('tabs')} className={`flex items-center gap-1.5 text-[10px] uppercase font-bold px-2.5 py-1 rounded-md transition-all ${layoutMode === 'tabs' ? 'bg-accent-primary text-white shadow-sm' : 'text-text-muted hover:text-text-primary hover:bg-bg-surface-hover'}`}><Maximize size={12} /><span>Tabs</span></button>
             </div>
           ) : (
-            <div className="flex items-center gap-2 text-xs font-bold text-accent-primary uppercase tracking-widest">
+            <div className="flex items-center gap-2 text-xs font-bold text-accent-primary uppercase tracking-widest pointer-events-auto">
                {appMode === 'runtime' ? <Monitor size={14} /> : <Network size={14} />}
                <span>{modeLabel}</span>
             </div>
           )}
         </div>
 
-        <div className="flex items-center gap-3 shrink-0 relative z-10" style={{ WebkitAppRegion: 'drag' } as any}>
-          <div className="flex items-center bg-bg-surface border border-border-panel rounded-md h-6 px-1 mr-2" style={{ WebkitAppRegion: 'no-drag' } as any}>
-            <button onClick={() => appWindow?.minimize()} className="w-6 h-full flex items-center justify-center text-text-muted hover:text-text-primary hover:bg-bg-panel rounded transition-colors"><Minus size={12} /></button>
-            <button onClick={() => appWindow?.toggleMaximize()} className="w-6 h-full flex items-center justify-center text-text-muted hover:text-text-primary hover:bg-bg-panel rounded transition-colors"><Square size={10} /></button>
-            <button onClick={() => appWindow?.close()} className="w-6 h-full flex items-center justify-center text-text-muted hover:text-red-400 hover:bg-red-400/10 rounded transition-colors"><X size={12} /></button>
+        <div className="relative z-10 flex items-center gap-3 shrink-0 h-full no-drag pr-2" style={{ WebkitAppRegion: 'no-drag' } as any}>
+          <div className="flex items-center bg-bg-surface border border-border-panel rounded-md h-6 px-1">
+            <button onClick={() => invoke('window_minimize')} className="w-6 h-full flex items-center justify-center text-text-muted hover:text-text-primary hover:bg-bg-panel rounded transition-colors cursor-pointer pointer-events-auto"><Minus size={12} /></button>
+            <button onClick={() => invoke('window_toggle_maximize')} className="w-6 h-full flex items-center justify-center text-text-muted hover:text-text-primary hover:bg-bg-panel rounded transition-colors cursor-pointer pointer-events-auto"><Square size={10} /></button>
+            <button onClick={() => invoke('window_close')} className="w-6 h-full flex items-center justify-center text-text-muted hover:text-red-400 hover:bg-red-400/10 rounded transition-colors cursor-pointer pointer-events-auto"><X size={12} /></button>
           </div>
         </div>
       </div>
