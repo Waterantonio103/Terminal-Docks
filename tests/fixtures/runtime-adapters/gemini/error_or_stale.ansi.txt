@@ -1,0 +1,4 @@
+gemini --unknown-flag
+Error: unknown option --unknown-flag
+exit code 1
+C:\Users\user>

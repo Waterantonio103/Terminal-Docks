@@ -1,0 +1,3 @@
+]0;Claude Code[38;2;215;119;87mPermission request[m
+Allow Claude to run this shell command? [y/n]
+❯ y

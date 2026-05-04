@@ -32,7 +32,12 @@ import type {
 } from './RuntimeTypes.js';
 import { isRuntimeSessionTerminal } from './RuntimeTypes.js';
 import { getCliAdapter } from './adapters/index.js';
-import type { CompletionDetectionResult } from './adapters/CliAdapter.js';
+import type { CompletionDetectionResult, StatusDetectionResult } from './adapters/CliAdapter.js';
+import {
+  buildCliReadinessDiagnostic,
+  evaluateCliReadiness,
+  isStrictCliStatusGateEnabled,
+} from './RuntimeReadinessGate.js';
 
 import {
   checkMcpHealthDetailed,
@@ -57,6 +62,8 @@ import {
   buildCodexInteractiveLaunchCommand,
   buildCodexFollowupTaskSignal,
   buildPtyLaunchCommand,
+  formatLaunchArgsForLog,
+  redactSensitiveLaunchValue,
   resolveCodexYoloFlag,
 } from '../cliCommandBuilders.js';
 import { getRuntimeBootstrapContract, buildRuntimeBootstrapRegistrationRequest } from '../runtimeBootstrap.js';
@@ -212,6 +219,7 @@ class RuntimeManager {
     nudgeTimer?: ReturnType<typeof setTimeout>;
     failTimer?: ReturnType<typeof setTimeout>;
   }>();
+  private cliReadinessDiagnostics = new Map<string, string>();
   private runtimeCompletionPollers = new Map<string, {
     timer: ReturnType<typeof setInterval>;
     inFlight: boolean;
@@ -569,6 +577,8 @@ class RuntimeManager {
       return;
     }
 
+    await this.waitForManagedInjectionReadyOrThrow(session, CLI_READY_WAIT_MS, 'sendTask');
+
     const { preClear, paste, submit } = adapter.buildActivationInput(signal);
     if (preClear) {
       await this.writeToTerminalOrFail(session, preClear);
@@ -776,6 +786,16 @@ class RuntimeManager {
               status: 'cli_mismatch',
               details: `Terminal is running "${detected.cli}" instead of "${session.cliId}".`,
             };
+          }
+
+          if (isStrictCliStatusGateEnabled(session.cliId)) {
+            const readiness = this.evaluateSessionReadiness(session, output);
+            if (!readiness.ready) {
+              return {
+                status: 'wrong_state',
+                details: this.buildSessionReadinessDiagnostic(session, readiness.status, readiness.strictGateEnabled, output),
+              };
+            }
           }
         }
       } catch {
@@ -1699,7 +1719,11 @@ class RuntimeManager {
         if (terminalReady && await this.shouldLaunchCliInTerminal(session)) {
           await sleep(CLI_LAUNCH_DELAY_MS);
           try {
-            const launchCmd = buildPtyLaunchCommand(session.cliId, { model: session.model, yolo: session.yolo });
+            const launchCmd = buildPtyLaunchCommand(session.cliId, {
+              model: session.model,
+              yolo: session.yolo,
+              workspaceDir: session.workspaceDir,
+            });
             await this.writeToTerminalOrFail(session, `${launchCmd}\r`);
             useWorkspaceStore.getState().updatePaneDataByTerminalId(session.terminalId, {
               cliSource: 'connect_agent',
@@ -1822,8 +1846,12 @@ class RuntimeManager {
           const launchResult = await this.launchInteractiveWorkflowCliViaShell(session, activationPayload);
           startupPromptDeliveredViaLaunch = launchResult.promptDeliveredAtLaunch;
         } else {
-          const launchCmd = buildPtyLaunchCommand(session.cliId, { model: session.model, yolo: session.yolo });
-          console.log(`[runtime] launch command=${launchCmd}`);
+          const launchCmd = buildPtyLaunchCommand(session.cliId, {
+            model: session.model,
+            yolo: session.yolo,
+            workspaceDir: session.workspaceDir,
+          });
+          console.log(`[runtime] launch command=${redactSensitiveLaunchValue(launchCmd)}`);
           await this.writeToTerminalOrFail(session, `${launchCmd}\r`);
         }
         await sleep(CLI_STARTUP_WAIT_MS);
@@ -1842,7 +1870,7 @@ class RuntimeManager {
           const reason = launchedCli
             ? `CLI "${session.cliId}" did not report ready state within ${CLI_READY_WAIT_MS}ms after launch.`
             : `CLI "${session.cliId}" is not ready and launch was skipped by gate logic.`;
-          throw new Error(reason);
+          throw new Error(this.readinessFailureReason(session, reason));
         }
       }
     }
@@ -2005,8 +2033,24 @@ class RuntimeManager {
         workspaceDir: session.workspaceDir,
         assignment: activationPayload.assignment,
       }, baseUrl);
-      console.log(`[runtime] injecting task prompt cli=${session.cliId} session=${session.sessionId}`);
-      await this.injectInteractiveTask(session, signal, false);
+      const taskAlreadyFetched = await this.hasRuntimeActivationStatus(
+        session,
+        new Set(['activation_acked', 'running', 'completed', 'done']),
+      );
+      if (taskAlreadyFetched) {
+        console.log(
+          `[runtime] skipping task prompt injection cli=${session.cliId} session=${session.sessionId}; task already fetched from MCP`,
+        );
+        this.emit({
+          type: 'task_injected',
+          sessionId: session.sessionId,
+          nodeId: session.nodeId,
+          attempt: session.attempt,
+        });
+      } else {
+        console.log(`[runtime] injecting task prompt cli=${session.cliId} session=${session.sessionId}`);
+        await this.injectInteractiveTask(session, signal, false);
+      }
     }
 
     session.transitionTo('awaiting_ack');
@@ -2081,7 +2125,7 @@ class RuntimeManager {
     }
 
     console.log(
-      `[runtime] launch command=${request.command} args=${JSON.stringify(request.args)} cli=${session.cliId} model=${session.model || '<default>'} yolo=${session.yolo} promptDelivery=${request.promptDelivery} mode=${request.executionMode}`,
+      `[runtime] launch command=${redactSensitiveLaunchValue(request.command)} args=${formatLaunchArgsForLog(request.args)} cli=${session.cliId} model=${session.model || '<default>'} yolo=${session.yolo} promptDelivery=${request.promptDelivery} mode=${request.executionMode}`,
     );
     await startHeadlessRun(request as import('./TerminalRuntime.js').HeadlessRunRequest);
   }
@@ -2092,7 +2136,32 @@ class RuntimeManager {
       throw new Error(`Terminal process for ${session.nodeId} has exited.`);
     }
 
+    if (session.cliId === 'codex' && !retry) {
+      console.log(
+        `[runtime] skipping follow-up task prompt injection cli=codex terminal=${session.terminalId}; startup prompt carries MCP task context`,
+      );
+      this.emit({
+        type: 'task_injected',
+        sessionId: session.sessionId,
+        nodeId: session.nodeId,
+        attempt: session.attempt,
+      });
+      return;
+    }
+
     await sleep(CLI_STARTUP_WAIT_MS);
+    if (!retry && await this.hasRuntimeActivationStatus(session, new Set(['activation_acked', 'running', 'completed', 'done']))) {
+      console.log(
+        `[runtime] skipping task prompt injection cli=${session.cliId} terminal=${session.terminalId}; task already fetched from MCP`,
+      );
+      this.emit({
+        type: 'task_injected',
+        sessionId: session.sessionId,
+        nodeId: session.nodeId,
+        attempt: session.attempt,
+      });
+      return;
+    }
     console.log(`[runtime] injecting task prompt cli=${session.cliId} terminal=${session.terminalId}`);
     await this.injectInteractivePrompt(session, signal, retry);
 
@@ -2169,7 +2238,10 @@ class RuntimeManager {
     } else {
       const cliReady = await this.waitForCliReady(session, CLI_READY_WAIT_MS);
       if (!cliReady) {
-        throw new Error(`CLI "${session.cliId}" did not report ready state within ${CLI_READY_WAIT_MS}ms after shell launch.`);
+        throw new Error(this.readinessFailureReason(
+          session,
+          `CLI "${session.cliId}" did not report ready state within ${CLI_READY_WAIT_MS}ms after shell launch.`,
+        ));
       }
     }
     console.log(`[runtime] CLI ready cli=${session.cliId} terminal=${session.terminalId}`);
@@ -2202,6 +2274,7 @@ class RuntimeManager {
         command: buildPtyLaunchCommand(session.cliId, {
           model: session.model,
           yolo: session.yolo,
+          workspaceDir: session.workspaceDir,
         }),
         promptDeliveredAtLaunch: false,
       };
@@ -2242,8 +2315,7 @@ class RuntimeManager {
   }
 
   private formatCodexArgsForLog(args: string[] = []): string {
-    if (!args.length) return '[]';
-    return `[${args.map((arg, index) => index === args.length - 1 ? '<prompt:redacted>' : arg).join(', ')}]`;
+    return formatLaunchArgsForLog(args, { redactLastArg: true });
   }
 
   private buildCodexCrashDiagnostic(
@@ -2461,6 +2533,22 @@ class RuntimeManager {
     });
   }
 
+  private async hasRuntimeActivationStatus(session: RuntimeSession, statuses: Set<string>): Promise<boolean> {
+    try {
+      const { invoke } = await import('@tauri-apps/api/core');
+      type ActivationRecord = { status?: string };
+      const record = await invoke<ActivationRecord | null>('get_runtime_activation', {
+        missionId: session.missionId,
+        nodeId: session.nodeId,
+        attempt: session.attempt,
+      });
+      const status = record?.status?.trim().toLowerCase();
+      return Boolean(status && statuses.has(status));
+    } catch {
+      return false;
+    }
+  }
+
   private getTerminalRuntimeConfig(terminalId: string): Record<string, unknown> {
     const state = useWorkspaceStore.getState();
     for (const tab of state.tabs) {
@@ -2554,35 +2642,105 @@ class RuntimeManager {
     return true;
   }
 
+  private evaluateSessionReadiness(session: RuntimeSession, output: string) {
+    return evaluateCliReadiness(
+      session.cliId,
+      output,
+      value => session.adapter.detectStatus(value),
+      value => session.adapter.detectReady(value),
+    );
+  }
+
+  private buildSessionReadinessDiagnostic(
+    session: RuntimeSession,
+    status: StatusDetectionResult,
+    strictGateEnabled: boolean,
+    recentOutput: string,
+    timeoutMs?: number,
+  ): string {
+    return buildCliReadinessDiagnostic({
+      cliId: session.cliId,
+      terminalId: session.terminalId,
+      nodeId: session.nodeId,
+      sessionId: session.sessionId,
+      timeoutMs,
+      status,
+      strictGateEnabled,
+      recentOutput: previewText(recentOutput, 1_200) ?? '',
+    });
+  }
+
+  private readinessFailureReason(session: RuntimeSession, fallback: string): string {
+    return this.cliReadinessDiagnostics.get(session.sessionId) ?? fallback;
+  }
+
   private async waitForCliReady(session: RuntimeSession, timeoutMs: number): Promise<boolean> {
     const deadline = Date.now() + timeoutMs;
     let lastDetail: string | null = null;
     let lastOutputLength = 0;
+    let lastStatus: StatusDetectionResult = {
+      status: 'processing',
+      confidence: 'low',
+      detail: 'No terminal output observed yet',
+    };
+    let lastStrictGateEnabled = isStrictCliStatusGateEnabled(session.cliId);
     while (Date.now() < deadline) {
       const output = await getRecentTerminalOutput(session.terminalId, 12_288);
       if (output) {
         lastOutputLength = output.length;
-        const ready = session.adapter.detectReady(output);
-        if (ready.detail && ready.detail !== lastDetail) {
-          console.log(`[runtime] cli-ready cli=${session.cliId} ready=${ready.ready} detail="${ready.detail}"`);
-          lastDetail = ready.detail;
+        const readiness = this.evaluateSessionReadiness(session, output);
+        lastStatus = readiness.status;
+        lastStrictGateEnabled = readiness.strictGateEnabled;
+        const detail = readiness.strictGateEnabled
+          ? readiness.status.detail
+          : readiness.legacyReady?.detail ?? readiness.status.detail;
+        if (detail && detail !== lastDetail) {
+          console.log(
+            `[runtime] cli-ready cli=${session.cliId} ready=${readiness.ready} status=${readiness.status.status} confidence=${readiness.status.confidence} strictGate=${readiness.strictGateEnabled} detail="${detail}"`,
+          );
+          lastDetail = detail;
         }
-        if (ready.ready) {
+        if (readiness.ready) {
           const settleMs = session.adapter.postReadySettleDelayMs ?? 0;
           if (settleMs > 0) {
             console.log(`[runtime] cli-ready settle cli=${session.cliId} delayMs=${settleMs}`);
             await sleep(settleMs);
           }
+          this.cliReadinessDiagnostics.delete(session.sessionId);
           return true;
         }
       }
       await sleep(200);
     }
     const recentOutput = await getRecentTerminalOutput(session.terminalId, 2_000).catch(() => '');
+    const diagnostic = this.buildSessionReadinessDiagnostic(
+      session,
+      lastStatus,
+      lastStrictGateEnabled,
+      recentOutput,
+      timeoutMs,
+    );
+    this.cliReadinessDiagnostics.set(session.sessionId, diagnostic);
     console.warn(
-      `[runtime] cli-ready timeout cli=${session.cliId} lastDetail="${lastDetail ?? 'none'}" outputLength=${lastOutputLength} timeoutMs=${timeoutMs} recent="${previewText(recentOutput, 500) ?? '<empty>'}"`,
+      `[runtime] cli-ready timeout ${diagnostic} lastDetail="${lastDetail ?? 'none'}" outputLength=${lastOutputLength}`,
     );
     return false;
+  }
+
+  private async waitForManagedInjectionReadyOrThrow(
+    session: RuntimeSession,
+    timeoutMs: number,
+    reason: string,
+  ): Promise<void> {
+    if (!session.isTerminal || !isStrictCliStatusGateEnabled(session.cliId)) return;
+
+    const ready = await this.waitForCliReady(session, timeoutMs);
+    if (ready) return;
+
+    throw new Error(
+      `${reason} failed because the CLI was not idle before managed prompt injection. ` +
+      this.readinessFailureReason(session, `cli=${session.cliId} terminalId=${session.terminalId} nodeId=${session.nodeId}`),
+    );
   }
 
   private async waitForTerminalOutputIdle(
@@ -2612,6 +2770,8 @@ class RuntimeManager {
     signal: string,
     retry: boolean,
   ): Promise<void> {
+    await this.waitForManagedInjectionReadyOrThrow(session, CLI_READY_WAIT_MS, 'managed prompt injection');
+
     const adapter = session.adapter;
     const { preClear, paste, submit } = adapter.buildActivationInput(signal);
 
@@ -2707,6 +2867,7 @@ class RuntimeManager {
   private cleanupSession(session: RuntimeSession): void {
     this.clearCompletionContractWatchdog(session.sessionId);
     this.clearRuntimeCompletionPoller(session.sessionId);
+    this.cliReadinessDiagnostics.delete(session.sessionId);
 
     const ptyCleanup = this.ptyCleanupFns.get(session.sessionId);
     if (ptyCleanup) {

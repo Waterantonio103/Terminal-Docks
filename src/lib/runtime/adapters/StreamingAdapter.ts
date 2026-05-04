@@ -9,6 +9,7 @@ import type {
   PermissionResponse,
   ReadyDetectionResult,
   RuntimeOutputEvent,
+  StatusDetectionResult,
   TaskContext,
 } from './CliAdapter';
 
@@ -43,6 +44,10 @@ export const streamingAdapter: CliAdapter = {
   detectReady(_output: string): ReadyDetectionResult {
     // Always ready
     return { ready: true, confidence: 'high', detail: 'Streaming backend always ready' };
+  },
+
+  detectStatus(_output: string): StatusDetectionResult {
+    return { status: 'idle', confidence: 'high', detail: 'Streaming backend always ready' };
   },
 
   buildInitialPrompt(context: TaskContext): string {

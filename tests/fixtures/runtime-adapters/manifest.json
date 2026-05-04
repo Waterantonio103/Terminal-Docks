@@ -1,0 +1,133 @@
+{
+  "generatedFrom": "docs/refined-rdtfp.md phase 2",
+  "fixtures": {
+    "codex": {
+      "idle.ansi.txt": {
+        "expectedStatus": "idle",
+        "provenance": "real-redacted",
+        "source": ".tmp-tests/live-all-double.json",
+        "note": "Codex prompt/footer frame with input prompt visible."
+      },
+      "processing.ansi.txt": {
+        "expectedStatus": "processing",
+        "provenance": "real-redacted",
+        "source": ".tmp-tests/live-codex-single-preserve-rust-running.json",
+        "note": "Codex startup frame while MCP boot is active."
+      },
+      "completed.ansi.txt": {
+        "expectedStatus": "completed",
+        "provenance": "real-redacted",
+        "source": ".tmp-tests/live-codex-single-completion-bridge.json",
+        "note": "Codex final turn footer."
+      },
+      "waiting_user_answer.ansi.txt": {
+        "expectedStatus": "waiting_user_answer",
+        "provenance": "synthetic-provisional",
+        "source": "provisional synthetic fixture; replace with compact real terminal capture when available",
+        "note": "Synthetic placeholder for a rare state not found in available live reports."
+      },
+      "error_or_stale.ansi.txt": {
+        "expectedStatus": "error",
+        "provenance": "real-redacted",
+        "source": ".tmp-tests/live-codex-single-after-mcp-fix.json",
+        "note": "Codex error frame from a failed MCP call."
+      }
+    },
+    "opencode": {
+      "idle.ansi.txt": {
+        "expectedStatus": "idle",
+        "provenance": "real-redacted",
+        "source": ".tmp-tests/live-opencode-triple.json",
+        "note": "OpenCode TUI frame with mode/model footer visible."
+      },
+      "processing.ansi.txt": {
+        "expectedStatus": "processing",
+        "provenance": "real-redacted",
+        "source": ".tmp-tests/live-opencode-triple.json",
+        "note": "OpenCode TUI frame with queued work visible."
+      },
+      "completed.ansi.txt": {
+        "expectedStatus": "completed",
+        "provenance": "synthetic-provisional",
+        "source": "provisional synthetic fixture; replace with compact real terminal capture when available",
+        "note": "Synthetic placeholder for a rare state not found in available live reports."
+      },
+      "waiting_user_answer.ansi.txt": {
+        "expectedStatus": "waiting_user_answer",
+        "provenance": "synthetic-provisional",
+        "source": "provisional synthetic fixture; replace with compact real terminal capture when available",
+        "note": "Synthetic placeholder for a rare state not found in available live reports."
+      },
+      "error_or_stale.ansi.txt": {
+        "expectedStatus": "error",
+        "provenance": "synthetic-provisional",
+        "source": "provisional synthetic fixture; replace with compact real terminal capture when available",
+        "note": "Synthetic placeholder for a rare state not found in available live reports."
+      }
+    },
+    "claude": {
+      "idle.ansi.txt": {
+        "expectedStatus": "idle",
+        "provenance": "real-redacted",
+        "source": ".tmp-tests/live-rerun-singles.json",
+        "note": "Claude Code banner with ready input row."
+      },
+      "processing.ansi.txt": {
+        "expectedStatus": "processing",
+        "provenance": "real-redacted",
+        "source": ".tmp-tests/live-rerun-double-codex-claude-after-patch.json",
+        "note": "Claude Code active thinking frame."
+      },
+      "completed.ansi.txt": {
+        "expectedStatus": "completed",
+        "provenance": "synthetic-provisional",
+        "source": "provisional synthetic fixture; replace with compact real terminal capture when available",
+        "note": "Synthetic placeholder for a rare state not found in available live reports."
+      },
+      "waiting_user_answer.ansi.txt": {
+        "expectedStatus": "waiting_user_answer",
+        "provenance": "synthetic-provisional",
+        "source": "provisional synthetic fixture; replace with compact real terminal capture when available",
+        "note": "Synthetic placeholder for a rare state not found in available live reports."
+      },
+      "error_or_stale.ansi.txt": {
+        "expectedStatus": "error",
+        "provenance": "synthetic-provisional",
+        "source": "provisional synthetic fixture; replace with compact real terminal capture when available",
+        "note": "Synthetic placeholder for a rare state not found in available live reports."
+      }
+    },
+    "gemini": {
+      "idle.ansi.txt": {
+        "expectedStatus": "idle",
+        "provenance": "real-redacted",
+        "source": ".tmp-tests/live-rerun-singles.json",
+        "note": "Gemini CLI input-ready frame."
+      },
+      "processing.ansi.txt": {
+        "expectedStatus": "processing",
+        "provenance": "real-redacted",
+        "source": ".tmp-tests/live-rerun-singles.json",
+        "note": "Gemini CLI authentication wait frame."
+      },
+      "completed.ansi.txt": {
+        "expectedStatus": "completed",
+        "provenance": "synthetic-provisional",
+        "source": "provisional synthetic fixture; replace with compact real terminal capture when available",
+        "note": "Synthetic placeholder for a rare state not found in available live reports."
+      },
+      "waiting_user_answer.ansi.txt": {
+        "expectedStatus": "waiting_user_answer",
+        "provenance": "synthetic-provisional",
+        "source": "provisional synthetic fixture; replace with compact real terminal capture when available",
+        "note": "Synthetic placeholder for a rare state not found in available live reports."
+      },
+      "error_or_stale.ansi.txt": {
+        "expectedStatus": "error",
+        "provenance": "synthetic-provisional",
+        "source": "provisional synthetic fixture; replace with compact real terminal capture when available",
+        "note": "Synthetic placeholder for a rare state not found in available live reports."
+      }
+    }
+  }
+}

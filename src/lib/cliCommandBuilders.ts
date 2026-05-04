@@ -146,6 +146,47 @@ function quoteShellArgument(value: string, shellKind: ShellKind): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
+function needsShellQuoting(value: string): boolean {
+  return value === '' || /[\s"'`&|<>^()[\]{};$]/.test(value);
+}
+
+function quoteShellArgumentIfNeeded(value: string, shellKind: ShellKind): string {
+  return needsShellQuoting(value) ? quoteShellArgument(value, shellKind) : value;
+}
+
+export function redactSensitiveLaunchValue(value: string): string {
+  let redacted = value.replace(
+    /https?:\/\/[^\s"'<>]+/gi,
+    (match) => {
+      try {
+        const url = new URL(match);
+        if (url.username) url.username = '<redacted>';
+        if (url.password) url.password = '<redacted>';
+        for (const key of Array.from(url.searchParams.keys())) {
+          url.searchParams.set(key, '<redacted>');
+        }
+        return url.toString();
+      } catch {
+        return match.replace(/([?&][^=&#]+)=([^&#]+)/g, '$1=<redacted>');
+      }
+    },
+  );
+
+  redacted = redacted
+    .replace(/(token|api[_-]?key|authorization|password|secret)=([^&\s"']+)/gi, '$1=<redacted>')
+    .replace(/(Bearer\s+)[A-Za-z0-9._~+/-]+=*/gi, '$1<redacted>');
+
+  return redacted;
+}
+
+export function formatLaunchArgsForLog(args: string[], options: { redactLastArg?: boolean } = {}): string {
+  if (!args.length) return '[]';
+  return `[${args.map((arg, index) => {
+    if (options.redactLastArg && index === args.length - 1) return '<prompt:redacted>';
+    return redactSensitiveLaunchValue(arg);
+  }).join(', ')}]`;
+}
+
 // Cached result of resolveCodexYoloFlag — undefined means not yet probed.
 let _cachedCodexYoloFlag: string | null | undefined = undefined;
 
@@ -173,8 +214,8 @@ export async function resolveCodexYoloFlag(): Promise<string | null> {
       _cachedCodexYoloFlag = null;
     }
   } catch (err) {
-    console.warn('[codex] could not probe codex --help, defaulting to --yolo', err);
-    _cachedCodexYoloFlag = '--yolo';
+    console.warn('[codex] could not probe codex --help, defaulting to --dangerously-bypass-approvals-and-sandbox', err);
+    _cachedCodexYoloFlag = '--dangerously-bypass-approvals-and-sandbox';
   }
 
   console.log(`[codex] resolved yolo flag=${_cachedCodexYoloFlag ?? '<none>'}`);
@@ -210,7 +251,7 @@ function buildCodexInteractiveFlagArgs({
     '--no-alt-screen',
     ...(yoloFlag ? [yoloFlag] : []),
   ];
-  console.log(`[codex] final codex args (no prompt)=[${args.join(', ')}]`);
+  console.log(`[codex] final codex args (no prompt)=${formatLaunchArgsForLog(args)}`);
   return args;
 }
 
@@ -286,9 +327,17 @@ export function buildCodexFollowupTaskSignal({
   return 'NEW_TASK. call get_current_task(), execute it, then call complete_task as the final MCP action. Do not stop after a normal final answer.';
 }
 
-export function buildPtyLaunchCommand(cliId: string, options: { model?: string | null; yolo?: boolean }): string {
+export interface PtyLaunchOptions {
+  model?: string | null;
+  yolo?: boolean;
+  workspaceDir?: string | null;
+  shellKind?: ShellKind;
+}
+
+export function buildPtyLaunchCommand(cliId: string, options: PtyLaunchOptions = {}): string {
   const { command, args } = buildPtyLaunchCommandParts(cliId, options);
-  return [command, ...args].join(' ');
+  const shellKind = options.shellKind ?? 'windows';
+  return [command, ...args.map(arg => quoteShellArgumentIfNeeded(arg, shellKind))].join(' ');
 }
 
 export interface PtyLaunchParts {
@@ -298,34 +347,41 @@ export interface PtyLaunchParts {
 
 export function buildPtyLaunchCommandParts(
   cliId: string,
-  options: { model?: string | null; yolo?: boolean }
+  options: PtyLaunchOptions = {},
 ): PtyLaunchParts {
   const cli = normalizeCliId(cliId);
+  const model = options.model?.trim();
+  const workspaceDir = options.workspaceDir?.trim();
 
   if (cli === 'claude') {
     const args: string[] = [];
-    if (options.model?.trim()) args.push('--model', options.model.trim());
+    if (model) args.push('--model', model);
     if (options.yolo) args.push('--dangerously-skip-permissions');
     return { command: 'claude', args };
   }
 
   if (cli === 'gemini') {
     const args: string[] = [];
-    if (options.model?.trim()) args.push('--model', options.model.trim());
-    if (options.yolo) args.push('--yolo');
+    if (model) args.push('--model', model);
+    if (options.yolo) args.push('--approval-mode', 'yolo');
     return { command: 'gemini', args };
   }
 
   if (cli === 'opencode') {
     const args: string[] = [];
-    if (options.model?.trim()) args.push('--model', options.model.trim());
+    // OpenCode has no confirmed alt-screen or mouse-disable flags. Its TUI
+    // accepts the project path as the deterministic workspace input.
+    if (workspaceDir) args.push(workspaceDir);
+    if (model) args.push('--model', model);
     return { command: 'opencode', args };
   }
 
   if (cli === 'codex') {
     const args: string[] = [];
-    if (options.model?.trim()) args.push('--model', options.model.trim());
-    if (options.yolo) args.push('--yolo');
+    if (model) args.push('--model', model);
+    if (workspaceDir) args.push('--cd', workspaceDir);
+    args.push('--no-alt-screen');
+    if (options.yolo) args.push('--dangerously-bypass-approvals-and-sandbox');
     return { command: 'codex', args };
   }
 

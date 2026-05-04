@@ -31,6 +31,13 @@ export type CompletionOutcome = 'success' | 'failure';
 
 export type ReadyDetectionConfidence = 'low' | 'medium' | 'high';
 
+export type CliOutputStatus =
+  | 'idle'
+  | 'processing'
+  | 'completed'
+  | 'waiting_user_answer'
+  | 'error';
+
 import type { ExecutionMode } from '../../workflow/WorkflowTypes.js';
 
 // ---------------------------------------------------------------------------
@@ -85,6 +92,13 @@ export interface ReadyDetectionResult {
   ready: boolean;
   confidence: ReadyDetectionConfidence;
   detail?: string;
+}
+
+export interface StatusDetectionResult {
+  status: CliOutputStatus;
+  confidence: ReadyDetectionConfidence;
+  detail: string;
+  fixtureGated?: boolean;
 }
 
 export interface PermissionDetectionResult {
@@ -159,6 +173,13 @@ export interface CliAdapter {
    * The adapter accumulates output across calls if needed.
    */
   detectReady(output: string): ReadyDetectionResult;
+
+  /**
+   * Inspect raw PTY output and classify the CLI's output state.
+   * Only `idle` is safe for managed task injection. RuntimeManager still owns
+   * PTY liveness, ownership, locks, permission state, and timeout policy.
+   */
+  detectStatus(output: string): StatusDetectionResult;
 
   /**
    * Build the initial task prompt to inject into the CLI.

@@ -9,16 +9,40 @@ import type {
   PermissionResponse,
   ReadyDetectionResult,
   RuntimeOutputEvent,
+  StatusDetectionResult,
   TaskContext,
-} from './CliAdapter';
+} from './CliAdapter.js';
+import { buildPtyLaunchCommandParts } from '../../cliCommandBuilders.js';
 
+const ANSI_RE =
+  /\x1b\][^\x07]*(?:\x07|\x1b\\)|\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])/g;
 const BANNER_RE = /\bopencode\b/i;
-const PROMPT_RE = /(?:>|\uff1e|❯|Input:|Prompt:|\$)\s*$/m;
-const SHELL_PROMPT_RE = /(?:\$|>|#)\s*$/m;
-const READY_KEYWORDS_RE = /\b(ready|listening|connected|type|enter)\b/i;
+const PROMPT_RE = /(?:^|\n)\s*(?:>|\uff1e|❯|Input:|Prompt:)\s*(?:\S.*)?$/m;
+const SHELL_PROMPT_RE = /(?:^|\n)\s*(?:[A-Za-z]:\\[^>\r\n]*>|PS [^>\r\n]*>|[$#>])\s*$/m;
+const OPENCODE_INPUT_FOOTER_RE = /(?:^|\s)▣\s+[\w -]+(?:\s*·\s*[\w .-]+)?/u;
+const OPENCODE_UI_RE = /(?:\bopencode\b|▣|QUEUED|Press\s+Esc|ctrl-c|ready for next turn)/i;
+const READY_KEYWORDS_RE = /\b(ready for next turn|type your|enter your|input|prompt)\b/i;
 const PERMISSION_RE = /(?:allow|approve|grant|trust|deny|reject).*(?:\?|y\/n|\[y\/n\]|\b1\.)/is;
 const COMPLETION_RE = /(?:\btask\s+(?:completed|complete)\b|turn\.completed|exit code\s+0)/i;
-const FAILURE_RE = /(?:\btask\s+failed\b|\bfatal error\b|\buncaught exception\b|exit code\s+[1-9])/i;
+const FAILURE_RE = /(?:\btask\s+failed\b|\bfatal error\b|\buncaught exception\b|exit code\s+[1-9]|\bunknown option\b|\binvalid flag\b|\bunexpected argument\b|(?:^|\n)\s*Usage:\s*opencode\b)/i;
+const ACTIVE_WORK_RE =
+  /(?:\bQUEUED\b|\bWorking\b|\bThinking\b|\bProcessing\b|\bRunning\b|\bLoading\b|\bInstalling\b|\bFetching\b|\bRetrying\b|\brate[- ]limit\b|\bwaiting for (?:model|tool|response|command|rate limit)\b|\boperation in progress\b|\bpress\s+esc\b|\bctrl-c\b|[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏])/i;
+
+function stripTerminalControls(output: string): string {
+  return output
+    .replace(ANSI_RE, '')
+    .replace(/\r/g, '\n')
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001a\u001c-\u001f\u007f]/g, '');
+}
+
+function lastNonEmptyLines(output: string, count: number): string {
+  return output
+    .split('\n')
+    .map(line => line.trimEnd())
+    .filter(line => line.trim())
+    .slice(-count)
+    .join('\n');
+}
 
 export const opencodeAdapter: CliAdapter = {
   id: 'opencode',
@@ -47,10 +71,11 @@ export const opencodeAdapter: CliAdapter = {
       };
     }
 
-    const args: string[] = [];
-    if (context.model?.trim()) args.push('--model', context.model.trim());
-    // --yolo is only valid for `opencode run`, not the default TUI mode.
-    // Passing it to the top-level command causes opencode to print help and exit.
+    const { args } = buildPtyLaunchCommandParts('opencode', {
+      model: context.model,
+      yolo: context.yolo,
+      workspaceDir: context.workspaceDir,
+    });
     return {
       command: 'opencode',
       args,
@@ -60,23 +85,52 @@ export const opencodeAdapter: CliAdapter = {
   },
 
   detectReady(output: string): ReadyDetectionResult {
-    // If the shell prompt is visible after the banner it means opencode exited (e.g. unknown flag).
-    if (SHELL_PROMPT_RE.test(output.split('\n').slice(-3).join('\n'))) {
-      return { ready: false, confidence: 'low', detail: 'Shell prompt visible — opencode may have exited' };
+    const status = this.detectStatus(output);
+    return {
+      ready: status.status === 'idle',
+      confidence: status.confidence,
+      detail: status.detail,
+    };
+  },
+
+  detectStatus(output: string): StatusDetectionResult {
+    const clean = stripTerminalControls(output);
+    const hasOpenCodeUi = OPENCODE_UI_RE.test(clean);
+    const lastLine = lastNonEmptyLines(clean, 1);
+
+    if (this.detectPermissionRequest(output)) {
+      return { status: 'waiting_user_answer', confidence: 'high', detail: 'OpenCode permission prompt detected' };
     }
 
-    if (BANNER_RE.test(output)) {
-      if (PROMPT_RE.test(output) || READY_KEYWORDS_RE.test(output)) {
-        return { ready: true, confidence: 'high', detail: 'OpenCode banner and prompt detected' };
-      }
-      return { ready: true, confidence: 'medium', detail: 'OpenCode banner detected, assuming ready' };
+    if (FAILURE_RE.test(clean)) {
+      return { status: 'error', confidence: 'high', detail: 'OpenCode failure output detected' };
     }
 
-    if (PROMPT_RE.test(output) || READY_KEYWORDS_RE.test(output)) {
-      return { ready: true, confidence: 'medium', detail: 'OpenCode prompt indicator detected' };
+    if (COMPLETION_RE.test(clean)) {
+      return { status: 'completed', confidence: 'high', detail: 'OpenCode completion marker detected' };
     }
 
-    return { ready: false, confidence: 'low' };
+    if (ACTIVE_WORK_RE.test(clean)) {
+      return { status: 'processing', confidence: 'high', detail: 'OpenCode active work indicator detected' };
+    }
+
+    if (OPENCODE_INPUT_FOOTER_RE.test(clean) || (hasOpenCodeUi && (PROMPT_RE.test(clean) || READY_KEYWORDS_RE.test(clean)))) {
+      return { status: 'idle', confidence: 'high', detail: 'OpenCode input prompt/footer detected' };
+    }
+
+    if (SHELL_PROMPT_RE.test(lastLine)) {
+      return { status: 'error', confidence: 'low', detail: 'Shell prompt visible - opencode may have exited' };
+    }
+
+    if (BANNER_RE.test(clean) || hasOpenCodeUi) {
+      return { status: 'processing', confidence: 'low', detail: 'OpenCode UI detected, waiting for input prompt' };
+    }
+
+    if (PROMPT_RE.test(clean) || READY_KEYWORDS_RE.test(clean)) {
+      return { status: 'processing', confidence: 'low', detail: 'Prompt-like output without OpenCode UI - waiting' };
+    }
+
+    return { status: 'processing', confidence: 'low', detail: 'OpenCode output is not ready' };
   },
 
   buildInitialPrompt(context: TaskContext): string {
@@ -84,10 +138,11 @@ export const opencodeAdapter: CliAdapter = {
   },
 
   detectPermissionRequest(output: string): PermissionDetectionResult | null {
-    if (!PERMISSION_RE.test(output)) return null;
+    const clean = stripTerminalControls(output);
+    if (!PERMISSION_RE.test(clean)) return null;
 
-    const lines = output.split('\n').filter(l => l.trim());
-    const promptLine = lines[lines.length - 1] ?? '';
+    const lines = clean.split('\n').filter(l => l.trim());
+    const promptLine = lines.slice(-12).join('\n');
 
     let category: PermissionRequest['category'] = 'unknown';
     if (/bash|command|shell|exec|run\s/i.test(promptLine)) category = 'shell_execution';
@@ -112,10 +167,11 @@ export const opencodeAdapter: CliAdapter = {
   },
 
   detectCompletion(output: string): CompletionDetectionResult | null {
-    if (COMPLETION_RE.test(output)) {
+    const clean = stripTerminalControls(output);
+    if (COMPLETION_RE.test(clean)) {
       return { detected: true, outcome: 'success', summary: 'OpenCode task completed' };
     }
-    if (FAILURE_RE.test(output)) {
+    if (FAILURE_RE.test(clean)) {
       return { detected: true, outcome: 'failure', summary: 'OpenCode task failed' };
     }
     return null;
@@ -124,16 +180,19 @@ export const opencodeAdapter: CliAdapter = {
   normalizeOutput(output: string): RuntimeOutputEvent[] {
     const events: RuntimeOutputEvent[] = [];
     const ts = Date.now();
+    const clean = stripTerminalControls(output);
+    const status = this.detectStatus(output);
+    const lastLine = lastNonEmptyLines(clean, 1);
 
-    if (BANNER_RE.test(output)) {
+    if (BANNER_RE.test(clean)) {
       events.push({ kind: 'banner', cli: 'opencode', timestamp: ts, confidence: 'high' });
     }
 
-    if (PROMPT_RE.test(output) || READY_KEYWORDS_RE.test(output)) {
+    if (OPENCODE_INPUT_FOOTER_RE.test(clean) || (OPENCODE_UI_RE.test(clean) && (PROMPT_RE.test(clean) || READY_KEYWORDS_RE.test(clean)))) {
       events.push({ kind: 'ready', cli: 'opencode', timestamp: ts, confidence: 'medium' });
     }
 
-    if (SHELL_PROMPT_RE.test(output)) {
+    if (status.status === 'error' && SHELL_PROMPT_RE.test(lastLine)) {
       events.push({ kind: 'process_exit', cli: 'opencode', timestamp: ts, detail: 'shell-prompt-visible' });
     }
 

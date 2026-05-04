@@ -1,0 +1,8 @@
+[?25l[24;1H
+[17;1H    [2mMCP error -32602: Input validation error: Invalid arguments for tool[22m        
+                                                                                
+                                                                                
+                                                                                
+                                                                                                                                                                
+                                                                                
+[17;1H[?25h

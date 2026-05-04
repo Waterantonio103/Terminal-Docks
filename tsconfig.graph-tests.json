@@ -22,8 +22,12 @@
     "src/lib/workflowRuntimePlanning.ts",
     "src/lib/runtime/TerminalOutputBus.ts",
     "src/lib/runtime/RuntimeTypes.ts",
+    "src/lib/runtime/RuntimeReadinessGate.ts",
     "src/lib/runtime/adapters/CliAdapter.ts",
     "src/lib/runtime/adapters/codex.ts",
+    "src/lib/runtime/adapters/opencode.ts",
+    "src/lib/runtime/adapters/claude.ts",
+    "src/lib/runtime/adapters/gemini.ts",
     "src/lib/workflow/*.ts"
   ]
 }

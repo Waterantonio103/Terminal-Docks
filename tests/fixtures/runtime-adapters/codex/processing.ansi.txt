@@ -1,0 +1,11 @@
+[?25l[K[38;2;128;128;128m[1m
+•[m [38;2;128;128;128m[1mBooting MCP server: codex_apps[m [2m(0s • esc to interrupt)[22m[K
+[K
+[K[1m
+›[22m [2mImprove documentation in @filename[22m[K
+[K[2m
+  gpt-5.5 high · ~ · gpt-5.5 · Context 100% left · Context 0% used · Fast off[22m   
+[K
+[K
+[K
+[K[18;3H[?25h

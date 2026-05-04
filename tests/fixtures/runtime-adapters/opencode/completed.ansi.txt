@@ -1,0 +1,2 @@
+]0;OpenCode[38;2;188;140;255m Task completed [m
+[38;2;139;148;158mstatus: success · ready for next turn[m

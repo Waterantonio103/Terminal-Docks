@@ -1,0 +1,2 @@
+]0;OpenCode[38;2;201;209;217mApprove command execution? [y/n][m
+[38;2;139;148;158m1. Allow once   2. Deny[m

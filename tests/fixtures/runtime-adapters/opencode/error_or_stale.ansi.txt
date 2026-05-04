@@ -1,0 +1,4 @@
+opencode --yolo
+Unknown option: --yolo
+Usage: opencode [options]
+C:\Users\user>

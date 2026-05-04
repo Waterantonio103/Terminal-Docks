@@ -9,19 +9,43 @@ import type {
   PermissionResponse,
   ReadyDetectionResult,
   RuntimeOutputEvent,
+  StatusDetectionResult,
   TaskContext,
 } from './CliAdapter.js';
+import { formatLaunchArgsForLog } from '../../cliCommandBuilders.js';
 
+const ANSI_RE =
+  /\x1b\][^\x07]*(?:\x07|\x1b\\)|\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])/g;
 const BANNER_RE = /\bcodex\b/i;
-const PROMPT_RE = /(?:\uff1e|❯|Input:|Prompt:)\s*$/m;
-const SHELL_PROMPT_RE = /(?:[A-Za-z]:\\.*>|(?:\$|>|#))\s*$/m;
-const READY_KEYWORDS_RE = /\b(ready|listening|connected|type|enter)\b/i;
+const PROMPT_RE = /(?:^|\n)\s*(?:›|\uff1e|❯|Input:|Prompt:)\s*(?:\S.*)?$/m;
+const SHELL_PROMPT_RE = /(?:^|\n)\s*(?:[A-Za-z]:\\[^>\r\n]*>|PS [^>\r\n]*>|[$#>])\s*$/m;
+const CODEX_FOOTER_RE = /(?:\bgpt-[\w.-]+(?:\s+\w+)?\b[\s\S]{0,120}\bContext\s+\d+%\s+(?:left|used)\b|\bContext\s+\d+%\s+left\b[\s\S]{0,80}\bContext\s+\d+%\s+used\b|\bFast\s+(?:on|off)\b)/i;
+const CODEX_UI_RE = /(?:\bcodex\b|\bgpt-[\w.-]+\b|\bContext\s+\d+%\s+(?:left|used)\b|\bFast\s+(?:on|off)\b|›)/i;
+const ACTIVE_WORK_RE =
+  /(?:\bWorking\b|\bBooting MCP server\b|\bStarting MCP servers\b|\bqueued message\b|\btab to queue message\b|\bPasted Content\b|\besc to interrupt\b|\bctrl-c to interrupt\b|\boperation in progress\b)/i;
 const MCP_PERMISSION_PROMPT_RE =
   /Allow\s+the\s+.+?\s+MCP\s+server\s+to\s+run\s+tool\s+"[^"]+"\?\s*[\s\S]*(?:\b1\.\s*Allow\b|\bAlways\s+allow\b|\benter\s+to\s+submit\b)/i;
 const GENERIC_PERMISSION_PROMPT_RE =
   /(?:allow|approve|grant)\s+(?:this\s+)?(?:command|tool|operation|request|permission)\??\s*[\s\S]*(?:\b1\.\s*Allow\b|\bAlways\s+allow\b|\by\/n\b|\[y\/n\])/i;
 const COMPLETION_RE = /(?:\btask\s+(?:completed|complete)\b|turn\.completed|exit code\s+0|(?:^|\n)\s*[─-]+\s*worked for\b|\bworked for\s+\d+\s*(?:s|m|h))/i;
-const FAILURE_RE = /(?:\btask\s+failed\b|\bfatal error\b|\buncaught exception\b|exit code\s+[1-9])/i;
+const FAILURE_RE =
+  /(?:\btask\s+failed\b|\bfatal error\b|\buncaught exception\b|\bMCP error\b|exit code\s+[1-9]|\bfailed process\b|\bcommand not found\b|\bnot recognized as\b|\bunknown option\b|\bunexpected argument\b|\binvalid flag\b|(?:^|\n)\s*(?:error|fatal):)/i;
+
+function stripTerminalControls(output: string): string {
+  return output
+    .replace(ANSI_RE, '')
+    .replace(/\r/g, '\n')
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001a\u001c-\u001f\u007f]/g, '');
+}
+
+function lastNonEmptyLines(output: string, count: number): string {
+  return output
+    .split('\n')
+    .map(line => line.trimEnd())
+    .filter(line => line.trim())
+    .slice(-count)
+    .join('\n');
+}
 
 function escapeInstructionValue(value: string): string {
   return value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
@@ -71,19 +95,24 @@ export const codexAdapter: CliAdapter = {
       };
     }
 
-    const args: string[] = [];
+    const args: string[] = [
+      '-c',
+      'mcp_servers.pencil.enabled=false',
+      '-c',
+      'mcp_servers.excalidraw.enabled=false',
+      ...(context.mcpUrl?.trim() ? ['-c', `mcp_servers.terminal-docks.url="${context.mcpUrl.trim()}"`] : []),
+    ];
     if (context.model?.trim()) args.push('--model', context.model.trim());
-    // Yolo flag is probed and resolved by resolveCodexYoloFlag() in spawnCodexDirectly.
-    // buildLaunchCommand is used for headless path (currently unsupported for codex),
-    // so fall back to --yolo as the preferred flag here.
-    const yoloFlag = '--yolo';
+    if (context.workspaceDir?.trim()) args.push('--cd', context.workspaceDir.trim());
+    args.push('--no-alt-screen');
+    const yoloFlag = '--dangerously-bypass-approvals-and-sandbox';
     if (context.yolo) {
       args.push(yoloFlag);
       console.log(`[codex] resolved yolo flag=${yoloFlag}`);
     } else {
       console.log('[codex] resolved yolo flag=<none> (yolo=false)');
     }
-    console.log(`[codex] final codex args (no prompt)=[${args.join(', ')}]`);
+    console.log(`[codex] final codex args (no prompt)=${formatLaunchArgsForLog(args)}`);
     return {
       command: 'codex',
       args,
@@ -93,29 +122,52 @@ export const codexAdapter: CliAdapter = {
   },
 
   detectReady(output: string): ReadyDetectionResult {
-    const lines = output.split('\n');
-    const lastLine = lines[lines.length - 1] ?? '';
-    const hasBanner = BANNER_RE.test(output);
+    const status = this.detectStatus(output);
+    return {
+      ready: status.status === 'idle',
+      confidence: status.confidence,
+      detail: status.detail,
+    };
+  },
 
-    if (hasBanner) {
-      // If we see the banner AND the last line looks like a prompt, we are highly confident.
-      if (PROMPT_RE.test(lastLine) || READY_KEYWORDS_RE.test(lastLine)) {
-        return { ready: true, confidence: 'high', detail: 'Codex banner and prompt detected' };
-      }
-      // If we see the banner but no prompt yet, wait. 
-      // Multi-line banners can cause early injection issues.
-      return { ready: false, confidence: 'low', detail: 'Codex banner detected, waiting for prompt' };
+  detectStatus(output: string): StatusDetectionResult {
+    const clean = stripTerminalControls(output);
+    const hasCodexUi = CODEX_UI_RE.test(clean);
+    const lastLine = lastNonEmptyLines(clean, 1);
+
+    if (this.detectPermissionRequest(output)) {
+      return { status: 'waiting_user_answer', confidence: 'high', detail: 'Codex permission prompt detected' };
+    }
+
+    if (FAILURE_RE.test(clean)) {
+      return { status: 'error', confidence: 'high', detail: 'Codex failure output detected' };
+    }
+
+    if (COMPLETION_RE.test(clean)) {
+      return { status: 'completed', confidence: 'high', detail: 'Codex completion marker detected' };
+    }
+
+    if (ACTIVE_WORK_RE.test(clean)) {
+      return { status: 'processing', confidence: 'high', detail: 'Codex active work indicator detected' };
+    }
+
+    if (hasCodexUi && PROMPT_RE.test(clean) && CODEX_FOOTER_RE.test(clean)) {
+      return { status: 'idle', confidence: 'high', detail: 'Codex input prompt and footer detected' };
     }
 
     if (SHELL_PROMPT_RE.test(lastLine)) {
-      return { ready: false, confidence: 'low', detail: 'Shell prompt visible — CLI may have exited' };
+      return { status: 'error', confidence: 'low', detail: 'Shell prompt visible - CLI may have exited' };
     }
 
-    if (PROMPT_RE.test(lastLine) || READY_KEYWORDS_RE.test(lastLine)) {
-      return { ready: false, confidence: 'low', detail: 'Prompt-like output without Codex banner — waiting' };
+    if (BANNER_RE.test(clean) || hasCodexUi) {
+      return { status: 'processing', confidence: 'low', detail: 'Codex UI detected, waiting for idle prompt' };
     }
 
-    return { ready: false, confidence: 'low' };
+    if (PROMPT_RE.test(clean)) {
+      return { status: 'processing', confidence: 'low', detail: 'Prompt-like output without Codex footer - waiting' };
+    }
+
+    return { status: 'processing', confidence: 'low', detail: 'Codex output is not ready' };
   },
 
   buildInitialPrompt(context: TaskContext): string {
@@ -123,11 +175,12 @@ export const codexAdapter: CliAdapter = {
   },
 
   detectPermissionRequest(output: string): PermissionDetectionResult | null {
-    if (!MCP_PERMISSION_PROMPT_RE.test(output) && !GENERIC_PERMISSION_PROMPT_RE.test(output)) {
+    const clean = stripTerminalControls(output);
+    if (!MCP_PERMISSION_PROMPT_RE.test(clean) && !GENERIC_PERMISSION_PROMPT_RE.test(clean)) {
       return null;
     }
 
-    const lines = output.split('\n').filter(l => l.trim());
+    const lines = clean.split('\n').filter(l => l.trim());
     const promptLine = lines.slice(-12).join('\n');
 
     let category: PermissionRequest['category'] = 'unknown';
@@ -153,10 +206,11 @@ export const codexAdapter: CliAdapter = {
   },
 
   detectCompletion(output: string): CompletionDetectionResult | null {
-    if (COMPLETION_RE.test(output)) {
+    const clean = stripTerminalControls(output);
+    if (COMPLETION_RE.test(clean)) {
       return { detected: true, outcome: 'success', summary: 'Codex task completed' };
     }
-    if (FAILURE_RE.test(output)) {
+    if (FAILURE_RE.test(clean)) {
       return { detected: true, outcome: 'failure', summary: 'Codex task failed' };
     }
     return null;
@@ -165,16 +219,19 @@ export const codexAdapter: CliAdapter = {
   normalizeOutput(output: string): RuntimeOutputEvent[] {
     const events: RuntimeOutputEvent[] = [];
     const ts = Date.now();
+    const clean = stripTerminalControls(output);
+    const status = this.detectStatus(output);
+    const lastLine = lastNonEmptyLines(clean, 1);
 
-    if (BANNER_RE.test(output)) {
+    if (BANNER_RE.test(clean)) {
       events.push({ kind: 'banner', cli: 'codex', timestamp: ts, confidence: 'high' });
     }
 
-    if (PROMPT_RE.test(output) || READY_KEYWORDS_RE.test(output)) {
+    if (CODEX_UI_RE.test(clean) && PROMPT_RE.test(clean) && CODEX_FOOTER_RE.test(clean)) {
       events.push({ kind: 'ready', cli: 'codex', timestamp: ts, confidence: 'medium' });
     }
 
-    if (SHELL_PROMPT_RE.test(output)) {
+    if (status.status === 'error' && SHELL_PROMPT_RE.test(lastLine)) {
       events.push({ kind: 'process_exit', cli: 'codex', timestamp: ts, detail: 'shell-prompt-visible' });
     }
 

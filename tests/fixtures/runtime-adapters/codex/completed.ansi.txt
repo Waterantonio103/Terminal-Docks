@@ -1,0 +1,6 @@
+[22m
+[2m[19;1H─ Worked for 1m 13s ────────────────────────────────────────────────────────────[22m                                                                                
+                                                                                [1m
+›[22m [2mImplement {feature}[22m                                                           
+                                                                                [2m
+  gpt-5.5 high · ~ · gpt-5.5 · Context 88% left · Context 12% used · 5h 80% · w…[22;3H

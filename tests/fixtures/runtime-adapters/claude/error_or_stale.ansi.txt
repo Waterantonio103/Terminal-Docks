@@ -1,0 +1,3 @@
+claude --bad-flag
+Fatal error: unknown option --bad-flag
+C:\Users\user>

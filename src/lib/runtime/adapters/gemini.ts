@@ -9,22 +9,46 @@ import type {
   PermissionResponse,
   ReadyDetectionResult,
   RuntimeOutputEvent,
+  StatusDetectionResult,
   TaskContext,
-} from './CliAdapter';
+} from './CliAdapter.js';
+import { buildPtyLaunchCommandParts } from '../../cliCommandBuilders.js';
 
-const BANNER_RE = /\b(gemini|google gemini|gemini cli)\b/i;
+const ANSI_RE =
+  /\x1b\][^\x07]*(?:\x07|\x1b\\)|\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])/g;
+const BANNER_RE = /\b(?:gemini|google gemini|gemini cli)\b/i;
 const PROMPT_BAR_RE = /(?:^|\n)\s*(?:>|\uff1e|❯|Input:|Prompt:)\s*$/m;
-const SHELL_PROMPT_RE = /(?:^|\n)\s*(?:[A-Za-z]:\\[^>\r\n]*>|PS [^>\r\n]*>|[$#])\s*$/m;
-const READY_KEYWORDS_RE = /\b(ready|welcome|type your|enter your (?:prompt|message|query))\b/i;
-const GEMINI_UI_RE = /(?:gemini cli|to resume this session|loaded cached credentials|tips for getting started|using:\s*gemini|╭|✦|✧)/i;
-const PERMISSION_RE = /(?:allow|approve|grant|trust|deny|reject).*(?:\?|y\/n|\[y\/n\]|\b1\.|always allow)/is;
+const SHELL_PROMPT_RE = /(?:^|\n)\s*(?:[A-Za-z]:\\[^>\r\n]*>|PS [^>\r\n]*>|[$#>])\s*$/m;
+const GEMINI_UI_RE =
+  /(?:gemini cli|gemini\.md|mcp servers?|to resume this session|loaded cached credentials|tips for getting started|using:\s*gemini|signed in with google|plan:\s*gemini|\/model\b|\bcontext\b|\bquota\b|\byolo\b|╭|✦|✧)/i;
+const GEMINI_INPUT_READY_RE =
+  /(?:^|\n)\s*(?:\*|>)?\s*Type your message\b|(?:^|\n)\s*(?:>|\uff1e|❯|Input:|Prompt:)\s*(?:$|\n)|\b(?:type|enter|input|paste|write)\b.*\b(?:prompt|message|query|input)\b/i;
+const PERMISSION_RE =
+  /(?:trust this folder\?|approve tool call\?|permission request|allow|approve|grant|trust|deny|reject|do you want).*(?:\?|y\/n|\[y\/n\]|\b1\.|yes\/no|always allow)/is;
 const COMPLETION_RE = /(?:\btask\s+(?:completed|complete)\b|turn\.completed|exit code\s+0)/i;
-const FAILURE_RE = /(?:\btask\s+failed\b|\bfatal error\b|\buncaught exception\b|exit code\s+[1-9])/i;
-const GEMINI_INPUT_HINT_RE = /\b(type|enter|input|paste|write)\b.*\b(prompt|message|query|input)\b/i;
-const GEMINI_PROMPT_MARKER_RE = /(?:gemini[^\n]{0,80}(?:>|\uff1e|❯|Input:|Prompt:))|(?:^|\n)\s*(?:>|\uff1e|❯|Input:|Prompt:)\s*(?:$|\n)|(?:type|enter|input|paste|write)\b.*\b(prompt|message|query|input)\b/i;
+const FAILURE_RE =
+  /(?:\btask\s+failed\b|\bfatal error\b|\buncaught exception\b|exit code\s+[1-9]|\bunknown option\b|\binvalid flag\b|\bunexpected argument\b|(?:^|\n)\s*Usage:\s*gemini\b|(?:^|\n)\s*Error:)/i;
+const ACTIVE_WORK_RE =
+  /(?:\bWaiting for authentication\b|\bWorking\b|\bThinking\b|\bProcessing\b|\bRunning\b|\bExecuting\b|\bCalling\b|\bUsing tool\b|\btool execution\b|\bqueued message\b|\besc to interrupt\b|\bctrl-c to interrupt\b|\boperation in progress\b|[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏])/i;
 
-function logGeminiReady(message: string): void {
-  console.debug(`[gemini-ready] ${message}`);
+function logGeminiReady(_message: string): void {
+  // Kept as a local hook for temporary parser diagnostics without noisy polling logs.
+}
+
+function stripTerminalControls(output: string): string {
+  return output
+    .replace(ANSI_RE, '')
+    .replace(/\r/g, '\n')
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001a\u001c-\u001f\u007f]/g, '');
+}
+
+function lastNonEmptyLines(output: string, count: number): string {
+  return output
+    .split('\n')
+    .map(line => line.trimEnd())
+    .filter(line => line.trim())
+    .slice(-count)
+    .join('\n');
 }
 
 export const geminiAdapter: CliAdapter = {
@@ -54,9 +78,11 @@ export const geminiAdapter: CliAdapter = {
       };
     }
 
-    const args: string[] = [];
-    if (context.model?.trim()) args.push('--model', context.model.trim());
-    if (context.yolo) args.push('--yolo');
+    const { args } = buildPtyLaunchCommandParts('gemini', {
+      model: context.model,
+      yolo: context.yolo,
+      workspaceDir: context.workspaceDir,
+    });
     return {
       command: 'gemini',
       args,
@@ -66,30 +92,61 @@ export const geminiAdapter: CliAdapter = {
   },
 
   detectReady(output: string): ReadyDetectionResult {
-    const tail = output.split('\n').slice(-3).join('\n');
-    const hasGeminiUi = GEMINI_UI_RE.test(output);
-    if (SHELL_PROMPT_RE.test(tail) && !hasGeminiUi) {
-      logGeminiReady('rejected reason=shell_prompt_only');
-      return { ready: false, confidence: 'low', detail: 'Shell prompt only — Gemini not confirmed' };
+    const status = this.detectStatus(output);
+    return {
+      ready: status.status === 'idle',
+      confidence: status.confidence,
+      detail: status.detail,
+    };
+  },
+
+  detectStatus(output: string): StatusDetectionResult {
+    const clean = stripTerminalControls(output);
+    const hasGeminiUi = GEMINI_UI_RE.test(clean);
+    const lastLine = lastNonEmptyLines(clean, 1);
+
+    if (this.detectPermissionRequest(output)) {
+      logGeminiReady('blocked reason=permission_prompt');
+      return { status: 'waiting_user_answer', confidence: 'high', detail: 'Gemini permission prompt detected' };
     }
 
-    if (BANNER_RE.test(output)) {
-      if (hasGeminiUi && (PROMPT_BAR_RE.test(output) || READY_KEYWORDS_RE.test(output) || GEMINI_INPUT_HINT_RE.test(output))) {
-        logGeminiReady('accepted reason=banner_and_prompt');
-        return { ready: true, confidence: 'high', detail: 'Gemini banner and input prompt detected' };
-      }
-      // Banner alone is not enough, wait for prompt
-      logGeminiReady('waiting reason=banner_without_prompt');
-      return { ready: false, confidence: 'low', detail: 'Gemini banner detected, waiting for prompt' };
+    if (FAILURE_RE.test(clean)) {
+      logGeminiReady('blocked reason=failure_output');
+      return { status: 'error', confidence: 'high', detail: 'Gemini failure output detected' };
     }
 
-    if (hasGeminiUi && GEMINI_PROMPT_MARKER_RE.test(output)) {
+    if (COMPLETION_RE.test(clean)) {
+      logGeminiReady('blocked reason=completion_marker');
+      return { status: 'completed', confidence: 'high', detail: 'Gemini completion marker detected' };
+    }
+
+    if (ACTIVE_WORK_RE.test(clean)) {
+      logGeminiReady('waiting reason=active_work');
+      return { status: 'processing', confidence: 'high', detail: 'Gemini active work indicator detected' };
+    }
+
+    if (hasGeminiUi && (PROMPT_BAR_RE.test(clean) || GEMINI_INPUT_READY_RE.test(clean))) {
       logGeminiReady('accepted reason=gemini_prompt_marker');
-      return { ready: true, confidence: 'medium', detail: 'Gemini-specific prompt marker detected' };
+      return { status: 'idle', confidence: BANNER_RE.test(clean) ? 'high' : 'medium', detail: 'Gemini input prompt detected' };
+    }
+
+    if (SHELL_PROMPT_RE.test(lastLine)) {
+      logGeminiReady('rejected reason=shell_prompt_only');
+      return { status: 'error', confidence: 'low', detail: 'Shell prompt only - Gemini not confirmed' };
+    }
+
+    if (hasGeminiUi) {
+      logGeminiReady('waiting reason=ui_without_prompt');
+      return { status: 'processing', confidence: 'low', detail: 'Gemini UI detected, waiting for input prompt' };
+    }
+
+    if (PROMPT_BAR_RE.test(clean) || GEMINI_INPUT_READY_RE.test(clean)) {
+      logGeminiReady('waiting reason=prompt_without_ui');
+      return { status: 'processing', confidence: 'low', detail: 'Prompt-like output without Gemini UI - waiting' };
     }
 
     logGeminiReady('waiting reason=no_gemini_marker');
-    return { ready: false, confidence: 'low' };
+    return { status: 'processing', confidence: 'low', detail: 'Gemini output is not ready' };
   },
 
   buildInitialPrompt(context: TaskContext): string {
@@ -97,9 +154,10 @@ export const geminiAdapter: CliAdapter = {
   },
 
   detectPermissionRequest(output: string): PermissionDetectionResult | null {
-    if (!PERMISSION_RE.test(output)) return null;
+    const clean = stripTerminalControls(output);
+    if (!PERMISSION_RE.test(clean)) return null;
 
-    const lines = output.split('\n').filter(l => l.trim());
+    const lines = clean.split('\n').filter(l => l.trim());
     const promptLine = lines[lines.length - 1] ?? '';
 
     let category: PermissionRequest['category'] = 'unknown';
@@ -125,10 +183,11 @@ export const geminiAdapter: CliAdapter = {
   },
 
   detectCompletion(output: string): CompletionDetectionResult | null {
-    if (COMPLETION_RE.test(output)) {
+    const clean = stripTerminalControls(output);
+    if (COMPLETION_RE.test(clean)) {
       return { detected: true, outcome: 'success', summary: 'Gemini task completed' };
     }
-    if (FAILURE_RE.test(output)) {
+    if (FAILURE_RE.test(clean)) {
       return { detected: true, outcome: 'failure', summary: 'Gemini task failed' };
     }
     return null;
@@ -137,16 +196,19 @@ export const geminiAdapter: CliAdapter = {
   normalizeOutput(output: string): RuntimeOutputEvent[] {
     const events: RuntimeOutputEvent[] = [];
     const ts = Date.now();
+    const clean = stripTerminalControls(output);
+    const status = this.detectStatus(output);
+    const lastLine = lastNonEmptyLines(clean, 1);
 
-    if (BANNER_RE.test(output)) {
+    if (BANNER_RE.test(clean)) {
       events.push({ kind: 'banner', cli: 'gemini', timestamp: ts, confidence: 'high' });
     }
 
-    if (PROMPT_BAR_RE.test(output) || READY_KEYWORDS_RE.test(output)) {
+    if (GEMINI_UI_RE.test(clean) && (PROMPT_BAR_RE.test(clean) || GEMINI_INPUT_READY_RE.test(clean))) {
       events.push({ kind: 'ready', cli: 'gemini', timestamp: ts, confidence: 'medium' });
     }
 
-    if (SHELL_PROMPT_RE.test(output)) {
+    if (status.status === 'error' && SHELL_PROMPT_RE.test(lastLine)) {
       events.push({ kind: 'process_exit', cli: 'gemini', timestamp: ts, detail: 'shell-prompt-visible' });
     }
 

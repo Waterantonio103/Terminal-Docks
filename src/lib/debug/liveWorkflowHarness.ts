@@ -76,7 +76,10 @@ const VALID_ROLE_IDS = ['scout', 'coordinator', 'builder', 'tester', 'security',
 
 const WINDOWS_PATH_SEP_RE = /[\\\/]+/g;
 const LIVE_WORKFLOW_MODEL = import.meta.env.VITE_LIVE_WORKFLOW_MODEL || undefined;
-const LIVE_WORKFLOW_FILTER = import.meta.env.VITE_LIVE_WORKFLOW_FILTER || undefined;
+const LIVE_WORKFLOW_FILTER: string | undefined =
+  typeof import.meta.env.VITE_LIVE_WORKFLOW_FILTER === 'string' && import.meta.env.VITE_LIVE_WORKFLOW_FILTER.trim()
+    ? import.meta.env.VITE_LIVE_WORKFLOW_FILTER
+    : undefined;
 
 interface LiveWorkflowTaskSpec {
   objective: string;
@@ -652,6 +655,8 @@ interface Prompt06WorkflowSpec {
   runInstruction: string;
   agents: Prompt06AgentSpec[];
   edges: Array<{ fromNodeId: string; toNodeId: string; condition?: 'always' | 'on_success' | 'on_failure' }>;
+  startNodeIds?: string[];
+  nodeTreeOperations?: string[];
 }
 
 const PROMPT_06_WORKFLOWS: Prompt06WorkflowSpec[] = [
@@ -1051,6 +1056,192 @@ const PROMPT_05_WORKFLOWS: Prompt06WorkflowSpec[] = [
   },
 ];
 
+const PROMPT_04_WORKFLOWS: Prompt06WorkflowSpec[] = [
+  {
+    name: 'edited-scout-output',
+    title: 'Edited prompt linear scout output',
+    task: 'Create a compact technical brief for a fictional terminal productivity feature called Focus Dock. The scout prompt has been edited before run to require a runnable/openable HTML brief rather than markdown-only notes.',
+    expectedFiles: ['index.html', 'README.md'],
+    runInstruction: 'Open index.html in a browser.',
+    nodeTreeOperations: [
+      'create_workflow_from_nodetree_graph',
+      'edit_node_prompt_before_run',
+      'verify_output_linked_to_output_node',
+    ],
+    agents: [
+      prompt06Agent('scout', 'scout', 'Scout', 'Create the initial brief content and HTML structure.'),
+      prompt06Agent('output', 'reviewer', 'Output', 'Verify the brief is openable and README links the output files.'),
+    ],
+    edges: [
+      prompt06Edge('scout', 'output'),
+    ],
+  },
+  {
+    name: 'branch-merge-landing',
+    title: 'Coordinator branch and merge landing page',
+    task: 'Create a static landing page for a fictional indie software launch named Signal Yard, with one builder responsible for page content and another for a small JavaScript interaction.',
+    expectedFiles: ['index.html', 'script.js', 'README.md'],
+    runInstruction: 'Open index.html in a browser.',
+    nodeTreeOperations: [
+      'add_branch_coordinator_to_two_builders',
+      'add_merge_two_builders_to_reviewer',
+      'verify_branch_status_and_reviewer_output_link',
+    ],
+    agents: [
+      prompt06Agent('coordinator', 'coordinator', 'Coordinator', 'Define branch responsibilities and acceptance criteria.'),
+      prompt06Agent('builder-copy', 'builder', 'Copy Builder', 'Create page copy and layout structure.'),
+      prompt06Agent('builder-js', 'builder', 'Interaction Builder', 'Create script.js and wire it to the page.'),
+      prompt06Agent('reviewer', 'reviewer', 'Reviewer', 'Merge both branches and verify the final output.'),
+    ],
+    edges: [
+      prompt06Edge('coordinator', 'builder-copy'),
+      prompt06Edge('coordinator', 'builder-js'),
+      prompt06Edge('builder-copy', 'reviewer'),
+      prompt06Edge('builder-js', 'reviewer'),
+    ],
+  },
+  {
+    name: 'cli-model-node-setting',
+    title: 'Codex CLI/model node setting Python CLI',
+    task: 'Create a standard-library Python CLI named note_rollup.py that reads a JSON notes file and prints grouped summaries.',
+    expectedFiles: ['note_rollup.py', 'sample_notes.json', 'README.md'],
+    runInstruction: 'Run python note_rollup.py --help.',
+    nodeTreeOperations: [
+      'change_node_cli_to_codex_before_run',
+      'change_node_model_setting_before_run',
+      'verify_runtime_terminal_binding',
+    ],
+    agents: [
+      prompt06Agent('builder', 'builder', 'Builder', 'Implement the CLI, sample data, and README usage.'),
+      prompt06Agent('reviewer', 'reviewer', 'Reviewer', 'Verify the CLI contract and expected files.'),
+    ],
+    edges: [
+      prompt06Edge('builder', 'reviewer'),
+    ],
+  },
+  {
+    name: 'subtree-dashboard',
+    title: 'Run subtree dashboard builder path',
+    task: 'Create a browser mini-dashboard for a fictional release queue. This run starts from the builder subtree after upstream planning was skipped, so the builder must create the complete compact output directly.',
+    expectedFiles: ['index.html', 'app.js', 'data.json', 'README.md'],
+    runInstruction: 'Open index.html in a browser.',
+    startNodeIds: ['builder'],
+    nodeTreeOperations: [
+      'run_subtree_only_from_builder_node',
+      'verify_skipped_upstream_nodes_do_not_block_subtree',
+      'verify_output_linked_to_subtree_node',
+    ],
+    agents: [
+      prompt06Agent('coordinator', 'coordinator', 'Coordinator', 'Skipped in subtree run; would normally define dashboard scope.'),
+      prompt06Agent('builder', 'builder', 'Builder', 'Build the full dashboard from the task prompt because this subtree run starts here.'),
+      prompt06Agent('reviewer', 'reviewer', 'Reviewer', 'Verify the subtree output and README.'),
+    ],
+    edges: [
+      prompt06Edge('coordinator', 'builder'),
+      prompt06Edge('builder', 'reviewer'),
+    ],
+  },
+  {
+    name: 'triple-with-tester',
+    title: 'Scout coordinator builder tester reviewer docs app',
+    task: 'Create a small searchable help center microsite for a fictional desktop app, with FAQ data embedded or represented in JavaScript.',
+    expectedFiles: ['index.html', 'search.js', 'README.md'],
+    runInstruction: 'Open index.html in a browser and use the search input.',
+    nodeTreeOperations: [
+      'create_deep_nodetree_graph',
+      'verify_pending_to_running_to_completed_statuses',
+      'verify_tester_to_reviewer_output_linking',
+    ],
+    agents: [
+      prompt06Agent('scout', 'scout', 'Scout', 'Define FAQ categories and user needs.'),
+      prompt06Agent('coordinator', 'coordinator', 'Coordinator', 'Split build and test responsibilities.'),
+      prompt06Agent('builder', 'builder', 'Builder', 'Build the microsite and search behavior.'),
+      prompt06Agent('tester', 'tester', 'Tester', 'Verify search wiring and expected files.'),
+      prompt06Agent('reviewer', 'reviewer', 'Reviewer', 'Finalize after tester evidence.'),
+    ],
+    edges: [
+      prompt06Edge('scout', 'coordinator'),
+      prompt06Edge('coordinator', 'builder'),
+      prompt06Edge('builder', 'tester'),
+      prompt06Edge('tester', 'reviewer'),
+    ],
+  },
+  {
+    name: 'parallel-review-split',
+    title: 'Coordinator scouts builders reviewer tester split',
+    task: 'Create a browser inventory checklist for a fictional hardware lab, with static JSON data and category filtering.',
+    expectedFiles: ['index.html', 'app.js', 'inventory.json', 'README.md'],
+    runInstruction: 'Open index.html in a browser.',
+    nodeTreeOperations: [
+      'add_parallel_scouts',
+      'add_parallel_builders',
+      'merge_to_reviewer_and_tester',
+      'verify_multi_target_output_links',
+    ],
+    agents: [
+      prompt06Agent('coordinator', 'coordinator', 'Coordinator', 'Define scout and builder branch ownership.'),
+      prompt06Agent('scout-data', 'scout', 'Data Scout', 'Define inventory fields and sample rows.'),
+      prompt06Agent('scout-ux', 'scout', 'UX Scout', 'Define filtering and checklist behavior.'),
+      prompt06Agent('builder-data', 'builder', 'Data Builder', 'Create inventory.json.'),
+      prompt06Agent('builder-ui', 'builder', 'UI Builder', 'Create page and filtering behavior.'),
+      prompt06Agent('reviewer', 'reviewer', 'Reviewer', 'Verify final integrated output.'),
+      prompt06Agent('tester', 'tester', 'Tester', 'Validate data and interaction wiring.'),
+    ],
+    edges: [
+      prompt06Edge('coordinator', 'scout-data'),
+      prompt06Edge('coordinator', 'scout-ux'),
+      prompt06Edge('scout-data', 'builder-data'),
+      prompt06Edge('scout-ux', 'builder-ui'),
+      prompt06Edge('builder-data', 'reviewer'),
+      prompt06Edge('builder-ui', 'reviewer'),
+      prompt06Edge('builder-data', 'tester'),
+      prompt06Edge('builder-ui', 'tester'),
+    ],
+  },
+  {
+    name: 'retry-node-package',
+    title: 'Retry node repro package',
+    task: 'Create a compact Python repro package for a fictional CSV validation issue, including a script, fixture, and README. If a node fails because of provider/runtime issues, the harness should record the failed status and retry path evidence before cleanup.',
+    expectedFiles: ['repro.py', 'fixtures\\bad_rows.csv', 'README.md'],
+    runInstruction: 'Run python repro.py fixtures\\bad_rows.csv.',
+    nodeTreeOperations: [
+      'retry_failed_node_when_available',
+      'verify_failed_status_display_when_retry_needed',
+      'verify_completed_status_after_successful_retry_or_report_blocker',
+    ],
+    agents: [
+      prompt06Agent('builder-repro', 'builder', 'Repro Builder', 'Create repro.py and README context.'),
+      prompt06Agent('builder-fixture', 'builder', 'Fixture Builder', 'Create fixtures\\bad_rows.csv.'),
+      prompt06Agent('reviewer', 'reviewer', 'Reviewer', 'Verify script, fixture, and README are linked.'),
+    ],
+    edges: [
+      prompt06Edge('builder-repro', 'reviewer'),
+      prompt06Edge('builder-fixture', 'reviewer'),
+    ],
+  },
+  {
+    name: 'debug-tagged-workflow',
+    title: 'Debug-tagged workflow output linking',
+    task: 'Create a tiny browser calculator for estimating focus session time savings, with inputs and JavaScript calculation behavior.',
+    expectedFiles: ['index.html', 'app.js', 'README.md'],
+    runInstruction: 'Open index.html in a browser and change the inputs.',
+    nodeTreeOperations: [
+      'tag_workflow_as_debug',
+      'verify_debug_identifier_in_mission_id_and_preset',
+      'verify_final_output_artifacts_link_to_reviewer',
+    ],
+    agents: [
+      prompt06Agent('planner', 'planner', 'Planner', 'Define calculator inputs and formula.'),
+      prompt06Agent('builder', 'builder', 'Builder', 'Build the calculator page and app.js.'),
+      prompt06Agent('reviewer', 'reviewer', 'Reviewer', 'Verify debug-tagged output links and README.'),
+    ],
+    edges: [
+      prompt06Edge('planner', 'builder'),
+      prompt06Edge('builder', 'reviewer'),
+    ],
+  },
+];
+
 function prompt06Agent(id: string, roleId: string, title: string, responsibility: string): Prompt06AgentSpec {
   return { id, roleId, title, responsibility };
 }
@@ -1112,12 +1303,20 @@ function buildPrompt06Mission(
   suiteSlug = 'prompt06',
 ): CompiledMission {
   const layers = inferPrompt06Layers(spec.agents, spec.edges);
+  const startNodeIds = spec.startNodeIds ?? layers[0];
   const branchMergeInstructions = promptNumber === '05'
     ? [
         'Prompt 05 branch/merge requirements: every branch producer must create a distinct artifact under branch-artifacts named for its node, and merge/review agents must inspect all upstream branch artifacts before completing.',
         'The final README must summarize which branch contributions were consumed.',
         'No branch output should overwrite another branch output.',
         'Keep branch artifacts concise and finish the MCP handoff/completion immediately after the required file and branch checks pass.',
+      ]
+    : [];
+  const nodeTreeInstructions = promptNumber === '04'
+    ? [
+        `Prompt 04 NodeTree Mission Control operations under test: ${(spec.nodeTreeOperations ?? []).join(', ') || 'graph creation and output linking'}.`,
+        'Treat this as a NodeTree-authored graph run: preserve branch ownership, consume upstream context, and mention which concrete output files your node produced or verified when completing.',
+        'The final reviewer must make sure README lists the concrete files and local verification command so output linking can point to user-facing files, not only node notes.',
       ]
     : [];
   const prompt = [
@@ -1128,6 +1327,7 @@ function buildPrompt06Mission(
     `Expected concrete project files: ${spec.expectedFiles.join(', ')}.`,
     `Runnable verification: ${spec.runInstruction}`,
     ...branchMergeInstructions,
+    ...nodeTreeInstructions,
     'This must be a real runnable/openable project, not markdown-only evidence.',
     'Keep the project compact and bounded: no large embedded assets, no long generated data dumps, and target small text/source files.',
     'Do not create screenshots, preview images, generated media, or dev-server evidence unless this node is explicitly the tester and the project cannot be verified from files alone.',
@@ -1150,7 +1350,7 @@ function buildPrompt06Mission(
     metadata: {
       compiledAt: Date.now(),
       sourceGraphId: `live-${suiteSlug}-graph-${suffix}`,
-      startNodeIds: layers[0],
+      startNodeIds,
       executionLayers: layers,
       authoringMode: 'graph',
       presetId: `live:${suiteSlug}:${spec.name}`,
@@ -1491,7 +1691,63 @@ async function runPrompt05BranchingMergeHarness(options: LiveWorkflowHarnessOpti
   }
 }
 
+async function runPrompt04NodeTreeMissionControlHarness(options: LiveWorkflowHarnessOptions): Promise<void> {
+  const selectedWorkflows = selectPromptWorkflows(PROMPT_04_WORKFLOWS);
+  const report = {
+    startedAt: new Date().toISOString(),
+    finishedAt: null as string | null,
+    suiteName: 'prompt04_nodetree_mission_control',
+    workflowFilter: LIVE_WORKFLOW_FILTER ?? null,
+    executionPath: 'live_app_harness',
+    liveRuntimeLaunched: true,
+    note: 'Runs Prompt 04 through the app-side NodeTree-like graph mission model, MissionOrchestrator, WorkflowOrchestrator, RuntimeManager, and interactive_pty Codex nodes.',
+    nodeTreeOperationsTested: Array.from(new Set(PROMPT_04_WORKFLOWS.flatMap(spec => spec.nodeTreeOperations ?? []))),
+    workflows: selectedWorkflows.map(({ spec, index }) => ({
+      index: index + 1,
+      name: spec.name,
+      title: spec.title,
+      agentCount: spec.agents.length,
+      expectedFiles: spec.expectedFiles,
+      runInstruction: spec.runInstruction,
+      startNodeIds: spec.startNodeIds ?? null,
+      nodeTreeOperations: spec.nodeTreeOperations ?? [],
+      edges: spec.edges,
+    })),
+    results: [] as LiveWorkflowResult[],
+  };
+
+  await writeReport(options.outputPath, report);
+  for (let selectedIndex = 0; selectedIndex < selectedWorkflows.length; selectedIndex += 1) {
+    const { spec, index } = selectedWorkflows[selectedIndex];
+    const result = await runPrompt06Workflow(
+      spec,
+      index,
+      options,
+      'nodetree-mission-control',
+      '04',
+      'prompt04',
+    );
+    report.results.push(result);
+    await writeReport(options.outputPath, report);
+    if (selectedIndex < selectedWorkflows.length - 1) {
+      await waitForPrompt06McpHealth('Prompt 04');
+    }
+  }
+
+  report.finishedAt = new Date().toISOString();
+  await writeReport(options.outputPath, report);
+
+  if (options.closeWhenDone) {
+    await Window.getCurrent().close();
+  }
+}
+
 export async function runLiveWorkflowHarness(options: LiveWorkflowHarnessOptions): Promise<void> {
+  if (options.suiteName === 'prompt04_nodetree_mission_control') {
+    await runPrompt04NodeTreeMissionControlHarness(options);
+    return;
+  }
+
   if (options.suiteName === 'prompt05_branching_merge') {
     await runPrompt05BranchingMergeHarness(options);
     return;

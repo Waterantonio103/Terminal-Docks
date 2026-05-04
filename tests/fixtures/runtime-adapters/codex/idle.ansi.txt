@@ -1,0 +1,11 @@
+[?25l[K
+[K[1m
+›[22m [2mWrite tests for @filename[22m[K
+[K[2m
+  gpt-5.5 high · ~ · gpt-5.5 · Context 100% left · Context 0% used · Fast off[22m   
+[K
+[K
+[K
+[K
+[K
+[K[16;3H]0;⠋ C:\[?25h

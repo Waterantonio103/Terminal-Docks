@@ -1,0 +1,6 @@
+[?25l[2m╭──────────────────────────────────────────────╮[22m
+│ [1mAllow the terminal-docks MCP server to run tool "shell"?[22m │
+│ 1. Allow once                                │
+│ 2. Deny                                      │
+│ Press enter to submit                        │
+╰──────────────────────────────────────────────╯[?25h

@@ -1,0 +1,2 @@
+]0;Gemini CLI[38;2;255;135;175mTrust this folder?[m
+Approve tool call? [y/n]
