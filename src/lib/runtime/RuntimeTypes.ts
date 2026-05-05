@@ -9,6 +9,7 @@
 
 import type { CliId, ExecutionMode, PermissionCategory, PermissionDecision } from '../workflow/WorkflowTypes.js';
 import type { RuntimeActivationPayload } from '../missionRuntime.js';
+import type { PostAckProgressSnapshot, PostAckWatchdogAction, PostAckWatchdogReason } from './RuntimeProgressWatchdog.js';
 
 
 // ──────────────────────────────────────────────
@@ -19,6 +20,7 @@ export type RuntimeSessionState =
   | 'creating'
   | 'launching_cli'
   | 'awaiting_cli_ready'
+  | 'waiting_auth'
   | 'registering_mcp'
   | 'bootstrap_injecting'
   | 'bootstrap_sent'
@@ -152,8 +154,10 @@ export type RuntimeManagerEvent =
   | { type: 'session_disconnected'; sessionId: string; nodeId: string; reason: string }
   | { type: 'permission_requested'; sessionId: string; nodeId: string; request: RuntimePermissionRequest }
   | { type: 'permission_resolved'; sessionId: string; nodeId: string; permissionId: string; decision: PermissionDecision }
-  | { type: 'task_injected'; sessionId: string; nodeId: string; attempt: number }
+  | { type: 'task_injected'; sessionId: string; nodeId: string; attempt: number; promptBytes?: number; promptPreview?: string }
   | { type: 'task_acked'; sessionId: string; nodeId: string; attempt: number }
+  | { type: 'mcp_event_observed'; sessionId: string; nodeId: string; mcpType: string; at?: number }
+  | { type: 'post_ack_watchdog'; sessionId: string; nodeId: string; action: Exclude<PostAckWatchdogAction, 'none'>; reason: PostAckWatchdogReason; idleMs: number; windowMs: number; progress: PostAckProgressSnapshot; message?: string }
   | { type: 'completion_contract_missing'; sessionId: string; nodeId: string; outcome: 'success' | 'failure'; action: 'renudge' | 'failed'; summary?: string; error?: string }
   | { type: 'output_captured'; sessionId: string; nodeId: string; text: string }
   | { type: 'heartbeat'; sessionId: string; nodeId: string; at: number }

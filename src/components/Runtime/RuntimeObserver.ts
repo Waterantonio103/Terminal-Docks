@@ -116,7 +116,9 @@ class RuntimeObserver {
       artifacts: [],
       startedAt: s.createdAt,
       lastActivityAt: s.lastHeartbeatAt ?? s.createdAt,
-      currentAction: s.activePermission ? 'Awaiting Permission' : (s.lastError ? 'Failed' : undefined),
+      currentAction: s.state === 'waiting_auth'
+        ? 'Authentication Required'
+        : s.activePermission ? 'Awaiting Permission' : (s.lastError ? 'Failed' : undefined),
       activePermission: s.activePermission
     }));
   }
@@ -126,6 +128,7 @@ class RuntimeObserver {
       case 'creating':
       case 'launching_cli':
       case 'awaiting_cli_ready':
+      case 'waiting_auth':
       case 'registering_mcp':
       case 'bootstrap_injecting':
       case 'bootstrap_sent':

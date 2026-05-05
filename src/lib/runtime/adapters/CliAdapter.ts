@@ -35,6 +35,7 @@ export type CliOutputStatus =
   | 'idle'
   | 'processing'
   | 'completed'
+  | 'waiting_auth'
   | 'waiting_user_answer'
   | 'error';
 

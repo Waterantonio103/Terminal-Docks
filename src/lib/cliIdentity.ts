@@ -49,10 +49,10 @@ export function supportsHeadless(cli: CliId): boolean {
     case 'ollama':
     case 'lmstudio':
     case 'custom':
+    case 'opencode':
       return true;
     case 'codex':
     case 'gemini':
-    case 'opencode':
       return false;
     default:
       return false;

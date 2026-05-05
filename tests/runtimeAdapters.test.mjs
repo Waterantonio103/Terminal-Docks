@@ -113,3 +113,11 @@ run('Gemini trust/startup prompt output does not map to idle', () => {
   assert.equal(geminiAdapter.detectStatus(prompt).status, 'waiting_user_answer');
   assert.equal(geminiAdapter.detectReady(prompt).ready, false);
 });
+
+run('Gemini latest visible input prompt wins over stale auth spinner', () => {
+  const fixture = readFileSync(join(fixtureRoot, 'gemini', 'auth_then_ready_prompt11.ansi.txt'), 'utf8');
+  const status = geminiAdapter.detectStatus(fixture);
+  assert.equal(status.status, 'idle', status.detail);
+  assert.equal(status.confidence, 'high');
+  assert.equal(geminiAdapter.detectReady(fixture).ready, true);
+});

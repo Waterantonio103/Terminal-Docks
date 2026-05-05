@@ -48,6 +48,75 @@ function unsupported(reason: string, env: Record<string, string>): CliRunCommand
   };
 }
 
+function normalizeOpenCodeMcpUrl(value?: string | null): string | null {
+  const trimmed = value?.trim();
+  if (!trimmed) return null;
+
+  try {
+    const url = new URL(trimmed);
+    const currentPath = url.pathname.replace(/\/+$/, '');
+    url.pathname = currentPath.endsWith('/mcp') ? currentPath : `${currentPath || ''}/mcp`;
+    return url.toString();
+  } catch {
+    const base = trimmed.replace(/\/+$/, '');
+    return base.endsWith('/mcp') ? base : `${base}/mcp`;
+  }
+}
+
+export function buildOpenCodeWorkflowConfigContent(mcpUrl?: string | null): string {
+  const normalizedMcpUrl = normalizeOpenCodeMcpUrl(mcpUrl);
+  return JSON.stringify({
+    $schema: 'https://opencode.ai/config.json',
+    ...(normalizedMcpUrl
+      ? {
+          mcp: {
+            'terminal-docks': {
+              type: 'remote',
+              url: normalizedMcpUrl,
+              enabled: true,
+            },
+          },
+          tools: {
+            'terminal-docks*': true,
+            'terminal-docks_*': true,
+          },
+        }
+      : {}),
+    permission: 'allow',
+  });
+}
+
+export function buildOpenCodeHeadlessRunCommand({
+  env,
+  mcpUrl,
+  model,
+  workspaceDir,
+}: {
+  env: Record<string, string>;
+  mcpUrl?: string | null;
+  model?: string | null;
+  workspaceDir?: string | null;
+}): CliRunCommand {
+  const args = ['run', '--format', 'json'];
+  const workspace = workspaceDir?.trim();
+  const modelId = model?.trim();
+
+  if (workspace) args.push('--dir', workspace);
+  if (modelId) args.push('--model', modelId);
+  args.push('--dangerously-skip-permissions', '{prompt}');
+
+  return {
+    command: 'opencode',
+    args,
+    env: {
+      ...env,
+      OPENCODE_CONFIG_CONTENT:
+        env.OPENCODE_CONFIG_CONTENT?.trim() || buildOpenCodeWorkflowConfigContent(mcpUrl),
+    },
+    promptDelivery: 'arg_text',
+  };
+}
+
 export function buildCliRunCommand(
   payload: RuntimeActivationPayload,
   options: CliCommandBuilderOptions = {},
@@ -108,6 +177,15 @@ export function buildCliRunCommand(
       },
       promptDelivery: 'stdin',
     };
+  }
+
+  if (cli === 'opencode') {
+    return buildOpenCodeHeadlessRunCommand({
+      env,
+      mcpUrl: options.mcpUrl,
+      model: options.model ?? payload.modelId ?? null,
+      workspaceDir: payload.workspaceDir,
+    });
   }
 
   if (cli === 'claude') {

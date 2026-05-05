@@ -1,0 +1,8 @@
+Gemini CLI v0.40.1
+Signed in with Google /auth
+Waiting for authentication... (Press Esc or Ctrl+C to cancel)
+? for shortcuts
+YOLO Ctrl+Y                                   1 GEMINI.md file - 2 MCP servers
+* Type your message or @path/to/file
+workspace (/directory)    sandbox       /model             context       quota
+~                         no sandbox    Auto (Gemini 3)    0%            0% used

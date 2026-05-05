@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "preflight:live-workflow": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/live-workflow-preflight.ps1",
     "build": "tsc && vite build",
     "preview": "vite preview",
     "tauri": "tauri",

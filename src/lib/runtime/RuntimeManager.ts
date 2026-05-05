@@ -73,6 +73,14 @@ import { useWorkspaceStore } from '../../store/workspace.js';
 import { emit } from '@tauri-apps/api/event';
 import { terminalOutputBus } from './TerminalOutputBus.js';
 import { missionRepository } from '../missionRepository.js';
+import {
+  assessPostAckTerminalProgress,
+  evaluatePostAckWatchdog,
+  isMeaningfulPostAckMcpEvent,
+  type PostAckProgressSnapshot,
+  type PostAckProgressSource,
+  type PostAckWatchdogReason,
+} from './RuntimeProgressWatchdog.js';
 
 // ──────────────────────────────────────────────
 // Constants
@@ -93,6 +101,7 @@ const TASK_ACK_TIMEOUT_MS = 60_000;
 const BOOTSTRAP_INJECTION_TIMEOUT_MS = 10_000;
 const MISSING_MCP_COMPLETION_RENUDGE_MS = 4_000;
 const MISSING_MCP_COMPLETION_FAIL_MS = 90_000;
+const POST_ACK_NO_PROGRESS_WINDOW_MS = readRuntimeEnvNumber('VITE_RUNTIME_POST_ACK_NO_PROGRESS_WINDOW_MS', 60_000, 1_000);
 const RUNTIME_COMPLETION_POLL_MS = 2_000;
 const CODEX_IDLE_WAIT_MS = 1_000;
 const CODEX_IDLE_TIMEOUT_MS = 8_000;
@@ -101,6 +110,14 @@ const CODEX_TYPE_CHUNK_SIZE = 48;
 const CODEX_TYPE_CHUNK_DELAY_MS = 20;
 const PTY_DESTROY_WAIT_MS = 5_000;
 const PTY_DESTROY_POLL_MS = 100;
+const CLI_AUTH_WAIT_MS = readRuntimeEnvNumber('VITE_RUNTIME_AUTH_WAIT_MS', 120_000, CLI_READY_WAIT_MS);
+const APP_REGISTERED_BOOTSTRAP_CLIS = new Set(['gemini', 'opencode']);
+
+function readRuntimeEnvNumber(key: string, fallback: number, minimum = 0): number {
+  const env = (import.meta as ImportMeta & { env?: Record<string, string | undefined> }).env;
+  const value = Number(env?.[key] ?? fallback);
+  return Number.isFinite(value) ? Math.max(minimum, value) : fallback;
+}
 
 // ──────────────────────────────────────────────
 // CLI Runtime Strategies
@@ -165,6 +182,42 @@ function previewText(value: string | null | undefined, limit = 280): string | nu
   return trimmed.length <= limit ? trimmed : `${trimmed.slice(0, limit)}...`;
 }
 
+function extractExpectedOutputFiles(value: string | null | undefined): string[] {
+  const text = typeof value === 'string' ? value : '';
+  const match = /Expected files:\s*([^.\r\n]+)/i.exec(text);
+  if (!match?.[1]) return [];
+
+  const seen = new Set<string>();
+  return match[1]
+    .split(/,|\band\b/i)
+    .map(item => item.trim().replace(/^["'`]+|["'`]+$/g, ''))
+    .map(item => item.replace(/^[\\/]+/, '').replace(/[\\/]+$/g, ''))
+    .filter(item =>
+      item.length > 0 &&
+      item.length <= 160 &&
+      !item.includes('..') &&
+      !/^[A-Za-z]:/.test(item) &&
+      !/[<>:"|?*]/.test(item)
+    )
+    .filter(item => {
+      const key = item.toLowerCase();
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .slice(0, 20);
+}
+
+function joinWorkspaceOutputPath(workspaceDir: string, relativePath: string): string {
+  const root = workspaceDir.replace(/[\\/]+$/g, '');
+  const child = relativePath.replace(/^[\\/]+/g, '');
+  return `${root}\\${child}`;
+}
+
+function fileContentSignature(content: string): string {
+  return `${content.length}:${content.slice(0, 80)}:${content.slice(-80)}`;
+}
+
 // ──────────────────────────────────────────────
 // Per-Terminal Mutex
 // ──────────────────────────────────────────────
@@ -202,6 +255,17 @@ class TerminalLock {
   }
 }
 
+interface PostAckNoProgressWatchdogState extends PostAckProgressSnapshot {
+  expectedFiles: string[];
+  expectedFileSignatures: Map<string, string>;
+  lastExpectedFile?: string;
+  lastMcpEventType?: string;
+  lastTerminalProgressPreview?: string;
+  lastTerminalSignature?: string;
+  nudgeTimer?: ReturnType<typeof setTimeout>;
+  failTimer?: ReturnType<typeof setTimeout>;
+}
+
 // ──────────────────────────────────────────────
 // RuntimeManager
 // ──────────────────────────────────────────────
@@ -219,6 +283,7 @@ class RuntimeManager {
     nudgeTimer?: ReturnType<typeof setTimeout>;
     failTimer?: ReturnType<typeof setTimeout>;
   }>();
+  private postAckNoProgressWatchdogs = new Map<string, PostAckNoProgressWatchdogState>();
   private cliReadinessDiagnostics = new Map<string, string>();
   private runtimeCompletionPollers = new Map<string, {
     timer: ReturnType<typeof setInterval>;
@@ -565,6 +630,8 @@ class RuntimeManager {
         sessionId: session.sessionId,
         nodeId: session.nodeId,
         attempt: session.attempt,
+        promptBytes: new TextEncoder().encode(signal).length,
+        promptPreview: previewText(signal, 320) ?? '',
       });
       missionRepository.appendWorkflowEvent({
         missionId: session.missionId,
@@ -593,6 +660,8 @@ class RuntimeManager {
       sessionId: session.sessionId,
       nodeId: session.nodeId,
       attempt: session.attempt,
+      promptBytes: new TextEncoder().encode(signal).length,
+      promptPreview: previewText(signal, 320) ?? '',
     });
     missionRepository.appendWorkflowEvent({
       missionId: session.missionId,
@@ -670,6 +739,7 @@ class RuntimeManager {
     }
 
     session.clearPermission();
+    this.recordPostAckProgress(session, 'manual_input');
 
     this.emit({
       type: 'permission_resolved',
@@ -700,7 +770,7 @@ class RuntimeManager {
     }
 
     const midPipelineStates: RuntimeSessionState[] = [
-      'creating', 'launching_cli', 'awaiting_cli_ready', 'registering_mcp',
+      'creating', 'launching_cli', 'awaiting_cli_ready', 'waiting_auth', 'registering_mcp',
       'bootstrap_injecting', 'bootstrap_sent', 'awaiting_mcp_ready',
       'injecting_task', 'awaiting_ack',
     ];
@@ -980,6 +1050,7 @@ class RuntimeManager {
 
       session.transitionTo('running');
       this.startRuntimeCompletionPoller(session);
+      this.startPostAckNoProgressWatchdog(session);
 
       await acknowledgeActivation({
         missionId: session.missionId,
@@ -1114,12 +1185,22 @@ class RuntimeManager {
         return;
       }
 
+      this.emit({
+        type: 'mcp_event_observed',
+        sessionId,
+        nodeId: session.nodeId,
+        mcpType: event.type,
+        at: event.at,
+      });
+      this.recordPostAckMcpProgress(session, event.type);
+
       if (event.type === 'agent:heartbeat') {
         session.updateHeartbeat(event.at);
         this.emit({ type: 'heartbeat', sessionId, nodeId: session.nodeId, at: event.at });
       }
 
       if (event.type === 'task:completed') {
+        this.clearPostAckNoProgressWatchdog(session.sessionId);
         const outcome = (event.outcome === 'success' || event.outcome === 'failure')
           ? (event.outcome as 'success' | 'failure')
           : 'success';
@@ -1205,6 +1286,7 @@ class RuntimeManager {
         nodeId: session.nodeId,
         text: event.text,
       });
+      this.recordPostAckTerminalProgress(session, event.text);
 
       const perm = session.adapter.detectPermissionRequest(event.text);
       if (perm && session.state !== 'awaiting_permission') {
@@ -1221,6 +1303,7 @@ class RuntimeManager {
           nodeId: session.nodeId,
           request,
         });
+        this.recordPostAckProgress(session, 'permission_prompt');
       }
 
       const comp = session.adapter.detectCompletion(event.text);
@@ -1342,6 +1425,347 @@ class RuntimeManager {
     if (timers.nudgeTimer) clearTimeout(timers.nudgeTimer);
     if (timers.failTimer) clearTimeout(timers.failTimer);
     this.completionContractTimers.delete(sessionId);
+  }
+
+  private startPostAckNoProgressWatchdog(session: RuntimeSession): void {
+    if (session.missionId.startsWith('adhoc-')) return;
+
+    this.clearPostAckNoProgressWatchdog(session.sessionId);
+    const now = Date.now();
+    const expectedFiles = extractExpectedOutputFiles(
+      `${session.goal ?? ''}\n${session.instructionOverride ?? ''}`,
+    );
+    this.postAckNoProgressWatchdogs.set(session.sessionId, {
+      acknowledgedAt: now,
+      lastProgressAt: now,
+      progressCount: 0,
+      mcpEventCount: 0,
+      terminalProgressCount: 0,
+      expectedFileOutputCount: 0,
+      permissionPromptCount: 0,
+      expectedFiles,
+      expectedFileSignatures: new Map(),
+      warnedAt: null,
+    });
+    this.schedulePostAckNoProgressWatchdog(session.sessionId);
+  }
+
+  private clearPostAckNoProgressWatchdog(sessionId: string): void {
+    const state = this.postAckNoProgressWatchdogs.get(sessionId);
+    if (!state) return;
+    if (state.nudgeTimer) clearTimeout(state.nudgeTimer);
+    if (state.failTimer) clearTimeout(state.failTimer);
+    this.postAckNoProgressWatchdogs.delete(sessionId);
+  }
+
+  private schedulePostAckNoProgressWatchdog(sessionId: string): void {
+    const state = this.postAckNoProgressWatchdogs.get(sessionId);
+    if (!state) return;
+    if (state.nudgeTimer) clearTimeout(state.nudgeTimer);
+    if (state.failTimer) clearTimeout(state.failTimer);
+
+    const now = Date.now();
+    const nudgeAt = state.lastProgressAt + POST_ACK_NO_PROGRESS_WINDOW_MS;
+    const failAt = state.lastProgressAt + (POST_ACK_NO_PROGRESS_WINDOW_MS * 2);
+    state.nudgeTimer = setTimeout(() => {
+      this.handlePostAckNoProgressNudge(sessionId).catch(error => {
+        console.warn(`[runtime] post-ack no-progress nudge failed session=${sessionId}`, error);
+      });
+    }, Math.max(0, nudgeAt - now));
+    state.failTimer = setTimeout(() => {
+      this.handlePostAckNoProgressFailure(sessionId).catch(error => {
+        console.warn(`[runtime] post-ack no-progress failure handling failed session=${sessionId}`, error);
+      });
+    }, Math.max(0, failAt - now));
+  }
+
+  private getPostAckSnapshot(state: PostAckNoProgressWatchdogState): PostAckProgressSnapshot {
+    return {
+      acknowledgedAt: state.acknowledgedAt,
+      lastProgressAt: state.lastProgressAt,
+      progressCount: state.progressCount,
+      mcpEventCount: state.mcpEventCount,
+      terminalProgressCount: state.terminalProgressCount,
+      expectedFileOutputCount: state.expectedFileOutputCount,
+      permissionPromptCount: state.permissionPromptCount,
+      lastProgressSource: state.lastProgressSource,
+      warnedAt: state.warnedAt,
+    };
+  }
+
+  private recordPostAckProgress(
+    session: RuntimeSession,
+    source: PostAckProgressSource,
+    detail: { mcpType?: string; file?: string; terminalPreview?: string } = {},
+  ): void {
+    const state = this.postAckNoProgressWatchdogs.get(session.sessionId);
+    if (!state || isRuntimeSessionTerminal(session.state) || !this.isCurrentOwner(session)) return;
+
+    state.lastProgressAt = Date.now();
+    state.progressCount += 1;
+    state.lastProgressSource = source;
+    state.warnedAt = null;
+
+    if (source === 'mcp_event') {
+      state.mcpEventCount += 1;
+      state.lastMcpEventType = detail.mcpType;
+    } else if (source === 'terminal_output' || source === 'known_long_running_progress') {
+      state.terminalProgressCount += 1;
+      state.lastTerminalProgressPreview = detail.terminalPreview;
+    } else if (source === 'expected_file_output') {
+      state.expectedFileOutputCount += 1;
+      state.lastExpectedFile = detail.file;
+    } else if (source === 'permission_prompt') {
+      state.permissionPromptCount += 1;
+    }
+
+    this.schedulePostAckNoProgressWatchdog(session.sessionId);
+  }
+
+  private recordPostAckMcpProgress(session: RuntimeSession, mcpType: string): void {
+    if (mcpType === 'task:completed') return;
+    if (!isMeaningfulPostAckMcpEvent(mcpType)) return;
+    this.recordPostAckProgress(session, 'mcp_event', { mcpType });
+  }
+
+  private recordPostAckTerminalProgress(session: RuntimeSession, text: string): void {
+    const state = this.postAckNoProgressWatchdogs.get(session.sessionId);
+    if (!state) return;
+
+    const assessment = assessPostAckTerminalProgress(text);
+    if (!assessment.useful || !assessment.signature || !assessment.source) return;
+    if (assessment.signature === state.lastTerminalSignature && assessment.source !== 'known_long_running_progress') return;
+
+    state.lastTerminalSignature = assessment.signature;
+    this.recordPostAckProgress(session, assessment.source, {
+      terminalPreview: assessment.preview,
+    });
+  }
+
+  private async maybeRecordExpectedFileProgress(
+    session: RuntimeSession,
+    state: PostAckNoProgressWatchdogState,
+  ): Promise<boolean> {
+    if (!session.workspaceDir || state.expectedFiles.length === 0) return false;
+
+    let invokeFn: <T>(cmd: string, args?: Record<string, unknown>) => Promise<T>;
+    try {
+      const core = await import('@tauri-apps/api/core');
+      invokeFn = core.invoke as <T>(cmd: string, args?: Record<string, unknown>) => Promise<T>;
+    } catch {
+      return false;
+    }
+
+    for (const file of state.expectedFiles) {
+      const path = joinWorkspaceOutputPath(session.workspaceDir, file);
+      try {
+        const content = await invokeFn<string>('workspace_read_text_file', { path });
+        const signature = fileContentSignature(content);
+        if (state.expectedFileSignatures.get(file) !== signature) {
+          state.expectedFileSignatures.set(file, signature);
+          this.recordPostAckProgress(session, 'expected_file_output', { file });
+          return true;
+        }
+      } catch {
+        // Missing or unreadable expected output is not progress.
+      }
+    }
+
+    return false;
+  }
+
+  private async handlePostAckNoProgressNudge(sessionId: string): Promise<void> {
+    const session = this.sessions.get(sessionId);
+    const state = this.postAckNoProgressWatchdogs.get(sessionId);
+    if (!session || !state || !this.isCurrentOwner(session) || isRuntimeSessionTerminal(session.state)) {
+      this.clearPostAckNoProgressWatchdog(sessionId);
+      return;
+    }
+    if (this.completionContractTimers.has(sessionId)) return;
+    if (await this.settleSessionFromRuntimeRecord(sessionId, 'post_ack_no_progress_pre_nudge')) return;
+    if (session.state === 'awaiting_permission' || session.activePermission) {
+      this.recordPostAckProgress(session, 'permission_prompt');
+      return;
+    }
+    if (await this.maybeRecordExpectedFileProgress(session, state)) return;
+
+    const decision = evaluatePostAckWatchdog({
+      snapshot: this.getPostAckSnapshot(state),
+      now: Date.now(),
+      windowMs: POST_ACK_NO_PROGRESS_WINDOW_MS,
+      blockedOnPermission: Boolean(session.activePermission),
+    });
+    if (decision.action !== 'nudge' || !decision.reason) {
+      this.schedulePostAckNoProgressWatchdog(sessionId);
+      return;
+    }
+
+    const reason = decision.reason;
+    state.warnedAt = Date.now();
+    const message = this.buildPostAckWatchdogMessage(session, reason, decision.idleMs);
+    this.emit({
+      type: 'post_ack_watchdog',
+      sessionId,
+      nodeId: session.nodeId,
+      action: 'nudge',
+      reason,
+      idleMs: decision.idleMs,
+      windowMs: POST_ACK_NO_PROGRESS_WINDOW_MS,
+      progress: this.getPostAckSnapshot(state),
+      message,
+    });
+    this.appendPostAckWatchdogWorkflowEvent(session, 'warning', `${reason}_nudge`, message, reason, decision.idleMs, state);
+
+    if (!session.isTerminal) return;
+    const prompt = this.buildPostAckNudgePrompt(session, reason, decision.idleMs);
+    await this.injectInteractivePrompt(session, prompt, true).catch(error => {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      this.appendPostAckWatchdogWorkflowEvent(
+        session,
+        'warning',
+        'post_ack_watchdog_nudge_injection_failed',
+        `Post-ACK watchdog could not inject a nudge: ${errorMessage}`,
+        reason,
+        decision.idleMs,
+        state,
+      );
+    });
+  }
+
+  private async handlePostAckNoProgressFailure(sessionId: string): Promise<void> {
+    const session = this.sessions.get(sessionId);
+    const state = this.postAckNoProgressWatchdogs.get(sessionId);
+    if (!session || !state || !this.isCurrentOwner(session) || isRuntimeSessionTerminal(session.state)) {
+      this.clearPostAckNoProgressWatchdog(sessionId);
+      return;
+    }
+    if (this.completionContractTimers.has(sessionId)) return;
+    if (await this.settleSessionFromRuntimeRecord(sessionId, 'post_ack_no_progress_pre_fail')) return;
+    if (session.state === 'awaiting_permission' || session.activePermission) {
+      this.recordPostAckProgress(session, 'permission_prompt');
+      return;
+    }
+    if (await this.maybeRecordExpectedFileProgress(session, state)) return;
+
+    const decision = evaluatePostAckWatchdog({
+      snapshot: this.getPostAckSnapshot(state),
+      now: Date.now(),
+      windowMs: POST_ACK_NO_PROGRESS_WINDOW_MS,
+      blockedOnPermission: Boolean(session.activePermission),
+    });
+    if (decision.action === 'nudge') {
+      await this.handlePostAckNoProgressNudge(sessionId);
+      return;
+    }
+    if (decision.action !== 'fail' || !decision.reason) {
+      this.schedulePostAckNoProgressWatchdog(sessionId);
+      return;
+    }
+
+    const reason = this.buildPostAckWatchdogMessage(session, decision.reason, decision.idleMs);
+    session.markFailed(reason);
+    this.emit({
+      type: 'post_ack_watchdog',
+      sessionId,
+      nodeId: session.nodeId,
+      action: 'fail',
+      reason: decision.reason,
+      idleMs: decision.idleMs,
+      windowMs: POST_ACK_NO_PROGRESS_WINDOW_MS,
+      progress: this.getPostAckSnapshot(state),
+      message: reason,
+    });
+    this.emit({
+      type: 'session_failed',
+      sessionId,
+      nodeId: session.nodeId,
+      error: reason,
+    });
+
+    await acknowledgeActivation({
+      missionId: session.missionId,
+      nodeId: session.nodeId,
+      attempt: session.attempt,
+      status: 'failed',
+      reason,
+    }).catch(() => {});
+    await emit('workflow-node-update', {
+      id: session.nodeId,
+      status: 'failed',
+      attempt: session.attempt,
+      message: reason,
+    }).catch(() => {});
+
+    this.appendPostAckWatchdogWorkflowEvent(session, 'error', decision.reason, reason, decision.reason, decision.idleMs, state);
+    this.cleanupSession(session);
+    if (session.terminalId) {
+      this.destroyAndWaitForTerminal(session.terminalId).catch(err =>
+        console.warn(`[runtime] PTY destroy after post-ack watchdog failure failed terminal=${session.terminalId}`, err),
+      );
+    }
+  }
+
+  private buildPostAckWatchdogMessage(
+    session: RuntimeSession,
+    reason: PostAckWatchdogReason,
+    idleMs: number,
+  ): string {
+    const seconds = Math.round(idleMs / 1000);
+    if (reason === 'post_ack_no_mcp_completion') {
+      return `post_ack_no_mcp_completion: Node "${session.nodeId}" acknowledged the task and produced progress, but no task:completed MCP event arrived and activity then stalled for ${seconds}s.`;
+    }
+    return `post_ack_no_progress: Node "${session.nodeId}" acknowledged the task but produced no MCP completion, meaningful MCP progress, expected file output, permission prompt, or useful terminal progress for ${seconds}s.`;
+  }
+
+  private buildPostAckNudgePrompt(
+    session: RuntimeSession,
+    reason: PostAckWatchdogReason,
+    idleMs: number,
+  ): string {
+    const seconds = Math.round(idleMs / 1000);
+    const base = `Terminal Docks still has missionId="${session.missionId}" nodeId="${session.nodeId}" attempt=${session.attempt} marked running.`;
+    if (reason === 'post_ack_no_mcp_completion') {
+      return [
+        base,
+        `It has seen progress but no complete_task MCP call for ${seconds}s.`,
+        'If the node is done, call complete_task now. If you are still working, produce concrete terminal/tool progress or write a progress artifact.',
+      ].join(' ');
+    }
+    return [
+      base,
+      `It has not seen useful progress for ${seconds}s after task acknowledgement.`,
+      'If you are working, produce concrete terminal/tool progress or write a progress artifact. If the node is done, call complete_task now.',
+    ].join(' ');
+  }
+
+  private appendPostAckWatchdogWorkflowEvent(
+    session: RuntimeSession,
+    severity: 'warning' | 'error',
+    eventType: string,
+    message: string,
+    reason: PostAckWatchdogReason,
+    idleMs: number,
+    state: PostAckNoProgressWatchdogState,
+  ): void {
+    missionRepository.appendWorkflowEvent({
+      missionId: session.missionId,
+      nodeId: session.nodeId,
+      sessionId: session.sessionId,
+      terminalId: session.terminalId,
+      eventType,
+      severity,
+      message,
+      payloadJson: JSON.stringify({
+        reason,
+        idleMs,
+        windowMs: POST_ACK_NO_PROGRESS_WINDOW_MS,
+        progress: this.getPostAckSnapshot(state),
+        expectedFiles: state.expectedFiles,
+        lastExpectedFile: state.lastExpectedFile ?? null,
+        lastMcpEventType: state.lastMcpEventType ?? null,
+        lastTerminalProgressPreview: state.lastTerminalProgressPreview ?? null,
+      }),
+    }).catch(() => {});
   }
 
   private startRuntimeCompletionPoller(session: RuntimeSession): void {
@@ -1914,7 +2338,7 @@ class RuntimeManager {
     });
 
     let bootstrapPromptBody: string | null = null;
-    if (session.isTerminal && !startupPromptDeliveredViaLaunch) {
+    if (session.isTerminal && !startupPromptDeliveredViaLaunch && !APP_REGISTERED_BOOTSTRAP_CLIS.has(session.cliId)) {
       session.transitionTo('bootstrap_injecting');
 
       let bootstrapPrompt: string | null = null;
@@ -2046,6 +2470,8 @@ class RuntimeManager {
           sessionId: session.sessionId,
           nodeId: session.nodeId,
           attempt: session.attempt,
+          promptBytes: 0,
+          promptPreview: '<task already fetched from MCP>',
         });
       } else {
         console.log(`[runtime] injecting task prompt cli=${session.cliId} session=${session.sessionId}`);
@@ -2069,6 +2495,7 @@ class RuntimeManager {
 
       session.transitionTo('running');
       this.startRuntimeCompletionPoller(session);
+      this.startPostAckNoProgressWatchdog(session);
 
       await acknowledgeActivation({
         missionId: session.missionId,
@@ -2145,6 +2572,8 @@ class RuntimeManager {
         sessionId: session.sessionId,
         nodeId: session.nodeId,
         attempt: session.attempt,
+        promptBytes: 0,
+        promptPreview: '<startup prompt carried task context>',
       });
       return;
     }
@@ -2159,6 +2588,8 @@ class RuntimeManager {
         sessionId: session.sessionId,
         nodeId: session.nodeId,
         attempt: session.attempt,
+        promptBytes: 0,
+        promptPreview: '<task already fetched from MCP>',
       });
       return;
     }
@@ -2170,6 +2601,8 @@ class RuntimeManager {
       sessionId: session.sessionId,
       nodeId: session.nodeId,
       attempt: session.attempt,
+      promptBytes: new TextEncoder().encode(signal).length,
+      promptPreview: previewText(signal, 320) ?? '',
     });
   }
 
@@ -2674,8 +3107,33 @@ class RuntimeManager {
     return this.cliReadinessDiagnostics.get(session.sessionId) ?? fallback;
   }
 
+  private updateCliReadinessWaitState(session: RuntimeSession, status: StatusDetectionResult): void {
+    if (status.status === 'waiting_auth') {
+      if (session.state === 'awaiting_cli_ready') {
+        session.transitionTo('waiting_auth');
+        missionRepository.appendWorkflowEvent({
+          missionId: session.missionId,
+          nodeId: session.nodeId,
+          sessionId: session.sessionId,
+          terminalId: session.terminalId,
+          eventType: 'provider_auth_required',
+          severity: 'warning',
+          message: `${session.cliId} is waiting for provider authentication before task injection.`,
+          payloadJson: JSON.stringify({ detail: status.detail }),
+        }).catch(() => {});
+      }
+      return;
+    }
+
+    if (session.state === 'waiting_auth') {
+      session.transitionTo('awaiting_cli_ready');
+    }
+  }
+
   private async waitForCliReady(session: RuntimeSession, timeoutMs: number): Promise<boolean> {
-    const deadline = Date.now() + timeoutMs;
+    const startedAt = Date.now();
+    let deadline = startedAt + timeoutMs;
+    let authDeadline: number | null = null;
     let lastDetail: string | null = null;
     let lastOutputLength = 0;
     let lastStatus: StatusDetectionResult = {
@@ -2691,6 +3149,14 @@ class RuntimeManager {
         const readiness = this.evaluateSessionReadiness(session, output);
         lastStatus = readiness.status;
         lastStrictGateEnabled = readiness.strictGateEnabled;
+        this.updateCliReadinessWaitState(session, readiness.status);
+        if (readiness.status.status === 'waiting_auth' && authDeadline === null) {
+          authDeadline = startedAt + Math.max(timeoutMs, CLI_AUTH_WAIT_MS);
+          deadline = Math.max(deadline, authDeadline);
+          console.log(
+            `[runtime] cli-ready auth wait extended cli=${session.cliId} delayMs=${Math.max(timeoutMs, CLI_AUTH_WAIT_MS)}`,
+          );
+        }
         const detail = readiness.strictGateEnabled
           ? readiness.status.detail
           : readiness.legacyReady?.detail ?? readiness.status.detail;
@@ -2866,6 +3332,7 @@ class RuntimeManager {
 
   private cleanupSession(session: RuntimeSession): void {
     this.clearCompletionContractWatchdog(session.sessionId);
+    this.clearPostAckNoProgressWatchdog(session.sessionId);
     this.clearRuntimeCompletionPoller(session.sessionId);
     this.cliReadinessDiagnostics.delete(session.sessionId);
 
@@ -2968,6 +3435,9 @@ class RuntimeManager {
     this.ptyCleanupFns.clear();
     for (const sessionId of this.completionContractTimers.keys()) {
       this.clearCompletionContractWatchdog(sessionId);
+    }
+    for (const sessionId of this.postAckNoProgressWatchdogs.keys()) {
+      this.clearPostAckNoProgressWatchdog(sessionId);
     }
     for (const sessionId of this.runtimeCompletionPollers.keys()) {
       this.clearRuntimeCompletionPoller(sessionId);

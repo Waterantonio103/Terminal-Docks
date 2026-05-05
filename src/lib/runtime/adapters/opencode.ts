@@ -12,7 +12,7 @@ import type {
   StatusDetectionResult,
   TaskContext,
 } from './CliAdapter.js';
-import { buildPtyLaunchCommandParts } from '../../cliCommandBuilders.js';
+import { buildOpenCodeHeadlessRunCommand, buildPtyLaunchCommandParts } from '../../cliCommandBuilders.js';
 
 const ANSI_RE =
   /\x1b\][^\x07]*(?:\x07|\x1b\\)|\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])/g;
@@ -21,7 +21,7 @@ const PROMPT_RE = /(?:^|\n)\s*(?:>|\uff1e|❯|Input:|Prompt:)\s*(?:\S.*)?$/m;
 const SHELL_PROMPT_RE = /(?:^|\n)\s*(?:[A-Za-z]:\\[^>\r\n]*>|PS [^>\r\n]*>|[$#>])\s*$/m;
 const OPENCODE_INPUT_FOOTER_RE = /(?:^|\s)▣\s+[\w -]+(?:\s*·\s*[\w .-]+)?/u;
 const OPENCODE_UI_RE = /(?:\bopencode\b|▣|QUEUED|Press\s+Esc|ctrl-c|ready for next turn)/i;
-const READY_KEYWORDS_RE = /\b(ready for next turn|type your|enter your|input|prompt)\b/i;
+const READY_KEYWORDS_RE = /\b(ready for next turn|type your|enter your|ask anything|input|prompt)\b/i;
 const PERMISSION_RE = /(?:allow|approve|grant|trust|deny|reject).*(?:\?|y\/n|\[y\/n\]|\b1\.)/is;
 const COMPLETION_RE = /(?:\btask\s+(?:completed|complete)\b|turn\.completed|exit code\s+0)/i;
 const FAILURE_RE = /(?:\btask\s+failed\b|\bfatal error\b|\buncaught exception\b|exit code\s+[1-9]|\bunknown option\b|\binvalid flag\b|\bunexpected argument\b|(?:^|\n)\s*Usage:\s*opencode\b)/i;
@@ -44,6 +44,24 @@ function lastNonEmptyLines(output: string, count: number): string {
     .join('\n');
 }
 
+function escapeInstructionValue(value: string): string {
+  return value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+}
+
+function extractActivationField(signal: string, key: string): string | null {
+  const quoted = new RegExp(`"${key}"\\s*:\\s*"([^"]+)"`).exec(signal);
+  if (quoted?.[1]) return quoted[1];
+  const yamlish = new RegExp(`${key}\\s*:\\s*"([^"]+)"`).exec(signal);
+  return yamlish?.[1] ?? null;
+}
+
+function extractActivationNumber(signal: string, key: string): number | null {
+  const match = new RegExp(`"?${key}"?\\s*:\\s*(\\d+)`).exec(signal);
+  if (!match?.[1]) return null;
+  const value = Number(match[1]);
+  return Number.isInteger(value) && value > 0 ? value : null;
+}
+
 export const opencodeAdapter: CliAdapter = {
   id: 'opencode',
   label: 'OpenCode',
@@ -62,13 +80,12 @@ export const opencodeAdapter: CliAdapter = {
     };
 
     if (context.executionMode === 'headless' || context.executionMode === 'streaming_headless') {
-      return {
-        command: '',
-        args: [],
+      return buildOpenCodeHeadlessRunCommand({
         env,
-        promptDelivery: 'unsupported',
-        unsupportedReason: 'Headless command builder for "opencode" is not configured yet. Switch this node to interactive PTY or use a custom command template.',
-      };
+        mcpUrl: context.mcpUrl,
+        model: context.model,
+        workspaceDir: context.workspaceDir,
+      });
     }
 
     const { args } = buildPtyLaunchCommandParts('opencode', {
@@ -134,7 +151,7 @@ export const opencodeAdapter: CliAdapter = {
   },
 
   buildInitialPrompt(context: TaskContext): string {
-    return `### MISSION_CONTROL_ACTIVATION_REQUEST ### You have been assigned a new task. Please call 'get_task_details({ missionId: "${context.missionId}", nodeId: "${context.nodeId}" })' to retrieve your full context. --- ENVELOPE --- ${context.payloadJson} --- END ENVELOPE --- `;
+    return `NEW_TASK. call get_task_details({ missionId: "${escapeInstructionValue(context.missionId)}", nodeId: "${escapeInstructionValue(context.nodeId)}" }), execute this graph node, then call complete_task({ missionId: "${escapeInstructionValue(context.missionId)}", nodeId: "${escapeInstructionValue(context.nodeId)}", attempt: ${context.attempt}, outcome: "success" or "failure", summary: "<concise summary>" }) as the final MCP action. Do not stop after a normal final answer.`;
   },
 
   detectPermissionRequest(output: string): PermissionDetectionResult | null {
@@ -213,10 +230,29 @@ export const opencodeAdapter: CliAdapter = {
     return events;
   },
 
-  buildActivationInput(signal: string): { paste: string; submit: string } {
-    const flat = signal.replace(/\r?\n/g, ' ').replace(/\s{2,}/g, ' ').trim();
+  buildActivationInput(signal: string): { preClear?: string; paste: string; submit: string } {
+    let target = signal;
+
+    if (signal.includes('### MISSION_CONTROL_ACTIVATION_REQUEST ###')) {
+      const missionId = extractActivationField(signal, 'missionId');
+      const nodeId = extractActivationField(signal, 'nodeId');
+      const attempt = extractActivationNumber(signal, 'attempt') ?? 1;
+
+      if (missionId && nodeId) {
+        const escapedMissionId = escapeInstructionValue(missionId);
+        const escapedNodeId = escapeInstructionValue(nodeId);
+        target =
+          `NEW_TASK. call get_task_details({ missionId: "${escapedMissionId}", nodeId: "${escapedNodeId}" }), ` +
+          'execute this graph node, then call ' +
+          `complete_task({ missionId: "${escapedMissionId}", nodeId: "${escapedNodeId}", attempt: ${attempt}, outcome: "success" or "failure", summary: "<concise summary>" }) ` +
+          'as the final MCP action. Do not stop after a normal final answer.';
+      }
+    }
+
+    const flat = target.replace(/\r?\n/g, ' ').replace(/\s{2,}/g, ' ').trim();
     return {
-      paste: `\x15\x1b[200~${flat}\x1b[201~`,
+      preClear: '\x15',
+      paste: flat,
       submit: '\r',
     };
   },

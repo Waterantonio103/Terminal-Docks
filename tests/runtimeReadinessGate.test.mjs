@@ -100,3 +100,31 @@ run('readiness diagnostics include status, gate state, ids, and redacted tail', 
   assert.doesNotMatch(diagnostic, /secret-value/);
   assert.doesNotMatch(diagnostic, /Bearer abc123/);
 });
+
+run('waiting_auth is blocked for managed injection with explicit diagnostics', () => {
+  const diagnostic = buildCliReadinessDiagnostic({
+    cliId: 'gemini',
+    terminalId: 'term-auth',
+    nodeId: 'node-auth',
+    sessionId: 'session-auth',
+    timeoutMs: 20000,
+    strictGateEnabled: true,
+    status: {
+      status: 'waiting_auth',
+      confidence: 'high',
+      detail: 'Gemini authentication flow detected',
+    },
+    recentOutput: 'Waiting for authentication... (Press Esc or Ctrl+C to cancel)',
+  });
+
+  assert.equal(
+    isStatusSafeForManagedInjection({
+      status: 'waiting_auth',
+      confidence: 'high',
+      detail: 'Gemini authentication flow detected',
+    }),
+    false,
+  );
+  assert.match(diagnostic, /status=waiting_auth/);
+  assert.match(diagnostic, /Gemini authentication flow detected/);
+});

@@ -38,10 +38,40 @@ run('opencode startup title alone does not imply idle', () => {
   assert.equal(opencodeAdapter.detectReady(titleOnly).ready, false);
 });
 
+run('opencode ask-anything input screen maps to idle', () => {
+  const inputScreen = '\u001b]0;OpenCode\u0007OpenCode\n┃  Ask anything... "What is the tech stack of this project?"\n┃  Build · Step 3.5 Flash Nvidia · medium\n~:master ⊙ 2 MCP/status';
+  const status = opencodeAdapter.detectStatus(inputScreen);
+  assert.equal(status.status, 'idle', status.detail);
+  assert.equal(status.confidence, 'high');
+  assert.equal(opencodeAdapter.detectReady(inputScreen).ready, true);
+});
+
 run('opencode invalid flag help maps to error', () => {
   const help = 'opencode --yolo\nUnknown option: --yolo\nUsage: opencode [options]\nC:\\Users\\user>';
   assert.equal(opencodeAdapter.detectStatus(help).status, 'error');
   assert.equal(opencodeAdapter.detectReady(help).ready, false);
+});
+
+run('opencode activation prompt is reduced to direct MCP task acknowledgement', () => {
+  const input = opencodeAdapter.buildActivationInput(
+    [
+      '### MISSION_CONTROL_ACTIVATION_REQUEST ###',
+      'Please call get_task_details.',
+      '--- ENVELOPE ---',
+      '{"signal":"NEW_TASK","missionId":"mission-1","nodeId":"builder","sessionId":"session-123","attempt":2}',
+      '--- END ENVELOPE ---',
+    ].join('\n'),
+  );
+
+  assert.equal(input.preClear, '\x15');
+  assert.match(input.paste, /NEW_TASK\. call get_task_details/);
+  assert.match(input.paste, /missionId: "mission-1"/);
+  assert.match(input.paste, /nodeId: "builder"/);
+  assert.match(input.paste, /attempt: 2/);
+  assert.match(input.paste, /complete_task/);
+  assert.doesNotMatch(input.paste, /ENVELOPE/);
+  assert.doesNotMatch(input.paste, /\x1b\[200~/);
+  assert.equal(input.submit, '\r');
 });
 
 run('opencode TUI launch does not emit unsupported yolo flag', () => {
@@ -62,4 +92,39 @@ run('opencode TUI launch does not emit unsupported yolo flag', () => {
   assert.equal(launch.command, 'opencode');
   assert.equal(launch.promptDelivery, 'interactive_pty');
   assert.deepEqual(launch.args, ['C:/workspace', '--model', 'anthropic/claude-sonnet-4']);
+  assert.equal(launch.args.includes('--yolo'), false);
+  assert.equal(launch.args.includes('--dangerously-skip-permissions'), false);
+});
+
+run('opencode headless launch uses run subcommand and supported non-interactive flags', () => {
+  const launch = opencodeAdapter.buildLaunchCommand({
+    sessionId: 'session-1',
+    missionId: 'mission-1',
+    nodeId: 'node-1',
+    role: 'builder',
+    agentId: 'agent-1',
+    profileId: 'profile-1',
+    workspaceDir: 'C:/workspace',
+    mcpUrl: 'http://127.0.0.1:3741/mcp',
+    executionMode: 'streaming_headless',
+    model: 'anthropic/claude-sonnet-4',
+    yolo: true,
+  });
+
+  assert.equal(launch.command, 'opencode');
+  assert.equal(launch.promptDelivery, 'arg_text');
+  assert.deepEqual(launch.args, [
+    'run',
+    '--format',
+    'json',
+    '--dir',
+    'C:/workspace',
+    '--model',
+    'anthropic/claude-sonnet-4',
+    '--dangerously-skip-permissions',
+    '{prompt}',
+  ]);
+  assert.equal(launch.args.includes('--yolo'), false);
+  assert.equal(launch.args.includes('--no-alt-screen'), false);
+  assert.equal(JSON.parse(launch.env.OPENCODE_CONFIG_CONTENT).mcp['terminal-docks'].url, 'http://127.0.0.1:3741/mcp');
 });

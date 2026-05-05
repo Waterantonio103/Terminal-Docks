@@ -80,6 +80,7 @@ run('opencode TUI launch uses project positional and avoids invented stability f
   assert.equal(command, 'opencode');
   assert.deepEqual(args, ['C:/workspace', '--model', 'anthropic/claude-sonnet-4']);
   assert.equal(args.includes('--yolo'), false);
+  assert.equal(args.includes('--dangerously-skip-permissions'), false);
   assert.equal(args.includes('--no-alt-screen'), false);
   assert.equal(args.includes('--mouse'), false);
   assert.equal(args.includes('--pure'), false);

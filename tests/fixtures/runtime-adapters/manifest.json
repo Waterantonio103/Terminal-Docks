@@ -104,6 +104,12 @@
         "source": ".tmp-tests/live-rerun-singles.json",
         "note": "Gemini CLI input-ready frame."
       },
+      "auth_then_ready_prompt11.ansi.txt": {
+        "expectedStatus": "idle",
+        "provenance": "real-redacted-compact",
+        "source": ".tmp-tests/prompt11-live-report-20260505-221052.json",
+        "note": "Prompt 11 Gemini terminal buffer with stale authentication spinner text followed by a later injectable input prompt."
+      },
       "processing.ansi.txt": {
         "expectedStatus": "processing",
         "provenance": "real-redacted",

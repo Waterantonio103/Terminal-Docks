@@ -39,6 +39,7 @@ const RUNTIME_ACTIVE_STATES = new Set<MissionAgent['status']>([
   'launching',
   'connecting',
   'spawning',
+  'waiting_auth',
   'terminal_started',
   'adapter_starting',
   'mcp_connecting',

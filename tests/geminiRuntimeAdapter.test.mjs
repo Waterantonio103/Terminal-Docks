@@ -37,6 +37,22 @@ run('gemini trust startup prompt maps to waiting_user_answer', () => {
   assert.equal(geminiAdapter.detectReady(prompt).ready, false);
 });
 
+run('gemini authentication startup flow maps to waiting_auth', () => {
+  const prompt = '\u001b]0;◇  Ready (james)\u0007Gemini CLI v0.40.1\nSigned in with Google /auth\n╭──╮\n│ ⠙ Waiting for authentication... (Press Esc or Ctrl+C to cancel) │\n╰──╯';
+  const status = geminiAdapter.detectStatus(prompt);
+  assert.equal(status.status, 'waiting_auth', status.detail);
+  assert.equal(status.confidence, 'high');
+  assert.equal(geminiAdapter.detectReady(prompt).ready, false);
+});
+
+run('gemini prompt 11 stale auth followed by input prompt maps to idle', () => {
+  const fixture = readFileSync(join(fixtureDir, 'auth_then_ready_prompt11.ansi.txt'), 'utf8');
+  const status = geminiAdapter.detectStatus(fixture);
+  assert.equal(status.status, 'idle', status.detail);
+  assert.equal(status.confidence, 'high');
+  assert.equal(geminiAdapter.detectReady(fixture).ready, true);
+});
+
 run('gemini shell prompt alone does not imply idle', () => {
   const shell = 'C:\\Users\\user>';
   const status = geminiAdapter.detectStatus(shell);
@@ -50,4 +66,3 @@ run('gemini prompt-like text without confirmed UI does not imply idle', () => {
   assert.notEqual(status.status, 'idle');
   assert.equal(geminiAdapter.detectReady(promptLike).ready, false);
 });
-

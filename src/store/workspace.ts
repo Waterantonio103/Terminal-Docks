@@ -20,6 +20,7 @@ export type WorkflowNodeStatus =
   | 'launching'
   | 'connecting'
   | 'spawning'
+  | 'waiting_auth'
   | 'terminal_started'
   | 'adapter_starting'
   | 'mcp_connecting'

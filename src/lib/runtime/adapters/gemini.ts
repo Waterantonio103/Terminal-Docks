@@ -28,8 +28,10 @@ const PERMISSION_RE =
 const COMPLETION_RE = /(?:\btask\s+(?:completed|complete)\b|turn\.completed|exit code\s+0)/i;
 const FAILURE_RE =
   /(?:\btask\s+failed\b|\bfatal error\b|\buncaught exception\b|exit code\s+[1-9]|\bunknown option\b|\binvalid flag\b|\bunexpected argument\b|(?:^|\n)\s*Usage:\s*gemini\b|(?:^|\n)\s*Error:)/i;
+const AUTH_RE =
+  /(?:\bWaiting for authentication\b|\bauthentication required\b|\blog(?:\s|-)?in required\b|\bsign(?:\s|-)?in required\b|\bopen .*browser.*(?:auth|sign in|login)\b|\bpress esc or ctrl\+c to cancel\b.*\bauthentication\b)/i;
 const ACTIVE_WORK_RE =
-  /(?:\bWaiting for authentication\b|\bWorking\b|\bThinking\b|\bProcessing\b|\bRunning\b|\bExecuting\b|\bCalling\b|\bUsing tool\b|\btool execution\b|\bqueued message\b|\besc to interrupt\b|\bctrl-c to interrupt\b|\boperation in progress\b|[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏])/i;
+  /(?:\bWorking\b|\bThinking\b|\bProcessing\b|\bRunning\b|\bExecuting\b|\bCalling\b|\bUsing tool\b|\btool execution\b|\bqueued message\b|\besc to interrupt\b|\bctrl-c to interrupt\b|\boperation in progress\b|[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏])/i;
 
 function logGeminiReady(_message: string): void {
   // Kept as a local hook for temporary parser diagnostics without noisy polling logs.
@@ -49,6 +51,36 @@ function lastNonEmptyLines(output: string, count: number): string {
     .filter(line => line.trim())
     .slice(-count)
     .join('\n');
+}
+
+function lastMatchIndex(output: string, pattern: RegExp): number {
+  const flags = pattern.flags.includes('g') ? pattern.flags : `${pattern.flags}g`;
+  const matcher = new RegExp(pattern.source, flags);
+  let lastIndex = -1;
+  let match: RegExpExecArray | null;
+
+  while ((match = matcher.exec(output)) !== null) {
+    lastIndex = match.index;
+    if (match[0].length === 0) {
+      matcher.lastIndex += 1;
+    }
+  }
+
+  return lastIndex;
+}
+
+function latestIndexedStatus(
+  statuses: Array<StatusDetectionResult & { index: number; logMessage: string }>,
+): (StatusDetectionResult & { logMessage: string }) | null {
+  let latest: (StatusDetectionResult & { index: number; logMessage: string }) | null = null;
+  for (const status of statuses) {
+    if (status.index < 0) continue;
+    if (!latest || status.index > latest.index) {
+      latest = status;
+    }
+  }
+
+  return latest;
 }
 
 export const geminiAdapter: CliAdapter = {
@@ -104,35 +136,75 @@ export const geminiAdapter: CliAdapter = {
     const clean = stripTerminalControls(output);
     const hasGeminiUi = GEMINI_UI_RE.test(clean);
     const lastLine = lastNonEmptyLines(clean, 1);
+    const promptLikeIndex = Math.max(
+      lastMatchIndex(clean, PROMPT_BAR_RE),
+      lastMatchIndex(clean, GEMINI_INPUT_READY_RE),
+    );
+    const lastLineIsGeminiPrompt = hasGeminiUi && PROMPT_BAR_RE.test(`\n${lastLine}`);
+    const shellPromptIndex = !lastLineIsGeminiPrompt && SHELL_PROMPT_RE.test(lastLine)
+      ? clean.lastIndexOf(lastLine)
+      : -1;
+    const permission = this.detectPermissionRequest(output);
 
-    if (this.detectPermissionRequest(output)) {
-      logGeminiReady('blocked reason=permission_prompt');
-      return { status: 'waiting_user_answer', confidence: 'high', detail: 'Gemini permission prompt detected' };
-    }
+    const latestStatus = latestIndexedStatus([
+      {
+        index: permission ? lastMatchIndex(clean, PERMISSION_RE) : -1,
+        status: 'waiting_user_answer',
+        confidence: 'high',
+        detail: 'Gemini permission prompt detected',
+        logMessage: 'blocked reason=permission_prompt',
+      },
+      {
+        index: lastMatchIndex(clean, FAILURE_RE),
+        status: 'error',
+        confidence: 'high',
+        detail: 'Gemini failure output detected',
+        logMessage: 'blocked reason=failure_output',
+      },
+      {
+        index: lastMatchIndex(clean, COMPLETION_RE),
+        status: 'completed',
+        confidence: 'high',
+        detail: 'Gemini completion marker detected',
+        logMessage: 'blocked reason=completion_marker',
+      },
+      {
+        index: lastMatchIndex(clean, AUTH_RE),
+        status: 'waiting_auth',
+        confidence: 'high',
+        detail: 'Gemini authentication flow detected',
+        logMessage: 'blocked reason=authentication_required',
+      },
+      {
+        index: lastMatchIndex(clean, ACTIVE_WORK_RE),
+        status: 'processing',
+        confidence: 'high',
+        detail: 'Gemini active work indicator detected',
+        logMessage: 'waiting reason=active_work',
+      },
+      {
+        index: hasGeminiUi ? promptLikeIndex : -1,
+        status: 'idle',
+        confidence: BANNER_RE.test(clean) ? 'high' : 'medium',
+        detail: 'Gemini input prompt detected',
+        logMessage: 'accepted reason=gemini_prompt_marker',
+      },
+      {
+        index: shellPromptIndex,
+        status: 'error',
+        confidence: 'low',
+        detail: 'Shell prompt only - Gemini not confirmed',
+        logMessage: 'rejected reason=shell_prompt_only',
+      },
+    ]);
 
-    if (FAILURE_RE.test(clean)) {
-      logGeminiReady('blocked reason=failure_output');
-      return { status: 'error', confidence: 'high', detail: 'Gemini failure output detected' };
-    }
-
-    if (COMPLETION_RE.test(clean)) {
-      logGeminiReady('blocked reason=completion_marker');
-      return { status: 'completed', confidence: 'high', detail: 'Gemini completion marker detected' };
-    }
-
-    if (ACTIVE_WORK_RE.test(clean)) {
-      logGeminiReady('waiting reason=active_work');
-      return { status: 'processing', confidence: 'high', detail: 'Gemini active work indicator detected' };
-    }
-
-    if (hasGeminiUi && (PROMPT_BAR_RE.test(clean) || GEMINI_INPUT_READY_RE.test(clean))) {
-      logGeminiReady('accepted reason=gemini_prompt_marker');
-      return { status: 'idle', confidence: BANNER_RE.test(clean) ? 'high' : 'medium', detail: 'Gemini input prompt detected' };
-    }
-
-    if (SHELL_PROMPT_RE.test(lastLine)) {
-      logGeminiReady('rejected reason=shell_prompt_only');
-      return { status: 'error', confidence: 'low', detail: 'Shell prompt only - Gemini not confirmed' };
+    if (latestStatus) {
+      logGeminiReady(latestStatus.logMessage);
+      return {
+        status: latestStatus.status,
+        confidence: latestStatus.confidence,
+        detail: latestStatus.detail,
+      };
     }
 
     if (hasGeminiUi) {
@@ -140,7 +212,7 @@ export const geminiAdapter: CliAdapter = {
       return { status: 'processing', confidence: 'low', detail: 'Gemini UI detected, waiting for input prompt' };
     }
 
-    if (PROMPT_BAR_RE.test(clean) || GEMINI_INPUT_READY_RE.test(clean)) {
+    if (promptLikeIndex >= 0) {
       logGeminiReady('waiting reason=prompt_without_ui');
       return { status: 'processing', confidence: 'low', detail: 'Prompt-like output without Gemini UI - waiting' };
     }

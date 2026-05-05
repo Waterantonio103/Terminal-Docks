@@ -1,11 +1,18 @@
 import assert from 'node:assert/strict';
 import {
   buildCliRunCommand,
+  buildOpenCodeWorkflowConfigContent,
   buildCodexFollowupTaskSignal,
   buildCodexInteractiveLaunchArgs,
   buildCodexInteractiveLaunchCommand,
 } from '../.tmp-tests/lib/cliCommandBuilders.js';
+import { supportsHeadless } from '../.tmp-tests/lib/cliIdentity.js';
 import { codexAdapter } from '../.tmp-tests/lib/runtime/adapters/codex.js';
+import {
+  assessPostAckTerminalProgress,
+  evaluatePostAckWatchdog,
+  isMeaningfulPostAckMcpEvent,
+} from '../.tmp-tests/lib/runtime/RuntimeProgressWatchdog.js';
 import { checkMcpHealthDetailed } from '../.tmp-tests/lib/runtime/TerminalRuntime.js';
 import { buildStartAgentRunRequest } from '../.tmp-tests/lib/runtimeDispatcher.js';
 
@@ -95,6 +102,155 @@ run('codex headless command is disabled for normal workflow safety', () => {
   assert.equal(command.command, '');
   assert.equal(command.promptDelivery, 'unsupported');
   assert.match(command.unsupportedReason, /interactive PTY/);
+});
+
+run('post-ack watchdog fails acknowledged stalled sessions as post_ack_no_progress', () => {
+  const decision = evaluatePostAckWatchdog({
+    snapshot: {
+      acknowledgedAt: 0,
+      lastProgressAt: 0,
+      progressCount: 0,
+      mcpEventCount: 0,
+      terminalProgressCount: 0,
+      expectedFileOutputCount: 0,
+      permissionPromptCount: 0,
+      warnedAt: 60_000,
+    },
+    now: 120_000,
+    windowMs: 60_000,
+  });
+
+  assert.equal(decision.action, 'fail');
+  assert.equal(decision.reason, 'post_ack_no_progress');
+});
+
+run('post-ack watchdog ignores acknowledged sessions that completed', () => {
+  const decision = evaluatePostAckWatchdog({
+    snapshot: {
+      acknowledgedAt: 0,
+      lastProgressAt: 0,
+      progressCount: 0,
+      mcpEventCount: 0,
+      terminalProgressCount: 0,
+      expectedFileOutputCount: 0,
+      permissionPromptCount: 0,
+      warnedAt: 60_000,
+    },
+    now: 180_000,
+    windowMs: 60_000,
+    completed: true,
+  });
+
+  assert.equal(decision.action, 'none');
+});
+
+run('post-ack watchdog treats progress as an extension and classifies later stalls separately', () => {
+  const activeDecision = evaluatePostAckWatchdog({
+    snapshot: {
+      acknowledgedAt: 0,
+      lastProgressAt: 70_000,
+      progressCount: 1,
+      mcpEventCount: 0,
+      terminalProgressCount: 1,
+      expectedFileOutputCount: 0,
+      permissionPromptCount: 0,
+      lastProgressSource: 'terminal_output',
+      warnedAt: null,
+    },
+    now: 120_000,
+    windowMs: 60_000,
+  });
+  assert.equal(activeDecision.action, 'none');
+
+  const stalledDecision = evaluatePostAckWatchdog({
+    snapshot: {
+      acknowledgedAt: 0,
+      lastProgressAt: 70_000,
+      progressCount: 1,
+      mcpEventCount: 0,
+      terminalProgressCount: 1,
+      expectedFileOutputCount: 0,
+      permissionPromptCount: 0,
+      lastProgressSource: 'terminal_output',
+      warnedAt: 130_000,
+    },
+    now: 190_000,
+    windowMs: 60_000,
+  });
+  assert.equal(stalledDecision.action, 'fail');
+  assert.equal(stalledDecision.reason, 'post_ack_no_mcp_completion');
+});
+
+run('post-ack terminal progress ignores spinner-only output but accepts concrete tool progress', () => {
+  assert.equal(assessPostAckTerminalProgress('\u001b[?25l\u001b[?2026h / \\ -').useful, false);
+  const progress = assessPostAckTerminalProgress('Running command: npm test -- --runInBand');
+  assert.equal(progress.useful, true);
+  assert.equal(progress.source, 'known_long_running_progress');
+  assert.equal(isMeaningfulPostAckMcpEvent('activation:acked'), false);
+  assert.equal(isMeaningfulPostAckMcpEvent('agent:heartbeat'), true);
+});
+
+run('opencode is eligible for headless workflow execution', () => {
+  assert.equal(supportsHeadless('opencode'), true);
+});
+
+run('opencode headless command uses official run mode with inline workflow config', () => {
+  const command = buildCliRunCommand(payload({ cliType: 'opencode' }), {
+    mcpUrl: 'http://127.0.0.1:3741',
+    model: 'anthropic/claude-sonnet-4',
+  });
+
+  assert.equal(command.command, 'opencode');
+  assert.equal(command.promptDelivery, 'arg_text');
+  assert.deepEqual(command.args, [
+    'run',
+    '--format',
+    'json',
+    '--dir',
+    'C:/workspace',
+    '--model',
+    'anthropic/claude-sonnet-4',
+    '--dangerously-skip-permissions',
+    '{prompt}',
+  ]);
+  assert.equal(command.args.includes('--yolo'), false);
+  assert.equal(command.args.includes('--no-alt-screen'), false);
+
+  const config = JSON.parse(command.env.OPENCODE_CONFIG_CONTENT);
+  assert.equal(config.mcp['terminal-docks'].type, 'remote');
+  assert.equal(config.mcp['terminal-docks'].url, 'http://127.0.0.1:3741/mcp');
+  assert.equal(config.mcp['terminal-docks'].enabled, true);
+  assert.equal(config.permission, 'allow');
+});
+
+run('opencode headless dispatcher materializes activation prompt as final message arg', () => {
+  const { request, error } = buildStartAgentRunRequest(
+    payload({ cliType: 'opencode' }),
+    'NEW_TASK. call get_task_details, then complete_task.',
+    {
+      mcpUrl: 'http://127.0.0.1:3741/mcp',
+      model: 'anthropic/claude-sonnet-4',
+    },
+  );
+
+  assert.equal(error, null);
+  assert.ok(request);
+  assert.equal(request.command, 'opencode');
+  assert.equal(request.promptDelivery, 'arg_text');
+  assert.equal(request.args.at(-1), 'NEW_TASK. call get_task_details, then complete_task.');
+  assert.equal(request.args.includes('{prompt}'), false);
+  assert.equal(JSON.parse(request.env.OPENCODE_CONFIG_CONTENT).mcp['terminal-docks'].url, 'http://127.0.0.1:3741/mcp');
+});
+
+run('opencode workflow config preserves explicit OPENCODE_CONFIG_CONTENT override', () => {
+  const customConfig = JSON.stringify({ permission: { bash: 'ask' } });
+  const command = buildCliRunCommand(payload({ cliType: 'opencode' }), {
+    customEnv: { OPENCODE_CONFIG_CONTENT: customConfig },
+    mcpUrl: 'http://127.0.0.1:3741',
+  });
+
+  assert.equal(command.env.OPENCODE_CONFIG_CONTENT, customConfig);
+  assert.equal(JSON.parse(buildOpenCodeWorkflowConfigContent('http://127.0.0.1:3741')).mcp['terminal-docks'].url, 'http://127.0.0.1:3741/mcp');
 });
 
 run('codex interactive argv places model and yolo before final prompt', () => {

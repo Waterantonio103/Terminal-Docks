@@ -153,7 +153,9 @@ function isRateLimitText(text: string): boolean {
   return (
     lower.includes('rate limit') ||
     lower.includes('rate_limit') ||
-    lower.includes('quota') ||
+    lower.includes('quota exceeded') ||
+    lower.includes('quota exhausted') ||
+    lower.includes('quota limit') ||
     lower.includes('limit exhausted') ||
     lower.includes('limit will reset') ||
     lower.includes('too many requests') ||
@@ -406,21 +408,37 @@ function classifyFailureCategory(
   sessionEvents: Array<Record<string, unknown>>,
   terminalTails: Record<string, string>,
 ): string | undefined {
+  const eventTypes = sessionEvents.map(event => String(event.type ?? ''));
+  const mcpEventTypes = sessionEvents
+    .filter(event => event.type === 'mcp_event_observed')
+    .map(event => String(event.mcpType ?? ''));
   const combined = [
     error ?? '',
-    ...sessionEvents.map(event => String(event.error ?? event.type ?? '')),
+    ...sessionEvents.map(event => String(event.error ?? event.reason ?? event.message ?? event.type ?? '')),
     ...Object.values(terminalTails),
   ].join('\n').toLowerCase();
 
   if (!combined.trim()) return undefined;
+  if (combined.includes('waiting_auth') || combined.includes('authentication flow detected') || combined.includes('waiting for authentication')) {
+    return 'provider_auth_required';
+  }
   if (combined.includes('rate limit') || combined.includes('rate_limit') || combined.includes('429')) return 'rate_limited';
   if (combined.includes('mcp_health_timeout')) return 'mcp_health_timeout';
   if (combined.includes('mcp_health_unavailable')) return 'mcp_health_unavailable';
   if (combined.includes('mcp_registration_timeout')) return 'mcp_registration_timeout';
   if (combined.includes('mcp_registration_failed')) return 'mcp_registration_failed';
+  if (combined.includes('post_ack_no_progress')) return 'post_ack_no_progress';
+  if (combined.includes('post_ack_no_mcp_completion')) return 'post_ack_no_mcp_completion';
   if (combined.includes('missing_mcp_completion')) return 'missing_mcp_completion';
   if (combined.includes('pty_exited_without_completion')) return 'pty_exited_without_completion';
   if (combined.includes('did not call get_task_details') || combined.includes('did not fetch the current task')) return 'task_ack_timeout';
+  if (
+    eventTypes.includes('task_acked') &&
+    !eventTypes.includes('session_completed') &&
+    !mcpEventTypes.includes('task:completed')
+  ) {
+    return 'post_ack_no_mcp_completion';
+  }
   return undefined;
 }
 
@@ -645,6 +663,7 @@ interface Prompt06AgentSpec {
   roleId: string;
   title: string;
   responsibility: string;
+  cli?: WorkflowAgentCli;
 }
 
 interface Prompt06WorkflowSpec {
@@ -1242,8 +1261,83 @@ const PROMPT_04_WORKFLOWS: Prompt06WorkflowSpec[] = [
   },
 ];
 
-function prompt06Agent(id: string, roleId: string, title: string, responsibility: string): Prompt06AgentSpec {
-  return { id, roleId, title, responsibility };
+const PROMPT_11_WORKFLOWS: Prompt06WorkflowSpec[] = [
+  {
+    name: 'single-claude-status-page',
+    title: 'Single-agent Claude smoke output',
+    task: 'Create a compact static status page for a fictional build monitor called Dock Pulse.',
+    expectedFiles: ['index.html', 'README.md'],
+    runInstruction: 'Open index.html in a browser.',
+    agents: [
+      prompt06Agent('agent', 'builder', 'Claude Builder', 'Create the full static page and README, then complete the MCP task.', 'claude'),
+    ],
+    edges: [],
+  },
+  {
+    name: 'gemini-opencode-two-agent-cli',
+    title: 'Gemini scout to OpenCode builder CLI smoke output',
+    task: 'Create a tiny standard-library Python CLI named dock_notes.py that adds and lists text notes from a JSON file.',
+    expectedFiles: ['dock_notes.py', 'sample_notes.json', 'README.md'],
+    runInstruction: 'Run python dock_notes.py --help.',
+    agents: [
+      prompt06Agent('scout', 'scout', 'Gemini Scout', 'Define the CLI command contract and sample data shape.', 'gemini'),
+      prompt06Agent('builder', 'builder', 'OpenCode Builder', 'Build the CLI and README from the scout context.', 'opencode'),
+    ],
+    edges: [
+      prompt06Edge('scout', 'builder'),
+    ],
+  },
+  {
+    name: 'mixed-branch-review',
+    title: 'Mixed CLI branch and review smoke output',
+    task: 'Create a small browser dashboard for a fictional release checklist, with one branch responsible for copy/layout and one branch responsible for JSON data and rendering behavior.',
+    expectedFiles: ['index.html', 'app.js', 'data.json', 'README.md'],
+    runInstruction: 'Open index.html in a browser.',
+    agents: [
+      prompt06Agent('coordinator', 'coordinator', 'Codex Coordinator', 'Define branch ownership, expected files, and final acceptance criteria.', 'codex'),
+      prompt06Agent('builder-copy', 'builder', 'Claude Copy Builder', 'Create page structure and concise release checklist copy.', 'claude'),
+      prompt06Agent('builder-data', 'builder', 'Gemini Data Builder', 'Create data.json and app.js rendering/filtering behavior.', 'gemini'),
+      prompt06Agent('reviewer', 'reviewer', 'OpenCode Reviewer', 'Inspect both branch outputs, verify all expected files, and finalize README instructions.', 'opencode'),
+    ],
+    edges: [
+      prompt06Edge('coordinator', 'builder-copy'),
+      prompt06Edge('coordinator', 'builder-data'),
+      prompt06Edge('builder-copy', 'reviewer'),
+      prompt06Edge('builder-data', 'reviewer'),
+    ],
+  },
+  {
+    name: 'consecutive-opencode-single',
+    title: 'Consecutive single-agent run A with OpenCode',
+    task: 'Create a compact HTML quick reference for Terminal Docks smoke-test acceptance signals.',
+    expectedFiles: ['index.html', 'README.md'],
+    runInstruction: 'Open index.html in a browser.',
+    agents: [
+      prompt06Agent('agent', 'builder', 'OpenCode Builder', 'Create the full static quick reference and README, then complete the MCP task.', 'opencode'),
+    ],
+    edges: [],
+  },
+  {
+    name: 'consecutive-codex-single',
+    title: 'Consecutive single-agent run B with Codex',
+    task: 'Create a compact HTML quick reference for Terminal Docks smoke-test acceptance signals, as the second consecutive single-agent run.',
+    expectedFiles: ['index.html', 'README.md'],
+    runInstruction: 'Open index.html in a browser.',
+    agents: [
+      prompt06Agent('agent', 'builder', 'Codex Builder', 'Create the full static quick reference and README, then complete the MCP task.', 'codex'),
+    ],
+    edges: [],
+  },
+];
+
+function prompt06Agent(
+  id: string,
+  roleId: string,
+  title: string,
+  responsibility: string,
+  cli?: WorkflowAgentCli,
+): Prompt06AgentSpec {
+  return { id, roleId, title, responsibility, cli };
 }
 
 function prompt06Edge(fromNodeId: string, toNodeId: string, condition: 'always' | 'on_success' | 'on_failure' = 'on_success') {
@@ -1356,11 +1450,13 @@ function buildPrompt06Mission(
       presetId: `live:${suiteSlug}:${spec.name}`,
       runVersion: 1,
     },
-    nodes: spec.agents.map((agent, index) => ({
-      id: agent.id,
-      roleId: agent.roleId,
-      instructionOverride: [
-        `You are a live Terminal Docks Prompt ${promptNumber} Codex workflow agent.`,
+    nodes: spec.agents.map((agent, index) => {
+      const cli = agent.cli ?? 'codex';
+      return {
+        id: agent.id,
+        roleId: agent.roleId,
+        instructionOverride: [
+          `You are a live Terminal Docks Prompt ${promptNumber} ${cli} workflow agent.`,
         `Role: ${agent.title}.`,
         `Responsibility: ${agent.responsibility}`,
         `Output directory: ${outputDir}.`,
@@ -1373,18 +1469,19 @@ function buildPrompt06Mission(
         'Avoid screenshots, preview images, browser automation, and extra generated assets unless your named responsibility is testing and file checks are insufficient.',
         'Complete your node with complete_task or handoff_task after your contribution or verification is done.',
         'Do not end with only a normal final answer; a successful MCP completion/handoff tool call is required.',
-      ].join(' '),
-      terminal: {
-        terminalId: `live-${suiteSlug}-${suffix}-${index + 1}-${agent.id}`,
-        terminalTitle: `${agent.title} (${spec.name})`,
-        cli: 'codex',
-        model: LIVE_WORKFLOW_MODEL,
-        yolo: true,
-        executionMode: 'interactive_pty',
-        paneId: `pane-live-${suiteSlug}-${suffix}-${index + 1}`,
-        reusedExisting: false,
-      },
-    })),
+        ].join(' '),
+        terminal: {
+          terminalId: `live-${suiteSlug}-${suffix}-${index + 1}-${agent.id}`,
+          terminalTitle: `${agent.title} (${spec.name})`,
+          cli,
+          model: LIVE_WORKFLOW_MODEL,
+          yolo: true,
+          executionMode: 'interactive_pty',
+          paneId: `pane-live-${suiteSlug}-${suffix}-${index + 1}`,
+          reusedExisting: false,
+        },
+      };
+    }),
     edges: spec.edges.map((edge, index) => ({
       id: `edge:${edge.fromNodeId}:${edge.condition ?? 'on_success'}:${edge.toNodeId}:${index}`,
       fromNodeId: edge.fromNodeId,
@@ -1434,6 +1531,8 @@ async function runPrompt06Workflow(
   await ensureNestedDirectory(suiteDir);
   const outputDir = await ensureWorkflowDirectory(suiteDir, `workflow-${String(index + 1).padStart(2, '0')}-${spec.name}-${suffix}`);
   const mission = buildPrompt06Mission(spec, outputDir, suffix, promptNumber, suiteSlug);
+  const missionCliSequence = mission.nodes.map(node => node.terminal.cli);
+  const missionCliLabel = missionCliSequence.join('>');
   const sessionEvents: Array<Record<string, unknown>> = [];
   const orchestratorEvents: Array<Record<string, unknown>> = [];
   const sessionIds = new Set<string>();
@@ -1486,8 +1585,8 @@ async function runPrompt06Workflow(
         const validation = await validateOutputFiles(outputDir, spec.expectedFiles);
         const error = 'Provider rate limit detected in terminal output.';
         return {
-          cli: 'codex',
-          cliSequence: mission.nodes.map(() => 'codex' as WorkflowAgentCli),
+          cli: missionCliLabel,
+          cliSequence: missionCliSequence,
           roleSequence: mission.nodes.map(node => node.roleId),
           phase: 'large',
           taskType: 'handoff',
@@ -1514,8 +1613,8 @@ async function runPrompt06Workflow(
         const failures = Object.values(run.nodeStates).filter(node => node.state === 'failed');
         const error = failures.map(node => `${node.nodeId}: failed`).join('; ') || (validation.missingFiles.length ? `Missing files: ${validation.missingFiles.join(', ')}` : undefined);
         return {
-          cli: 'codex',
-          cliSequence: mission.nodes.map(() => 'codex' as WorkflowAgentCli),
+          cli: missionCliLabel,
+          cliSequence: missionCliSequence,
           roleSequence: mission.nodes.map(node => node.roleId),
           phase: 'large',
           taskType: 'handoff',
@@ -1547,8 +1646,8 @@ async function runPrompt06Workflow(
     const failedEvent = orchestratorEvents.find(event => event.type === 'node_failed');
     const error = typeof failedEvent?.error === 'string' ? failedEvent.error : undefined;
     return {
-      cli: 'codex',
-      cliSequence: mission.nodes.map(() => 'codex' as WorkflowAgentCli),
+      cli: missionCliLabel,
+      cliSequence: missionCliSequence,
       roleSequence: mission.nodes.map(node => node.roleId),
       phase: 'large',
       taskType: 'handoff',
@@ -1574,8 +1673,8 @@ async function runPrompt06Workflow(
     const validation = await validateOutputFiles(outputDir, spec.expectedFiles);
     const message = error instanceof Error ? error.message : String(error);
     return {
-      cli: 'codex',
-      cliSequence: mission.nodes.map(() => 'codex' as WorkflowAgentCli),
+      cli: missionCliLabel,
+      cliSequence: missionCliSequence,
       roleSequence: mission.nodes.map(node => node.roleId),
       phase: 'large',
       taskType: 'handoff',
@@ -1742,6 +1841,55 @@ async function runPrompt04NodeTreeMissionControlHarness(options: LiveWorkflowHar
   }
 }
 
+async function runPrompt11MixedCliSmokeHarness(options: LiveWorkflowHarnessOptions): Promise<void> {
+  const selectedWorkflows = selectPromptWorkflows(PROMPT_11_WORKFLOWS);
+  const report = {
+    startedAt: new Date().toISOString(),
+    finishedAt: null as string | null,
+    suiteName: 'prompt11_mixed_cli_smoke',
+    workflowFilter: LIVE_WORKFLOW_FILTER ?? null,
+    executionPath: 'live_app_harness',
+    liveRuntimeLaunched: true,
+    note: 'Runs Prompt 11 through MissionOrchestrator / WorkflowOrchestrator / RuntimeManager with mixed Claude, Gemini, OpenCode, and Codex interactive_pty nodes per the operator override.',
+    workflows: selectedWorkflows.map(({ spec, index }) => ({
+      index: index + 1,
+      name: spec.name,
+      title: spec.title,
+      agentCount: spec.agents.length,
+      clis: spec.agents.map(agent => agent.cli ?? 'codex'),
+      expectedFiles: spec.expectedFiles,
+      runInstruction: spec.runInstruction,
+      edges: spec.edges,
+    })),
+    results: [] as LiveWorkflowResult[],
+  };
+
+  await writeReport(options.outputPath, report);
+  for (let selectedIndex = 0; selectedIndex < selectedWorkflows.length; selectedIndex += 1) {
+    const { spec, index } = selectedWorkflows[selectedIndex];
+    const result = await runPrompt06Workflow(
+      spec,
+      index,
+      options,
+      'smoke',
+      '11',
+      'prompt11',
+    );
+    report.results.push(result);
+    await writeReport(options.outputPath, report);
+    if (selectedIndex < selectedWorkflows.length - 1) {
+      await waitForPrompt06McpHealth('Prompt 11');
+    }
+  }
+
+  report.finishedAt = new Date().toISOString();
+  await writeReport(options.outputPath, report);
+
+  if (options.closeWhenDone) {
+    await Window.getCurrent().close();
+  }
+}
+
 export async function runLiveWorkflowHarness(options: LiveWorkflowHarnessOptions): Promise<void> {
   if (options.suiteName === 'prompt04_nodetree_mission_control') {
     await runPrompt04NodeTreeMissionControlHarness(options);
@@ -1755,6 +1903,11 @@ export async function runLiveWorkflowHarness(options: LiveWorkflowHarnessOptions
 
   if (options.suiteName === 'prompt06_large_workflows') {
     await runPrompt06LargeWorkflowHarness(options);
+    return;
+  }
+
+  if (options.suiteName === 'prompt11_mixed_cli_smoke') {
+    await runPrompt11MixedCliSmokeHarness(options);
     return;
   }
 
