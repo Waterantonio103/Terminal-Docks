@@ -9,7 +9,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { homeDir } from '@tauri-apps/api/path';
 import { Window } from '@tauri-apps/api/window';
-import { PanelLeft, TerminalSquare, FileCode2, KanbanSquare, Activity, Plus, Rocket, Monitor, Minus, Square, X, Network, FolderTree, LayoutGrid, Maximize, Settings, Inbox } from 'lucide-react';
+import { TerminalSquare, FileCode2, KanbanSquare, Activity, Plus, Rocket, Monitor, Minus, Square, X, Network, FolderTree, LayoutGrid, Maximize, Settings, Inbox } from 'lucide-react';
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { detectRoleFromText, normalizeCli } from './lib/cliDetection';
 import { refreshCliDetectionForTerminals } from './lib/terminalCliRuntime';
@@ -228,8 +228,8 @@ function App() {
       {fatalReport && <FatalErrorOverlay report={fatalReport} onDismiss={() => { clearLastFatalReport(); setFatalReport(null); }} />}
       
       <div className="flex items-center h-10 bg-bg-titlebar border-b border-border-panel shrink-0 select-none relative z-50">
-        <div className="flex items-center gap-2 px-3 border-r border-border-panel h-full cursor-pointer hover:bg-bg-surface transition-colors" onClick={toggleSidebar}>
-          <PanelLeft size={16} className={sidebarOpen ? "text-accent-primary" : "text-text-muted"} />
+        <div className="flex items-center justify-center w-12 border-r border-border-panel h-full cursor-pointer hover:bg-bg-surface transition-colors" onClick={toggleSidebar} title={sidebarOpen ? 'Hide sidebar' : 'Show sidebar'}>
+          <CometAiLogoMark className="w-7 h-7 text-[#f2ead3]" />
         </div>
 
         <div className="flex-1 flex justify-center items-center gap-1 h-full relative z-10" data-tauri-drag-region>
@@ -326,6 +326,22 @@ const MODE_OPTIONS: Array<{ id: AppMode; label: string; icon: React.ReactNode }>
   { id: 'runtime', label: 'Runtime', icon: <Monitor size={18} /> },
   { id: 'workspace', label: 'Workspace', icon: <FolderTree size={18} /> },
 ];
+
+function CometAiLogoMark({ className = '' }: { className?: string }) {
+  return (
+    <svg
+      className={className}
+      viewBox="0 0 64 64"
+      role="img"
+      aria-label="CometAI logo"
+      fill="currentColor"
+    >
+      <path d="M 6 50 A 28 28 0 0 1 58 30 L 58 38 A 20 20 0 0 0 14 50 Z" />
+      <path d="M 14 50 A 20 20 0 0 1 50 36 L 50 44 A 12 12 0 0 0 22 50 Z" />
+      <path d="M 22 50 A 12 12 0 0 1 42 42 L 42 50 Z" />
+    </svg>
+  );
+}
 
 function ModeRail() {
   const appMode = useWorkspaceStore((s) => s.appMode);
