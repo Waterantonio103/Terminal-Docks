@@ -24,7 +24,7 @@ const GEMINI_UI_RE =
 const GEMINI_INPUT_READY_RE =
   /(?:^|\n)\s*(?:\*|>)?\s*Type your message\b|(?:^|\n)\s*(?:>|\uff1e|❯|Input:|Prompt:)\s*(?:$|\n)|\b(?:type|enter|input|paste|write)\b.*\b(?:prompt|message|query|input)\b/i;
 const PERMISSION_RE =
-  /(?:trust this folder\?|approve tool call\?|permission request|allow|approve|grant|trust|deny|reject|do you want).*(?:\?|y\/n|\[y\/n\]|\b1\.|yes\/no|always allow)/is;
+  /(?:trust this folder\?|approve tool call\?|permission request|do you want\b.*(?:\?|y\/n|\[y\/n\]|yes\/no)|(?:allow|approve|grant|deny|reject)\b.*(?:\?|y\/n|\[y\/n\]|yes\/no|always allow))/is;
 const COMPLETION_RE = /(?:\btask\s+(?:completed|complete)\b|turn\.completed|exit code\s+0)/i;
 const FAILURE_RE =
   /(?:\btask\s+failed\b|\bfatal error\b|\buncaught exception\b|exit code\s+[1-9]|\bunknown option\b|\binvalid flag\b|\bunexpected argument\b|(?:^|\n)\s*Usage:\s*gemini\b|(?:^|\n)\s*Error:)/i;
@@ -33,8 +33,9 @@ const AUTH_RE =
 const UPDATE_RE =
   /(?:\bGemini CLI update available\b|\bAttempting to automatically update now\b|\bUpdate successful\b)/i;
 const PASTED_TEXT_RE = /\[Pasted Text:\s*\d+\s*chars\]/i;
+const QUEUED_INPUT_RE = /\bQueued\s+\(press\s+↑\s+to\s+edit\):/i;
 const ACTIVE_WORK_RE =
-  /(?:\bWorking\b|\bThinking\b|\bProcessing\b|\bRunning\b|\bExecuting\b|\bCalling\b|\bUsing tool\b|\btool execution\b|\bqueued message\b|\besc to interrupt\b|\bctrl-c to interrupt\b|\boperation in progress\b|[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏])/i;
+  /(?:\bWorking\b|\bThinking\b|\bProcessing\b|\bRunning\b|\bExecuting\b|\bCalling\b|\bUsing tool\b|\btool execution\b|\bqueued message\b|\bConfirming\b|\besc to cancel\b|\besc to interrupt\b|\bctrl-c to interrupt\b|\boperation in progress\b|[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏])/i;
 
 function logGeminiReady(_message: string): void {
   // Kept as a local hook for temporary parser diagnostics without noisy polling logs.
@@ -70,6 +71,24 @@ function lastMatchIndex(output: string, pattern: RegExp): number {
   }
 
   return lastIndex;
+}
+
+function escapeInstructionValue(value: string): string {
+  return value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+}
+
+function extractActivationField(signal: string, key: string): string | null {
+  const quoted = new RegExp(`"${key}"\\s*:\\s*"([^"]+)"`).exec(signal);
+  if (quoted?.[1]) return quoted[1];
+  const yamlish = new RegExp(`${key}\\s*:\\s*"([^"]+)"`).exec(signal);
+  return yamlish?.[1] ?? null;
+}
+
+function extractActivationNumber(signal: string, key: string): number | null {
+  const match = new RegExp(`"?${key}"?\\s*:\\s*(\\d+)`).exec(signal);
+  if (!match?.[1]) return null;
+  const value = Number(match[1]);
+  return Number.isInteger(value) && value > 0 ? value : null;
 }
 
 function latestIndexedStatus(
@@ -193,6 +212,13 @@ export const geminiAdapter: CliAdapter = {
         logMessage: 'waiting reason=pasted_text_pending_submit',
       },
       {
+        index: lastMatchIndex(clean, QUEUED_INPUT_RE),
+        status: 'processing',
+        confidence: 'high',
+        detail: 'Gemini has queued input while a turn is still running',
+        logMessage: 'waiting reason=queued_input_pending_turn',
+      },
+      {
         index: lastMatchIndex(clean, ACTIVE_WORK_RE),
         status: 'processing',
         confidence: 'high',
@@ -239,7 +265,15 @@ export const geminiAdapter: CliAdapter = {
   },
 
   buildInitialPrompt(context: TaskContext): string {
-    return `### MISSION_CONTROL_ACTIVATION_REQUEST ### You have been assigned a new task. Please call 'get_task_details({ missionId: "${context.missionId}", nodeId: "${context.nodeId}" })' to retrieve your full context. --- ENVELOPE --- ${context.payloadJson} --- END ENVELOPE --- `;
+    const missionId = escapeInstructionValue(context.missionId);
+    const nodeId = escapeInstructionValue(context.nodeId);
+    return (
+      `NEW_TASK. call get_task_details({ missionId: "${missionId}", nodeId: "${nodeId}" }), ` +
+      'execute this graph node, then call ' +
+      `complete_task({ missionId: "${missionId}", nodeId: "${nodeId}", attempt: ${context.attempt}, outcome: "success" or "failure", summary: "<concise summary>" }) ` +
+      'as the final MCP action. Do not stop after a normal final answer. ' +
+      `--- ENVELOPE --- ${context.payloadJson} --- END ENVELOPE ---`
+    );
   },
 
   detectPermissionRequest(output: string): PermissionDetectionResult | null {
@@ -319,7 +353,25 @@ export const geminiAdapter: CliAdapter = {
   },
 
   buildActivationInput(signal: string): { preClear?: string; paste: string; submit: string } {
-    const flat = signal.replace(/\r?\n/g, ' ').replace(/\s{2,}/g, ' ').trim();
+    let target = signal;
+
+    if (signal.includes('### MISSION_CONTROL_ACTIVATION_REQUEST ###')) {
+      const missionId = extractActivationField(signal, 'missionId');
+      const nodeId = extractActivationField(signal, 'nodeId');
+      const attempt = extractActivationNumber(signal, 'attempt') ?? 1;
+
+      if (missionId && nodeId) {
+        const escapedMissionId = escapeInstructionValue(missionId);
+        const escapedNodeId = escapeInstructionValue(nodeId);
+        target =
+          `NEW_TASK. call get_task_details({ missionId: "${escapedMissionId}", nodeId: "${escapedNodeId}" }), ` +
+          'execute this graph node, then call ' +
+          `complete_task({ missionId: "${escapedMissionId}", nodeId: "${escapedNodeId}", attempt: ${attempt}, outcome: "success" or "failure", summary: "<concise summary>" }) ` +
+          'as the final MCP action. Do not stop after a normal final answer.';
+      }
+    }
+
+    const flat = target.replace(/\r?\n/g, ' ').replace(/\s{2,}/g, ' ').trim();
     return {
       preClear: '\x15',
       paste: flat,

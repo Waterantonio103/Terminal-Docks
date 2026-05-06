@@ -19,15 +19,15 @@ const ANSI_RE =
 const BANNER_RE = /\bclaude (code|assistant)\b/i;
 const SHELL_PROMPT_RE = /(?:^|\n)\s*(?:[A-Za-z]:\\[^>\r\n]*>|PS [^>\r\n]*>|[$#>])\s*$/m;
 const CLAUDE_UI_RE = /(?:\bclaude (?:code|assistant)\b|Sonnet|Opus|Haiku|--\s*INSERT\s*--|bypass permissions|shift\+tab to cycle|❯|⏵⏵)/i;
-const CLAUDE_INPUT_READY_RE = /(?:^|\n)\s*❯\s*(?:$|\n)|--\s*INSERT\s*--|\b(?:type|enter|paste|write)\b.*\b(?:prompt|message|input)\b/i;
+const CLAUDE_INPUT_READY_RE = /(?:^|\n)\s*❯\s*(?:(?:Try\b)|$|\n)|--\s*INSERT\s*--|\b(?:type|enter|paste|write)\b.*\b(?:prompt|message|input)\b/i;
 const ACTIVE_WORK_RE =
-  /(?:\bStewing\b|\bContemplating\b|\bThinking\b|\bProcessing\b|\bWorking\b|\bRunning\b|\bExecuting\b|\bCalling\b|\bUsing tool\b|\btool execution\b|\bqueued message\b|\besc to interrupt\b|\bctrl-c to interrupt\b|[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏])/i;
+  /(?:\bStewing\b|\bSimmering\b|\bContemplating\b|\bThinking\b|\bProcessing\b|\bWorking\b|\bRunning\b|\bExecuting\b|\bCalling\b|\bUsing tool\b|\btool execution\b|\bqueued message\b|\besc to interrupt\b|\bctrl-c to interrupt\b|[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏])/i;
 const PERMISSION_RE =
   /(?:permission request|allow|approve|grant|trust|deny|reject|do you want).*(?:\?|y\/n|\[y\/n\]|\b1\.|yes\/no|always allow)/is;
 
 const COMPLETION_RE = /(?:\btask\s+(?:completed|complete)\b|turn\.completed|exit code\s+0)/i;
 const FAILURE_RE =
-  /(?:\btask\s+failed\b|\bfatal error\b|\buncaught exception\b|exit code\s+[1-9]|\bunknown option\b|\binvalid flag\b|\bunexpected argument\b|(?:^|\n)\s*Usage:\s*claude\b)/i;
+  /(?:\btask\s+failed\b|\bfatal error\b|\buncaught exception\b|\bunknown option\b|\binvalid flag\b|\bunexpected argument\b|(?:^|\n)\s*Usage:\s*claude\b)/i;
 
 function stripTerminalControls(output: string): string {
   return output
@@ -112,12 +112,12 @@ export const claudeAdapter: CliAdapter = {
       return { status: 'completed', confidence: 'high', detail: 'Claude completion marker detected' };
     }
 
-    if (ACTIVE_WORK_RE.test(clean)) {
-      return { status: 'processing', confidence: 'high', detail: 'Claude active work indicator detected' };
-    }
-
     if (hasClaudeUi && CLAUDE_INPUT_READY_RE.test(clean)) {
       return { status: 'idle', confidence: 'high', detail: 'Claude input prompt detected' };
+    }
+
+    if (ACTIVE_WORK_RE.test(clean)) {
+      return { status: 'processing', confidence: 'high', detail: 'Claude active work indicator detected' };
     }
 
     if (SHELL_PROMPT_RE.test(lastLine)) {

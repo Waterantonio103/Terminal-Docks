@@ -91,6 +91,16 @@ const CLI_LAUNCH_DELAY_MS = 500;
 const SHELL_LAUNCH_SETTLE_MS = 700;
 const CLI_STARTUP_WAIT_MS = 2_000;
 const CLI_READY_WAIT_MS = 20_000;
+const CLAUDE_MANAGED_INJECTION_READY_WAIT_MS = readRuntimeEnvNumber(
+  'VITE_RUNTIME_CLAUDE_MANAGED_INJECTION_READY_WAIT_MS',
+  75_000,
+  CLI_READY_WAIT_MS,
+);
+const OPENCODE_MANAGED_INJECTION_READY_WAIT_MS = readRuntimeEnvNumber(
+  'VITE_RUNTIME_OPENCODE_MANAGED_INJECTION_READY_WAIT_MS',
+  75_000,
+  CLI_READY_WAIT_MS,
+);
 const PASTE_SUBMIT_GAP_MS = 150;
 const GEMINI_PASTE_SUBMIT_GAP_MS = 1_500;
 const PRE_CLEAR_SETTLE_MS = 300;
@@ -123,6 +133,18 @@ function readRuntimeEnvNumber(key: string, fallback: number, minimum = 0): numbe
 
 function pasteSubmitGapMsForCli(cliId: string): number {
   return cliId === 'gemini' ? GEMINI_PASTE_SUBMIT_GAP_MS : PASTE_SUBMIT_GAP_MS;
+}
+
+function managedInjectionReadyWaitMsForCli(cliId: string): number {
+  if (cliId === 'claude') return CLAUDE_MANAGED_INJECTION_READY_WAIT_MS;
+  if (cliId === 'opencode') return OPENCODE_MANAGED_INJECTION_READY_WAIT_MS;
+  return CLI_READY_WAIT_MS;
+}
+
+function isManagedCliActiveWorkStatus(status: StatusDetectionResult | null | undefined): boolean {
+  return status?.status === 'processing' &&
+    status.confidence === 'high' &&
+    /active work|queued input|pending turn|completing current tasks/i.test(status.detail ?? '');
 }
 
 function escapeGeminiStartupPromptValue(value: string): string {
@@ -1584,6 +1606,45 @@ class RuntimeManager {
     return false;
   }
 
+  private async maybeRecordManagedCliActiveWorkProgress(session: RuntimeSession): Promise<boolean> {
+    if (!new Set(['gemini', 'opencode']).has(session.cliId) || !session.terminalId) return false;
+
+    let recentOutput = '';
+    try {
+      recentOutput = await getRecentTerminalOutput(session.terminalId, 12_288);
+    } catch {
+      return false;
+    }
+
+    const status = session.adapter.detectStatus(recentOutput);
+    if (!isManagedCliActiveWorkStatus(status)) return false;
+
+    this.recordPostAckProgress(session, 'known_long_running_progress', {
+      terminalPreview: status.detail,
+    });
+    this.appendPostAckWatchdogWorkflowEvent(
+      session,
+      'warning',
+      'post_ack_watchdog_cli_active_work',
+      `${session.cliId} is still reporting active work: ${status.detail}`,
+      'post_ack_no_mcp_completion',
+      0,
+      this.postAckNoProgressWatchdogs.get(session.sessionId) ?? {
+        acknowledgedAt: Date.now(),
+        lastProgressAt: Date.now(),
+        progressCount: 0,
+        mcpEventCount: 0,
+        terminalProgressCount: 0,
+        expectedFileOutputCount: 0,
+        permissionPromptCount: 0,
+        expectedFiles: [],
+        expectedFileSignatures: new Map(),
+        warnedAt: null,
+      },
+    );
+    return true;
+  }
+
   private async handlePostAckNoProgressNudge(sessionId: string): Promise<void> {
     const session = this.sessions.get(sessionId);
     const state = this.postAckNoProgressWatchdogs.get(sessionId);
@@ -1598,6 +1659,7 @@ class RuntimeManager {
       return;
     }
     if (await this.maybeRecordExpectedFileProgress(session, state)) return;
+    if (await this.maybeRecordManagedCliActiveWorkProgress(session)) return;
 
     const decision = evaluatePostAckWatchdog({
       snapshot: this.getPostAckSnapshot(state),
@@ -1627,6 +1689,34 @@ class RuntimeManager {
     this.appendPostAckWatchdogWorkflowEvent(session, 'warning', `${reason}_nudge`, message, reason, decision.idleMs, state);
 
     if (!session.isTerminal) return;
+    if (session.cliId === 'gemini' && reason === 'post_ack_no_mcp_completion') {
+      const recentOutput = session.terminalId
+        ? await getRecentTerminalOutput(session.terminalId, 12_288).catch(() => '')
+        : '';
+      const readiness = recentOutput ? this.evaluateSessionReadiness(session, recentOutput) : null;
+      if (readiness?.ready) {
+        this.appendPostAckWatchdogWorkflowEvent(
+          session,
+          'warning',
+          'post_ack_watchdog_nudge_resumed',
+          'Gemini is idle, so the post-ACK completion nudge will be injected instead of deferred.',
+          reason,
+          decision.idleMs,
+          state,
+        );
+      } else {
+        this.appendPostAckWatchdogWorkflowEvent(
+          session,
+          'warning',
+          'post_ack_watchdog_nudge_deferred',
+          'Gemini post-ACK completion nudge was deferred because Gemini queues managed input while a turn is still running.',
+          reason,
+          decision.idleMs,
+          state,
+        );
+        return;
+      }
+    }
     const prompt = this.buildPostAckNudgePrompt(session, reason, decision.idleMs);
     await this.injectInteractivePrompt(session, prompt, true).catch(error => {
       const errorMessage = error instanceof Error ? error.message : String(error);
@@ -1656,6 +1746,7 @@ class RuntimeManager {
       return;
     }
     if (await this.maybeRecordExpectedFileProgress(session, state)) return;
+    if (await this.maybeRecordManagedCliActiveWorkProgress(session)) return;
 
     const decision = evaluatePostAckWatchdog({
       snapshot: this.getPostAckSnapshot(state),
@@ -3213,6 +3304,24 @@ class RuntimeManager {
           if (settleMs > 0) {
             console.log(`[runtime] cli-ready settle cli=${session.cliId} delayMs=${settleMs}`);
             await sleep(settleMs);
+            if (isRuntimeSessionTerminal(session.state) || !this.isCurrentOwner(session)) {
+              return false;
+            }
+            const settledOutput = await getRecentTerminalOutput(session.terminalId, 12_288).catch(() => '');
+            const settledReadiness = settledOutput ? this.evaluateSessionReadiness(session, settledOutput) : readiness;
+            lastStatus = settledReadiness.status;
+            lastStrictGateEnabled = settledReadiness.strictGateEnabled;
+            this.updateCliReadinessWaitState(session, settledReadiness.status);
+            if (!settledReadiness.ready) {
+              const settledDetail = settledReadiness.strictGateEnabled
+                ? settledReadiness.status.detail
+                : settledReadiness.legacyReady?.detail ?? settledReadiness.status.detail;
+              console.log(
+                `[runtime] cli-ready settle recheck cli=${session.cliId} ready=false status=${settledReadiness.status.status} confidence=${settledReadiness.status.confidence} detail="${settledDetail}"`,
+              );
+              lastDetail = settledDetail ?? lastDetail;
+              continue;
+            }
           }
           this.cliReadinessDiagnostics.delete(session.sessionId);
           return true;
@@ -3241,8 +3350,10 @@ class RuntimeManager {
     reason: string,
   ): Promise<void> {
     if (!session.isTerminal || !isStrictCliStatusGateEnabled(session.cliId)) return;
+    if (isRuntimeSessionTerminal(session.state) || !this.isCurrentOwner(session)) return;
 
     const ready = await this.waitForCliReady(session, timeoutMs);
+    if (isRuntimeSessionTerminal(session.state) || !this.isCurrentOwner(session)) return;
     if (ready) return;
 
     throw new Error(
@@ -3278,7 +3389,13 @@ class RuntimeManager {
     signal: string,
     retry: boolean,
   ): Promise<void> {
-    await this.waitForManagedInjectionReadyOrThrow(session, CLI_READY_WAIT_MS, 'managed prompt injection');
+    if (isRuntimeSessionTerminal(session.state) || !this.isCurrentOwner(session)) return;
+    await this.waitForManagedInjectionReadyOrThrow(
+      session,
+      managedInjectionReadyWaitMsForCli(session.cliId),
+      'managed prompt injection',
+    );
+    if (isRuntimeSessionTerminal(session.state) || !this.isCurrentOwner(session)) return;
 
     const adapter = session.adapter;
     const { preClear, paste, submit } = adapter.buildActivationInput(signal);

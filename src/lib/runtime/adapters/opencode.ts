@@ -25,8 +25,9 @@ const READY_KEYWORDS_RE = /\b(ready for next turn|type your|enter your|ask anyth
 const PERMISSION_RE = /(?:allow|approve|grant|trust|deny|reject).*(?:\?|y\/n|\[y\/n\]|\b1\.)/is;
 const COMPLETION_RE = /(?:\btask\s+(?:completed|complete)\b|turn\.completed|exit code\s+0)/i;
 const FAILURE_RE = /(?:\btask\s+failed\b|\bfatal error\b|\buncaught exception\b|exit code\s+[1-9]|\bunknown option\b|\binvalid flag\b|\bunexpected argument\b|(?:^|\n)\s*Usage:\s*opencode\b)/i;
-const ACTIVE_WORK_RE =
-  /(?:\bQUEUED\b|\bWorking\b|\bThinking\b|\bProcessing\b|\bRunning\b|\bLoading\b|\bInstalling\b|\bFetching\b|\bRetrying\b|\brate[- ]limit\b|\bwaiting for (?:model|tool|response|command|rate limit)\b|\boperation in progress\b|\bpress\s+esc\b|\bctrl-c\b|[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏])/i;
+const ACTIVE_WORK_TEXT_RE =
+  /(?:\bQUEUED\b|\bWorking\b|\bThinking\b|\bProcessing\b|\bRunning\b|\bLoading\b|\bInstalling\b|\bFetching\b|\bRetrying\b|\brate[- ]limit\b|\bwaiting for (?:model|tool|response|command|rate limit)\b|\boperation in progress\b|\bpress\s+esc\b|\bctrl-c\b)/i;
+const SPINNER_RE = /[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/u;
 
 function stripTerminalControls(output: string): string {
   return output
@@ -42,6 +43,22 @@ function lastNonEmptyLines(output: string, count: number): string {
     .filter(line => line.trim())
     .slice(-count)
     .join('\n');
+}
+
+function lastMatchIndex(output: string, pattern: RegExp): number {
+  const flags = pattern.flags.includes('g') ? pattern.flags : `${pattern.flags}g`;
+  const matcher = new RegExp(pattern.source, flags);
+  let lastIndex = -1;
+  let match: RegExpExecArray | null;
+
+  while ((match = matcher.exec(output)) !== null) {
+    lastIndex = match.index;
+    if (match[0].length === 0) {
+      matcher.lastIndex += 1;
+    }
+  }
+
+  return lastIndex;
 }
 
 function escapeInstructionValue(value: string): string {
@@ -114,6 +131,13 @@ export const opencodeAdapter: CliAdapter = {
     const clean = stripTerminalControls(output);
     const hasOpenCodeUi = OPENCODE_UI_RE.test(clean);
     const lastLine = lastNonEmptyLines(clean, 1);
+    const inputPromptIndex = Math.max(
+      lastMatchIndex(clean, OPENCODE_INPUT_FOOTER_RE),
+      hasOpenCodeUi ? lastMatchIndex(clean, PROMPT_RE) : -1,
+      hasOpenCodeUi ? lastMatchIndex(clean, READY_KEYWORDS_RE) : -1,
+    );
+    const activeTextIndex = lastMatchIndex(clean, ACTIVE_WORK_TEXT_RE);
+    const spinnerIndex = lastMatchIndex(clean, SPINNER_RE);
 
     if (this.detectPermissionRequest(output)) {
       return { status: 'waiting_user_answer', confidence: 'high', detail: 'OpenCode permission prompt detected' };
@@ -127,12 +151,16 @@ export const opencodeAdapter: CliAdapter = {
       return { status: 'completed', confidence: 'high', detail: 'OpenCode completion marker detected' };
     }
 
-    if (ACTIVE_WORK_RE.test(clean)) {
+    if (activeTextIndex >= 0 && activeTextIndex > inputPromptIndex) {
       return { status: 'processing', confidence: 'high', detail: 'OpenCode active work indicator detected' };
     }
 
-    if (OPENCODE_INPUT_FOOTER_RE.test(clean) || (hasOpenCodeUi && (PROMPT_RE.test(clean) || READY_KEYWORDS_RE.test(clean)))) {
+    if (inputPromptIndex >= 0) {
       return { status: 'idle', confidence: 'high', detail: 'OpenCode input prompt/footer detected' };
+    }
+
+    if (spinnerIndex >= 0) {
+      return { status: 'processing', confidence: 'low', detail: 'OpenCode spinner indicator without active work text' };
     }
 
     if (SHELL_PROMPT_RE.test(lastLine)) {

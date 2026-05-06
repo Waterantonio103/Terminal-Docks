@@ -121,6 +121,17 @@ function createFastCompletingRuntimeManager() {
   };
 }
 
+function createCapturingRuntimeManager(capturedArgs) {
+  const manager = createFastCompletingRuntimeManager();
+  return {
+    ...manager,
+    async startNodeRun(args) {
+      capturedArgs.push(args);
+      return manager.startNodeRun(args);
+    },
+  };
+}
+
 async function run(name, fn) {
   try {
     await fn();
@@ -142,6 +153,20 @@ await run('orchestrator handles runtime completion before runtime_attached', asy
   const run = orchestrator.getRun('race-run');
   assert.equal(run?.status, 'completed');
   assert.equal(run?.nodeStates['agent-a']?.state, 'completed');
+});
+
+await run('agent runtimes inherit task workspace when node workspace is unset', async () => {
+  const orchestrator = new WorkflowOrchestrator();
+  const capturedArgs = [];
+  orchestrator.setRuntimeManager(createCapturingRuntimeManager(capturedArgs));
+
+  const def = definition();
+  def.nodes[0].config.workspaceDir = 'C:/docks-testing/workflow-output';
+
+  orchestrator.startRun(def, { runId: 'workspace-fallback-run' });
+  await sleep(50);
+
+  assert.equal(capturedArgs[0]?.workspaceDir, 'C:/docks-testing/workflow-output');
 });
 
 await run('explicit MCP handoff waits for all fan-in parents', async () => {

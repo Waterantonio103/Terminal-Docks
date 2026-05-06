@@ -413,6 +413,76 @@ try {
     );
   });
 
+  await run('handoff_task rejects graph-mode role-only handoffs', async () => {
+    resetStarlinkState();
+    seedCompiledMission(demoMission());
+    seedMissionNodeRuntime({
+      missionId: 'mission-graph',
+      nodeId: 'builder',
+      roleId: 'builder',
+      status: 'running',
+      attempt: 1,
+      currentWaveId: 'root:mission-graph',
+    });
+    seedAgentRuntimeSession({
+      sessionId: 'session:mission-graph:builder:1',
+      agentId: 'agent:mission-graph:builder:term-builder',
+      missionId: 'mission-graph',
+      nodeId: 'builder',
+      attempt: 1,
+      terminalId: 'term-builder',
+      status: 'running',
+    });
+
+    const result = executeHandoffTask({
+      missionId: 'mission-graph',
+      fromRole: 'builder',
+      targetRole: 'reviewer',
+      outcome: 'success',
+      title: 'Legacy role-only handoff',
+      completion: { status: 'success', summary: 'This should not complete a graph node.' },
+    }, 'session:mission-graph:builder:1');
+
+    assert.equal(result.isError, true);
+    assert.match(result.content[0].text, /Graph handoff requires missionId, fromNodeId, fromAttempt/);
+  });
+
+  await run('handoff_task rejects graph-mode routing without targetNodeId', async () => {
+    resetStarlinkState();
+    seedCompiledMission(demoMission());
+    seedMissionNodeRuntime({
+      missionId: 'mission-graph',
+      nodeId: 'builder',
+      roleId: 'builder',
+      status: 'running',
+      attempt: 1,
+      currentWaveId: 'root:mission-graph',
+    });
+    seedAgentRuntimeSession({
+      sessionId: 'session:mission-graph:builder:1',
+      agentId: 'agent:mission-graph:builder:term-builder',
+      missionId: 'mission-graph',
+      nodeId: 'builder',
+      attempt: 1,
+      terminalId: 'term-builder',
+      status: 'running',
+    });
+
+    const result = executeHandoffTask({
+      missionId: 'mission-graph',
+      fromNodeId: 'builder',
+      fromAttempt: 1,
+      outcome: 'success',
+      title: 'Ambiguous graph handoff',
+      completion: { status: 'success', summary: 'This has more than one legal target.' },
+    }, 'session:mission-graph:builder:1');
+
+    assert.equal(result.isError, true);
+    assert.match(result.content[0].text, /requires an exact targetNodeId/);
+    assert.match(result.content[0].text, /reviewer-a/);
+    assert.match(result.content[0].text, /reviewer-b/);
+  });
+
   await run('complete_task heals active runtime status drift before routing', async () => {
     resetStarlinkState();
     seedCompiledMission(demoMission());

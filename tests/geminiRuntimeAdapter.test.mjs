@@ -81,12 +81,59 @@ run('gemini pending pasted text does not look ready for another managed injectio
   assert.equal(geminiAdapter.detectReady(prompt).ready, false);
 });
 
+run('gemini queued watchdog text keeps managed injection blocked', () => {
+  const prompt = [
+    'Gemini CLI v0.41.1',
+    '*   Type your message or @path/to/file',
+    'Queued (press ↑ to edit):',
+    'Terminal Docks still has missionId="mission-1" nodeId="builder-data" marked running.',
+    '⠋ Confirming Completion Time Logic (esc to cancel, 2m 43s)',
+  ].join('\n');
+  const status = geminiAdapter.detectStatus(prompt);
+  assert.equal(status.status, 'processing', status.detail);
+  assert.match(status.detail, /queued input|active work/i);
+  assert.equal(geminiAdapter.detectReady(prompt).ready, false);
+});
+
+run('gemini status chrome does not map to permission request', () => {
+  const chrome = [
+    'YOLO Ctrl+Y                                   1 GEMINI.md file · 2 MCP servers',
+    '* y',
+    'workspace (/directory)   branch    sandbox      /model             context',
+    'C:\\VSCODE...-mouamdi8    main      no sandbox   Auto (Gemini 3)    4%        …',
+  ].join('\n');
+  assert.equal(geminiAdapter.detectPermissionRequest(chrome), null);
+  assert.notEqual(geminiAdapter.detectStatus(chrome).status, 'waiting_user_answer');
+});
+
 run('gemini activation input uses raw single-line input instead of bracketed paste', () => {
   const input = geminiAdapter.buildActivationInput('NEW_TASK.\ncall get_task_details.');
   assert.equal(input.preClear, '\x15');
   assert.equal(input.paste, 'NEW_TASK. call get_task_details.');
   assert.equal(input.submit, '\x1b[13u');
   assert.doesNotMatch(input.paste, /\x1b\[200~/);
+});
+
+run('gemini activation prompt is reduced to direct MCP completion instruction', () => {
+  const input = geminiAdapter.buildActivationInput(
+    [
+      '### MISSION_CONTROL_ACTIVATION_REQUEST ###',
+      'Please call get_task_details.',
+      '--- ENVELOPE ---',
+      '{"signal":"NEW_TASK","missionId":"mission-1","nodeId":"builder","sessionId":"session-123","attempt":2}',
+      '--- END ENVELOPE ---',
+    ].join('\n'),
+  );
+
+  assert.equal(input.preClear, '\x15');
+  assert.match(input.paste, /NEW_TASK\. call get_task_details/);
+  assert.match(input.paste, /missionId: "mission-1"/);
+  assert.match(input.paste, /nodeId: "builder"/);
+  assert.match(input.paste, /attempt: 2/);
+  assert.match(input.paste, /complete_task/);
+  assert.match(input.paste, /final MCP action/);
+  assert.doesNotMatch(input.paste, /ENVELOPE/);
+  assert.equal(input.submit, '\x1b[13u');
 });
 
 run('gemini shell prompt alone does not imply idle', () => {

@@ -16,6 +16,21 @@ import { terminalOutputBus } from '../../lib/runtime/TerminalOutputBus';
 
 interface ContextMenuState { x: number; y: number }
 
+function isMissingPtyError(err: unknown): boolean {
+  return String(err).includes('not found in active PTY state');
+}
+
+function safePtyInvoke<T = unknown>(command: string, args: Record<string, unknown>): Promise<T | undefined> {
+  return invoke<T>(command, args).catch(err => {
+    if (isMissingPtyError(err)) {
+      console.debug(`[TerminalPane] PTY command ignored after terminal detach: ${command}`, args);
+      return undefined;
+    }
+    console.warn(`[TerminalPane] PTY command failed: ${command}`, err);
+    return undefined;
+  });
+}
+
 export function TerminalPane({ pane, dragEndSeq }: { pane: Pane; dragEndSeq?: number }) {
   const terminalRef      = useRef<HTMLDivElement>(null);
   const terminalInstance = useRef<Terminal | null>(null);
@@ -125,7 +140,7 @@ export function TerminalPane({ pane, dragEndSeq }: { pane: Pane; dragEndSeq?: nu
       // Handle paste manually
       const text = e.clipboardData?.getData('text');
       if (text) {
-        invoke('write_to_pty', { id: terminalId, data: text });
+        safePtyInvoke('write_to_pty', { id: terminalId, data: text });
       }
     };
     terminalElement.addEventListener('paste', pasteHandler, true);
@@ -308,7 +323,7 @@ export function TerminalPane({ pane, dragEndSeq }: { pane: Pane; dragEndSeq?: nu
               const rows = terminalInstance.current.rows || 24;
               const cols = terminalInstance.current.cols || 80;
               fitAddon.current?.fit();
-              invoke('resize_pty', { id: terminalId, rows, cols }).catch(() => {});
+              safePtyInvoke('resize_pty', { id: terminalId, rows, cols });
               terminalInstance.current.refresh(0, rows - 1);
               terminalInstance.current.scrollToBottom();
               if (shouldLog) console.log(`[TerminalPane] post-attach flush triggered terminal=${terminalId}`);
@@ -381,7 +396,7 @@ export function TerminalPane({ pane, dragEndSeq }: { pane: Pane; dragEndSeq?: nu
       if (initialCommand) {
         // Small delay to ensure the shell is ready to receive input
         setTimeout(() => {
-          invoke('write_to_pty', { id: terminalId, data: initialCommand + '\r' });
+          safePtyInvoke('write_to_pty', { id: terminalId, data: initialCommand + '\r' });
         }, 1000);
       }
 
@@ -393,7 +408,7 @@ export function TerminalPane({ pane, dragEndSeq }: { pane: Pane; dragEndSeq?: nu
     });
 
     term.onData((data) => {
-      invoke('write_to_pty', { id: terminalId, data });
+      safePtyInvoke('write_to_pty', { id: terminalId, data });
     });
 
     // Debounced resize to prevent layout thrashing and PTY issues.
@@ -409,7 +424,7 @@ export function TerminalPane({ pane, dragEndSeq }: { pane: Pane; dragEndSeq?: nu
         fit.fit();
         publishTerminalSize();
         if (term.rows && term.cols) {
-          invoke('resize_pty', { id: terminalId, rows: term.rows, cols: term.cols });
+          safePtyInvoke('resize_pty', { id: terminalId, rows: term.rows, cols: term.cols });
         }
       }, 250);
     });
@@ -507,7 +522,7 @@ export function TerminalPane({ pane, dragEndSeq }: { pane: Pane; dragEndSeq?: nu
       }
       case 'paste': {
         const text = await readText().catch(() => '');
-        if (text) invoke('write_to_pty', { id: terminalId, data: text });
+        if (text) safePtyInvoke('write_to_pty', { id: terminalId, data: text });
         break;
       }
       case 'clear':

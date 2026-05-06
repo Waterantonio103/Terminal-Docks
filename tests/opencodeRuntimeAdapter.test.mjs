@@ -46,6 +46,20 @@ run('opencode ask-anything input screen maps to idle', () => {
   assert.equal(opencodeAdapter.detectReady(inputScreen).ready, true);
 });
 
+run('opencode visible input prompt wins over stale spinner glyphs', () => {
+  const output = [
+    '\u001b]0;OpenCode\u0007OpenCode',
+    '\u001b[?25l⠧\u001b[?25h',
+    '┃  Ask anything... "What should I build next?"',
+    '┃  Build · GLM-5.1 · medium',
+    '~:master ⊙ 2 MCP/status',
+  ].join('\n');
+  const status = opencodeAdapter.detectStatus(output);
+  assert.equal(status.status, 'idle', status.detail);
+  assert.equal(status.confidence, 'high');
+  assert.equal(opencodeAdapter.detectReady(output).ready, true);
+});
+
 run('opencode invalid flag help maps to error', () => {
   const help = 'opencode --yolo\nUnknown option: --yolo\nUsage: opencode [options]\nC:\\Users\\user>';
   assert.equal(opencodeAdapter.detectStatus(help).status, 'error');

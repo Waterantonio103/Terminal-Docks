@@ -109,6 +109,43 @@ function matchingOutgoingTargets(mission, fromNodeId, outcome) {
     .filter(entry => entry.targetNode);
 }
 
+function validateGraphHandoffArgs({
+  missionId,
+  fromNodeId,
+  targetNodeId,
+  fromAttempt,
+  outcome,
+}) {
+  if (!missionId) return { ok: true };
+  if (!fromNodeId || !Number.isInteger(fromAttempt) || fromAttempt < 1) {
+    return {
+      ok: false,
+      error: 'Graph handoff requires missionId, fromNodeId, fromAttempt, and an exact targetNodeId when routing. Role-only handoffs do not complete graph nodes.',
+    };
+  }
+
+  const record = loadCompiledMissionRecord(missionId);
+  if (!record) return { ok: false, error: 'Mission not found.' };
+  const fromNode = getMissionNode(record.mission, fromNodeId);
+  if (!fromNode) return { ok: false, error: 'Node not found.' };
+
+  const legalTargets = matchingOutgoingTargets(record.mission, fromNodeId, outcome);
+  if (legalTargets.length > 0 && !targetNodeId) {
+    return {
+      ok: false,
+      error: `Graph handoff from ${fromNodeId} requires an exact targetNodeId. Legal targets for outcome ${outcome}: ${legalTargets.map(entry => entry.targetNode.id).join(', ')}.`,
+    };
+  }
+  if (targetNodeId && !legalTargets.some(entry => entry.targetNode.id === targetNodeId)) {
+    return {
+      ok: false,
+      error: `Illegal graph handoff target ${targetNodeId} from ${fromNodeId} for outcome ${outcome}. Legal targets: ${legalTargets.map(entry => entry.targetNode.id).join(', ') || '(none)'}.`,
+    };
+  }
+
+  return { ok: true, record, fromNode };
+}
+
 function markRuntimeCompletion({
   missionId,
   nodeId,
@@ -284,6 +321,16 @@ function persistGraphHandoff({
 export function executeHandoffTask(args, sid) {
   let { fromRole, targetRole, title, description, payload, completion, parentTaskId, missionId, fromNodeId, targetNodeId, outcome, fromAttempt } = args;
   let runtimeValidation = null;
+  const normalizedOutcome = outcome?.trim().toLowerCase() ?? 'success';
+
+  const graphValidation = validateGraphHandoffArgs({
+    missionId,
+    fromNodeId,
+    targetNodeId,
+    fromAttempt,
+    outcome: normalizedOutcome,
+  });
+  if (!graphValidation.ok) return makeToolText(graphValidation.error, true);
 
   if (missionId && fromNodeId) {
     runtimeValidation = nodeRuntimeIsRunning(missionId, fromNodeId, fromAttempt);
@@ -306,7 +353,6 @@ export function executeHandoffTask(args, sid) {
     }
   }
 
-  const normalizedOutcome = outcome?.trim().toLowerCase() ?? 'success';
   const structuredCompletion = buildStructuredCompletionPayload({
     completion,
     payload,

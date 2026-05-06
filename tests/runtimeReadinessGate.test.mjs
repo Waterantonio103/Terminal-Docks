@@ -73,6 +73,26 @@ run('low-confidence idle is blocked for managed injection', () => {
   );
 });
 
+run('opencode strict gate accepts visible input prompt despite stale spinner glyphs', () => {
+  const output = [
+    '\u001b]0;OpenCode\u0007OpenCode',
+    '\u001b[?25l⠧\u001b[?25h',
+    '┃  Ask anything... "What should I build next?"',
+    '┃  Build · GLM-5.1 · medium',
+    '~:master ⊙ 2 MCP/status',
+  ].join('\n');
+  const evaluation = evaluateCliReadiness(
+    'opencode',
+    output,
+    text => opencodeAdapter.detectStatus(text),
+    text => opencodeAdapter.detectReady(text),
+  );
+
+  assert.equal(evaluation.strictGateEnabled, true);
+  assert.equal(evaluation.status.status, 'idle', evaluation.status.detail);
+  assert.equal(evaluation.ready, true);
+});
+
 run('readiness diagnostics include status, gate state, ids, and redacted tail', () => {
   const diagnostic = buildCliReadinessDiagnostic({
     cliId: 'codex',

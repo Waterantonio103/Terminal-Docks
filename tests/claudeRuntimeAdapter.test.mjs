@@ -50,3 +50,27 @@ run('claude invalid flag help maps to error', () => {
   assert.equal(claudeAdapter.detectReady(help).ready, false);
 });
 
+run('claude shell tool exit code during active turn is not task completion', () => {
+  const activeToolFailure = [
+    '● Error: Exit code 127',
+    '/usr/bin/bash: line 1: Get-Content: command not found',
+    '✢ Simmering... still thinking',
+  ].join('\n');
+
+  assert.equal(claudeAdapter.detectStatus(activeToolFailure).status, 'processing');
+  assert.equal(claudeAdapter.detectCompletion(activeToolFailure), null);
+});
+
+run('claude visible input prompt wins over stale spinner glyphs', () => {
+  const promptReady = [
+    'Claude Code v2.1.131',
+    'Haiku 4.5 · Claude Pro',
+    '⠋',
+    '────────────────────────────────────────────────────────',
+    '❯ Try "how do I log an error?"',
+  ].join('\n');
+
+  const status = claudeAdapter.detectStatus(promptReady);
+  assert.equal(status.status, 'idle', status.detail);
+  assert.equal(claudeAdapter.detectReady(promptReady).ready, true);
+});

@@ -490,6 +490,8 @@ export class WorkflowOrchestrator {
     try {
       const attempt = run.nodeStates[nodeId]?.attempt || 1;
 
+      const workspaceDir = this.resolveWorkspaceDir(run.definition, nodeDef);
+
       // Group 5: Single entry point for runtime readiness.
       // Handles reuse, stale cleanup, and new launch.
       const result = await this.runtimeManager!.startNodeRun({
@@ -503,7 +505,7 @@ export class WorkflowOrchestrator {
         executionMode: nodeDef.config.executionMode ?? 'interactive_pty',
         terminalId: nodeDef.config.terminalId || '',
         paneId: nodeDef.config.paneId,
-        workspaceDir: nodeDef.config.workspaceDir ?? null,
+        workspaceDir,
         instructionOverride: nodeDef.config.instructionOverride ?? null,
         modelId: nodeDef.config.model ?? null,
         yolo: nodeDef.config.yolo ?? false,
@@ -1127,7 +1129,7 @@ export class WorkflowOrchestrator {
       modelId: nodeDef.config.model ?? null,
       yolo: nodeDef.config.yolo ?? false,
       executionMode: nodeDef.config.executionMode ?? 'interactive_pty',
-      workspaceDir: nodeDef.config.workspaceDir ?? null,
+      workspaceDir: this.resolveWorkspaceDir(run.definition, nodeDef),
       legalTargets,
       upstreamPayloads: upstreamHandoffs,
     };
@@ -1250,6 +1252,15 @@ export class WorkflowOrchestrator {
       return false;
     });
     return edge?.condition ?? 'always';
+  }
+
+  private resolveWorkspaceDir(
+    definition: WorkflowDefinition,
+    nodeDef: WorkflowNodeDefinition,
+  ): string | null {
+    return nodeDef.config.workspaceDir
+      ?? definition.nodes.find((n) => n.kind === 'task')?.config.workspaceDir
+      ?? null;
   }
 
   private resolveStartNodes(definition: WorkflowDefinition): string[] {

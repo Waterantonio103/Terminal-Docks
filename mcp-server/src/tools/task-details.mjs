@@ -188,7 +188,7 @@ export function buildTaskDetails(missionId, nodeId) {
     completionContract: {
       requiredTool: 'complete_task',
       authority: 'MCP task:completed event',
-      note: 'Natural-language final answers do not complete a graph node. Call complete_task with missionId, nodeId, attempt, outcome, and summary as the final MCP action.',
+      note: 'Natural-language final answers do not complete a graph node. Role-only handoffs also do not complete graph nodes. Prefer complete_task with missionId, nodeId, attempt, outcome, and summary. If you intentionally use handoff_task, include missionId, fromNodeId, fromAttempt, and an exact legal targetNodeId.',
     },
     workspaceDir: record.mission.task?.workspaceDir ?? null,
     assignment: {
