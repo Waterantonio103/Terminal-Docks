@@ -377,6 +377,32 @@ export function buildCodexInteractiveLaunchArgs({
   ];
 }
 
+export function buildGeminiInteractiveLaunchCommand({
+  modelId,
+  yolo,
+  workspaceDir,
+  prompt,
+  shellKind = 'windows',
+}: {
+  modelId?: string | null;
+  yolo?: boolean;
+  workspaceDir?: string | null;
+  prompt: string;
+  shellKind?: ShellKind;
+}): string {
+  const { command, args } = buildPtyLaunchCommandParts('gemini', {
+    model: modelId,
+    yolo,
+    workspaceDir,
+  });
+  return [
+    command,
+    ...args.map(arg => quoteShellArgumentIfNeeded(arg, shellKind)),
+    '--prompt-interactive',
+    quoteShellArgument(prompt.replace(/\s+/g, ' ').trim(), shellKind),
+  ].join(' ');
+}
+
 function escapeInlineInstruction(value: string): string {
   return value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
 }

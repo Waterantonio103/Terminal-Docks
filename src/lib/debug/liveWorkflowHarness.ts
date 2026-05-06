@@ -419,6 +419,7 @@ function classifyFailureCategory(
   ].join('\n').toLowerCase();
 
   if (!combined.trim()) return undefined;
+  if (combined.includes('did not call get_task_details') || combined.includes('did not fetch the current task')) return 'task_ack_timeout';
   if (combined.includes('waiting_auth') || combined.includes('authentication flow detected') || combined.includes('waiting for authentication')) {
     return 'provider_auth_required';
   }
@@ -431,7 +432,6 @@ function classifyFailureCategory(
   if (combined.includes('post_ack_no_mcp_completion')) return 'post_ack_no_mcp_completion';
   if (combined.includes('missing_mcp_completion')) return 'missing_mcp_completion';
   if (combined.includes('pty_exited_without_completion')) return 'pty_exited_without_completion';
-  if (combined.includes('did not call get_task_details') || combined.includes('did not fetch the current task')) return 'task_ack_timeout';
   if (
     eventTypes.includes('task_acked') &&
     !eventTypes.includes('session_completed') &&
@@ -1263,24 +1263,24 @@ const PROMPT_04_WORKFLOWS: Prompt06WorkflowSpec[] = [
 
 const PROMPT_11_WORKFLOWS: Prompt06WorkflowSpec[] = [
   {
-    name: 'single-claude-status-page',
-    title: 'Single-agent Claude smoke output',
-    task: 'Create a compact static status page for a fictional build monitor called Dock Pulse.',
-    expectedFiles: ['index.html', 'README.md'],
-    runInstruction: 'Open index.html in a browser.',
+    name: 'single-claude-risk-simulator',
+    title: 'Single-agent Claude Monte Carlo risk simulator',
+    task: 'Create a standard-library Python CLI named risk_simulator.py that runs a deterministic Monte Carlo portfolio risk simulation with configurable trials, seed, and percentile outputs. Include a sample JSON portfolio and concise README.',
+    expectedFiles: ['risk_simulator.py', 'sample_portfolio.json', 'README.md'],
+    runInstruction: 'Run python risk_simulator.py --portfolio sample_portfolio.json --trials 2000 --seed 42.',
     agents: [
-      prompt06Agent('agent', 'builder', 'Claude Builder', 'Create the full static page and README, then complete the MCP task.', 'claude'),
+      prompt06Agent('agent', 'builder', 'Claude Builder', 'Create the full Python CLI, sample portfolio, and README, then complete the MCP task.', 'claude'),
     ],
     edges: [],
   },
   {
-    name: 'gemini-opencode-two-agent-cli',
-    title: 'Gemini scout to OpenCode builder CLI smoke output',
-    task: 'Create a tiny standard-library Python CLI named dock_notes.py that adds and lists text notes from a JSON file.',
-    expectedFiles: ['dock_notes.py', 'sample_notes.json', 'README.md'],
-    runInstruction: 'Run python dock_notes.py --help.',
+    name: 'gemini-opencode-queue-calculator',
+    title: 'Gemini scout to OpenCode queue calculator CLI',
+    task: 'Create a standard-library Python CLI named queue_capacity.py that models multi-server queue capacity using Erlang C style calculations, prints utilization, wait probability, expected wait, and scenario recommendations from a JSON input file.',
+    expectedFiles: ['queue_capacity.py', 'sample_scenarios.json', 'README.md'],
+    runInstruction: 'Run python queue_capacity.py --scenarios sample_scenarios.json.',
     agents: [
-      prompt06Agent('scout', 'scout', 'Gemini Scout', 'Define the CLI command contract and sample data shape.', 'gemini'),
+      prompt06Agent('scout', 'scout', 'Gemini Scout', 'Define the calculation contract, JSON scenario shape, and numeric acceptance checks.', 'gemini'),
       prompt06Agent('builder', 'builder', 'OpenCode Builder', 'Build the CLI and README from the scout context.', 'opencode'),
     ],
     edges: [
@@ -1288,15 +1288,15 @@ const PROMPT_11_WORKFLOWS: Prompt06WorkflowSpec[] = [
     ],
   },
   {
-    name: 'mixed-branch-review',
-    title: 'Mixed CLI branch and review smoke output',
-    task: 'Create a small browser dashboard for a fictional release checklist, with one branch responsible for copy/layout and one branch responsible for JSON data and rendering behavior.',
-    expectedFiles: ['index.html', 'app.js', 'data.json', 'README.md'],
-    runInstruction: 'Open index.html in a browser.',
+    name: 'mixed-branch-scheduler-analysis',
+    title: 'Mixed CLI branch and review scheduler analysis package',
+    task: 'Create a standard-library Python analysis package for comparing job-shop scheduling heuristics. One branch should define sample jobs and heuristic requirements, another should implement the scheduler and metrics, and the reviewer should verify the integrated CLI output.',
+    expectedFiles: ['scheduler_analysis.py', 'jobs.json', 'README.md', 'verification_notes.md'],
+    runInstruction: 'Run python scheduler_analysis.py --jobs jobs.json --heuristics shortest,longest,weighted.',
     agents: [
       prompt06Agent('coordinator', 'coordinator', 'Codex Coordinator', 'Define branch ownership, expected files, and final acceptance criteria.', 'codex'),
-      prompt06Agent('builder-copy', 'builder', 'Claude Copy Builder', 'Create page structure and concise release checklist copy.', 'claude'),
-      prompt06Agent('builder-data', 'builder', 'Gemini Data Builder', 'Create data.json and app.js rendering/filtering behavior.', 'gemini'),
+      prompt06Agent('builder-copy', 'builder', 'Claude Heuristic Builder', 'Create jobs.json and document the heuristic/metric expectations.', 'claude'),
+      prompt06Agent('builder-data', 'builder', 'Gemini Scheduler Builder', 'Create scheduler_analysis.py with deterministic heuristic calculations.', 'gemini'),
       prompt06Agent('reviewer', 'reviewer', 'OpenCode Reviewer', 'Inspect both branch outputs, verify all expected files, and finalize README instructions.', 'opencode'),
     ],
     edges: [
@@ -1307,24 +1307,24 @@ const PROMPT_11_WORKFLOWS: Prompt06WorkflowSpec[] = [
     ],
   },
   {
-    name: 'consecutive-opencode-single',
+    name: 'consecutive-opencode-network-flow',
     title: 'Consecutive single-agent run A with OpenCode',
-    task: 'Create a compact HTML quick reference for Terminal Docks smoke-test acceptance signals.',
-    expectedFiles: ['index.html', 'README.md'],
-    runInstruction: 'Open index.html in a browser.',
+    task: 'Create a standard-library Python CLI named max_flow.py that computes max flow on a small directed network from JSON using Edmonds-Karp and prints min-cut edges plus total flow.',
+    expectedFiles: ['max_flow.py', 'network.json', 'README.md'],
+    runInstruction: 'Run python max_flow.py --network network.json.',
     agents: [
-      prompt06Agent('agent', 'builder', 'OpenCode Builder', 'Create the full static quick reference and README, then complete the MCP task.', 'opencode'),
+      prompt06Agent('agent', 'builder', 'OpenCode Builder', 'Create the full Python max-flow CLI, sample network, and README, then complete the MCP task.', 'opencode'),
     ],
     edges: [],
   },
   {
-    name: 'consecutive-codex-single',
+    name: 'consecutive-codex-matrix-solver',
     title: 'Consecutive single-agent run B with Codex',
-    task: 'Create a compact HTML quick reference for Terminal Docks smoke-test acceptance signals, as the second consecutive single-agent run.',
-    expectedFiles: ['index.html', 'README.md'],
-    runInstruction: 'Open index.html in a browser.',
+    task: 'Create a standard-library Python CLI named matrix_solver.py that solves linear systems with Gaussian elimination, reports determinant and residual error, and reads a sample JSON matrix problem.',
+    expectedFiles: ['matrix_solver.py', 'matrix_problem.json', 'README.md'],
+    runInstruction: 'Run python matrix_solver.py --problem matrix_problem.json.',
     agents: [
-      prompt06Agent('agent', 'builder', 'Codex Builder', 'Create the full static quick reference and README, then complete the MCP task.', 'codex'),
+      prompt06Agent('agent', 'builder', 'Codex Builder', 'Create the full Python solver CLI, sample problem, and README, then complete the MCP task.', 'codex'),
     ],
     edges: [],
   },

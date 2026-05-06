@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import {
+  buildGeminiInteractiveLaunchCommand,
   buildPtyLaunchCommand,
   buildPtyLaunchCommandParts,
   formatLaunchArgsForLog,
@@ -126,6 +127,22 @@ run('gemini launch preserves model and yolo approval mode without screen-reader 
 
   const launch = geminiAdapter.buildLaunchCommand(launchContext({ model: 'gemini-2.5-pro', yolo: true }));
   assert.deepEqual(launch.args, args);
+});
+
+run('gemini prompt-interactive launch quotes startup prompt and preserves yolo mode', () => {
+  const command = buildGeminiInteractiveLaunchCommand({
+    modelId: 'gemini-2.5-pro',
+    yolo: true,
+    workspaceDir: 'C:/workspace',
+    prompt: 'NEW_TASK. call get_task_details({ missionId: "m1", nodeId: "n1" })',
+  });
+
+  assert.match(command, /^gemini /);
+  assert.match(command, /--model gemini-2\.5-pro/);
+  assert.match(command, /--approval-mode yolo/);
+  assert.match(command, /--prompt-interactive/);
+  assert.match(command, /"NEW_TASK\. call get_task_details/);
+  assert.doesNotMatch(command, /--screen-reader/);
 });
 
 run('runtime launch arg logging redacts MCP secrets and startup prompt', () => {

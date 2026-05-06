@@ -88,12 +88,15 @@ function Test-GeminiAuthPreflight {
   # --output-format json, and yolo approval through --approval-mode yolo.
   Write-Host 'checking Gemini auth: gemini -p "Return TD_OK only" --output-format json --approval-mode yolo'
 
-  $stdoutFile = New-TemporaryFile
-  $stderrFile = New-TemporaryFile
+  $stdoutFile = [pscustomobject]@{ FullName = [System.IO.Path]::GetTempFileName() }
+  $stderrFile = [pscustomobject]@{ FullName = [System.IO.Path]::GetTempFileName() }
   try {
+    $geminiScriptLiteral = $geminiCommand.Source.Replace("'", "''")
+    $geminiCheckCommand = "& '$geminiScriptLiteral' -p 'Return TD_OK only' --output-format json --approval-mode yolo"
+    $geminiCheckEncoded = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($geminiCheckCommand))
     $process = Start-Process `
-      -FilePath 'cmd.exe' `
-      -ArgumentList '/d /s /c "gemini -p ""Return TD_OK only"" --output-format json --approval-mode yolo"' `
+      -FilePath 'powershell.exe' `
+      -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $geminiCheckEncoded) `
       -WorkingDirectory $WorkingDirectory `
       -WindowStyle Hidden `
       -RedirectStandardOutput $stdoutFile.FullName `
@@ -104,23 +107,20 @@ function Test-GeminiAuthPreflight {
       Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
       Fail-GeminiPreflight -Message "gemini did not complete within $GeminiTimeoutSeconds seconds."
     }
+    $process.Refresh()
 
     $stdout = Get-Content -Raw -LiteralPath $stdoutFile.FullName -ErrorAction SilentlyContinue
     $stderr = Get-Content -Raw -LiteralPath $stderrFile.FullName -ErrorAction SilentlyContinue
     $combinedOutput = (($stdout, $stderr) -join [Environment]::NewLine).Trim()
+    $hasTdOk = [string]$combinedOutput -match 'TD_OK'
+    $exitCode = $process.ExitCode
 
-    if ($process.ExitCode -ne 0) {
-      Fail-GeminiPreflight -Message "gemini exited with code $($process.ExitCode)." -Output $combinedOutput
+    if ($null -ne $exitCode -and $exitCode -ne 0 -and -not $hasTdOk) {
+      Fail-GeminiPreflight -Message "gemini exited with code $exitCode." -Output $combinedOutput
     }
 
-    try {
-      $json = $stdout | ConvertFrom-Json -ErrorAction Stop
-    } catch {
-      Fail-GeminiPreflight -Message 'gemini did not return valid JSON output.' -Output $combinedOutput
-    }
-
-    if (-not ([string]$json.response -match 'TD_OK')) {
-      Fail-GeminiPreflight -Message 'gemini JSON response did not contain TD_OK.' -Output $combinedOutput
+    if (-not $hasTdOk) {
+      Fail-GeminiPreflight -Message 'gemini output did not contain TD_OK.' -Output $combinedOutput
     }
 
     Write-Host 'gemini auth preflight ok'

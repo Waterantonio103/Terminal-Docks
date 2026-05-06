@@ -53,6 +53,42 @@ run('gemini prompt 11 stale auth followed by input prompt maps to idle', () => {
   assert.equal(geminiAdapter.detectReady(fixture).ready, true);
 });
 
+run('gemini package update after prompt keeps readiness blocked until a fresh prompt', () => {
+  const updating = [
+    'Gemini CLI v0.40.1',
+    '*   Type your message or @path/to/file',
+    'Gemini CLI update available! 0.40.1 -> 0.41.1',
+    'Installed with npm. Attempting to automatically update now...',
+  ].join('\n');
+  const status = geminiAdapter.detectStatus(updating);
+  assert.equal(status.status, 'processing', status.detail);
+  assert.match(status.detail, /update/i);
+  assert.equal(geminiAdapter.detectReady(updating).ready, false);
+
+  const settled = `${updating}\nUpdate successful! The new version will be used on your next run.\n*   Type your message or @path/to/file`;
+  assert.equal(geminiAdapter.detectStatus(settled).status, 'idle');
+  assert.equal(geminiAdapter.detectReady(settled).ready, true);
+});
+
+run('gemini pending pasted text does not look ready for another managed injection', () => {
+  const prompt = [
+    'Gemini CLI v0.41.1',
+    '* [Pasted Text: 6166 chars]',
+  ].join('\n');
+  const status = geminiAdapter.detectStatus(prompt);
+  assert.equal(status.status, 'processing', status.detail);
+  assert.match(status.detail, /pasted text/i);
+  assert.equal(geminiAdapter.detectReady(prompt).ready, false);
+});
+
+run('gemini activation input uses raw single-line input instead of bracketed paste', () => {
+  const input = geminiAdapter.buildActivationInput('NEW_TASK.\ncall get_task_details.');
+  assert.equal(input.preClear, '\x15');
+  assert.equal(input.paste, 'NEW_TASK. call get_task_details.');
+  assert.equal(input.submit, '\x1b[13u');
+  assert.doesNotMatch(input.paste, /\x1b\[200~/);
+});
+
 run('gemini shell prompt alone does not imply idle', () => {
   const shell = 'C:\\Users\\user>';
   const status = geminiAdapter.detectStatus(shell);

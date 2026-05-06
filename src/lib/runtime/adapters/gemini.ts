@@ -30,6 +30,9 @@ const FAILURE_RE =
   /(?:\btask\s+failed\b|\bfatal error\b|\buncaught exception\b|exit code\s+[1-9]|\bunknown option\b|\binvalid flag\b|\bunexpected argument\b|(?:^|\n)\s*Usage:\s*gemini\b|(?:^|\n)\s*Error:)/i;
 const AUTH_RE =
   /(?:\bWaiting for authentication\b|\bauthentication required\b|\blog(?:\s|-)?in required\b|\bsign(?:\s|-)?in required\b|\bopen .*browser.*(?:auth|sign in|login)\b|\bpress esc or ctrl\+c to cancel\b.*\bauthentication\b)/i;
+const UPDATE_RE =
+  /(?:\bGemini CLI update available\b|\bAttempting to automatically update now\b|\bUpdate successful\b)/i;
+const PASTED_TEXT_RE = /\[Pasted Text:\s*\d+\s*chars\]/i;
 const ACTIVE_WORK_RE =
   /(?:\bWorking\b|\bThinking\b|\bProcessing\b|\bRunning\b|\bExecuting\b|\bCalling\b|\bUsing tool\b|\btool execution\b|\bqueued message\b|\besc to interrupt\b|\bctrl-c to interrupt\b|\boperation in progress\b|[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏])/i;
 
@@ -176,6 +179,20 @@ export const geminiAdapter: CliAdapter = {
         logMessage: 'blocked reason=authentication_required',
       },
       {
+        index: lastMatchIndex(clean, UPDATE_RE),
+        status: 'processing',
+        confidence: 'high',
+        detail: 'Gemini package update is still settling',
+        logMessage: 'waiting reason=package_update',
+      },
+      {
+        index: lastMatchIndex(clean, PASTED_TEXT_RE),
+        status: 'processing',
+        confidence: 'high',
+        detail: 'Gemini has pasted text in the editor that has not been submitted',
+        logMessage: 'waiting reason=pasted_text_pending_submit',
+      },
+      {
         index: lastMatchIndex(clean, ACTIVE_WORK_RE),
         status: 'processing',
         confidence: 'high',
@@ -305,8 +322,8 @@ export const geminiAdapter: CliAdapter = {
     const flat = signal.replace(/\r?\n/g, ' ').replace(/\s{2,}/g, ' ').trim();
     return {
       preClear: '\x15',
-      paste: `\x1b[200~${flat}\x1b[201~`,
-      submit: '\r',
+      paste: flat,
+      submit: '\x1b[13u',
     };
   },
 };

@@ -61,6 +61,7 @@ import { buildStartAgentRunRequest } from '../runtimeDispatcher.js';
 import {
   buildCodexInteractiveLaunchCommand,
   buildCodexFollowupTaskSignal,
+  buildGeminiInteractiveLaunchCommand,
   buildPtyLaunchCommand,
   formatLaunchArgsForLog,
   redactSensitiveLaunchValue,
@@ -91,6 +92,7 @@ const SHELL_LAUNCH_SETTLE_MS = 700;
 const CLI_STARTUP_WAIT_MS = 2_000;
 const CLI_READY_WAIT_MS = 20_000;
 const PASTE_SUBMIT_GAP_MS = 150;
+const GEMINI_PASTE_SUBMIT_GAP_MS = 1_500;
 const PRE_CLEAR_SETTLE_MS = 300;
 const BOOTSTRAP_EVENT_TIMEOUT_MS = 8_000;
 const MCP_HEALTH_TIMEOUT_MS = 5_000;
@@ -117,6 +119,14 @@ function readRuntimeEnvNumber(key: string, fallback: number, minimum = 0): numbe
   const env = (import.meta as ImportMeta & { env?: Record<string, string | undefined> }).env;
   const value = Number(env?.[key] ?? fallback);
   return Number.isFinite(value) ? Math.max(minimum, value) : fallback;
+}
+
+function pasteSubmitGapMsForCli(cliId: string): number {
+  return cliId === 'gemini' ? GEMINI_PASTE_SUBMIT_GAP_MS : PASTE_SUBMIT_GAP_MS;
+}
+
+function escapeGeminiStartupPromptValue(value: string): string {
+  return value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
 }
 
 // ──────────────────────────────────────────────
@@ -652,7 +662,7 @@ class RuntimeManager {
       await sleep(PRE_CLEAR_SETTLE_MS);
     }
     await this.writeToTerminalOrFail(session, paste);
-    await sleep(PASTE_SUBMIT_GAP_MS);
+    await sleep(pasteSubmitGapMsForCli(session.cliId));
     await this.writeToTerminalOrFail(session, submit);
 
     this.emit({
@@ -2461,7 +2471,19 @@ class RuntimeManager {
         session,
         new Set(['activation_acked', 'running', 'completed', 'done']),
       );
-      if (taskAlreadyFetched) {
+      if (startupPromptDeliveredViaLaunch && session.cliId === 'gemini') {
+        console.log(
+          `[runtime] skipping task prompt injection cli=${session.cliId} session=${session.sessionId}; startup prompt carries MCP task context`,
+        );
+        this.emit({
+          type: 'task_injected',
+          sessionId: session.sessionId,
+          nodeId: session.nodeId,
+          attempt: session.attempt,
+          promptBytes: 0,
+          promptPreview: '<startup prompt carried task context>',
+        });
+      } else if (taskAlreadyFetched) {
         console.log(
           `[runtime] skipping task prompt injection cli=${session.cliId} session=${session.sessionId}; task already fetched from MCP`,
         );
@@ -2650,7 +2672,7 @@ class RuntimeManager {
     const launch = await this.buildInteractiveWorkflowShellLaunchCommand(session, activationPayload);
     const launchCmd = launch.command;
 
-    console.log(`[runtime] writing CLI launch command: ${launch.promptDeliveredAtLaunch ? 'codex <startup-prompt:redacted>' : launchCmd}`);
+    console.log(`[runtime] writing CLI launch command: ${launch.promptDeliveredAtLaunch ? `${session.cliId} <startup-prompt:redacted>` : launchCmd}`);
     await this.writeToTerminalOrFail(session, `${launchCmd}\r`);
     await sleep(150);
     await resizeTerminal(session.terminalId, rows, cols).catch(() => {});
@@ -2702,6 +2724,26 @@ class RuntimeManager {
     session: RuntimeSession,
     activationPayload: import('../missionRuntime.js').RuntimeActivationPayload,
   ): Promise<{ command: string; promptDeliveredAtLaunch: boolean }> {
+    if (session.cliId === 'gemini') {
+      const missionId = escapeGeminiStartupPromptValue(session.missionId);
+      const nodeId = escapeGeminiStartupPromptValue(session.nodeId);
+      const signal = [
+        `NEW_TASK. First call get_task_details({ missionId: "${missionId}", nodeId: "${nodeId}" }) through the Terminal Docks MCP server.`,
+        'Use the returned role instructions, task payload, inbox, and legal targets as the source of truth.',
+        'Finish by calling complete_task or handoff_task through Terminal Docks MCP; do not stop after a normal final answer.',
+      ].join(' ');
+      return {
+        command: buildGeminiInteractiveLaunchCommand({
+          modelId: session.model || null,
+          yolo: session.yolo,
+          workspaceDir: session.workspaceDir,
+          prompt: signal,
+          shellKind: 'windows',
+        }),
+        promptDeliveredAtLaunch: true,
+      };
+    }
+
     if (session.cliId !== 'codex') {
       return {
         command: buildPtyLaunchCommand(session.cliId, {
@@ -3252,7 +3294,7 @@ class RuntimeManager {
         await sleep(PRE_CLEAR_SETTLE_MS);
       }
       await this.writeTerminalLikeTyping(session.terminalId, paste);
-      await sleep(PASTE_SUBMIT_GAP_MS);
+      await sleep(pasteSubmitGapMsForCli(session.cliId));
       await this.writeToTerminalOrFail(session, submit);
       return;
     }
@@ -3262,7 +3304,7 @@ class RuntimeManager {
       await sleep(PRE_CLEAR_SETTLE_MS);
     }
     await this.writeToTerminalOrFail(session, paste);
-    await sleep(PASTE_SUBMIT_GAP_MS);
+    await sleep(pasteSubmitGapMsForCli(session.cliId));
     await this.writeToTerminalOrFail(session, submit);
   }
 
