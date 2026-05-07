@@ -66,6 +66,17 @@ run('opencode invalid flag help maps to error', () => {
   assert.equal(opencodeAdapter.detectReady(help).ready, false);
 });
 
+run('opencode file preview text does not masquerade as CLI completion', () => {
+  const preview = [
+    '# Wrote opencode_completion_probe.txt',
+    '1 OpenCode MCP completion probe',
+    '2 Task completed successfully',
+    'Thinking: Good, I have created the required file. Now I need to call complete_task.',
+  ].join('\n');
+  assert.equal(opencodeAdapter.detectCompletion(preview), null);
+  assert.notEqual(opencodeAdapter.detectStatus(preview).status, 'completed');
+});
+
 run('opencode activation prompt is reduced to direct MCP task acknowledgement', () => {
   const input = opencodeAdapter.buildActivationInput(
     [

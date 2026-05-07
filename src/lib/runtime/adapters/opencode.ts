@@ -23,7 +23,8 @@ const OPENCODE_INPUT_FOOTER_RE = /(?:^|\s)▣\s+[\w -]+(?:\s*·\s*[\w .-]+)?/u;
 const OPENCODE_UI_RE = /(?:\bopencode\b|▣|QUEUED|Press\s+Esc|ctrl-c|ready for next turn)/i;
 const READY_KEYWORDS_RE = /\b(ready for next turn|type your|enter your|ask anything|input|prompt)\b/i;
 const PERMISSION_RE = /(?:allow|approve|grant|trust|deny|reject).*(?:\?|y\/n|\[y\/n\]|\b1\.)/is;
-const COMPLETION_RE = /(?:\btask\s+(?:completed|complete)\b|turn\.completed|exit code\s+0)/i;
+const COMPLETION_RE =
+  /(?:turn\.completed|exit code\s+0|\btask\s+(?:completed|complete)\b[\s\S]{0,180}\b(?:status:\s*success|ready for next turn)\b)/i;
 const FAILURE_RE = /(?:\btask\s+failed\b|\bfatal error\b|\buncaught exception\b|exit code\s+[1-9]|\bunknown option\b|\binvalid flag\b|\bunexpected argument\b|(?:^|\n)\s*Usage:\s*opencode\b)/i;
 const ACTIVE_WORK_TEXT_RE =
   /(?:\bQUEUED\b|\bWorking\b|\bThinking\b|\bProcessing\b|\bRunning\b|\bLoading\b|\bInstalling\b|\bFetching\b|\bRetrying\b|\brate[- ]limit\b|\bwaiting for (?:model|tool|response|command|rate limit)\b|\boperation in progress\b|\bpress\s+esc\b|\bctrl-c\b)/i;

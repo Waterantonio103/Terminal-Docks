@@ -58,7 +58,7 @@ function buildCodexDebugPrompt(options: {
     'Workflow:',
     `1. Call debug_get_run({ debugRunId: "${options.debugRunId}", includeEvents: true }).`,
     `2. Call debug_run_suite({ debugRunId: "${options.debugRunId}", suiteName: "${options.suiteName}" }) only for handler-level smoke evidence. Its results do not prove live UI/PTY execution or concrete runnable output.`,
-    '3. Inspect failures using debug_get_recent_runtime_logs, debug_get_workflow_events, debug_get_terminal_tail, debug_search_logs, debug_search_code, and debug_read_file as needed.',
+    '3. Inspect failures using debug_get_recent_runtime_logs, debug_get_workflow_events, debug_get_terminal_tail, debug_search_logs, debug_list_ui_screenwatch_snapshots, debug_read_ui_screenwatch_snapshot, debug_capture_app_screenshot, debug_search_code, and debug_read_file as needed. debug_capture_app_screenshot captures the already-running CometAI app window by handle; launch the app explicitly when UI evidence is required.',
     '4. If the requested test requires real workflow UX/backend evidence, run it through the live app workflow path or live workflow harness and use debug_validate_concrete_output to validate runnable/openable project files.',
     `5. ${modeInstructions[options.mode]}`,
     '6. Write the final report with debug_write_report using completed, failed, or blocked status.',

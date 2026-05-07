@@ -1,6 +1,6 @@
 param(
   [string]$RepoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path,
-  [int[]]$Ports = @(1700, 1701, 3741),
+  [int[]]$Ports = @(1420, 1700, 1701, 3741),
   [int]$GeminiTimeoutSeconds = 60,
   [switch]$SkipGeminiAuthCheck,
   [switch]$DryRun

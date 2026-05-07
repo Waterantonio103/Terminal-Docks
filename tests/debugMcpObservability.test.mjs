@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 
 const tempRoot = mkdtempSync(join(tmpdir(), 'terminal-docks-debug-observability-'));
 process.env.MCP_DB_PATH = join(tempRoot, 'tasks.db');
@@ -15,6 +15,7 @@ try {
   const { initDb, db } = await import('../mcp-server/src/db/index.mjs');
   const { createDebugRun, listDebugEvents } = await import('../mcp-server/src/debug/state.mjs');
   const { registerDebugObservabilityTools } = await import('../mcp-server/src/debug/tools/observability.mjs');
+  const { registerDebugScreenwatchTools } = await import('../mcp-server/src/debug/tools/screenwatch.mjs');
 
   initDb();
 
@@ -61,6 +62,7 @@ try {
     },
   };
   registerDebugObservabilityTools(server, () => 'test-session');
+  registerDebugScreenwatchTools(server, () => 'test-session');
 
   const snapshot = textPayload(await tools.get('debug_get_mission_snapshot').handler({ debugRunId, missionId: 'mission-a' }));
   assert.equal(snapshot.mission.missionId, 'mission-a');
@@ -83,10 +85,51 @@ try {
   const search = textPayload(await tools.get('debug_search_logs').handler({ debugRunId, query: 'ready' }));
   assert.equal(search.workflowEvents.length, 1);
 
+  const screenwatchRoot = resolve('.tmp-tests/debug-observability-ui-screenwatch');
+  const missionScreenwatchDir = join(screenwatchRoot, 'mission-a');
+  mkdirSync(missionScreenwatchDir, { recursive: true });
+  const screenwatchPath = join(missionScreenwatchDir, '001-completed.json');
+  writeFileSync(screenwatchPath, JSON.stringify({
+    schemaVersion: 1,
+    capturedAt: '2026-05-02T10:00:01.000Z',
+    label: 'completed',
+    missionId: 'mission-a',
+    issues: ['blank_terminal_0'],
+    terminals: [{ index: 0, looksBlank: true }],
+  }));
+
+  const capture = textPayload(await tools.get('debug_capture_app_screenshot').handler({
+    debugRunId,
+    label: 'metadata only',
+    outputDir: '.tmp-tests/debug-observability-screenshots',
+    mode: 'metadata_only',
+  }));
+  assert.equal(capture.ok, true);
+  assert.match(capture.metadataPath, /\.json$/);
+  assert.equal(capture.pngPath, null);
+
+  const snapshots = textPayload(await tools.get('debug_list_ui_screenwatch_snapshots').handler({
+    debugRunId,
+    missionId: 'mission-a',
+    rootDir: '.tmp-tests/debug-observability-ui-screenwatch',
+  }));
+  assert.equal(snapshots.snapshots.length, 1);
+  assert.deepEqual(snapshots.snapshots[0].issues, ['blank_terminal_0']);
+
+  const uiSnapshot = textPayload(await tools.get('debug_read_ui_screenwatch_snapshot').handler({
+    debugRunId,
+    path: snapshots.snapshots[0].path,
+  }));
+  assert.equal(uiSnapshot.snapshot.missionId, 'mission-a');
+
   const events = listDebugEvents(debugRunId);
   assert.ok(events.some(event => event.eventType === 'debug_evidence_collected'));
+  assert.ok(events.some(event => event.eventType === 'debug_screenshot_captured'));
+  assert.ok(events.some(event => event.eventType === 'debug_ui_screenwatch_listed'));
 
   console.log('PASS debug MCP observability tools return durable runtime evidence');
 } finally {
   try { rmSync(tempRoot, { recursive: true, force: true }); } catch {}
+  try { rmSync(resolve('.tmp-tests/debug-observability-ui-screenwatch'), { recursive: true, force: true }); } catch {}
+  try { rmSync(resolve('.tmp-tests/debug-observability-screenshots'), { recursive: true, force: true }); } catch {}
 }

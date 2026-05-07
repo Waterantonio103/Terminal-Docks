@@ -21,6 +21,9 @@ interface LiveWorkflowHarnessOptions {
   suiteName?: string | null;
   repoRoot: string;
   outputPath: string;
+  screenwatchDir: string;
+  screenwatchEnabled: boolean;
+  screenwatchIntervalMs: number;
   clis: WorkflowAgentCli[];
   phases: LiveWorkflowPhase[];
   cliSequences: WorkflowAgentCli[][];
@@ -51,6 +54,7 @@ interface LiveWorkflowResult {
   missingFiles: string[];
   filePreviews: Record<string, string>;
   failureCategory?: string;
+  uiScreenwatch?: UiScreenwatchSummary;
   nodeFinalStates?: Array<{
     nodeId: string;
     state: string;
@@ -85,6 +89,58 @@ interface LiveWorkflowTaskSpec {
   objective: string;
   expectedFiles: string[];
   acceptance: string[];
+}
+
+interface UiScreenwatchSummary {
+  enabled: boolean;
+  directory?: string;
+  snapshots: string[];
+  totalSnapshots: number;
+  latest?: UiScreenwatchSnapshot;
+  issueCounts: Record<string, number>;
+  errors: string[];
+}
+
+interface UiScreenwatchSnapshot {
+  schemaVersion: 1;
+  capturedAt: string;
+  label: string;
+  missionId: string;
+  url: string;
+  viewport: { width: number; height: number };
+  document: {
+    title: string;
+    visibilityState: string;
+    bodyTextLength: number;
+    bodyTextPreview: string;
+    bodyRect: RectSummary | null;
+  };
+  terminals: TerminalUiSummary[];
+  artifacts: {
+    visibleIndicators: number;
+    emptyWaitingIndicators: number;
+    textPreview: string;
+  };
+  errorIndicators: string[];
+  issues: string[];
+}
+
+interface RectSummary {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+interface TerminalUiSummary {
+  index: number;
+  rect: RectSummary | null;
+  textLength: number;
+  rowsTextLength: number;
+  canvasCount: number;
+  canvasPaintedCount: number | null;
+  looksBlank: boolean;
+  textPreview: string;
 }
 
 function sleep(ms: number): Promise<void> {
@@ -368,6 +424,181 @@ async function writeReport(outputPath: string, report: Record<string, unknown>):
   });
 }
 
+function rectSummary(rect: DOMRect | null | undefined): RectSummary | null {
+  if (!rect) return null;
+  return {
+    x: Math.round(rect.x),
+    y: Math.round(rect.y),
+    width: Math.round(rect.width),
+    height: Math.round(rect.height),
+  };
+}
+
+function countPaintedCanvases(root: Element): { count: number; readable: boolean } {
+  const canvases = Array.from(root.querySelectorAll('canvas'));
+  let painted = 0;
+  let readable = true;
+  for (const canvas of canvases) {
+    try {
+      const context = canvas.getContext('2d', { willReadFrequently: true });
+      if (!context || canvas.width <= 0 || canvas.height <= 0) {
+        continue;
+      }
+      const width = Math.min(canvas.width, 32);
+      const height = Math.min(canvas.height, 32);
+      const data = context.getImageData(0, 0, width, height).data;
+      for (let index = 3; index < data.length; index += 4) {
+        if (data[index] !== 0 || data[index - 1] !== 0 || data[index - 2] !== 0 || data[index - 3] !== 0) {
+          painted += 1;
+          break;
+        }
+      }
+    } catch {
+      readable = false;
+    }
+  }
+  return { count: painted, readable };
+}
+
+function collectUiScreenwatchSnapshot(label: string, missionId: string): UiScreenwatchSnapshot {
+  const bodyText = document.body?.innerText ?? '';
+  const lowerBodyText = bodyText.toLowerCase();
+  const terminals = Array.from(document.querySelectorAll('.xterm')).map((terminal, index): TerminalUiSummary => {
+    const rowsText = Array.from(terminal.querySelectorAll('.xterm-rows')).map(node => node.textContent ?? '').join('\n');
+    const terminalText = terminal.textContent ?? '';
+    const rect = terminal.getBoundingClientRect();
+    const canvasInfo = countPaintedCanvases(terminal);
+    const canvasCount = terminal.querySelectorAll('canvas').length;
+    const hasArea = rect.width > 120 && rect.height > 60;
+    const hasReadablePaint = canvasInfo.readable ? canvasInfo.count > 0 : true;
+    const looksBlank = hasArea && terminalText.trim().length < 8 && rowsText.trim().length < 8 && !hasReadablePaint;
+    return {
+      index,
+      rect: rectSummary(rect),
+      textLength: terminalText.trim().length,
+      rowsTextLength: rowsText.trim().length,
+      canvasCount,
+      canvasPaintedCount: canvasInfo.readable ? canvasInfo.count : null,
+      looksBlank,
+      textPreview: truncateText((rowsText || terminalText).replace(/\s+/g, ' ').trim(), 240),
+    };
+  });
+  const artifactText = Array.from(document.querySelectorAll('[class*="artifact" i], [title*="artifact" i]'))
+    .map(node => (node.textContent ?? '').trim())
+    .filter(Boolean)
+    .join('\n');
+  const errorIndicators = [
+    'react error',
+    'error boundary',
+    'unhandledrejection',
+    'uncaught',
+    'failed to render',
+  ].filter(pattern => lowerBodyText.includes(pattern));
+  const issues = [
+    ...terminals.filter(terminal => terminal.looksBlank).map(terminal => `blank_terminal_${terminal.index}`),
+    ...errorIndicators.map(pattern => `error_indicator_${pattern.replace(/\s+/g, '_')}`),
+  ];
+  if ((document.body?.getBoundingClientRect().width ?? 0) < 100 || bodyText.trim().length < 20) {
+    issues.push('app_surface_mostly_empty');
+  }
+  if (lowerBodyText.includes('waiting for artifacts')) {
+    issues.push('artifact_waiting_indicator_visible');
+  }
+
+  return {
+    schemaVersion: 1,
+    capturedAt: new Date().toISOString(),
+    label,
+    missionId,
+    url: window.location.href,
+    viewport: {
+      width: window.innerWidth,
+      height: window.innerHeight,
+    },
+    document: {
+      title: document.title,
+      visibilityState: document.visibilityState,
+      bodyTextLength: bodyText.length,
+      bodyTextPreview: truncateText(bodyText.replace(/\s+/g, ' ').trim(), 500),
+      bodyRect: rectSummary(document.body?.getBoundingClientRect()),
+    },
+    terminals,
+    artifacts: {
+      visibleIndicators: artifactText ? artifactText.split('\n').length : 0,
+      emptyWaitingIndicators: lowerBodyText.includes('waiting for artifacts') ? 1 : 0,
+      textPreview: truncateText(artifactText.replace(/\s+/g, ' ').trim(), 500),
+    },
+    errorIndicators,
+    issues,
+  };
+}
+
+class UiScreenwatchController {
+  private readonly snapshots: string[] = [];
+  private readonly errors: string[] = [];
+  private readonly issueCounts = new Map<string, number>();
+  private latest: UiScreenwatchSnapshot | undefined;
+  private timer: ReturnType<typeof setInterval> | null = null;
+  private sequence = 0;
+
+  constructor(
+    private readonly enabled: boolean,
+    private readonly directory: string,
+    private readonly missionId: string,
+    private readonly intervalMs: number,
+  ) {}
+
+  start(): void {
+    if (!this.enabled) return;
+    void this.capture('start');
+    this.timer = setInterval(() => {
+      void this.capture('interval');
+    }, Math.max(1_000, this.intervalMs));
+  }
+
+  async capture(label: string): Promise<void> {
+    if (!this.enabled) return;
+    try {
+      await ensureNestedDirectory(this.directory);
+      const snapshot = collectUiScreenwatchSnapshot(label, this.missionId);
+      this.latest = snapshot;
+      for (const issue of snapshot.issues) {
+        this.issueCounts.set(issue, (this.issueCounts.get(issue) ?? 0) + 1);
+      }
+      this.sequence += 1;
+      const fileName = `${String(this.sequence).padStart(3, '0')}-${label.replace(/[^a-z0-9_-]+/gi, '-').toLowerCase()}.json`;
+      const path = joinWindowsPath(this.directory, fileName);
+      await invoke('workspace_write_text_file', {
+        path,
+        content: JSON.stringify(snapshot, null, 2),
+      });
+      this.snapshots.push(path);
+    } catch (error) {
+      this.errors.push(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  async stop(label = 'stop'): Promise<void> {
+    if (this.timer) {
+      clearInterval(this.timer);
+      this.timer = null;
+    }
+    await this.capture(label);
+  }
+
+  summary(): UiScreenwatchSummary {
+    return {
+      enabled: this.enabled,
+      directory: this.enabled ? this.directory : undefined,
+      snapshots: [...this.snapshots],
+      totalSnapshots: this.snapshots.length,
+      latest: this.latest,
+      issueCounts: Object.fromEntries(this.issueCounts),
+      errors: [...this.errors],
+    };
+  }
+}
+
 async function ensureWorkflowDirectory(parentDir: string, name: string): Promise<string> {
   const outputDir = joinWindowsPath(parentDir, name);
   await invoke('workspace_create_dir', { parentPath: parentDir, name }).catch(error => {
@@ -505,6 +736,12 @@ async function runOneWorkflow(
   const expectedFiles = getTaskSpec(taskType).expectedFiles;
   const mission = buildMission(cliSequence, roleSequence, phase, taskType, outputDir, missionSuffix);
   const cliLabel = cliSequence.join('>');
+  const screenwatch = new UiScreenwatchController(
+    options.screenwatchEnabled,
+    joinWindowsPath(options.screenwatchDir, mission.missionId),
+    mission.missionId,
+    options.screenwatchIntervalMs,
+  );
   const sessionEvents: Array<Record<string, unknown>> = [];
   const orchestratorEvents: Array<Record<string, unknown>> = [];
   const sessionIds = new Set<string>();
@@ -543,6 +780,7 @@ async function runOneWorkflow(
   });
 
   try {
+    screenwatch.start();
     await withTimeout(
       invoke('seed_mission_to_db', { missionId: mission.missionId, graph: mission }),
       10_000,
@@ -559,6 +797,7 @@ async function runOneWorkflow(
         break;
       }
       if (run?.status === 'completed') {
+        await screenwatch.capture('completed');
         const failures = Object.values(run.nodeStates).filter(node => node.state === 'failed');
         const validation = await validateOutputFiles(outputDir, expectedFiles);
         const outputMissing = validation.missingFiles.length > 0;
@@ -584,6 +823,7 @@ async function runOneWorkflow(
           missingFiles: validation.missingFiles,
           filePreviews: validation.filePreviews,
           failureCategory: classifyFailureCategory(error, sessionEvents, terminalTails),
+          uiScreenwatch: screenwatch.summary(),
           nodeFinalStates: buildNodeFinalStates(mission.missionId),
           error,
         };
@@ -597,6 +837,7 @@ async function runOneWorkflow(
     terminalTails = await collectTerminalTails(mission.nodes.map(node => node.terminal.terminalId));
     const validation = await validateOutputFiles(outputDir, expectedFiles);
     const failedEvent = orchestratorEvents.find(event => event.type === 'node_failed');
+    await screenwatch.capture(terminalStatus ?? (failedEvent ? 'failed' : 'timeout'));
     const error = typeof failedEvent?.error === 'string' ? failedEvent.error : undefined;
     return {
       cli: cliLabel,
@@ -618,11 +859,13 @@ async function runOneWorkflow(
       missingFiles: validation.missingFiles,
       filePreviews: validation.filePreviews,
       failureCategory: classifyFailureCategory(error, sessionEvents, terminalTails),
+      uiScreenwatch: screenwatch.summary(),
       nodeFinalStates: buildNodeFinalStates(mission.missionId),
       error,
     };
   } catch (error) {
     terminalTails = await collectTerminalTails(mission.nodes.map(node => node.terminal.terminalId));
+    await screenwatch.capture('error');
     const validation = await validateOutputFiles(outputDir, expectedFiles);
     const message = error instanceof Error ? error.message : String(error);
     return {
@@ -645,10 +888,12 @@ async function runOneWorkflow(
       missingFiles: validation.missingFiles,
       filePreviews: validation.filePreviews,
       failureCategory: classifyFailureCategory(message, sessionEvents, terminalTails),
+      uiScreenwatch: screenwatch.summary(),
       nodeFinalStates: buildNodeFinalStates(mission.missionId),
       error: message,
     };
   } finally {
+    await screenwatch.stop('cleanup');
     runtimeUnsub();
     orchestratorSub.unsubscribe();
     const cleanupErrors = await cleanupMission(mission.missionId, mission.nodes.map(node => node.terminal.terminalId));
@@ -1075,6 +1320,182 @@ const PROMPT_05_WORKFLOWS: Prompt06WorkflowSpec[] = [
   },
 ];
 
+const PROMPT_05_MID_MIXED_CLI_WORKFLOWS: Prompt06WorkflowSpec[] = [
+  {
+    name: 'merge-release-notes-cli',
+    title: 'Coordinator to two builders to reviewer release notes CLI',
+    task: 'Create a small standard-library Python CLI that merges two changelog JSON inputs into user-facing release notes grouped by feature, fix, and operations impact.',
+    expectedFiles: ['release_notes.py', 'sample_changes_a.json', 'sample_changes_b.json', 'README.md'],
+    runInstruction: 'Run python release_notes.py --left sample_changes_a.json --right sample_changes_b.json.',
+    agents: [
+      prompt06Agent('coordinator', 'coordinator', 'Coordinator', 'Define the release-note merge contract and assign Builder1 to CLI behavior and Builder2 to sample data and README.', 'codex'),
+      prompt06Agent('builder1', 'builder', 'Builder1', 'Implement release_notes.py with argparse, JSON loading, grouping, duplicate handling, and readable terminal output.', 'claude'),
+      prompt06Agent('builder2', 'builder', 'Builder2', 'Create realistic sample_changes_a.json, sample_changes_b.json, and README usage examples without overwriting Builder1 code.', 'gemini'),
+      prompt06Agent('reviewer', 'reviewer', 'Reviewer', 'Inspect both builder outputs, run or reason through the documented command, and fix small integration gaps before completing.', 'opencode'),
+    ],
+    edges: [
+      prompt06Edge('coordinator', 'builder1'),
+      prompt06Edge('coordinator', 'builder2'),
+      prompt06Edge('builder1', 'reviewer'),
+      prompt06Edge('builder2', 'reviewer'),
+    ],
+  },
+  {
+    name: 'mixed-branch-api-docs',
+    title: 'Coordinator to Claude and Gemini builders to OpenCode reviewer API docs',
+    task: 'Create a compact API documentation package for a fictional incident intake service with endpoints, schemas, examples, error handling, and assumptions.',
+    expectedFiles: ['api_reference.md', 'schemas.json', 'examples.http', 'README.md'],
+    runInstruction: 'Read README.md, validate schemas.json parses as JSON, and inspect examples.http.',
+    agents: [
+      prompt06Agent('coordinator', 'coordinator', 'Coordinator', 'Define the API doc scope, split endpoint reference and schemas/examples between branches, and record assumptions.', 'codex'),
+      prompt06Agent('claude-builder', 'builder', 'Claude Builder', 'Write api_reference.md with endpoints, authentication, request/response examples, and errors.', 'claude'),
+      prompt06Agent('gemini-builder', 'builder', 'Gemini Builder', 'Create schemas.json and examples.http with realistic incident intake payloads and responses.', 'gemini'),
+      prompt06Agent('opencode-reviewer', 'reviewer', 'OpenCode Reviewer', 'Merge-review the docs package, ensure files agree, and complete only after schemas.json is valid.', 'opencode'),
+    ],
+    edges: [
+      prompt06Edge('coordinator', 'claude-builder'),
+      prompt06Edge('coordinator', 'gemini-builder'),
+      prompt06Edge('claude-builder', 'opencode-reviewer'),
+      prompt06Edge('gemini-builder', 'opencode-reviewer'),
+    ],
+  },
+  {
+    name: 'delegated-research-dashboard',
+    title: 'Codex coordinator to Claude and Gemini scouts to OpenCode builder to Codex reviewer',
+    task: 'Create a research-backed recommendation package for choosing a lightweight project status metric set. Include source-style assumptions, sample metric data, and a concise final recommendation.',
+    expectedFiles: ['metric_recommendations.md', 'metrics.json', 'research_notes.md', 'README.md'],
+    runInstruction: 'Validate metrics.json parses as JSON and read metric_recommendations.md.',
+    agents: [
+      prompt06Agent('codex-coordinator', 'coordinator', 'Codex Coordinator', 'Frame the research questions and assign one scout to metric definitions and one scout to assumptions and limitations.', 'codex'),
+      prompt06Agent('claude-scout', 'scout', 'Claude Scout', 'Produce branch-artifacts/claude-scout.md with candidate metric definitions and concise rationale.', 'claude'),
+      prompt06Agent('gemini-scout', 'scout', 'Gemini Scout', 'Produce branch-artifacts/gemini-scout.md with assumptions, source-style notes, and risks for the metric set.', 'gemini'),
+      prompt06Agent('opencode-builder', 'builder', 'OpenCode Builder', 'Build metric_recommendations.md, metrics.json, research_notes.md, and README.md from both scout artifacts.', 'opencode'),
+      prompt06Agent('codex-reviewer', 'reviewer', 'Codex Reviewer', 'Review the integrated dashboard package, validate JSON consistency, and complete the final handoff.', 'codex'),
+    ],
+    edges: [
+      prompt06Edge('codex-coordinator', 'claude-scout'),
+      prompt06Edge('codex-coordinator', 'gemini-scout'),
+      prompt06Edge('claude-scout', 'opencode-builder'),
+      prompt06Edge('gemini-scout', 'opencode-builder'),
+      prompt06Edge('opencode-builder', 'codex-reviewer'),
+    ],
+  },
+  {
+    name: 'implementation-review-bug-repro',
+    title: 'Gemini coordinator to Codex and Claude builders to OpenCode tester to Codex reviewer',
+    task: 'Create a bug reproduction package for CSV import duplicate IDs, including a repro script, fixture data, expected output notes, and a README.',
+    expectedFiles: ['repro_duplicate_ids.py', 'fixtures\\duplicate_ids.csv', 'expected_output.txt', 'README.md'],
+    runInstruction: 'Run python repro_duplicate_ids.py fixtures\\duplicate_ids.csv.',
+    agents: [
+      prompt06Agent('gemini-coordinator', 'coordinator', 'Gemini Coordinator', 'Define the bug scenario, split script and fixture/docs responsibilities, and require a real runnable repro.', 'gemini'),
+      prompt06Agent('codex-builder', 'builder', 'Codex Builder', 'Implement repro_duplicate_ids.py using only the standard library, with clear duplicate detection output.', 'codex'),
+      prompt06Agent('claude-builder', 'builder', 'Claude Builder', 'Create fixtures/duplicate_ids.csv, expected_output.txt, and README.md without overwriting the script.', 'claude'),
+      prompt06Agent('opencode-tester', 'tester', 'OpenCode Tester', 'Inspect both branch outputs, run or reason through the repro command, and record verification in branch-artifacts/opencode-tester.md.', 'opencode'),
+      prompt06Agent('codex-reviewer', 'reviewer', 'Codex Reviewer', 'Finalize the package and complete only after expected files exist and the README command is correct.', 'codex'),
+    ],
+    edges: [
+      prompt06Edge('gemini-coordinator', 'codex-builder'),
+      prompt06Edge('gemini-coordinator', 'claude-builder'),
+      prompt06Edge('codex-builder', 'opencode-tester'),
+      prompt06Edge('claude-builder', 'opencode-tester'),
+      prompt06Edge('opencode-tester', 'codex-reviewer'),
+    ],
+  },
+  {
+    name: 'fan-in-runbook-package',
+    title: 'Codex coordinator to Claude and Gemini scouts to Codex and OpenCode builders to Claude reviewer',
+    task: 'Create a compact operational runbook package for triaging a static-site deployment incident. Keep the runbook and README concise so the final fan-in can complete quickly.',
+    expectedFiles: ['runbook.md', 'triage_helper.py', 'sample_incident.json', 'README.md'],
+    runInstruction: 'Run python triage_helper.py --incident sample_incident.json.',
+    agents: [
+      prompt06Agent('codex-coordinator', 'coordinator', 'Codex Coordinator', 'Define the incident scope, scout questions, builder ownership, and final merge criteria.', 'codex'),
+      prompt06Agent('claude-scout', 'scout', 'Claude Scout', 'Produce branch-artifacts/claude-scout.md covering likely symptoms, signals, and stakeholder notes.', 'claude'),
+      prompt06Agent('gemini-scout', 'scout', 'Gemini Scout', 'Produce branch-artifacts/gemini-scout.md covering assumptions, risks, and rollback considerations.', 'gemini'),
+      prompt06Agent('codex-builder', 'builder', 'Codex Builder', 'Create triage_helper.py, sample_incident.json, and a concise runbook.md using the scout artifacts as inputs. The helper must accept both "--incident sample_incident.json" and "--incident=sample_incident.json".', 'codex'),
+      prompt06Agent('opencode-builder', 'builder', 'OpenCode Builder', 'Create only README.md plus branch-artifacts/opencode-builder.md. Keep README under 60 lines, document the helper command, and call complete_task immediately after README.md exists.', 'opencode'),
+      prompt06Agent('claude-reviewer', 'reviewer', 'Claude Reviewer', 'Inspect expected files and branch artifacts, fix only small doc inconsistencies, then call complete_task immediately. Do not keep polishing once files exist.', 'claude'),
+    ],
+    edges: [
+      prompt06Edge('codex-coordinator', 'claude-scout'),
+      prompt06Edge('codex-coordinator', 'gemini-scout'),
+      prompt06Edge('claude-scout', 'codex-builder'),
+      prompt06Edge('gemini-scout', 'codex-builder'),
+      prompt06Edge('claude-scout', 'opencode-builder'),
+      prompt06Edge('gemini-scout', 'opencode-builder'),
+      prompt06Edge('codex-builder', 'claude-reviewer'),
+      prompt06Edge('opencode-builder', 'claude-reviewer'),
+    ],
+  },
+];
+
+const OPENCODE_POST_ACK_REPRO_WORKFLOWS: Prompt06WorkflowSpec[] = [
+  {
+    name: 'single-opencode-file-completion',
+    title: 'Single OpenCode node creates one file and completes via MCP',
+    task: 'Create the smallest possible completion probe: write one text file named opencode_completion_probe.txt with two short lines, then stop work and complete the node through Terminal Docks MCP.',
+    expectedFiles: ['opencode_completion_probe.txt'],
+    runInstruction: 'Read opencode_completion_probe.txt and confirm it mentions OpenCode MCP completion.',
+    agents: [
+      prompt06Agent(
+        'opencode-probe',
+        'builder',
+        'OpenCode Probe',
+        [
+          'Call get_task_details first.',
+          'Create only opencode_completion_probe.txt in the output directory.',
+          'The file must mention OpenCode and MCP completion.',
+          'After the file exists, immediately call complete_task with outcome="success".',
+          'Do not create README.md, branch artifacts, screenshots, or any extra files.',
+          'Do not end with only a normal final answer.',
+        ].join(' '),
+        'opencode',
+      ),
+    ],
+    edges: [],
+    startNodeIds: ['opencode-probe'],
+  },
+  {
+    name: 'codex-upstream-to-opencode-file-completion',
+    title: 'Codex upstream hands one tiny task to OpenCode builder',
+    task: 'Create a minimal handoff completion probe. The Codex upstream node should write one short branch note. The OpenCode builder should use that handoff to create one final text file named opencode_handoff_probe.txt, then immediately complete the node through Terminal Docks MCP.',
+    expectedFiles: ['opencode_handoff_probe.txt'],
+    runInstruction: 'Read opencode_handoff_probe.txt and confirm it mentions Codex upstream handoff and OpenCode MCP completion.',
+    agents: [
+      prompt06Agent(
+        'codex-upstream',
+        'scout',
+        'Codex Upstream',
+        [
+          'Call get_task_details first.',
+          'Create only branch-artifacts/codex-upstream.md.',
+          'Keep the note under 8 lines and mention that OpenCode must create opencode_handoff_probe.txt.',
+          'After the branch note exists, immediately call complete_task with outcome="success".',
+        ].join(' '),
+        'codex',
+      ),
+      prompt06Agent(
+        'opencode-builder',
+        'builder',
+        'OpenCode Builder',
+        [
+          'Call get_task_details first.',
+          'Read the upstream handoff context.',
+          'Create only opencode_handoff_probe.txt in the output directory.',
+          'The file must mention Codex upstream handoff and OpenCode MCP completion.',
+          'After the file exists, immediately call complete_task with outcome="success".',
+          'Do not create README.md, screenshots, dashboards, branch artifacts, or any extra final files.',
+          'Do not end with only a normal final answer.',
+        ].join(' '),
+        'opencode',
+      ),
+    ],
+    edges: [
+      prompt06Edge('codex-upstream', 'opencode-builder'),
+    ],
+    startNodeIds: ['codex-upstream'],
+  },
+];
+
 const PROMPT_04_WORKFLOWS: Prompt06WorkflowSpec[] = [
   {
     name: 'edited-scout-output',
@@ -1290,13 +1711,13 @@ const PROMPT_11_WORKFLOWS: Prompt06WorkflowSpec[] = [
   {
     name: 'mixed-branch-scheduler-analysis',
     title: 'Mixed CLI branch and review scheduler analysis package',
-    task: 'Create a standard-library Python analysis package for comparing job-shop scheduling heuristics. One branch should define sample jobs and heuristic requirements, another should implement the scheduler and metrics, and the reviewer should verify the integrated CLI output.',
+    task: 'Create a standard-library Python analysis package for comparing job-shop scheduling heuristics. Preserve exact branch ownership by node ID: builder-copy creates only jobs.json plus README/verification notes for heuristic and metric requirements; builder-data creates the runnable scheduler_analysis.py implementation and must not replace it with a placeholder; reviewer verifies the integrated CLI output.',
     expectedFiles: ['scheduler_analysis.py', 'jobs.json', 'README.md', 'verification_notes.md'],
     runInstruction: 'Run python scheduler_analysis.py --jobs jobs.json --heuristics shortest,longest,weighted.',
     agents: [
-      prompt06Agent('coordinator', 'coordinator', 'Codex Coordinator', 'Define branch ownership, expected files, and final acceptance criteria.', 'codex'),
-      prompt06Agent('builder-copy', 'builder', 'Claude Heuristic Builder', 'Create jobs.json and document the heuristic/metric expectations.', 'claude'),
-      prompt06Agent('builder-data', 'builder', 'Gemini Scheduler Builder', 'Create scheduler_analysis.py with deterministic heuristic calculations.', 'gemini'),
+      prompt06Agent('coordinator', 'coordinator', 'Codex Coordinator', 'Route by exact node IDs: builder-copy owns jobs.json/README/verification_notes.md requirements; builder-data owns scheduler_analysis.py implementation; do not swap branch responsibilities.', 'codex'),
+      prompt06Agent('builder-copy', 'builder', 'Claude Dataset Builder', 'Create jobs.json and document heuristic/metric expectations in README.md or verification_notes.md. Do not create or overwrite scheduler_analysis.py.', 'claude'),
+      prompt06Agent('builder-data', 'builder', 'Gemini Scheduler Builder', 'Create the complete runnable scheduler_analysis.py CLI with deterministic heuristic calculations, metrics, argparse, and printed output. Do not leave main() as pass.', 'gemini'),
       prompt06Agent('reviewer', 'reviewer', 'OpenCode Reviewer', 'Inspect both branch outputs, verify all expected files, and finalize README instructions.', 'opencode'),
     ],
     edges: [
@@ -1533,6 +1954,13 @@ async function runPrompt06Workflow(
   const mission = buildPrompt06Mission(spec, outputDir, suffix, promptNumber, suiteSlug);
   const missionCliSequence = mission.nodes.map(node => node.terminal.cli);
   const missionCliLabel = missionCliSequence.join('>');
+  const screenwatchDir = joinWindowsPath(options.screenwatchDir, mission.missionId);
+  const screenwatch = new UiScreenwatchController(
+    options.screenwatchEnabled,
+    screenwatchDir,
+    mission.missionId,
+    options.screenwatchIntervalMs,
+  );
   const sessionEvents: Array<Record<string, unknown>> = [];
   const orchestratorEvents: Array<Record<string, unknown>> = [];
   const sessionIds = new Set<string>();
@@ -1570,6 +1998,7 @@ async function runPrompt06Workflow(
   });
 
   try {
+    screenwatch.start();
     await withTimeout(
       invoke('seed_mission_to_db', { missionId: mission.missionId, graph: mission }),
       10_000,
@@ -1577,11 +2006,12 @@ async function runPrompt06Workflow(
     );
     await withTimeout(missionOrchestrator.launchMission(mission), 30_000, undefined);
 
-    const deadline = Date.now() + options.workflowTimeoutMs * Math.max(1, Math.ceil(mission.nodes.length / 3));
+    const deadline = Date.now() + options.workflowTimeoutMs * Math.max(1, mission.nodes.length);
     while (Date.now() < deadline) {
       const run = workflowOrchestrator.getRun(mission.missionId);
       terminalTails = await collectTerminalTails(mission.nodes.map(node => node.terminal.terminalId));
       if (Object.values(terminalTails).some(isRateLimitText)) {
+        await screenwatch.capture('rate-limited');
         const validation = await validateOutputFiles(outputDir, spec.expectedFiles);
         const error = 'Provider rate limit detected in terminal output.';
         return {
@@ -1604,11 +2034,13 @@ async function runPrompt06Workflow(
           missingFiles: validation.missingFiles,
           filePreviews: validation.filePreviews,
           failureCategory: classifyFailureCategory(error, sessionEvents, terminalTails),
+          uiScreenwatch: screenwatch.summary(),
           nodeFinalStates: buildNodeFinalStates(mission.missionId),
           error,
         };
       }
       if (run?.status === 'completed') {
+        await screenwatch.capture('completed');
         const validation = await validateOutputFiles(outputDir, spec.expectedFiles);
         const failures = Object.values(run.nodeStates).filter(node => node.state === 'failed');
         const error = failures.map(node => `${node.nodeId}: failed`).join('; ') || (validation.missingFiles.length ? `Missing files: ${validation.missingFiles.join(', ')}` : undefined);
@@ -1633,6 +2065,7 @@ async function runPrompt06Workflow(
           missingFiles: validation.missingFiles,
           filePreviews: validation.filePreviews,
           failureCategory: classifyFailureCategory(error, sessionEvents, terminalTails),
+          uiScreenwatch: screenwatch.summary(),
           nodeFinalStates: buildNodeFinalStates(mission.missionId),
           error,
         };
@@ -1642,8 +2075,9 @@ async function runPrompt06Workflow(
     }
 
     terminalTails = await collectTerminalTails(mission.nodes.map(node => node.terminal.terminalId));
-    const validation = await validateOutputFiles(outputDir, spec.expectedFiles);
     const failedEvent = orchestratorEvents.find(event => event.type === 'node_failed');
+    await screenwatch.capture(failedEvent ? 'failed' : 'timeout');
+    const validation = await validateOutputFiles(outputDir, spec.expectedFiles);
     const error = typeof failedEvent?.error === 'string' ? failedEvent.error : undefined;
     return {
       cli: missionCliLabel,
@@ -1665,11 +2099,13 @@ async function runPrompt06Workflow(
       missingFiles: validation.missingFiles,
       filePreviews: validation.filePreviews,
       failureCategory: classifyFailureCategory(error, sessionEvents, terminalTails),
+      uiScreenwatch: screenwatch.summary(),
       nodeFinalStates: buildNodeFinalStates(mission.missionId),
       error,
     };
   } catch (error) {
     terminalTails = await collectTerminalTails(mission.nodes.map(node => node.terminal.terminalId));
+    await screenwatch.capture('error');
     const validation = await validateOutputFiles(outputDir, spec.expectedFiles);
     const message = error instanceof Error ? error.message : String(error);
     return {
@@ -1692,10 +2128,12 @@ async function runPrompt06Workflow(
       missingFiles: validation.missingFiles,
       filePreviews: validation.filePreviews,
       failureCategory: classifyFailureCategory(message, sessionEvents, terminalTails),
+      uiScreenwatch: screenwatch.summary(),
       nodeFinalStates: buildNodeFinalStates(mission.missionId),
       error: message,
     };
   } finally {
+    await screenwatch.stop('cleanup');
     runtimeUnsub();
     orchestratorSub.unsubscribe();
     const cleanupErrors = await cleanupMission(mission.missionId, mission.nodes.map(node => node.terminal.terminalId));
@@ -1780,6 +2218,101 @@ async function runPrompt05BranchingMergeHarness(options: LiveWorkflowHarnessOpti
     if (selectedIndex < selectedWorkflows.length - 1) {
       await waitForPrompt06McpHealth('Prompt 05');
     }
+  }
+
+  report.finishedAt = new Date().toISOString();
+  await writeReport(options.outputPath, report);
+
+  if (options.closeWhenDone) {
+    await Window.getCurrent().close();
+  }
+}
+
+async function runPrompt05MidMixedCliHarness(options: LiveWorkflowHarnessOptions): Promise<void> {
+  const selectedWorkflows = selectPromptWorkflows(PROMPT_05_MID_MIXED_CLI_WORKFLOWS);
+  const report = {
+    startedAt: new Date().toISOString(),
+    finishedAt: null as string | null,
+    suiteName: 'prompt05_branching_merge_mid_mixed_cli',
+    workflowFilter: LIVE_WORKFLOW_FILTER ?? null,
+    executionPath: 'live_app_harness',
+    liveRuntimeLaunched: true,
+    note: 'Runs a bounded five-workflow mixed-CLI Prompt 05 branch/merge suite through MissionOrchestrator, WorkflowOrchestrator, RuntimeManager, and interactive PTY sessions.',
+    workflows: selectedWorkflows.map(({ spec, index }) => ({
+      index: index + 1,
+      name: spec.name,
+      title: spec.title,
+      agentCount: spec.agents.length,
+      clis: spec.agents.map(agent => agent.cli ?? 'codex'),
+      expectedFiles: spec.expectedFiles,
+      runInstruction: spec.runInstruction,
+      edges: spec.edges,
+    })),
+    results: [] as LiveWorkflowResult[],
+  };
+
+  await writeReport(options.outputPath, report);
+  for (let selectedIndex = 0; selectedIndex < selectedWorkflows.length; selectedIndex += 1) {
+    const { spec, index } = selectedWorkflows[selectedIndex];
+    const result = await runPrompt06Workflow(
+      spec,
+      index,
+      options,
+      'branching-merge-mid',
+      '05',
+      'prompt05-mid',
+    );
+    report.results.push(result);
+    await writeReport(options.outputPath, report);
+    if (selectedIndex < selectedWorkflows.length - 1) {
+      await waitForPrompt06McpHealth('Prompt 05 mid mixed-CLI');
+    }
+  }
+
+  report.finishedAt = new Date().toISOString();
+  await writeReport(options.outputPath, report);
+
+  if (options.closeWhenDone) {
+    await Window.getCurrent().close();
+  }
+}
+
+async function runOpenCodePostAckReproducerHarness(options: LiveWorkflowHarnessOptions): Promise<void> {
+  const selectedWorkflows = selectPromptWorkflows(OPENCODE_POST_ACK_REPRO_WORKFLOWS);
+  const report = {
+    startedAt: new Date().toISOString(),
+    finishedAt: null as string | null,
+    suiteName: 'opencode_post_ack_reproducer',
+    workflowFilter: LIVE_WORKFLOW_FILTER ?? null,
+    executionPath: 'live_app_harness',
+    liveRuntimeLaunched: true,
+    note: 'Minimal live reproducers for OpenCode post_ack_no_mcp_completion. Runs small OpenCode interactive PTY workflows through MissionOrchestrator, WorkflowOrchestrator, RuntimeManager, and Terminal Docks MCP.',
+    workflows: selectedWorkflows.map(({ spec, index }) => ({
+      index: index + 1,
+      name: spec.name,
+      title: spec.title,
+      agentCount: spec.agents.length,
+      clis: spec.agents.map(agent => agent.cli ?? 'codex'),
+      expectedFiles: spec.expectedFiles,
+      runInstruction: spec.runInstruction,
+      edges: spec.edges,
+    })),
+    results: [] as LiveWorkflowResult[],
+  };
+
+  await writeReport(options.outputPath, report);
+  for (let selectedIndex = 0; selectedIndex < selectedWorkflows.length; selectedIndex += 1) {
+    const { spec, index } = selectedWorkflows[selectedIndex];
+    const result = await runPrompt06Workflow(
+      spec,
+      index,
+      options,
+      'opencode-post-ack-repro',
+      'OpenCode post-ACK',
+      'opencode-post-ack',
+    );
+    report.results.push(result);
+    await writeReport(options.outputPath, report);
   }
 
   report.finishedAt = new Date().toISOString();
@@ -1901,6 +2434,16 @@ export async function runLiveWorkflowHarness(options: LiveWorkflowHarnessOptions
     return;
   }
 
+  if (options.suiteName === 'prompt05_branching_merge_mid_mixed_cli') {
+    await runPrompt05MidMixedCliHarness(options);
+    return;
+  }
+
+  if (options.suiteName === 'opencode_post_ack_reproducer') {
+    await runOpenCodePostAckReproducerHarness(options);
+    return;
+  }
+
   if (options.suiteName === 'prompt06_large_workflows') {
     await runPrompt06LargeWorkflowHarness(options);
     return;
@@ -1969,6 +2512,9 @@ export function liveWorkflowHarnessOptionsFromEnv(): LiveWorkflowHarnessOptions 
     suiteName: env.VITE_LIVE_WORKFLOW_SUITE || null,
     repoRoot,
     outputPath: env.VITE_LIVE_WORKFLOW_REPORT || `${repoRoot}\\.tmp-tests\\live-workflow-report.json`,
+    screenwatchDir: env.VITE_LIVE_WORKFLOW_SCREENWATCH_DIR || `${repoRoot}\\.tmp-tests\\ui-screenwatch`,
+    screenwatchEnabled: env.VITE_LIVE_WORKFLOW_SCREENWATCH !== '0',
+    screenwatchIntervalMs: Math.max(1_000, Number(env.VITE_LIVE_WORKFLOW_SCREENWATCH_INTERVAL_MS || 5_000)),
     clis: parseCsv(env.VITE_LIVE_WORKFLOW_CLIS, VALID_CLIS, VALID_CLIS),
     phases: parseCsv(env.VITE_LIVE_WORKFLOW_PHASES, VALID_PHASES, VALID_PHASES),
     cliSequences: parseCliSequences(env.VITE_LIVE_WORKFLOW_COMBOS),
