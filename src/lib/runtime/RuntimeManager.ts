@@ -109,11 +109,22 @@ const MCP_HEALTH_TIMEOUT_MS = 5_000;
 const MCP_HEALTH_RETRY_ATTEMPTS = 3;
 const MCP_HEALTH_RETRY_DELAY_MS = 1_000;
 const MCP_REGISTRATION_TIMEOUT_MS = 8_000;
-const TASK_ACK_TIMEOUT_MS = 60_000;
+const TASK_ACK_TIMEOUT_MS = readRuntimeEnvNumber('VITE_RUNTIME_TASK_ACK_TIMEOUT_MS', 60_000, 30_000);
+const GEMINI_TASK_ACK_TIMEOUT_MS = readRuntimeEnvNumber(
+  'VITE_RUNTIME_GEMINI_TASK_ACK_TIMEOUT_MS',
+  180_000,
+  TASK_ACK_TIMEOUT_MS,
+);
+const CLAUDE_TASK_ACK_TIMEOUT_MS = readRuntimeEnvNumber(
+  'VITE_RUNTIME_CLAUDE_TASK_ACK_TIMEOUT_MS',
+  120_000,
+  TASK_ACK_TIMEOUT_MS,
+);
 const BOOTSTRAP_INJECTION_TIMEOUT_MS = 10_000;
 const MISSING_MCP_COMPLETION_RENUDGE_MS = 4_000;
 const MISSING_MCP_COMPLETION_FAIL_MS = 90_000;
 const POST_ACK_NO_PROGRESS_WINDOW_MS = readRuntimeEnvNumber('VITE_RUNTIME_POST_ACK_NO_PROGRESS_WINDOW_MS', 60_000, 1_000);
+const MAX_RETAINED_RUNTIME_VIEW_SESSIONS = readRuntimeEnvNumber('VITE_RUNTIME_RETAINED_VIEW_SESSIONS', 16, 0);
 const RUNTIME_COMPLETION_POLL_MS = 2_000;
 const CODEX_IDLE_WAIT_MS = 1_000;
 const CODEX_IDLE_TIMEOUT_MS = 8_000;
@@ -139,6 +150,11 @@ function managedInjectionReadyWaitMsForCli(cliId: string): number {
   if (cliId === 'claude') return CLAUDE_MANAGED_INJECTION_READY_WAIT_MS;
   if (cliId === 'opencode') return OPENCODE_MANAGED_INJECTION_READY_WAIT_MS;
   return CLI_READY_WAIT_MS;
+}
+
+function taskAckTimeoutMsForCli(cliId: string): number {
+  if (cliId === 'claude') return CLAUDE_TASK_ACK_TIMEOUT_MS;
+  return cliId === 'gemini' ? GEMINI_TASK_ACK_TIMEOUT_MS : TASK_ACK_TIMEOUT_MS;
 }
 
 function isManagedCliActiveWorkStatus(status: StatusDetectionResult | null | undefined): boolean {
@@ -950,6 +966,10 @@ class RuntimeManager {
     const isWorkflowRun = !args.missionId.startsWith('adhoc-');
     let needsPtyDestroy = false;
 
+    if (isWorkflowRun) {
+      this.pruneRetainedSessionsForWorkflowRun(args.missionId);
+    }
+
     const existing = this.findReusableSessionCandidate(args);
     if (existing && strategy.workflowMode === 'reusable_interactive' && !isWorkflowRun) {
       const validation = await this.validateSessionForReuse(existing.sessionId, expectedReuse);
@@ -1069,6 +1089,8 @@ class RuntimeManager {
 
     session.transitionTo('awaiting_ack');
 
+    const taskAckTimeoutMs = taskAckTimeoutMsForCli(session.cliId);
+
     try {
       await this.waitForMcpState(
         session.sessionId,
@@ -1077,7 +1099,7 @@ class RuntimeManager {
         session.attempt,
         'activation:acked',
         new Set(['activation_acked', 'running', 'completed', 'done']),
-        TASK_ACK_TIMEOUT_MS,
+        taskAckTimeoutMs,
       );
 
       session.transitionTo('running');
@@ -1107,7 +1129,7 @@ class RuntimeManager {
       }).catch(() => {});
     } catch {
       throw new Error(
-        `Agent for CLI "${session.cliId}" on node "${session.nodeId}" did not ACK re-injected task within ${Math.round(TASK_ACK_TIMEOUT_MS / 1000)}s.`,
+        `Agent for CLI "${session.cliId}" on node "${session.nodeId}" did not ACK re-injected task within ${Math.round(taskAckTimeoutMs / 1000)}s.`,
       );
     }
   }
@@ -2515,49 +2537,30 @@ class RuntimeManager {
 
     session.transitionTo('injecting_task');
 
+    const baseUrl = await getMcpBaseUrl();
+    const signal = buildNewTaskSignal({
+      missionId: session.missionId,
+      nodeId: session.nodeId,
+      roleId: session.role,
+      sessionId: session.sessionId,
+      agentId: session.agentId,
+      terminalId: session.terminalId,
+      activatedAt: Date.now(),
+      attempt: session.attempt,
+      payload: activationPayload.inputPayload ?? null,
+      runId: activationPayload.runId,
+      cliType: session.cliId,
+      modelId: session.model || null,
+      yolo: session.yolo,
+      executionMode: session.executionMode,
+      goal: activationPayload.goal,
+      workspaceDir: session.workspaceDir,
+      assignment: activationPayload.assignment,
+    }, baseUrl);
+
     if (session.isHeadless) {
-      const baseUrl = await getMcpBaseUrl();
-      const signal = buildNewTaskSignal({
-        missionId: session.missionId,
-        nodeId: session.nodeId,
-        roleId: session.role,
-        sessionId: session.sessionId,
-        agentId: session.agentId,
-        terminalId: session.terminalId,
-        activatedAt: Date.now(),
-        attempt: session.attempt,
-        payload: activationPayload.inputPayload ?? null,
-        runId: activationPayload.runId,
-        cliType: session.cliId,
-        modelId: session.model || null,
-        yolo: session.yolo,
-        executionMode: session.executionMode,
-        goal: activationPayload.goal,
-        workspaceDir: session.workspaceDir,
-        assignment: activationPayload.assignment,
-      }, baseUrl);
       await this.launchHeadless(session, activationPayload, signal, baseUrl);
     } else {
-      const baseUrl = await getMcpBaseUrl();
-      const signal = buildNewTaskSignal({
-        missionId: session.missionId,
-        nodeId: session.nodeId,
-        roleId: session.role,
-        sessionId: session.sessionId,
-        agentId: session.agentId,
-        terminalId: session.terminalId,
-        activatedAt: Date.now(),
-        attempt: session.attempt,
-        payload: activationPayload.inputPayload ?? null,
-        runId: activationPayload.runId,
-        cliType: session.cliId,
-        modelId: session.model || null,
-        yolo: session.yolo,
-        executionMode: session.executionMode,
-        goal: activationPayload.goal,
-        workspaceDir: session.workspaceDir,
-        assignment: activationPayload.assignment,
-      }, baseUrl);
       const taskAlreadyFetched = await this.hasRuntimeActivationStatus(
         session,
         new Set(['activation_acked', 'running', 'completed', 'done']),
@@ -2594,56 +2597,90 @@ class RuntimeManager {
 
     session.transitionTo('awaiting_ack');
 
+    const taskAckTimeoutMs = taskAckTimeoutMsForCli(session.cliId);
+
     try {
-      const ackPromise = this.waitForMcpState(
-        session.sessionId,
-        session.missionId,
-        session.nodeId,
-        session.attempt,
-        'activation:acked',
-        new Set(['activation_acked', 'running', 'completed', 'done']),
-        TASK_ACK_TIMEOUT_MS,
-      );
-      await ackPromise;
-
-      session.transitionTo('running');
-      this.startRuntimeCompletionPoller(session);
-      this.startPostAckNoProgressWatchdog(session);
-
-      await acknowledgeActivation({
-        missionId: session.missionId,
-        nodeId: session.nodeId,
-        attempt: session.attempt,
-        status: 'activation_acked',
-      });
-      await acknowledgeActivation({
-        missionId: session.missionId,
-        nodeId: session.nodeId,
-        attempt: session.attempt,
-        status: 'running',
-      });
-
-      this.emit({
-        type: 'task_acked',
-        sessionId: session.sessionId,
-        nodeId: session.nodeId,
-        attempt: session.attempt,
-      });
-      missionRepository.appendWorkflowEvent({
-        missionId: session.missionId,
-        nodeId: session.nodeId,
-        sessionId: session.sessionId,
-        eventType: 'task_acknowledged',
-        severity: 'info',
-        message: `Task acknowledged by agent in session ${session.sessionId}`,
-      }).catch(() => {});
+      await this.waitForTaskAckAndMarkRunning(session, taskAckTimeoutMs);
     } catch {
+      if (startupPromptDeliveredViaLaunch && session.cliId === 'gemini') {
+        const taskAlreadyFetched = await this.hasRuntimeActivationStatus(
+          session,
+          new Set(['activation_acked', 'running', 'completed', 'done']),
+        );
+        if (taskAlreadyFetched) {
+          await this.waitForTaskAckAndMarkRunning(session, 1_000);
+          return;
+        }
+
+        missionRepository.appendWorkflowEvent({
+          missionId: session.missionId,
+          nodeId: session.nodeId,
+          sessionId: session.sessionId,
+          terminalId: session.terminalId,
+          eventType: 'gemini_startup_task_ack_retry',
+          severity: 'warning',
+          message: 'Gemini did not acknowledge the launch-time task prompt; retrying with managed prompt injection.',
+        }).catch(() => {});
+        await this.injectInteractiveTask(session, signal, true);
+        session.transitionTo('awaiting_ack');
+        try {
+          await this.waitForTaskAckAndMarkRunning(session, taskAckTimeoutMs);
+          return;
+        } catch {
+          // Fall through to the standard ACK error below.
+        }
+      }
+
       throw new Error(
         session.cliId === 'codex'
           ? `Codex did not fetch the current task from MCP. Try New Runtime or check MCP connection.`
-          : `Agent for CLI "${session.cliId}" on node "${session.nodeId}" did not call get_task_details within ${Math.round(TASK_ACK_TIMEOUT_MS / 1000)}s (state: awaiting_ack). Check terminal for errors.`,
+          : `Agent for CLI "${session.cliId}" on node "${session.nodeId}" did not call get_task_details within ${Math.round(taskAckTimeoutMs / 1000)}s (state: awaiting_ack). Check terminal for errors.`,
       );
     }
+  }
+
+  private async waitForTaskAckAndMarkRunning(session: RuntimeSession, timeoutMs: number): Promise<void> {
+    await this.waitForMcpState(
+      session.sessionId,
+      session.missionId,
+      session.nodeId,
+      session.attempt,
+      'activation:acked',
+      new Set(['activation_acked', 'running', 'completed', 'done']),
+      timeoutMs,
+    );
+
+    session.transitionTo('running');
+    this.startRuntimeCompletionPoller(session);
+    this.startPostAckNoProgressWatchdog(session);
+
+    await acknowledgeActivation({
+      missionId: session.missionId,
+      nodeId: session.nodeId,
+      attempt: session.attempt,
+      status: 'activation_acked',
+    });
+    await acknowledgeActivation({
+      missionId: session.missionId,
+      nodeId: session.nodeId,
+      attempt: session.attempt,
+      status: 'running',
+    });
+
+    this.emit({
+      type: 'task_acked',
+      sessionId: session.sessionId,
+      nodeId: session.nodeId,
+      attempt: session.attempt,
+    });
+    missionRepository.appendWorkflowEvent({
+      missionId: session.missionId,
+      nodeId: session.nodeId,
+      sessionId: session.sessionId,
+      eventType: 'task_acknowledged',
+      severity: 'info',
+      message: `Task acknowledged by agent in session ${session.sessionId}`,
+    }).catch(() => {});
   }
 
   private async launchHeadless(
@@ -2925,14 +2962,31 @@ class RuntimeManager {
 
   private retainSessionForRuntimeView(session: RuntimeSession): void {
     if (session.missionId.startsWith('adhoc-')) return;
+    if (MAX_RETAINED_RUNTIME_VIEW_SESSIONS <= 0) return;
     this.retainedSessions.set(session.sessionId, session.toDescriptor());
+    this.pruneRetainedSessionsForWorkflowRun(session.missionId);
+  }
 
-    const entries = Array.from(this.retainedSessions.entries());
-    const maxRetained = 48;
-    if (entries.length <= maxRetained) return;
-    for (const [sessionId] of entries.slice(0, entries.length - maxRetained)) {
-      this.retainedSessions.delete(sessionId);
+  private pruneRetainedSessionsForWorkflowRun(activeMissionId: string): void {
+    let changed = false;
+    for (const [sessionId, descriptor] of this.retainedSessions.entries()) {
+      if (descriptor.missionId !== activeMissionId) {
+        this.retainedSessions.delete(sessionId);
+        changed = true;
+      }
     }
+
+    const entries = Array.from(this.retainedSessions.entries())
+      .sort((a, b) => (a[1].createdAt ?? 0) - (b[1].createdAt ?? 0));
+    if (entries.length <= MAX_RETAINED_RUNTIME_VIEW_SESSIONS) {
+      if (changed) this.notifySnapshot();
+      return;
+    }
+    for (const [sessionId] of entries.slice(0, entries.length - MAX_RETAINED_RUNTIME_VIEW_SESSIONS)) {
+      this.retainedSessions.delete(sessionId);
+      changed = true;
+    }
+    if (changed) this.notifySnapshot();
   }
 
   private forgetRetainedSessionsForRuntime(missionId: string, nodeId: string, terminalId: string): void {

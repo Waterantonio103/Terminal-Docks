@@ -12,6 +12,23 @@ const DEFAULT_SCREENSHOT_ROOT = resolve(REPO_ROOT, '.tmp-tests/debug-screenshots
 const DEFAULT_SCREENWATCH_ROOT = resolve(REPO_ROOT, '.tmp-tests/ui-screenwatch');
 const DEBUG_TMP_ROOT = resolve(REPO_ROOT, '.tmp-tests');
 const MAX_JSON_BYTES = 1_000_000;
+const WINDOW_SCREENSHOT_CONTRACT = {
+  captureTarget: 'matched_app_window_handle',
+  captureMethod: 'windows_print_window_hwnd',
+  occlusionIndependent: true,
+  foregroundWindowRequired: false,
+  capturesDesktop: false,
+  requiresMainWindowHandle: true,
+  note: 'Window mode captures the matched app HWND with PrintWindow/PW_RENDERFULLCONTENT. Other windows layered above the app are not included. Capture can still fail if the app is not running, has no window handle, is minimized/hidden, or the window surface refuses PrintWindow rendering.',
+};
+const SCREENWATCH_VISUAL_REVIEW = {
+  required: true,
+  reason: 'Screenwatch JSON uses DOM and xterm heuristics only. It can flag blank terminals and obvious text errors, but it cannot determine whether the app UI is visually correct.',
+  instruction: 'Explicitly call debug_capture_app_screenshot, open/analyze the PNG, and report any perceivable UI errors such as broken layout, overlapping panes, clipped text, blank areas, stale prompts, or incorrect CLI surfaces. Window screenshots are captured from the matched app window handle, not from foreground desktop pixels, so other windows being open or in front are not part of the image.',
+  screenshotTool: 'debug_capture_app_screenshot',
+  defaultScreenshotDir: toRepoPath(DEFAULT_SCREENSHOT_ROOT),
+  screenshotContract: WINDOW_SCREENSHOT_CONTRACT,
+};
 
 function safeSlug(value, fallback = 'capture') {
   const slug = String(value ?? '').trim().replace(/[^a-z0-9_-]+/gi, '-').replace(/^-+|-+$/g, '').toLowerCase();
@@ -68,6 +85,7 @@ function readSnapshotSummary(pathValue) {
     missionId: parsed?.missionId ?? null,
     issues: Array.isArray(parsed?.issues) ? parsed.issues : [],
     terminalCount: Array.isArray(parsed?.terminals) ? parsed.terminals.length : 0,
+    visualReviewRequired: true,
   };
 }
 
@@ -87,10 +105,10 @@ async function captureWindowsAppWindow(outputPath, { targetWindowTitle, processN
     'if ($title) {',
     '  $titleMatches = $candidates | Where-Object { $_.MainWindowTitle -like "*$title*" }',
     '  if ($titleMatches) { $candidates = $titleMatches }',
-    '  elseif (-not $allowTitleFallback) { throw "No visible app window matched requested title $title. Refusing fallback capture." }',
+    '  elseif (-not $allowTitleFallback) { throw "No app window handle matched requested title $title. Refusing fallback capture." }',
     '}',
     '$window = $candidates | Sort-Object @{ Expression = { if ($_.MainWindowTitle -eq $title) { 0 } elseif ($_.MainWindowTitle -like "*$title*") { 1 } else { 2 } } }, Id | Select-Object -First 1',
-    'if (-not $window) { throw "No visible app window found. Launch the app explicitly, then capture by processName or targetWindowTitle." }',
+    'if (-not $window) { throw "No app window handle found. Launch the app explicitly, then capture by processName or targetWindowTitle." }',
     'Add-Type @"',
     'using System;',
     'using System.Runtime.InteropServices;',
@@ -172,6 +190,7 @@ export function registerDebugScreenwatchTools(server, getSessionId) {
       targetWindowTitle,
       processName: processName ?? null,
       allowTitleFallback,
+      captureContract: WINDOW_SCREENSHOT_CONTRACT,
       note: 'window mode captures the running app window handle via PrintWindow. It does not capture the desktop, browser tabs, or windows layered above the app.',
     };
 
@@ -199,6 +218,11 @@ export function registerDebugScreenwatchTools(server, getSessionId) {
         metadataPath: toRepoPath(metadataPath),
         pngPath: metadata.pngPath,
         mode,
+        captureContract: WINDOW_SCREENSHOT_CONTRACT,
+        visualAnalysisRequired: mode === 'window',
+        analysisInstruction: mode === 'window'
+          ? 'Open/analyze the PNG and explicitly report any perceivable UI errors. Screenwatch JSON alone is not sufficient UI validation. Window mode captures the matched app window handle, not foreground desktop pixels, so other windows being open or in front are not part of the image.'
+          : 'metadata_only mode does not produce pixels to analyze. Use mode="window" for visual UI validation; window mode captures the matched app window handle, not foreground desktop pixels.',
       });
     } catch (error) {
       writeDebugEvent(debugRunId, 'debug_screenshot_failed', {
@@ -236,6 +260,7 @@ export function registerDebugScreenwatchTools(server, getSessionId) {
       root: toRepoPath(root),
       missionId: missionId ?? null,
       snapshots,
+      visualReview: SCREENWATCH_VISUAL_REVIEW,
     });
   });
 
@@ -271,6 +296,7 @@ export function registerDebugScreenwatchTools(server, getSessionId) {
     return jsonResponse({
       path: toRepoPath(absolute),
       snapshot,
+      visualReview: SCREENWATCH_VISUAL_REVIEW,
     });
   });
 }

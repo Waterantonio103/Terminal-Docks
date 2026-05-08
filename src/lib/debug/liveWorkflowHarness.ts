@@ -99,6 +99,7 @@ interface UiScreenwatchSummary {
   latest?: UiScreenwatchSnapshot;
   issueCounts: Record<string, number>;
   errors: string[];
+  visualReview: UiScreenwatchVisualReview;
 }
 
 interface UiScreenwatchSnapshot {
@@ -123,6 +124,20 @@ interface UiScreenwatchSnapshot {
   };
   errorIndicators: string[];
   issues: string[];
+  visualReview: UiScreenwatchVisualReview;
+}
+
+interface UiScreenwatchVisualReview {
+  required: true;
+  reason: string;
+  instruction: string;
+  screenshotTool: 'debug_capture_app_screenshot';
+  screenshotContract: {
+    captureTarget: 'matched_app_window_handle';
+    occlusionIndependent: true;
+    foregroundWindowRequired: false;
+    capturesDesktop: false;
+  };
 }
 
 interface RectSummary {
@@ -207,15 +222,18 @@ function parseRoleSequences(value: string | undefined): string[][] {
 function isRateLimitText(text: string): boolean {
   const lower = text.toLowerCase();
   return (
-    lower.includes('rate limit') ||
     lower.includes('rate_limit') ||
+    lower.includes('rate limited') ||
+    lower.includes('rate limit exceeded') ||
+    lower.includes('rate limit reached') ||
     lower.includes('quota exceeded') ||
     lower.includes('quota exhausted') ||
     lower.includes('quota limit') ||
     lower.includes('limit exhausted') ||
     lower.includes('limit will reset') ||
     lower.includes('too many requests') ||
-    lower.includes('429')
+    lower.includes('resource_exhausted') ||
+    /\b(?:http|status|error|code)\s*[:= -]?\s*429\b/.test(lower)
   );
 }
 
@@ -460,6 +478,21 @@ function countPaintedCanvases(root: Element): { count: number; readable: boolean
   return { count: painted, readable };
 }
 
+function buildUiScreenwatchVisualReview(): UiScreenwatchVisualReview {
+  return {
+    required: true,
+    reason: 'Screenwatch JSON uses DOM and xterm heuristics only; it is not a visual UI classifier.',
+    instruction: 'Explicitly capture the running CometAI app with debug_capture_app_screenshot, analyze the PNG, and report perceivable UI errors such as broken layout, overlapping panes, clipped text, blank areas, stale prompts, or incorrect CLI surfaces. The screenshot tool captures the matched app window handle, not foreground desktop pixels, so other windows being open or in front should not affect the image.',
+    screenshotTool: 'debug_capture_app_screenshot',
+    screenshotContract: {
+      captureTarget: 'matched_app_window_handle',
+      occlusionIndependent: true,
+      foregroundWindowRequired: false,
+      capturesDesktop: false,
+    },
+  };
+}
+
 function collectUiScreenwatchSnapshot(label: string, missionId: string): UiScreenwatchSnapshot {
   const bodyText = document.body?.innerText ?? '';
   const lowerBodyText = bodyText.toLowerCase();
@@ -530,6 +563,7 @@ function collectUiScreenwatchSnapshot(label: string, missionId: string): UiScree
     },
     errorIndicators,
     issues,
+    visualReview: buildUiScreenwatchVisualReview(),
   };
 }
 
@@ -595,6 +629,7 @@ class UiScreenwatchController {
       latest: this.latest,
       issueCounts: Object.fromEntries(this.issueCounts),
       errors: [...this.errors],
+      visualReview: buildUiScreenwatchVisualReview(),
     };
   }
 }
@@ -643,6 +678,7 @@ function classifyFailureCategory(
   const mcpEventTypes = sessionEvents
     .filter(event => event.type === 'mcp_event_observed')
     .map(event => String(event.mcpType ?? ''));
+  const hasObservedCompletion = eventTypes.includes('session_completed') || mcpEventTypes.includes('task:completed');
   const combined = [
     error ?? '',
     ...sessionEvents.map(event => String(event.error ?? event.reason ?? event.message ?? event.type ?? '')),
@@ -650,6 +686,7 @@ function classifyFailureCategory(
   ].join('\n').toLowerCase();
 
   if (!combined.trim()) return undefined;
+  if (!error && hasObservedCompletion) return undefined;
   if (combined.includes('did not call get_task_details') || combined.includes('did not fetch the current task')) return 'task_ack_timeout';
   if (combined.includes('waiting_auth') || combined.includes('authentication flow detected') || combined.includes('waiting for authentication')) {
     return 'provider_auth_required';

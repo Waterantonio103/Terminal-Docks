@@ -74,3 +74,18 @@ run('claude visible input prompt wins over stale spinner glyphs', () => {
   assert.equal(status.status, 'idle', status.detail);
   assert.equal(claudeAdapter.detectReady(promptReady).ready, true);
 });
+
+run('claude empty visible prompt with footer chrome maps to idle', () => {
+  const promptReady = [
+    'Claude Code v2.1.131',
+    'Sonnet 4.6 · Claude Pro',
+    '────────────────────────────────────────────────────────',
+    '❯\u00a0\u2588',
+    '────────────────────────────────────────────────────────',
+    '-- INSERT -- ⏵⏵ bypass permissions on (shift+tab to cycle)',
+  ].join('\n');
+
+  const status = claudeAdapter.detectStatus(promptReady);
+  assert.equal(status.status, 'idle', status.detail);
+  assert.equal(claudeAdapter.detectReady(promptReady).ready, true);
+});

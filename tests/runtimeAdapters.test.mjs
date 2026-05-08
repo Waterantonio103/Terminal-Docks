@@ -108,6 +108,17 @@ run('Claude banner-only startup output does not map to idle', () => {
   assert.equal(claudeAdapter.detectReady(bannerOnly).ready, false);
 });
 
+run('Claude empty prompt line with footer chrome maps to idle', () => {
+  const promptReady = [
+    'Claude Code v2.1.131',
+    'Sonnet 4.6 · Claude Pro',
+    '❯\u00a0\u2588',
+    '-- INSERT -- ⏵⏵ bypass permissions on (shift+tab to cycle)',
+  ].join('\n');
+  assert.equal(claudeAdapter.detectStatus(promptReady).status, 'idle');
+  assert.equal(claudeAdapter.detectReady(promptReady).ready, true);
+});
+
 run('Gemini trust/startup prompt output does not map to idle', () => {
   const prompt = '\u001b]0;Gemini CLI\u0007Trust this folder?';
   assert.equal(geminiAdapter.detectStatus(prompt).status, 'waiting_user_answer');

@@ -363,6 +363,14 @@ export function RuntimeView() {
       const occupied: RuntimeNodeLayout[] = [];
       let next: Record<string, RuntimeNodeLayout> = { ...prev };
       let changed = false;
+      const currentKeys = new Set(sessions.map((session, index) => layoutKeyFor(session, index)));
+      for (const key of Object.keys(next)) {
+        if (!currentKeys.has(key)) {
+          delete next[key];
+          delete _sessionLayouts[key];
+          changed = true;
+        }
+      }
       for (let index = 0; index < sessions.length; index += 1) {
         const session = sessions[index];
         const key = layoutKeyFor(session, index);

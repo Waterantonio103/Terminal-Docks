@@ -19,7 +19,8 @@ const ANSI_RE =
 const BANNER_RE = /\bclaude (code|assistant)\b/i;
 const SHELL_PROMPT_RE = /(?:^|\n)\s*(?:[A-Za-z]:\\[^>\r\n]*>|PS [^>\r\n]*>|[$#>])\s*$/m;
 const CLAUDE_UI_RE = /(?:\bclaude (?:code|assistant)\b|Sonnet|Opus|Haiku|--\s*INSERT\s*--|bypass permissions|shift\+tab to cycle|❯|⏵⏵)/i;
-const CLAUDE_INPUT_READY_RE = /(?:^|\n)\s*❯\s*(?:(?:Try\b)|$|\n)|--\s*INSERT\s*--|\b(?:type|enter|paste|write)\b.*\b(?:prompt|message|input)\b/i;
+const CLAUDE_INPUT_READY_RE = /(?:^|\n)\s*(?:[│┃]\s*)?(?:❯|>)\s*(?:["'`]?Try\b|$|\n|[^\S\r\n]{0,8}[\u2580-\u259f]?[\s\S]{0,1}(?:\n|$))|--\s*INSERT\s*--|\b(?:type|enter|paste|write)\b.*\b(?:prompt|message|input)\b/i;
+const CLAUDE_VISIBLE_PROMPT_RE = /(?:^|\n)\s*(?:[│┃]\s*)?(?:❯|>)\s*(?:["'`]?Try\b|[^\S\r\n]{0,12}[\u2580-\u259f]?[^\S\r\n]*(?:\n|$))/m;
 const ACTIVE_WORK_RE =
   /(?:\bStewing\b|\bSimmering\b|\bContemplating\b|\bThinking\b|\bProcessing\b|\bWorking\b|\bRunning\b|\bExecuting\b|\bCalling\b|\bUsing tool\b|\btool execution\b|\bqueued message\b|\besc to interrupt\b|\bctrl-c to interrupt\b|[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏])/i;
 const PERMISSION_RE =
@@ -43,6 +44,22 @@ function lastNonEmptyLines(output: string, count: number): string {
     .filter(line => line.trim())
     .slice(-count)
     .join('\n');
+}
+
+function lastMatchIndex(output: string, pattern: RegExp): number {
+  const flags = pattern.flags.includes('g') ? pattern.flags : `${pattern.flags}g`;
+  const matcher = new RegExp(pattern.source, flags);
+  let lastIndex = -1;
+  let match: RegExpExecArray | null;
+
+  while ((match = matcher.exec(output)) !== null) {
+    lastIndex = match.index;
+    if (match[0].length === 0) {
+      matcher.lastIndex += 1;
+    }
+  }
+
+  return lastIndex;
 }
 
 export const claudeAdapter: CliAdapter = {
@@ -99,6 +116,11 @@ export const claudeAdapter: CliAdapter = {
     const clean = stripTerminalControls(output);
     const hasClaudeUi = CLAUDE_UI_RE.test(clean);
     const lastLine = lastNonEmptyLines(clean, 1);
+    const readyPromptIndex = Math.max(
+      lastMatchIndex(clean, CLAUDE_INPUT_READY_RE),
+      lastMatchIndex(clean, CLAUDE_VISIBLE_PROMPT_RE),
+    );
+    const activeWorkIndex = lastMatchIndex(clean, ACTIVE_WORK_RE);
 
     if (this.detectPermissionRequest(output)) {
       return { status: 'waiting_user_answer', confidence: 'high', detail: 'Claude permission prompt detected' };
@@ -112,7 +134,7 @@ export const claudeAdapter: CliAdapter = {
       return { status: 'completed', confidence: 'high', detail: 'Claude completion marker detected' };
     }
 
-    if (hasClaudeUi && CLAUDE_INPUT_READY_RE.test(clean)) {
+    if (hasClaudeUi && readyPromptIndex >= 0 && readyPromptIndex >= activeWorkIndex) {
       return { status: 'idle', confidence: 'high', detail: 'Claude input prompt detected' };
     }
 

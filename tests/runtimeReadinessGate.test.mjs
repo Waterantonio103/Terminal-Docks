@@ -93,6 +93,26 @@ run('opencode strict gate accepts visible input prompt despite stale spinner gly
   assert.equal(evaluation.ready, true);
 });
 
+run('claude strict gate accepts empty visible input prompt with footer chrome', () => {
+  const output = [
+    'Claude Code v2.1.131',
+    'Sonnet 4.6 · Claude Pro',
+    '⠋',
+    '❯\u00a0\u2588',
+    '-- INSERT -- ⏵⏵ bypass permissions on (shift+tab to cycle)',
+  ].join('\n');
+  const evaluation = evaluateCliReadiness(
+    'claude',
+    output,
+    text => claudeAdapter.detectStatus(text),
+    text => claudeAdapter.detectReady(text),
+  );
+
+  assert.equal(evaluation.strictGateEnabled, true);
+  assert.equal(evaluation.status.status, 'idle', evaluation.status.detail);
+  assert.equal(evaluation.ready, true);
+});
+
 run('readiness diagnostics include status, gate state, ids, and redacted tail', () => {
   const diagnostic = buildCliReadinessDiagnostic({
     cliId: 'codex',

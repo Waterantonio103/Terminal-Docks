@@ -107,6 +107,13 @@ try {
   assert.equal(capture.ok, true);
   assert.match(capture.metadataPath, /\.json$/);
   assert.equal(capture.pngPath, null);
+  assert.equal(capture.visualAnalysisRequired, false);
+  assert.equal(capture.captureContract.captureTarget, 'matched_app_window_handle');
+  assert.equal(capture.captureContract.occlusionIndependent, true);
+  assert.equal(capture.captureContract.foregroundWindowRequired, false);
+  assert.equal(capture.captureContract.capturesDesktop, false);
+  assert.match(capture.analysisInstruction, /mode="window"/);
+  assert.match(capture.analysisInstruction, /window handle|foreground desktop/i);
 
   const snapshots = textPayload(await tools.get('debug_list_ui_screenwatch_snapshots').handler({
     debugRunId,
@@ -115,12 +122,22 @@ try {
   }));
   assert.equal(snapshots.snapshots.length, 1);
   assert.deepEqual(snapshots.snapshots[0].issues, ['blank_terminal_0']);
+  assert.equal(snapshots.snapshots[0].visualReviewRequired, true);
+  assert.equal(snapshots.visualReview.required, true);
+  assert.equal(snapshots.visualReview.screenshotTool, 'debug_capture_app_screenshot');
+  assert.equal(snapshots.visualReview.screenshotContract.occlusionIndependent, true);
+  assert.equal(snapshots.visualReview.screenshotContract.capturesDesktop, false);
+  assert.match(snapshots.visualReview.instruction, /analyze the PNG/);
+  assert.match(snapshots.visualReview.instruction, /window handle/);
 
   const uiSnapshot = textPayload(await tools.get('debug_read_ui_screenwatch_snapshot').handler({
     debugRunId,
     path: snapshots.snapshots[0].path,
   }));
   assert.equal(uiSnapshot.snapshot.missionId, 'mission-a');
+  assert.equal(uiSnapshot.visualReview.required, true);
+  assert.match(uiSnapshot.visualReview.reason, /heuristics only/);
+  assert.equal(uiSnapshot.visualReview.screenshotContract.foregroundWindowRequired, false);
 
   const events = listDebugEvents(debugRunId);
   assert.ok(events.some(event => event.eventType === 'debug_evidence_collected'));
