@@ -181,6 +181,28 @@ run('post-ack watchdog treats progress as an extension and classifies later stal
   assert.equal(stalledDecision.reason, 'post_ack_no_mcp_completion');
 });
 
+run('post-ack watchdog fails active sessions at the absolute no-completion cap', () => {
+  const decision = evaluatePostAckWatchdog({
+    snapshot: {
+      acknowledgedAt: 0,
+      lastProgressAt: 175_000,
+      progressCount: 12,
+      mcpEventCount: 2,
+      terminalProgressCount: 8,
+      expectedFileOutputCount: 2,
+      permissionPromptCount: 0,
+      lastProgressSource: 'terminal_output',
+      warnedAt: null,
+    },
+    now: 181_000,
+    windowMs: 60_000,
+    maxRuntimeMs: 180_000,
+  });
+
+  assert.equal(decision.action, 'fail');
+  assert.equal(decision.reason, 'post_ack_no_mcp_completion');
+});
+
 run('post-ack terminal progress ignores spinner-only output but accepts concrete tool progress', () => {
   assert.equal(assessPostAckTerminalProgress('\u001b[?25l\u001b[?2026h / \\ -').useful, false);
   const progress = assessPostAckTerminalProgress('Running command: npm test -- --runInBand');

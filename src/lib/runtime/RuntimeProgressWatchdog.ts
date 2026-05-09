@@ -84,12 +84,22 @@ export function evaluatePostAckWatchdog(args: {
   snapshot: PostAckProgressSnapshot;
   now: number;
   windowMs: number;
+  maxRuntimeMs?: number;
   completed?: boolean;
   blockedOnPermission?: boolean;
 }): PostAckWatchdogDecision {
   const idleMs = Math.max(0, args.now - args.snapshot.lastProgressAt);
+  const runtimeMs = Math.max(0, args.now - args.snapshot.acknowledgedAt);
   if (args.completed || args.blockedOnPermission) {
     return { action: 'none', idleMs };
+  }
+
+  if (args.maxRuntimeMs !== undefined && runtimeMs >= args.maxRuntimeMs) {
+    return {
+      action: 'fail',
+      reason: classifyPostAckWatchdogReason(args.snapshot),
+      idleMs,
+    };
   }
 
   if (idleMs < args.windowMs) {

@@ -7,9 +7,10 @@ import { DebugPanel } from './components/Debug/DebugPanel';
 import { useWorkspaceStore, PaneType, McpMessage, DbTask, type AppMode } from './store/workspace';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
+import { defaultWindowIcon } from '@tauri-apps/api/app';
 import { homeDir } from '@tauri-apps/api/path';
 import { Window } from '@tauri-apps/api/window';
-import { TerminalSquare, FileCode2, KanbanSquare, Activity, Plus, Rocket, Monitor, Minus, Square, X, Network, FolderTree, LayoutGrid, Maximize, Settings, Inbox } from 'lucide-react';
+import { TerminalSquare, FileCode2, KanbanSquare, Activity, Plus, Rocket, Monitor, Minus, Square, X, Network, FolderTree, LayoutGrid, Maximize, Settings, Bell } from 'lucide-react';
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { detectRoleFromText, normalizeCli } from './lib/cliDetection';
 import { refreshCliDetectionForTerminals } from './lib/terminalCliRuntime';
@@ -17,6 +18,8 @@ import { ErrorBoundary } from './components/Diagnostics/ErrorBoundary';
 import { FatalErrorOverlay } from './components/Diagnostics/FatalErrorOverlay';
 import { SettingsOverlay } from './components/Settings/SettingsOverlay';
 import { clearLastFatalReport, readBreadcrumbs, readLastFatalReport, recordBreadcrumb, stringifyUnknownError, writeFatalReport, type FatalErrorReport } from './lib/diagnostics';
+import { useActionCenterItems } from './components/ActionCenter/useActionCenterItems';
+import { ActionCenterPane } from './components/ActionCenter/ActionCenterPane';
 import './App.css';
 
 // Safe access to window
@@ -45,7 +48,7 @@ const PANE_ICONS: Record<PaneType, React.ReactNode> = {
   launcher:       <Rocket size={13} />,
   missioncontrol: <Monitor size={13} />,
   nodetree:       <Network size={13} />,
-  inbox:          <Inbox size={13} />,
+  inbox:          <Bell size={13} />,
 };
 
 import { runtimeManager } from './lib/runtime/RuntimeManager';
@@ -75,6 +78,13 @@ function sendFrontendErrorToDebugMcp(report: FatalErrorReport, name?: string) {
 
 function App() {
   useEffect(() => {
+    if (appWindow) {
+      defaultWindowIcon()
+        .then(icon => {
+          if (icon) return appWindow.setIcon(icon);
+        })
+        .catch(() => {});
+    }
     terminalOutputBus.start().catch(console.error);
     workflowOrchestrator.setRuntimeManager(runtimeExecutor);
     runtimeManager.startListening().catch(console.error);
@@ -229,7 +239,7 @@ function App() {
       
       <div className="flex items-center h-10 bg-bg-titlebar border-b border-border-panel shrink-0 select-none relative z-50">
         <div className="flex items-center justify-center w-12 border-r border-border-panel h-full cursor-pointer hover:bg-bg-surface transition-colors" onClick={toggleSidebar} title={sidebarOpen ? 'Hide sidebar' : 'Show sidebar'}>
-          <CometAiLogoMark className="w-7 h-7 text-[#f2ead3]" />
+          <CometAiLogoMark className="w-8 h-8" />
         </div>
 
         <div className="flex-1 flex justify-center items-center gap-1 h-full relative z-10" data-tauri-drag-region>
@@ -240,7 +250,7 @@ function App() {
             </div>
           ) : (
             <div className="flex items-center gap-2 text-xs font-bold text-accent-primary uppercase tracking-widest">
-               {appMode === 'runtime' ? <Monitor size={14} /> : <Network size={14} />}
+               {appMode === 'runtime' ? <Monitor size={14} /> : appMode === 'actioncenter' ? <Bell size={14} /> : <Network size={14} />}
                <span>{modeLabel}</span>
             </div>
           )}
@@ -266,7 +276,7 @@ function App() {
               </div>
               <DebugPanel />
             </div>
-          ) : appMode === 'runtime' ? <RuntimeView /> : (
+          ) : appMode === 'runtime' ? <RuntimeView /> : appMode === 'actioncenter' ? <ActionCenterPane /> : (
             <>
               {layoutMode === 'grid' && (
                 <div className="flex items-center h-8 bg-bg-titlebar border-b border-border-panel px-2 gap-0.5 overflow-x-auto shrink-0 select-none relative" data-tauri-drag-region>
@@ -325,21 +335,17 @@ const MODE_OPTIONS: Array<{ id: AppMode; label: string; icon: React.ReactNode }>
   { id: 'workflow', label: 'Workflow', icon: <Network size={18} /> },
   { id: 'runtime', label: 'Runtime', icon: <Monitor size={18} /> },
   { id: 'workspace', label: 'Workspace', icon: <FolderTree size={18} /> },
+  { id: 'actioncenter', label: 'Action Center', icon: <Bell size={18} /> },
 ];
 
 function CometAiLogoMark({ className = '' }: { className?: string }) {
   return (
-    <svg
-      className={className}
-      viewBox="0 0 64 64"
-      role="img"
-      aria-label="CometAI logo"
-      fill="currentColor"
-    >
-      <path d="M 6 50 A 28 28 0 0 1 58 30 L 58 38 A 20 20 0 0 0 14 50 Z" />
-      <path d="M 14 50 A 20 20 0 0 1 50 36 L 50 44 A 12 12 0 0 0 22 50 Z" />
-      <path d="M 22 50 A 12 12 0 0 1 42 42 L 42 50 Z" />
-    </svg>
+    <img
+      className={`object-contain ${className}`}
+      src="/cometai-logo.svg"
+      alt="CometAI logo"
+      draggable={false}
+    />
   );
 }
 
@@ -348,7 +354,7 @@ function ModeRail() {
   const setAppMode = useWorkspaceStore((s) => s.setAppMode);
   const setShowSettings = useWorkspaceStore((s) => s.setShowSettings);
   const showSettings = useWorkspaceStore((s) => s.showSettings);
-  const addPane = useWorkspaceStore((s) => s.addPane);
+  const { needsYouCount } = useActionCenterItems();
 
   return (
     <nav className="w-12 shrink-0 h-full bg-bg-titlebar border-r border-border-panel flex flex-col items-center py-2 gap-1 relative">
@@ -359,14 +365,13 @@ function ModeRail() {
         <button key={mode.id} onClick={() => setAppMode(mode.id)} title={mode.label} className={`relative w-9 h-9 flex items-center justify-center rounded-lg transition-all ${appMode === mode.id ? 'text-accent-primary bg-accent-primary/10' : 'text-text-muted hover:text-text-secondary hover:bg-bg-surface'}`}>
           {mode.icon}
           {appMode === mode.id && <span className="absolute left-0 top-1/2 -translate-y-1/2 w-0.5 h-5 bg-accent-primary rounded-r-full" />}
+          {mode.id === 'actioncenter' && needsYouCount > 0 && (
+            <span className="absolute -right-0.5 -top-0.5 min-w-4 h-4 px-1 rounded-full bg-amber-400 text-black text-[9px] font-bold leading-4 text-center shadow">
+              {needsYouCount > 9 ? '9+' : needsYouCount}
+            </span>
+          )}
         </button>
       ))}
-
-      <div className="mt-4 border-t border-border-panel pt-4 flex flex-col gap-1">
-         <button onClick={() => addPane('inbox', 'Delegation Inbox')} title="Inbox" className="w-9 h-9 flex items-center justify-center rounded-lg text-text-muted hover:text-text-primary hover:bg-bg-surface transition-all">
-           <Inbox size={18} />
-         </button>
-      </div>
 
       <div className="mt-auto pb-2 flex flex-col items-center gap-1">
         <button onClick={() => setShowSettings(!showSettings)} title="Settings" className={`relative w-9 h-9 flex items-center justify-center rounded-lg transition-all ${showSettings ? 'text-accent-primary bg-accent-primary/10' : 'text-text-muted hover:text-text-secondary hover:bg-bg-surface'}`}>

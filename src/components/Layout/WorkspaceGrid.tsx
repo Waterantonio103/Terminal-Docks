@@ -1,4 +1,4 @@
-import { TerminalSquare, FileCode2, KanbanSquare, Activity, Rocket, Monitor, X, Network, Inbox } from 'lucide-react';
+import { TerminalSquare, FileCode2, KanbanSquare, Activity, Rocket, Monitor, X, Network, Bell } from 'lucide-react';
 import { useWorkspaceStore, PaneType, Pane, selectActivePanes, GridPos, resolveCollisions } from '../../store/workspace';
 import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { TerminalPane } from '../Terminal/TerminalPane';
@@ -7,7 +7,7 @@ import { TaskBoardPane } from '../TaskBoard/TaskBoardPane';
 import { ActivityFeedPane } from '../ActivityFeed/ActivityFeedPane';
 import { LauncherPane } from '../Launcher/LauncherPane';
 import { MissionControlPane } from '../MissionControl/MissionControlPane';
-import { InboxPane } from '../TaskBoard/InboxPane';
+import { ActionCenterPane } from '../ActionCenter/ActionCenterPane';
 
 const PANE_ICONS: Record<PaneType, React.ReactNode> = {
   terminal:       <TerminalSquare size={13} />,
@@ -17,7 +17,7 @@ const PANE_ICONS: Record<PaneType, React.ReactNode> = {
   launcher:       <Rocket size={13} />,
   missioncontrol: <Monitor size={13} />,
   nodetree:       <Network size={13} />,
-  inbox:          <Inbox size={13} />,
+  inbox:          <Bell size={13} />,
 };
 
 const CELL_HEIGHT = 4;
@@ -128,7 +128,7 @@ const DashboardPanel = React.memo(function DashboardPanel({ pane, onDragStart, o
           {pane.type === 'activityfeed'   && <ActivityFeedPane />}
           {pane.type === 'launcher'       && <LauncherPane />}
           {pane.type === 'missioncontrol' && <MissionControlPane pane={pane} />}
-          {pane.type === 'inbox'          && <InboxPane />}
+          {pane.type === 'inbox'          && <ActionCenterPane />}
         </div>
 
         {/* Resize Handle */}
@@ -195,7 +195,7 @@ function TabsView({ panes }: { panes: Pane[] }) {
             {activePane.type === 'activityfeed'   && <ActivityFeedPane />}
             {activePane.type === 'launcher'       && <LauncherPane />}
             {activePane.type === 'missioncontrol' && <MissionControlPane pane={activePane} />}
-            {activePane.type === 'inbox'          && <InboxPane />}
+            {activePane.type === 'inbox'          && <ActionCenterPane />}
           </div>
         ) : (
           <div className="w-full h-full flex flex-col items-center justify-center text-text-muted">

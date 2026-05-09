@@ -1,6 +1,7 @@
 import { invoke } from '@tauri-apps/api/core';
 import { Window } from '@tauri-apps/api/window';
 import type { CompiledMission, WorkflowAgentCli } from '../../store/workspace.js';
+import { useWorkspaceStore } from '../../store/workspace.js';
 import { missionOrchestrator } from '../workflow/MissionOrchestrator.js';
 import { workflowOrchestrator } from '../workflow/WorkflowOrchestrator.js';
 import { runtimeManager } from '../runtime/RuntimeManager.js';
@@ -80,10 +81,20 @@ const VALID_ROLE_IDS = ['scout', 'coordinator', 'builder', 'tester', 'security',
 
 const WINDOWS_PATH_SEP_RE = /[\\\/]+/g;
 const LIVE_WORKFLOW_MODEL = import.meta.env.VITE_LIVE_WORKFLOW_MODEL || undefined;
+const LIVE_WORKFLOW_CLI_MODELS: Partial<Record<WorkflowAgentCli, string>> = {
+  codex: import.meta.env.VITE_LIVE_WORKFLOW_CODEX_MODEL || LIVE_WORKFLOW_MODEL,
+  claude: import.meta.env.VITE_LIVE_WORKFLOW_CLAUDE_MODEL || undefined,
+  gemini: import.meta.env.VITE_LIVE_WORKFLOW_GEMINI_MODEL || undefined,
+  opencode: import.meta.env.VITE_LIVE_WORKFLOW_OPENCODE_MODEL || undefined,
+};
 const LIVE_WORKFLOW_FILTER: string | undefined =
   typeof import.meta.env.VITE_LIVE_WORKFLOW_FILTER === 'string' && import.meta.env.VITE_LIVE_WORKFLOW_FILTER.trim()
     ? import.meta.env.VITE_LIVE_WORKFLOW_FILTER
     : undefined;
+
+function liveWorkflowModelForCli(cli: WorkflowAgentCli): string | undefined {
+  return LIVE_WORKFLOW_CLI_MODELS[cli];
+}
 
 interface LiveWorkflowTaskSpec {
   objective: string;
@@ -419,7 +430,7 @@ function buildMission(
         terminalId: terminalIds[index],
         terminalTitle: `Live ${cliSequence[index]} ${phase} ${index + 1}`,
         cli: cliSequence[index],
-        model: LIVE_WORKFLOW_MODEL,
+        model: liveWorkflowModelForCli(cliSequence[index]),
         yolo: true,
         executionMode: 'interactive_pty',
         paneId: `pane-${terminalIds[index]}`,
@@ -958,6 +969,10 @@ interface Prompt06WorkflowSpec {
   edges: Array<{ fromNodeId: string; toNodeId: string; condition?: 'always' | 'on_success' | 'on_failure' }>;
   startNodeIds?: string[];
   nodeTreeOperations?: string[];
+  promptNumber?: string;
+  suiteSlug?: string;
+  suiteDirName?: string;
+  expectedFailure?: boolean;
 }
 
 const PROMPT_06_WORKFLOWS: Prompt06WorkflowSpec[] = [
@@ -1719,6 +1734,110 @@ const PROMPT_04_WORKFLOWS: Prompt06WorkflowSpec[] = [
   },
 ];
 
+const PROMPT_07_10_CAPPED_WORKFLOWS: Prompt06WorkflowSpec[] = [
+  {
+    name: 'artifact-cli-fire-animation',
+    title: 'Prompt 07 artifact-organized CLI fire animation',
+    promptNumber: '07',
+    suiteSlug: 'prompt07',
+    suiteDirName: 'artifact-organization',
+    task: 'Create a standard-library Python terminal fire animation package. The CLI should render bounded ANSI flame frames in the terminal, support --frames, --width, --height, --seed, and --no-color flags, and include per-agent branch artifacts that explain ownership and verification.',
+    expectedFiles: ['fire_anim.py', 'palettes.json', 'README.md', 'branch-artifacts\\coordinator.md', 'branch-artifacts\\builder-render.md', 'branch-artifacts\\builder-data.md', 'branch-artifacts\\reviewer.md'],
+    runInstruction: 'Run python fire_anim.py --frames 8 --width 48 --height 14 --seed 7 --no-color.',
+    agents: [
+      prompt06Agent('coordinator', 'coordinator', 'Codex Coordinator', 'Define output folder structure, branch artifact requirements, CLI contract, and file-size guardrails.', 'codex'),
+      prompt06Agent('builder-render', 'builder', 'Claude Renderer Builder', 'Create fire_anim.py with bounded ANSI/fire rendering, argparse flags, deterministic seed handling, and a small terminal demo path.', 'claude'),
+      prompt06Agent('builder-data', 'builder', 'Gemini Palette Builder', 'Create palettes.json plus README usage details and branch artifact notes without overwriting fire_anim.py.', 'gemini'),
+      prompt06Agent('reviewer', 'reviewer', 'OpenCode Artifact Reviewer', 'Inspect all branch artifacts, verify expected files, ensure README links concrete output paths, and run or reason through the CLI command.', 'opencode'),
+    ],
+    edges: [
+      prompt06Edge('coordinator', 'builder-render'),
+      prompt06Edge('coordinator', 'builder-data'),
+      prompt06Edge('builder-render', 'reviewer'),
+      prompt06Edge('builder-data', 'reviewer'),
+    ],
+  },
+  {
+    name: 'failure-recovery-fire-probe',
+    title: 'Prompt 08 controlled failure recovery package',
+    promptNumber: '08',
+    suiteSlug: 'prompt08',
+    suiteDirName: 'failure-recovery',
+    expectedFailure: true,
+    task: 'Exercise controlled failure and recovery with a small terminal fire diagnostics package. The first node must intentionally fail after writing failure evidence; the on_failure recovery path must create a runnable retry_probe.py script, recovery notes, and README explaining the expected failure versus app behavior.',
+    expectedFiles: ['failure-evidence.md', 'retry_probe.py', 'recovery_plan.md', 'README.md', 'branch-artifacts\\failure-probe.md', 'branch-artifacts\\recovery-builder.md', 'branch-artifacts\\reviewer.md'],
+    runInstruction: 'Run python retry_probe.py --frames 5 and confirm it prints bounded diagnostic frames.',
+    agents: [
+      prompt06Agent('failure-probe', 'tester', 'Codex Controlled Failure Probe', 'Call get_task_details, write failure-evidence.md and branch-artifacts/failure-probe.md, then intentionally call complete_task with outcome "failure" and a clear expected-failure summary. Do not create retry_probe.py.', 'codex'),
+      prompt06Agent('recovery-builder', 'builder', 'Claude Recovery Builder', 'Consume the failed upstream context from failure-probe, create retry_probe.py, recovery_plan.md, README.md, and branch-artifacts/recovery-builder.md, then complete successfully.', 'claude'),
+      prompt06Agent('recovery-tester', 'tester', 'Gemini Recovery Tester', 'Verify retry_probe.py behavior, record branch-artifacts/recovery-tester.md, and confirm the failure was expected and recovered.', 'gemini'),
+      prompt06Agent('reviewer', 'reviewer', 'OpenCode Recovery Reviewer', 'Inspect failure evidence, recovery artifacts, and tester notes; keep expected failure distinct from broken app behavior before completing.', 'opencode'),
+    ],
+    edges: [
+      prompt06Edge('failure-probe', 'recovery-builder', 'on_failure'),
+      prompt06Edge('recovery-builder', 'recovery-tester'),
+      prompt06Edge('recovery-tester', 'reviewer'),
+    ],
+  },
+  {
+    name: 'terminal-pty-verbose-fire',
+    title: 'Prompt 09 PTY output visibility fire benchmark',
+    promptNumber: '09',
+    suiteSlug: 'prompt09',
+    suiteDirName: 'terminal-output',
+    task: 'Create a terminal output visibility benchmark around a bounded CLI fire renderer. The package must include a Python script that prints deterministic multi-frame output, a verifier that can emit a larger but reasonable log, and README notes for terminal buffering/replay observations.',
+    expectedFiles: ['terminal_fire.py', 'verify_terminal_output.py', 'README.md', 'branch-artifacts\\scout.md', 'branch-artifacts\\builder.md', 'branch-artifacts\\tester.md', 'branch-artifacts\\reviewer.md'],
+    runInstruction: 'Run python verify_terminal_output.py --frames 16 --width 52 --height 12.',
+    agents: [
+      prompt06Agent('scout', 'scout', 'Claude Terminal Scout', 'Define terminal visibility checks, expected bounded output volume, and write branch-artifacts/scout.md.', 'claude'),
+      prompt06Agent('builder', 'builder', 'Codex PTY Builder', 'Create terminal_fire.py and verify_terminal_output.py with deterministic frame output and no unbounded loops.', 'codex'),
+      prompt06Agent('tester', 'tester', 'Gemini PTY Tester', 'Run or reason through the verifier, create branch-artifacts/tester.md, and make terminal-visible progress while keeping output bounded.', 'gemini'),
+      prompt06Agent('reviewer', 'reviewer', 'OpenCode PTY Reviewer', 'Inspect terminal tails and output files, create branch-artifacts/reviewer.md, and summarize visibility/replay evidence in README.md.', 'opencode'),
+    ],
+    edges: [
+      prompt06Edge('scout', 'builder'),
+      prompt06Edge('builder', 'tester'),
+      prompt06Edge('tester', 'reviewer'),
+    ],
+  },
+  {
+    name: 'nodetree-fire-control-panel',
+    title: 'Prompt 10 NodeTree mission-control fire toolkit',
+    promptNumber: '10',
+    suiteSlug: 'prompt10',
+    suiteDirName: 'nodetree-mission-control',
+    task: 'Create a NodeTree-style mission-control toolkit for a terminal fire animation. The workflow should exercise edited node prompts, mixed CLI settings, branch and merge behavior, subtree-style builder ownership, status evidence, and output links to concrete project files.',
+    expectedFiles: ['fire_control.py', 'fire_config.json', 'status_matrix.md', 'README.md', 'branch-artifacts\\coordinator.md', 'branch-artifacts\\builder-core.md', 'branch-artifacts\\builder-config.md', 'branch-artifacts\\tester.md', 'branch-artifacts\\reviewer.md'],
+    runInstruction: 'Run python fire_control.py --config fire_config.json --frames 6 --plain.',
+    nodeTreeOperations: [
+      'create_workflow_from_nodetree_like_graph',
+      'edit_node_prompt_before_run',
+      'change_cli_setting_on_node_before_run',
+      'add_branch_coordinator_to_builder_core_and_builder_config',
+      'add_merge_builders_to_tester_and_reviewer',
+      'verify_status_matrix_pending_running_completed_failed_cancelled',
+      'verify_output_artifacts_link_to_exact_node_ids',
+      'tag_debug_workflow_in_report',
+    ],
+    agents: [
+      prompt06Agent('coordinator', 'coordinator', 'Codex NodeTree Coordinator', 'Record the NodeTree operation contract in branch-artifacts/coordinator.md and assign exact node ID ownership.', 'codex'),
+      prompt06Agent('builder-core', 'builder', 'Claude Core Builder', 'Create fire_control.py with argparse, deterministic frame generation, and --plain support.', 'claude'),
+      prompt06Agent('builder-config', 'builder', 'Gemini Config Builder', 'Create fire_config.json and status_matrix.md covering pending, queued, starting, running, completed, failed, and cancelled status expectations.', 'gemini'),
+      prompt06Agent('tester', 'tester', 'OpenCode NodeTree Tester', 'Verify builder outputs, create branch-artifacts/tester.md, and ensure output links map to exact node IDs.', 'opencode'),
+      prompt06Agent('reviewer', 'reviewer', 'Codex NodeTree Reviewer', 'Finalize README.md with concrete output links, run command, DEBUG tag, and NodeTree operation coverage.', 'codex'),
+    ],
+    edges: [
+      prompt06Edge('coordinator', 'builder-core'),
+      prompt06Edge('coordinator', 'builder-config'),
+      prompt06Edge('builder-core', 'tester'),
+      prompt06Edge('builder-config', 'tester'),
+      prompt06Edge('builder-core', 'reviewer'),
+      prompt06Edge('builder-config', 'reviewer'),
+      prompt06Edge('tester', 'reviewer'),
+    ],
+  },
+];
+
 const PROMPT_11_WORKFLOWS: Prompt06WorkflowSpec[] = [
   {
     name: 'single-claude-risk-simulator',
@@ -1754,7 +1873,7 @@ const PROMPT_11_WORKFLOWS: Prompt06WorkflowSpec[] = [
     agents: [
       prompt06Agent('coordinator', 'coordinator', 'Codex Coordinator', 'Route by exact node IDs: builder-copy owns jobs.json/README/verification_notes.md requirements; builder-data owns scheduler_analysis.py implementation; do not swap branch responsibilities.', 'codex'),
       prompt06Agent('builder-copy', 'builder', 'Claude Dataset Builder', 'Create jobs.json and document heuristic/metric expectations in README.md or verification_notes.md. Do not create or overwrite scheduler_analysis.py.', 'claude'),
-      prompt06Agent('builder-data', 'builder', 'Gemini Scheduler Builder', 'Create the complete runnable scheduler_analysis.py CLI with deterministic heuristic calculations, metrics, argparse, and printed output. Do not leave main() as pass.', 'gemini'),
+      prompt06Agent('builder-data', 'builder', 'Gemini Scheduler Builder', 'Create the complete runnable scheduler_analysis.py CLI with deterministic job-shop heuristic calculations over jobs that contain ordered operations arrays with machine and duration fields. Do not assume a flat job.duration field. Calculate makespan, machine utilization, and per-operation schedules, support argparse --jobs and --heuristics, and print results. Do not leave main() as pass.', 'gemini'),
       prompt06Agent('reviewer', 'reviewer', 'OpenCode Reviewer', 'Inspect both branch outputs, verify all expected files, and finalize README instructions.', 'opencode'),
     ],
     edges: [
@@ -1785,6 +1904,761 @@ const PROMPT_11_WORKFLOWS: Prompt06WorkflowSpec[] = [
       prompt06Agent('agent', 'builder', 'Codex Builder', 'Create the full Python solver CLI, sample problem, and README, then complete the MCP task.', 'codex'),
     ],
     edges: [],
+  },
+  {
+    name: 'planner-etl-dashboard',
+    title: 'Template-generated ETL dashboard package',
+    task: 'Create a compact multi-stack operations analytics package: a Python ETL script reads transactions.csv and writes summary.json, and a plain JavaScript/HTML dashboard opens summary.json and renders revenue, category, and anomaly summaries. Include README instructions.',
+    expectedFiles: ['etl_transactions.py', 'transactions.csv', 'summary.json', 'dashboard.html', 'dashboard.js', 'README.md', 'branch-artifacts\\planner.md', 'branch-artifacts\\builder-etl.md', 'branch-artifacts\\builder-ui.md', 'branch-artifacts\\reviewer.md'],
+    runInstruction: 'Run python etl_transactions.py --input transactions.csv --output summary.json, then open dashboard.html.',
+    agents: [
+      prompt06Agent('planner', 'coordinator', 'Codex Planner', 'Define the ETL contract, file ownership, and dashboard data schema under branch-artifacts/planner.md.', 'codex'),
+      prompt06Agent('builder-etl', 'builder', 'Claude ETL Builder', 'Create transactions.csv, etl_transactions.py, summary.json, and branch-artifacts/builder-etl.md. Do not create dashboard files.', 'claude'),
+      prompt06Agent('builder-ui', 'builder', 'Gemini Dashboard Builder', 'Create dashboard.html and dashboard.js that consume summary.json, plus branch-artifacts/builder-ui.md. Do not overwrite ETL files.', 'gemini'),
+      prompt06Agent('reviewer', 'reviewer', 'OpenCode Reviewer', 'Verify both stacks, inspect all branch artifacts, and finalize README.md with concrete commands.', 'opencode'),
+    ],
+    edges: [
+      prompt06Edge('planner', 'builder-etl'),
+      prompt06Edge('planner', 'builder-ui'),
+      prompt06Edge('builder-etl', 'reviewer'),
+      prompt06Edge('builder-ui', 'reviewer'),
+    ],
+  },
+  {
+    name: 'planner-sqlite-log-audit',
+    title: 'Template-generated SQLite log audit toolkit',
+    task: 'Create a log audit toolkit that combines Python data loading, SQLite querying, and a generated Markdown findings report. It must load sample_events.csv into audit.db, run deterministic queries, and write findings.md plus README.',
+    expectedFiles: ['load_audit_db.py', 'sample_events.csv', 'queries.sql', 'findings.md', 'README.md', 'branch-artifacts\\scout.md', 'branch-artifacts\\builder.md', 'branch-artifacts\\tester.md'],
+    runInstruction: 'Run python load_audit_db.py --csv sample_events.csv --db audit.db --queries queries.sql.',
+    agents: [
+      prompt06Agent('scout', 'scout', 'Gemini Audit Scout', 'Define event schema, query expectations, and write branch-artifacts/scout.md.', 'gemini'),
+      prompt06Agent('builder', 'builder', 'Codex Audit Builder', 'Create the Python loader, CSV fixture, SQL queries, findings output path, and README.', 'codex'),
+      prompt06Agent('tester', 'tester', 'Claude Audit Tester', 'Verify the loader and query artifacts, then write branch-artifacts/tester.md with evidence.', 'claude'),
+    ],
+    edges: [
+      prompt06Edge('scout', 'builder'),
+      prompt06Edge('builder', 'tester'),
+    ],
+  },
+  {
+    name: 'planner-node-python-forecast',
+    title: 'Template-generated Node/Python forecast package',
+    task: 'Create a compact forecasting package where Python generates normalized forecast.json from demand.csv and a Node.js verifier reads forecast.json to validate totals and thresholds. Include README and verification notes.',
+    expectedFiles: ['forecast.py', 'demand.csv', 'forecast.json', 'verify_forecast.mjs', 'verification_notes.md', 'README.md', 'branch-artifacts\\coordinator.md', 'branch-artifacts\\python-builder.md', 'branch-artifacts\\node-builder.md', 'branch-artifacts\\reviewer.md'],
+    runInstruction: 'Run python forecast.py --input demand.csv --output forecast.json, then node verify_forecast.mjs forecast.json.',
+    agents: [
+      prompt06Agent('coordinator', 'coordinator', 'OpenCode Coordinator', 'Assign exact node ownership and create branch-artifacts/coordinator.md.', 'opencode'),
+      prompt06Agent('python-builder', 'builder', 'Claude Python Builder', 'Create demand.csv, forecast.py, forecast.json, and branch-artifacts/python-builder.md.', 'claude'),
+      prompt06Agent('node-builder', 'builder', 'Codex Node Builder', 'Create verify_forecast.mjs, verification_notes.md, and branch-artifacts/node-builder.md without overwriting Python artifacts.', 'codex'),
+      prompt06Agent('reviewer', 'reviewer', 'Gemini Forecast Reviewer', 'Verify cross-stack integration and finalize README.md.', 'gemini'),
+    ],
+    edges: [
+      prompt06Edge('coordinator', 'python-builder'),
+      prompt06Edge('coordinator', 'node-builder'),
+      prompt06Edge('python-builder', 'reviewer'),
+      prompt06Edge('node-builder', 'reviewer'),
+    ],
+  },
+];
+
+function expectedWithArtifacts(files: string[], nodeIds: string[]): string[] {
+  return [...files, ...nodeIds.map(nodeId => `branch-artifacts\\${nodeId}.md`)];
+}
+
+const PROMPT_12_WORKFLOWS: Prompt06WorkflowSpec[] = [
+  {
+    name: 'handoff-python-incidents-linear',
+    title: 'Linear incident analytics handoff',
+    task: 'Create a Python incident analytics package from incidents.json. Scout defines the schema, Builder creates incident_report.py and sample data, and Reviewer verifies the CLI output and README.',
+    expectedFiles: expectedWithArtifacts(['incident_report.py', 'incidents.json', 'README.md'], ['scout', 'builder', 'reviewer']),
+    runInstruction: 'Run python incident_report.py --input incidents.json.',
+    agents: [
+      prompt06Agent('scout', 'scout', 'Claude Incident Scout', 'Define the incident schema and hand off exact requirements.', 'claude'),
+      prompt06Agent('builder', 'builder', 'Codex Incident Builder', 'Create the Python CLI, JSON fixture, README, and node artifact from scout context.', 'codex'),
+      prompt06Agent('reviewer', 'reviewer', 'Gemini Incident Reviewer', 'Read scout and builder artifacts, verify files, and complete with handoff evidence.', 'gemini'),
+    ],
+    edges: [prompt06Edge('scout', 'builder'), prompt06Edge('builder', 'reviewer')],
+  },
+  {
+    name: 'handoff-node-inventory-linear',
+    title: 'Linear Node inventory verifier handoff',
+    task: 'Create a Node.js inventory verifier that reads inventory.json, computes reorder warnings, and writes reorder_report.json. Include README and exact upstream artifact references.',
+    expectedFiles: expectedWithArtifacts(['inventory.json', 'verify_inventory.mjs', 'reorder_report.json', 'README.md'], ['scout', 'builder', 'reviewer']),
+    runInstruction: 'Run node verify_inventory.mjs inventory.json reorder_report.json.',
+    agents: [
+      prompt06Agent('scout', 'scout', 'Gemini Inventory Scout', 'Define inventory shape and reorder thresholds.', 'gemini'),
+      prompt06Agent('builder', 'builder', 'OpenCode Inventory Builder', 'Create the Node verifier, fixture, generated report, README, and builder artifact.', 'opencode'),
+      prompt06Agent('reviewer', 'reviewer', 'Codex Inventory Reviewer', 'Inspect upstream artifacts and verify handoff/session alignment.', 'codex'),
+    ],
+    edges: [prompt06Edge('scout', 'builder'), prompt06Edge('builder', 'reviewer')],
+  },
+  {
+    name: 'handoff-sqlite-audit-linear',
+    title: 'Linear SQLite audit handoff',
+    task: 'Create a Python plus SQLite audit workflow. The package must load access_log.csv into audit.db, execute queries.sql, and write audit_findings.md with deterministic counts.',
+    expectedFiles: expectedWithArtifacts(['load_access_log.py', 'access_log.csv', 'queries.sql', 'audit_findings.md', 'README.md'], ['scout', 'builder', 'reviewer']),
+    runInstruction: 'Run python load_access_log.py --csv access_log.csv --db audit.db --queries queries.sql.',
+    agents: [
+      prompt06Agent('scout', 'scout', 'Codex Audit Scout', 'Define SQLite schema, query expectations, and acceptance checks.', 'codex'),
+      prompt06Agent('builder', 'builder', 'Claude Audit Builder', 'Create loader, fixture, SQL, findings, README, and builder artifact.', 'claude'),
+      prompt06Agent('reviewer', 'reviewer', 'OpenCode Audit Reviewer', 'Verify downstream consumption of scout and builder artifacts.', 'opencode'),
+    ],
+    edges: [prompt06Edge('scout', 'builder'), prompt06Edge('builder', 'reviewer')],
+  },
+  {
+    name: 'handoff-branch-energy-dashboard',
+    title: 'Branch energy dashboard handoff',
+    task: 'Create a multi-stack energy dashboard package. One branch owns Python aggregation from meter_readings.csv to energy_summary.json; the other owns dashboard.html/dashboard.js that render the summary.',
+    expectedFiles: expectedWithArtifacts(['aggregate_energy.py', 'meter_readings.csv', 'energy_summary.json', 'dashboard.html', 'dashboard.js', 'README.md'], ['coordinator', 'builder-data', 'builder-ui', 'reviewer']),
+    runInstruction: 'Run python aggregate_energy.py --input meter_readings.csv --output energy_summary.json, then open dashboard.html.',
+    agents: [
+      prompt06Agent('coordinator', 'coordinator', 'Codex Energy Coordinator', 'Assign branch ownership and exact target node IDs.', 'codex'),
+      prompt06Agent('builder-data', 'builder', 'Claude Data Builder', 'Create Python/CSV/JSON artifacts only.', 'claude'),
+      prompt06Agent('builder-ui', 'builder', 'Gemini UI Builder', 'Create dashboard files that consume energy_summary.json only.', 'gemini'),
+      prompt06Agent('reviewer', 'reviewer', 'OpenCode Energy Reviewer', 'Consume both branch artifacts and verify integrated output.', 'opencode'),
+    ],
+    edges: [
+      prompt06Edge('coordinator', 'builder-data'),
+      prompt06Edge('coordinator', 'builder-ui'),
+      prompt06Edge('builder-data', 'reviewer'),
+      prompt06Edge('builder-ui', 'reviewer'),
+    ],
+  },
+  {
+    name: 'handoff-branch-api-contract',
+    title: 'Branch API contract package handoff',
+    task: 'Create an API contract package: two scout branches define request and response fixtures, Builder turns them into validate_contract.mjs, and Reviewer verifies every upstream artifact is consumed.',
+    expectedFiles: expectedWithArtifacts(['request_examples.json', 'response_examples.json', 'validate_contract.mjs', 'contract_report.md', 'README.md'], ['coordinator', 'scout-request', 'scout-response', 'builder', 'reviewer']),
+    runInstruction: 'Run node validate_contract.mjs request_examples.json response_examples.json.',
+    agents: [
+      prompt06Agent('coordinator', 'coordinator', 'Claude Contract Coordinator', 'Define branch ownership and handoff sequence.', 'claude'),
+      prompt06Agent('scout-request', 'scout', 'Gemini Request Scout', 'Create request_examples.json and branch artifact.', 'gemini'),
+      prompt06Agent('scout-response', 'scout', 'Codex Response Scout', 'Create response_examples.json and branch artifact.', 'codex'),
+      prompt06Agent('builder', 'builder', 'OpenCode Contract Builder', 'Create validator, contract report, README, and builder artifact.', 'opencode'),
+      prompt06Agent('reviewer', 'reviewer', 'Codex Contract Reviewer', 'Verify all upstream artifacts were read and referenced.', 'codex'),
+    ],
+    edges: [
+      prompt06Edge('coordinator', 'scout-request'),
+      prompt06Edge('coordinator', 'scout-response'),
+      prompt06Edge('scout-request', 'builder'),
+      prompt06Edge('scout-response', 'builder'),
+      prompt06Edge('builder', 'reviewer'),
+    ],
+  },
+  {
+    name: 'handoff-branch-three-builders',
+    title: 'Three-branch forecast package handoff',
+    task: 'Create a forecasting package with three branch owners: Python model, JSON fixture, and Node verifier. Reviewer must consume all three branch artifacts and finalize README.',
+    expectedFiles: expectedWithArtifacts(['forecast_model.py', 'demand_fixture.json', 'verify_forecast.mjs', 'forecast_report.md', 'README.md'], ['coordinator', 'builder-model', 'builder-fixture', 'builder-verify', 'reviewer']),
+    runInstruction: 'Run python forecast_model.py --input demand_fixture.json --output forecast.json, then node verify_forecast.mjs forecast.json.',
+    agents: [
+      prompt06Agent('coordinator', 'coordinator', 'OpenCode Forecast Coordinator', 'Route exact builder node IDs and expected artifacts.', 'opencode'),
+      prompt06Agent('builder-model', 'builder', 'Claude Forecast Model Builder', 'Create forecast_model.py and branch artifact.', 'claude'),
+      prompt06Agent('builder-fixture', 'builder', 'Gemini Fixture Builder', 'Create demand_fixture.json and branch artifact.', 'gemini'),
+      prompt06Agent('builder-verify', 'builder', 'Codex Verifier Builder', 'Create verify_forecast.mjs, forecast_report.md, and branch artifact.', 'codex'),
+      prompt06Agent('reviewer', 'reviewer', 'Gemini Forecast Reviewer', 'Verify all branch outputs and README.', 'gemini'),
+    ],
+    edges: [
+      prompt06Edge('coordinator', 'builder-model'),
+      prompt06Edge('coordinator', 'builder-fixture'),
+      prompt06Edge('coordinator', 'builder-verify'),
+      prompt06Edge('builder-model', 'reviewer'),
+      prompt06Edge('builder-fixture', 'reviewer'),
+      prompt06Edge('builder-verify', 'reviewer'),
+    ],
+  },
+  {
+    name: 'handoff-merge-release-notes',
+    title: 'Merge release notes toolkit handoff',
+    task: 'Create a release notes toolkit. Two builders own changelog.json and render_release_notes.py; Reviewer consumes both to verify release_notes.md and README.',
+    expectedFiles: expectedWithArtifacts(['changelog.json', 'render_release_notes.py', 'release_notes.md', 'README.md'], ['coordinator', 'builder-data', 'builder-renderer', 'reviewer']),
+    runInstruction: 'Run python render_release_notes.py --input changelog.json --output release_notes.md.',
+    agents: [
+      prompt06Agent('coordinator', 'coordinator', 'Codex Release Coordinator', 'Define merge criteria and exact node ownership.', 'codex'),
+      prompt06Agent('builder-data', 'builder', 'Claude Changelog Builder', 'Create changelog.json and branch artifact.', 'claude'),
+      prompt06Agent('builder-renderer', 'builder', 'OpenCode Renderer Builder', 'Create Python renderer, README notes, and branch artifact.', 'opencode'),
+      prompt06Agent('reviewer', 'reviewer', 'Gemini Release Reviewer', 'Verify all handoffs and merged output.', 'gemini'),
+    ],
+    edges: [
+      prompt06Edge('coordinator', 'builder-data'),
+      prompt06Edge('coordinator', 'builder-renderer'),
+      prompt06Edge('builder-data', 'reviewer'),
+      prompt06Edge('builder-renderer', 'reviewer'),
+    ],
+  },
+  {
+    name: 'handoff-merge-risk-scoring',
+    title: 'Merge risk scoring package handoff',
+    task: 'Create a risk scoring package where one builder owns risks.csv, another owns score_risks.py, Tester validates output, and Reviewer checks all handoffs.',
+    expectedFiles: expectedWithArtifacts(['risks.csv', 'score_risks.py', 'risk_scores.json', 'test_results.md', 'README.md'], ['coordinator', 'builder-data', 'builder-score', 'tester', 'reviewer']),
+    runInstruction: 'Run python score_risks.py --input risks.csv --output risk_scores.json.',
+    agents: [
+      prompt06Agent('coordinator', 'coordinator', 'Gemini Risk Coordinator', 'Assign data and scorer branches with exact node IDs.', 'gemini'),
+      prompt06Agent('builder-data', 'builder', 'Codex Risk Data Builder', 'Create risks.csv and branch artifact.', 'codex'),
+      prompt06Agent('builder-score', 'builder', 'Claude Risk Scorer Builder', 'Create score_risks.py and branch artifact.', 'claude'),
+      prompt06Agent('tester', 'tester', 'OpenCode Risk Tester', 'Run or reason through scorer output and write test_results.md.', 'opencode'),
+      prompt06Agent('reviewer', 'reviewer', 'Codex Risk Reviewer', 'Verify tester consumed both branch artifacts.', 'codex'),
+    ],
+    edges: [
+      prompt06Edge('coordinator', 'builder-data'),
+      prompt06Edge('coordinator', 'builder-score'),
+      prompt06Edge('builder-data', 'tester'),
+      prompt06Edge('builder-score', 'tester'),
+      prompt06Edge('tester', 'reviewer'),
+    ],
+  },
+  {
+    name: 'handoff-merge-geo-visualization',
+    title: 'Merge geo visualization package handoff',
+    task: 'Create a geo visualization package: scout branches define data and rendering requirements, builders create Python normalization and browser map table output, Tester verifies integration.',
+    expectedFiles: expectedWithArtifacts(['locations.csv', 'normalize_locations.py', 'locations.json', 'map_table.html', 'map_table.js', 'test_results.md', 'README.md'], ['coordinator', 'scout-data', 'scout-ui', 'builder-data', 'builder-ui', 'tester', 'reviewer']),
+    runInstruction: 'Run python normalize_locations.py --input locations.csv --output locations.json, then open map_table.html.',
+    agents: [
+      prompt06Agent('coordinator', 'coordinator', 'Claude Geo Coordinator', 'Define exact graph route and branch ownership.', 'claude'),
+      prompt06Agent('scout-data', 'scout', 'Gemini Data Scout', 'Define CSV and JSON normalization checks.', 'gemini'),
+      prompt06Agent('scout-ui', 'scout', 'Codex UI Scout', 'Define browser table interaction requirements.', 'codex'),
+      prompt06Agent('builder-data', 'builder', 'OpenCode Data Builder', 'Create CSV, Python normalizer, JSON output, and branch artifact.', 'opencode'),
+      prompt06Agent('builder-ui', 'builder', 'Claude UI Builder', 'Create HTML/JS output and branch artifact.', 'claude'),
+      prompt06Agent('tester', 'tester', 'Gemini Geo Tester', 'Verify all upstream artifacts and create test_results.md.', 'gemini'),
+      prompt06Agent('reviewer', 'reviewer', 'Codex Geo Reviewer', 'Verify handoff counts and finalize README.', 'codex'),
+    ],
+    edges: [
+      prompt06Edge('coordinator', 'scout-data'),
+      prompt06Edge('coordinator', 'scout-ui'),
+      prompt06Edge('scout-data', 'builder-data'),
+      prompt06Edge('scout-ui', 'builder-ui'),
+      prompt06Edge('builder-data', 'tester'),
+      prompt06Edge('builder-ui', 'tester'),
+      prompt06Edge('tester', 'reviewer'),
+    ],
+  },
+  {
+    name: 'handoff-deep-six-agent',
+    title: 'Deep six-agent handoff chain',
+    task: 'Create a full compliance checklist generator with two scouts, two builders, tester, and reviewer. The final package must include Python generation, JSON policy inputs, Node verification, and README.',
+    expectedFiles: expectedWithArtifacts(['policies.json', 'generate_checklist.py', 'checklist.md', 'verify_checklist.mjs', 'test_results.md', 'README.md'], ['coordinator', 'scout-policy', 'scout-verifier', 'builder-python', 'builder-node', 'tester', 'reviewer']),
+    runInstruction: 'Run python generate_checklist.py --policies policies.json --output checklist.md, then node verify_checklist.mjs checklist.md.',
+    agents: [
+      prompt06Agent('coordinator', 'coordinator', 'Codex Compliance Coordinator', 'Plan the six-plus-agent route and exact node handoffs.', 'codex'),
+      prompt06Agent('scout-policy', 'scout', 'Claude Policy Scout', 'Define policy JSON content and acceptance checks.', 'claude'),
+      prompt06Agent('scout-verifier', 'scout', 'Gemini Verifier Scout', 'Define verification expectations.', 'gemini'),
+      prompt06Agent('builder-python', 'builder', 'OpenCode Python Builder', 'Create policies.json, generate_checklist.py, checklist.md, and branch artifact.', 'opencode'),
+      prompt06Agent('builder-node', 'builder', 'Codex Node Builder', 'Create verify_checklist.mjs and branch artifact.', 'codex'),
+      prompt06Agent('tester', 'tester', 'Claude Compliance Tester', 'Verify generated checklist and write test_results.md.', 'claude'),
+      prompt06Agent('reviewer', 'reviewer', 'Gemini Compliance Reviewer', 'Confirm exact handoffs and final README.', 'gemini'),
+    ],
+    edges: [
+      prompt06Edge('coordinator', 'scout-policy'),
+      prompt06Edge('coordinator', 'scout-verifier'),
+      prompt06Edge('scout-policy', 'builder-python'),
+      prompt06Edge('scout-verifier', 'builder-node'),
+      prompt06Edge('builder-python', 'tester'),
+      prompt06Edge('builder-node', 'tester'),
+      prompt06Edge('tester', 'reviewer'),
+    ],
+  },
+  {
+    name: 'handoff-custom-security-playbook',
+    title: 'Custom security playbook handoff',
+    task: 'Create a security playbook package with Python checklist generation and Markdown threat register. Branches own assets, automation, and review evidence.',
+    expectedFiles: expectedWithArtifacts(['threats.json', 'build_playbook.py', 'security_playbook.md', 'review_verdict.md', 'README.md'], ['coordinator', 'asset-scout', 'automation-builder', 'security-reviewer', 'reviewer']),
+    runInstruction: 'Run python build_playbook.py --threats threats.json --output security_playbook.md.',
+    agents: [
+      prompt06Agent('coordinator', 'coordinator', 'OpenCode Security Coordinator', 'Define node routing and playbook ownership.', 'opencode'),
+      prompt06Agent('asset-scout', 'scout', 'Codex Asset Scout', 'Create threats.json and branch artifact.', 'codex'),
+      prompt06Agent('automation-builder', 'builder', 'Claude Automation Builder', 'Create build_playbook.py and generated playbook.', 'claude'),
+      prompt06Agent('security-reviewer', 'security', 'Gemini Security Reviewer', 'Review generated risks and create review_verdict.md.', 'gemini'),
+      prompt06Agent('reviewer', 'reviewer', 'Codex Final Reviewer', 'Verify all upstream artifacts and README.', 'codex'),
+    ],
+    edges: [
+      prompt06Edge('coordinator', 'asset-scout'),
+      prompt06Edge('coordinator', 'automation-builder'),
+      prompt06Edge('asset-scout', 'security-reviewer'),
+      prompt06Edge('automation-builder', 'security-reviewer'),
+      prompt06Edge('security-reviewer', 'reviewer'),
+    ],
+  },
+  {
+    name: 'handoff-custom-test-plan',
+    title: 'Custom test plan package handoff',
+    task: 'Create a runnable/checkable test plan package for a CSV transformation tool. Scouts define cases, Builder creates transform_csv.py, Tester writes verification output, Reviewer validates all MCP handoffs.',
+    expectedFiles: expectedWithArtifacts(['input.csv', 'expected.csv', 'transform_csv.py', 'test_plan.md', 'test_results.md', 'README.md'], ['scout-cases', 'scout-data', 'builder', 'tester', 'reviewer']),
+    runInstruction: 'Run python transform_csv.py --input input.csv --output actual.csv, then compare with expected.csv.',
+    agents: [
+      prompt06Agent('scout-cases', 'scout', 'Claude Case Scout', 'Define transformation cases and branch artifact.', 'claude'),
+      prompt06Agent('scout-data', 'scout', 'Gemini Data Scout', 'Create input.csv and expected.csv with branch artifact.', 'gemini'),
+      prompt06Agent('builder', 'builder', 'Codex Transform Builder', 'Create transform_csv.py and README implementation notes.', 'codex'),
+      prompt06Agent('tester', 'tester', 'OpenCode Transform Tester', 'Create test_plan.md and test_results.md from upstream outputs.', 'opencode'),
+      prompt06Agent('reviewer', 'reviewer', 'Gemini Transform Reviewer', 'Verify exact source/destination handoffs and artifact reads.', 'gemini'),
+    ],
+    edges: [
+      prompt06Edge('scout-cases', 'builder'),
+      prompt06Edge('scout-data', 'builder'),
+      prompt06Edge('builder', 'tester'),
+      prompt06Edge('tester', 'reviewer'),
+    ],
+  },
+];
+
+const CLI_CYCLE: WorkflowAgentCli[] = ['codex', 'claude', 'gemini', 'opencode'];
+
+function cycleCli(index: number): WorkflowAgentCli {
+  return CLI_CYCLE[index % CLI_CYCLE.length];
+}
+
+function makePrompt13ConsecutiveWorkflows(): Prompt06WorkflowSpec[] {
+  const workflows: Prompt06WorkflowSpec[] = [];
+  for (let index = 1; index <= 5; index += 1) {
+    const cli = cycleCli(index - 1);
+    workflows.push({
+      name: `simple-run-${index}`,
+      title: `Simple repeated run ${index}`,
+      task: `Prompt 13 simple repeated workflow run ${index}: create a fresh multi-stack health snapshot package with Python JSON generation and README. Do not reuse any previous output folder.`,
+      expectedFiles: expectedWithArtifacts(['health_snapshot.py', 'snapshot.json', 'README.md'], ['agent']),
+      runInstruction: 'Run python health_snapshot.py --output snapshot.json.',
+      agents: [
+        prompt06Agent('agent', 'builder', `${cli} Health Snapshot Builder`, 'Create fresh run-specific files and a cleanup note artifact.', cli),
+      ],
+      edges: [],
+    });
+  }
+
+  for (let index = 1; index <= 5; index += 1) {
+    const scoutCli = cycleCli(index);
+    const builderCli = cycleCli(index + 1);
+    workflows.push({
+      name: `two-agent-run-${index}`,
+      title: `Two-agent repeated run ${index}`,
+      task: `Prompt 13 two-agent repeated workflow run ${index}: Scout defines telemetry CSV requirements, Builder creates a Python summarizer and generated JSON output in this fresh folder only.`,
+      expectedFiles: expectedWithArtifacts(['telemetry.csv', 'summarize_telemetry.py', 'telemetry_summary.json', 'README.md'], ['scout', 'builder']),
+      runInstruction: 'Run python summarize_telemetry.py --input telemetry.csv --output telemetry_summary.json.',
+      agents: [
+        prompt06Agent('scout', 'scout', `${scoutCli} Telemetry Scout`, 'Define telemetry columns, acceptance checks, and fresh-run cleanup notes.', scoutCli),
+        prompt06Agent('builder', 'builder', `${builderCli} Telemetry Builder`, 'Create CSV, Python summarizer, JSON output, README, and builder artifact.', builderCli),
+      ],
+      edges: [prompt06Edge('scout', 'builder')],
+    });
+  }
+
+  for (let index = 1; index <= 5; index += 1) {
+    workflows.push({
+      name: `branching-run-${index}`,
+      title: `Branching repeated run ${index}`,
+      task: `Prompt 13 branching repeated workflow run ${index}: Coordinator routes two branches. One branch creates Python processing over orders.csv; the other creates a Node verifier. Reviewer confirms no stale prior-run files were used.`,
+      expectedFiles: expectedWithArtifacts(['orders.csv', 'process_orders.py', 'orders_summary.json', 'verify_orders.mjs', 'cleanup_notes.md', 'README.md'], ['coordinator', 'builder-data', 'builder-verify', 'reviewer']),
+      runInstruction: 'Run python process_orders.py --input orders.csv --output orders_summary.json, then node verify_orders.mjs orders_summary.json.',
+      agents: [
+        prompt06Agent('coordinator', 'coordinator', 'Codex Branch Coordinator', 'Assign exact branch ownership and fresh output folder checks.', 'codex'),
+        prompt06Agent('builder-data', 'builder', 'Claude Data Builder', 'Create orders.csv, process_orders.py, orders_summary.json, and branch artifact.', 'claude'),
+        prompt06Agent('builder-verify', 'builder', 'Gemini Verifier Builder', 'Create verify_orders.mjs, cleanup_notes.md, and branch artifact.', 'gemini'),
+        prompt06Agent('reviewer', 'reviewer', 'OpenCode Cleanup Reviewer', 'Verify both branches and note runtime/session cleanup evidence.', 'opencode'),
+      ],
+      edges: [
+        prompt06Edge('coordinator', 'builder-data'),
+        prompt06Edge('coordinator', 'builder-verify'),
+        prompt06Edge('builder-data', 'reviewer'),
+        prompt06Edge('builder-verify', 'reviewer'),
+      ],
+    });
+  }
+
+  for (let index = 1; index <= 3; index += 1) {
+    workflows.push({
+      name: `deep-run-${index}`,
+      title: `Deep repeated run ${index}`,
+      task: `Prompt 13 deep repeated workflow run ${index}: build a fresh compliance evidence package with two scouts, two builders, tester, and reviewer using Python plus Node verification.`,
+      expectedFiles: expectedWithArtifacts(['controls.json', 'generate_evidence.py', 'evidence.md', 'verify_evidence.mjs', 'test_results.md', 'cleanup_notes.md', 'README.md'], ['coordinator', 'scout-controls', 'scout-verifier', 'builder-python', 'builder-node', 'tester', 'reviewer']),
+      runInstruction: 'Run python generate_evidence.py --controls controls.json --output evidence.md, then node verify_evidence.mjs evidence.md.',
+      agents: [
+        prompt06Agent('coordinator', 'coordinator', 'Codex Deep Coordinator', 'Plan exact node IDs and cleanup expectations.', 'codex'),
+        prompt06Agent('scout-controls', 'scout', 'Claude Controls Scout', 'Define controls.json requirements.', 'claude'),
+        prompt06Agent('scout-verifier', 'scout', 'Gemini Verifier Scout', 'Define verification requirements.', 'gemini'),
+        prompt06Agent('builder-python', 'builder', 'OpenCode Python Builder', 'Create controls.json, generate_evidence.py, evidence.md, and artifact.', 'opencode'),
+        prompt06Agent('builder-node', 'builder', 'Codex Node Builder', 'Create verify_evidence.mjs and artifact.', 'codex'),
+        prompt06Agent('tester', 'tester', 'Claude Deep Tester', 'Create test_results.md and cleanup notes.', 'claude'),
+        prompt06Agent('reviewer', 'reviewer', 'Gemini Deep Reviewer', 'Verify all upstream artifacts and final README.', 'gemini'),
+      ],
+      edges: [
+        prompt06Edge('coordinator', 'scout-controls'),
+        prompt06Edge('coordinator', 'scout-verifier'),
+        prompt06Edge('scout-controls', 'builder-python'),
+        prompt06Edge('scout-verifier', 'builder-node'),
+        prompt06Edge('builder-python', 'tester'),
+        prompt06Edge('builder-node', 'tester'),
+        prompt06Edge('tester', 'reviewer'),
+      ],
+    });
+  }
+
+  ['default-a', 'changed-settings-b', 'default-c'].forEach((label, index) => {
+    workflows.push({
+      name: `settings-${label}`,
+      title: `Settings-change run ${label}`,
+      task: `Prompt 13 settings-change workflow ${label}: create a fresh settings evidence package that records the logical setting mode "${label}", builds a Python config normalizer, and verifies with Node.`,
+      expectedFiles: expectedWithArtifacts(['settings.json', 'normalize_settings.py', 'normalized_settings.json', 'verify_settings.mjs', 'settings_run_notes.md', 'README.md'], ['coordinator', 'builder', 'tester']),
+      runInstruction: 'Run python normalize_settings.py --input settings.json --output normalized_settings.json, then node verify_settings.mjs normalized_settings.json.',
+      agents: [
+        prompt06Agent('coordinator', 'coordinator', 'Codex Settings Coordinator', `Record this as settings run ${label} and assign ownership.`, 'codex'),
+        prompt06Agent('builder', 'builder', `${cycleCli(index + 1)} Settings Builder`, 'Create config normalizer files and branch artifact.', cycleCli(index + 1)),
+        prompt06Agent('tester', 'tester', `${cycleCli(index + 2)} Settings Tester`, 'Verify settings files and write settings_run_notes.md.', cycleCli(index + 2)),
+      ],
+      edges: [prompt06Edge('coordinator', 'builder'), prompt06Edge('builder', 'tester')],
+    });
+  });
+
+  return workflows;
+}
+
+const PROMPT_13_WORKFLOWS = makePrompt13ConsecutiveWorkflows();
+
+const PROMPT_14_WORKFLOWS: Prompt06WorkflowSpec[] = [
+  {
+    name: 'branch-sales-dashboard',
+    title: 'Branch sales dashboard',
+    task: 'Create a sales dashboard package with Python aggregation, browser rendering, and integrated README. Data and UI branches must be consumed by Reviewer.',
+    expectedFiles: expectedWithArtifacts(['sales.csv', 'aggregate_sales.py', 'sales_summary.json', 'dashboard.html', 'dashboard.js', 'merge_verdict.md', 'README.md'], ['coordinator', 'builder-data', 'builder-ui', 'reviewer']),
+    runInstruction: 'Run python aggregate_sales.py --input sales.csv --output sales_summary.json, then open dashboard.html.',
+    agents: [
+      prompt06Agent('coordinator', 'coordinator', 'Codex Sales Coordinator', 'Assign data/UI branch ownership and merge criteria.', 'codex'),
+      prompt06Agent('builder-data', 'builder', 'Claude Sales Data Builder', 'Create CSV, Python aggregation, JSON summary, and branch artifact.', 'claude'),
+      prompt06Agent('builder-ui', 'builder', 'Gemini Sales UI Builder', 'Create dashboard HTML/JS and branch artifact.', 'gemini'),
+      prompt06Agent('reviewer', 'reviewer', 'OpenCode Sales Reviewer', 'Consume both branch outputs and write merge verdict.', 'opencode'),
+    ],
+    edges: [prompt06Edge('coordinator', 'builder-data'), prompt06Edge('coordinator', 'builder-ui'), prompt06Edge('builder-data', 'reviewer'), prompt06Edge('builder-ui', 'reviewer')],
+  },
+  {
+    name: 'branch-support-triage',
+    title: 'Branch support triage analyzer',
+    task: 'Create a support triage analyzer where scouts define taxonomy and fixtures, Builder creates Python classifier, and Reviewer verifies merged evidence.',
+    expectedFiles: expectedWithArtifacts(['tickets.json', 'triage_rules.json', 'triage.py', 'triage_report.md', 'README.md'], ['coordinator', 'scout-taxonomy', 'scout-fixtures', 'builder', 'reviewer']),
+    runInstruction: 'Run python triage.py --tickets tickets.json --rules triage_rules.json.',
+    agents: [
+      prompt06Agent('coordinator', 'coordinator', 'Claude Triage Coordinator', 'Assign scout branches and builder merge expectations.', 'claude'),
+      prompt06Agent('scout-taxonomy', 'scout', 'Gemini Taxonomy Scout', 'Create triage_rules.json and artifact.', 'gemini'),
+      prompt06Agent('scout-fixtures', 'scout', 'Codex Fixture Scout', 'Create tickets.json and artifact.', 'codex'),
+      prompt06Agent('builder', 'builder', 'OpenCode Triage Builder', 'Create triage.py, triage_report.md, and artifact from both scouts.', 'opencode'),
+      prompt06Agent('reviewer', 'reviewer', 'Codex Triage Reviewer', 'Verify merged branch consumption and README.', 'codex'),
+    ],
+    edges: [prompt06Edge('coordinator', 'scout-taxonomy'), prompt06Edge('coordinator', 'scout-fixtures'), prompt06Edge('scout-taxonomy', 'builder'), prompt06Edge('scout-fixtures', 'builder'), prompt06Edge('builder', 'reviewer')],
+  },
+  {
+    name: 'branch-simulation-three-builders',
+    title: 'Three-builder simulation package',
+    task: 'Create a small queue simulation package. Branches own config, Python simulator, and Node verifier; Tester and Reviewer consume all upstream artifacts.',
+    expectedFiles: expectedWithArtifacts(['simulation_config.json', 'simulate_queue.py', 'simulation_results.json', 'verify_simulation.mjs', 'test_results.md', 'README.md'], ['scout', 'coordinator', 'builder-config', 'builder-sim', 'builder-verify', 'tester', 'reviewer']),
+    runInstruction: 'Run python simulate_queue.py --config simulation_config.json --output simulation_results.json, then node verify_simulation.mjs simulation_results.json.',
+    agents: [
+      prompt06Agent('scout', 'scout', 'Gemini Simulation Scout', 'Define simulation acceptance checks.', 'gemini'),
+      prompt06Agent('coordinator', 'coordinator', 'Codex Simulation Coordinator', 'Route three builder branches.', 'codex'),
+      prompt06Agent('builder-config', 'builder', 'Claude Config Builder', 'Create simulation_config.json and artifact.', 'claude'),
+      prompt06Agent('builder-sim', 'builder', 'OpenCode Simulator Builder', 'Create Python simulator and artifact.', 'opencode'),
+      prompt06Agent('builder-verify', 'builder', 'Codex Verifier Builder', 'Create Node verifier and artifact.', 'codex'),
+      prompt06Agent('tester', 'tester', 'Gemini Simulation Tester', 'Create test_results.md by consuming all builder outputs.', 'gemini'),
+      prompt06Agent('reviewer', 'reviewer', 'Claude Simulation Reviewer', 'Finalize README and merge verdict.', 'claude'),
+    ],
+    edges: [
+      prompt06Edge('scout', 'coordinator'),
+      prompt06Edge('coordinator', 'builder-config'),
+      prompt06Edge('coordinator', 'builder-sim'),
+      prompt06Edge('coordinator', 'builder-verify'),
+      prompt06Edge('builder-config', 'tester'),
+      prompt06Edge('builder-sim', 'tester'),
+      prompt06Edge('builder-verify', 'tester'),
+      prompt06Edge('tester', 'reviewer'),
+    ],
+  },
+  {
+    name: 'branch-ab-test-two-testers',
+    title: 'A/B test two-tester merge',
+    task: 'Create an A/B test analysis package with two builders and two testers. Final Reviewer must reconcile both tester outputs.',
+    expectedFiles: expectedWithArtifacts(['experiment.csv', 'analyze_ab.py', 'ab_summary.json', 'verify_stats.mjs', 'tester_stats.md', 'tester_product.md', 'README.md'], ['coordinator', 'builder-data', 'builder-analysis', 'tester-stats', 'tester-product', 'reviewer']),
+    runInstruction: 'Run python analyze_ab.py --input experiment.csv --output ab_summary.json, then node verify_stats.mjs ab_summary.json.',
+    agents: [
+      prompt06Agent('coordinator', 'coordinator', 'OpenCode Experiment Coordinator', 'Assign builders and tester fan-out.', 'opencode'),
+      prompt06Agent('builder-data', 'builder', 'Gemini Experiment Data Builder', 'Create experiment.csv and artifact.', 'gemini'),
+      prompt06Agent('builder-analysis', 'builder', 'Codex Analysis Builder', 'Create analyze_ab.py, ab_summary.json, and artifact.', 'codex'),
+      prompt06Agent('tester-stats', 'tester', 'Claude Stats Tester', 'Create verify_stats.mjs and tester_stats.md.', 'claude'),
+      prompt06Agent('tester-product', 'tester', 'Gemini Product Tester', 'Create tester_product.md from upstream output.', 'gemini'),
+      prompt06Agent('reviewer', 'reviewer', 'Codex Experiment Reviewer', 'Reconcile both tester outputs in README.', 'codex'),
+    ],
+    edges: [prompt06Edge('coordinator', 'builder-data'), prompt06Edge('coordinator', 'builder-analysis'), prompt06Edge('builder-data', 'tester-stats'), prompt06Edge('builder-analysis', 'tester-stats'), prompt06Edge('builder-data', 'tester-product'), prompt06Edge('builder-analysis', 'tester-product'), prompt06Edge('tester-stats', 'reviewer'), prompt06Edge('tester-product', 'reviewer')],
+  },
+  {
+    name: 'branch-risk-quality-wide',
+    title: 'Wide risk and quality merge',
+    task: 'Create a release readiness package with scout, build, test, security, and review lanes. The final package must include Python checks, Node verification, security notes, and README.',
+    expectedFiles: expectedWithArtifacts(['release_manifest.json', 'check_release.py', 'release_check.json', 'verify_release.mjs', 'security_notes.md', 'test_results.md', 'README.md'], ['coordinator', 'scout-risk', 'scout-test', 'builder-python', 'builder-node', 'security-reviewer', 'tester', 'reviewer']),
+    runInstruction: 'Run python check_release.py --manifest release_manifest.json --output release_check.json, then node verify_release.mjs release_check.json.',
+    agents: [
+      prompt06Agent('coordinator', 'coordinator', 'Codex Release Coordinator', 'Assign risk, test, build, and review lanes.', 'codex'),
+      prompt06Agent('scout-risk', 'scout', 'Claude Risk Scout', 'Define security and risk checks.', 'claude'),
+      prompt06Agent('scout-test', 'scout', 'Gemini Test Scout', 'Define test acceptance checks.', 'gemini'),
+      prompt06Agent('builder-python', 'builder', 'OpenCode Python Builder', 'Create manifest, Python checker, JSON output, and artifact.', 'opencode'),
+      prompt06Agent('builder-node', 'builder', 'Codex Node Builder', 'Create Node verifier and artifact.', 'codex'),
+      prompt06Agent('security-reviewer', 'security', 'Claude Security Reviewer', 'Create security_notes.md from risk and build artifacts.', 'claude'),
+      prompt06Agent('tester', 'tester', 'Gemini Release Tester', 'Create test_results.md from all upstream artifacts.', 'gemini'),
+      prompt06Agent('reviewer', 'reviewer', 'OpenCode Release Reviewer', 'Finalize README with all upstream references.', 'opencode'),
+    ],
+    edges: [
+      prompt06Edge('coordinator', 'scout-risk'),
+      prompt06Edge('coordinator', 'scout-test'),
+      prompt06Edge('scout-risk', 'builder-python'),
+      prompt06Edge('scout-test', 'builder-node'),
+      prompt06Edge('builder-python', 'security-reviewer'),
+      prompt06Edge('builder-node', 'tester'),
+      prompt06Edge('security-reviewer', 'reviewer'),
+      prompt06Edge('tester', 'reviewer'),
+    ],
+  },
+  {
+    name: 'branch-warehouse-optimizer',
+    title: 'Warehouse optimizer merge',
+    task: 'Create a warehouse slotting optimizer with Python optimization, JSON fixtures, and Node verification. Branches must not overwrite each other.',
+    expectedFiles: expectedWithArtifacts(['warehouse.json', 'optimize_slots.py', 'slot_plan.json', 'verify_slots.mjs', 'review_notes.md', 'README.md'], ['coordinator', 'builder-fixture', 'builder-optimizer', 'builder-verifier', 'reviewer']),
+    runInstruction: 'Run python optimize_slots.py --warehouse warehouse.json --output slot_plan.json, then node verify_slots.mjs slot_plan.json.',
+    agents: [
+      prompt06Agent('coordinator', 'coordinator', 'Gemini Warehouse Coordinator', 'Assign fixture, optimizer, and verifier branches.', 'gemini'),
+      prompt06Agent('builder-fixture', 'builder', 'Claude Fixture Builder', 'Create warehouse.json and artifact.', 'claude'),
+      prompt06Agent('builder-optimizer', 'builder', 'Codex Optimizer Builder', 'Create optimize_slots.py and slot_plan.json.', 'codex'),
+      prompt06Agent('builder-verifier', 'builder', 'OpenCode Verifier Builder', 'Create verify_slots.mjs and artifact.', 'opencode'),
+      prompt06Agent('reviewer', 'reviewer', 'Claude Warehouse Reviewer', 'Verify all three branches and README.', 'claude'),
+    ],
+    edges: [prompt06Edge('coordinator', 'builder-fixture'), prompt06Edge('coordinator', 'builder-optimizer'), prompt06Edge('coordinator', 'builder-verifier'), prompt06Edge('builder-fixture', 'reviewer'), prompt06Edge('builder-optimizer', 'reviewer'), prompt06Edge('builder-verifier', 'reviewer')],
+  },
+  {
+    name: 'branch-usage-forecast',
+    title: 'Usage forecast merge',
+    task: 'Create a usage forecast package with CSV fixture, Python model, browser chart table, and QA report.',
+    expectedFiles: expectedWithArtifacts(['usage.csv', 'forecast_usage.py', 'usage_forecast.json', 'chart.html', 'chart.js', 'qa_report.md', 'README.md'], ['coordinator', 'builder-data', 'builder-model', 'builder-chart', 'tester', 'reviewer']),
+    runInstruction: 'Run python forecast_usage.py --input usage.csv --output usage_forecast.json, then open chart.html.',
+    agents: [
+      prompt06Agent('coordinator', 'coordinator', 'Codex Usage Coordinator', 'Assign data/model/chart branches.', 'codex'),
+      prompt06Agent('builder-data', 'builder', 'Gemini Usage Data Builder', 'Create usage.csv and artifact.', 'gemini'),
+      prompt06Agent('builder-model', 'builder', 'Claude Forecast Builder', 'Create forecast_usage.py and JSON output.', 'claude'),
+      prompt06Agent('builder-chart', 'builder', 'OpenCode Chart Builder', 'Create chart.html/chart.js and artifact.', 'opencode'),
+      prompt06Agent('tester', 'tester', 'Codex Usage Tester', 'Create qa_report.md by consuming all builders.', 'codex'),
+      prompt06Agent('reviewer', 'reviewer', 'Gemini Usage Reviewer', 'Finalize README with branch summary.', 'gemini'),
+    ],
+    edges: [prompt06Edge('coordinator', 'builder-data'), prompt06Edge('coordinator', 'builder-model'), prompt06Edge('coordinator', 'builder-chart'), prompt06Edge('builder-data', 'tester'), prompt06Edge('builder-model', 'tester'), prompt06Edge('builder-chart', 'tester'), prompt06Edge('tester', 'reviewer')],
+  },
+  {
+    name: 'branch-bug-repro-package',
+    title: 'Bug reproduction merge package',
+    task: 'Create a bug reproduction package with fixture generator, reproducer script, expected/actual report, and review notes.',
+    expectedFiles: expectedWithArtifacts(['fixture.json', 'make_fixture.py', 'reproduce_bug.py', 'actual_vs_expected.md', 'review_notes.md', 'README.md'], ['coordinator', 'builder-fixture', 'builder-repro', 'tester', 'reviewer']),
+    runInstruction: 'Run python make_fixture.py --output fixture.json, then python reproduce_bug.py --fixture fixture.json.',
+    agents: [
+      prompt06Agent('coordinator', 'coordinator', 'Claude Bug Coordinator', 'Assign fixture and repro branch responsibilities.', 'claude'),
+      prompt06Agent('builder-fixture', 'builder', 'Codex Fixture Builder', 'Create make_fixture.py and fixture.json.', 'codex'),
+      prompt06Agent('builder-repro', 'builder', 'Gemini Repro Builder', 'Create reproduce_bug.py and artifact.', 'gemini'),
+      prompt06Agent('tester', 'tester', 'OpenCode Bug Tester', 'Create actual_vs_expected.md from both branches.', 'opencode'),
+      prompt06Agent('reviewer', 'reviewer', 'Codex Bug Reviewer', 'Create review_notes.md and final README.', 'codex'),
+    ],
+    edges: [prompt06Edge('coordinator', 'builder-fixture'), prompt06Edge('coordinator', 'builder-repro'), prompt06Edge('builder-fixture', 'tester'), prompt06Edge('builder-repro', 'tester'), prompt06Edge('tester', 'reviewer')],
+  },
+  {
+    name: 'branch-docs-with-verifier',
+    title: 'Documentation deliverable with verifier merge',
+    task: 'Create substantial API documentation plus a Node link verifier and Python example generator. This is explicitly a documentation/report deliverable with runnable verification helpers.',
+    expectedFiles: expectedWithArtifacts(['api_spec.json', 'generate_examples.py', 'API_GUIDE.md', 'verify_docs.mjs', 'doc_quality.md', 'README.md'], ['coordinator', 'builder-spec', 'builder-docs', 'builder-verifier', 'reviewer']),
+    runInstruction: 'Run python generate_examples.py --spec api_spec.json, then node verify_docs.mjs API_GUIDE.md.',
+    agents: [
+      prompt06Agent('coordinator', 'coordinator', 'OpenCode Docs Coordinator', 'Assign spec, docs, and verifier branch ownership.', 'opencode'),
+      prompt06Agent('builder-spec', 'builder', 'Gemini API Spec Builder', 'Create api_spec.json and artifact.', 'gemini'),
+      prompt06Agent('builder-docs', 'builder', 'Claude Docs Builder', 'Create generate_examples.py and API_GUIDE.md.', 'claude'),
+      prompt06Agent('builder-verifier', 'builder', 'Codex Docs Verifier Builder', 'Create verify_docs.mjs and doc_quality.md.', 'codex'),
+      prompt06Agent('reviewer', 'reviewer', 'Gemini Docs Reviewer', 'Verify all branch artifacts and README.', 'gemini'),
+    ],
+    edges: [prompt06Edge('coordinator', 'builder-spec'), prompt06Edge('coordinator', 'builder-docs'), prompt06Edge('coordinator', 'builder-verifier'), prompt06Edge('builder-spec', 'reviewer'), prompt06Edge('builder-docs', 'reviewer'), prompt06Edge('builder-verifier', 'reviewer')],
+  },
+  {
+    name: 'branch-game-sim-mini',
+    title: 'Mini simulation/game merge package',
+    task: 'Create a small deterministic grid simulation package with Python state generation, browser playback, test report, and final review.',
+    expectedFiles: expectedWithArtifacts(['grid_config.json', 'simulate_grid.py', 'frames.json', 'playback.html', 'playback.js', 'test_results.md', 'README.md'], ['coordinator', 'builder-sim', 'builder-playback', 'tester', 'reviewer']),
+    runInstruction: 'Run python simulate_grid.py --config grid_config.json --output frames.json, then open playback.html.',
+    agents: [
+      prompt06Agent('coordinator', 'coordinator', 'Codex Grid Coordinator', 'Assign simulation and playback branches.', 'codex'),
+      prompt06Agent('builder-sim', 'builder', 'Claude Simulation Builder', 'Create config, Python simulator, frames JSON, and artifact.', 'claude'),
+      prompt06Agent('builder-playback', 'builder', 'Gemini Playback Builder', 'Create playback HTML/JS and artifact.', 'gemini'),
+      prompt06Agent('tester', 'tester', 'OpenCode Grid Tester', 'Verify integration and write test_results.md.', 'opencode'),
+      prompt06Agent('reviewer', 'reviewer', 'Codex Grid Reviewer', 'Finalize README and branch summary.', 'codex'),
+    ],
+    edges: [prompt06Edge('coordinator', 'builder-sim'), prompt06Edge('coordinator', 'builder-playback'), prompt06Edge('builder-sim', 'tester'), prompt06Edge('builder-playback', 'tester'), prompt06Edge('tester', 'reviewer')],
+  },
+];
+
+const PROMPT_15_WORKFLOWS: Prompt06WorkflowSpec[] = [
+  {
+    name: 'quality-small-config-lint',
+    title: 'Small config lint quality gate',
+    task: 'Create a small quality-gated config lint package with a JSON config, Python linter, summary artifact, and final output artifact.',
+    expectedFiles: expectedWithArtifacts(['config.json', 'lint_config.py', 'summary.md', 'final_output.md', 'README.md'], ['agent']),
+    runInstruction: 'Run python lint_config.py --config config.json.',
+    agents: [
+      prompt06Agent('agent', 'builder', 'Codex Config Quality Builder', 'Create all small workflow required artifacts and complete only after verifying them.', 'codex'),
+    ],
+    edges: [],
+  },
+  {
+    name: 'quality-small-node-budget',
+    title: 'Small Node budget quality gate',
+    task: 'Create a small Node.js budget checker with budget.json, check_budget.mjs, summary artifact, final output artifact, and README.',
+    expectedFiles: expectedWithArtifacts(['budget.json', 'check_budget.mjs', 'summary.md', 'final_output.md', 'README.md'], ['agent']),
+    runInstruction: 'Run node check_budget.mjs budget.json.',
+    agents: [
+      prompt06Agent('agent', 'builder', 'OpenCode Budget Quality Builder', 'Create Node budget checker and required quality artifacts.', 'opencode'),
+    ],
+    edges: [],
+  },
+  {
+    name: 'quality-medium-observability',
+    title: 'Medium observability quality gate',
+    task: 'Create an observability report package. Scout writes context, Builder creates Python log analyzer and fixture output, Reviewer writes verdict referencing upstream artifacts.',
+    expectedFiles: expectedWithArtifacts(['logs.jsonl', 'analyze_logs.py', 'observability_report.json', 'scout_context.md', 'builder_output.md', 'reviewer_verdict.md', 'README.md'], ['scout', 'builder', 'reviewer']),
+    runInstruction: 'Run python analyze_logs.py --input logs.jsonl --output observability_report.json.',
+    agents: [
+      prompt06Agent('scout', 'scout', 'Claude Observability Scout', 'Create scout_context.md and branch artifact.', 'claude'),
+      prompt06Agent('builder', 'builder', 'Gemini Observability Builder', 'Create logs fixture, analyzer, JSON report, builder_output.md, and artifact.', 'gemini'),
+      prompt06Agent('reviewer', 'reviewer', 'Codex Observability Reviewer', 'Create reviewer_verdict.md and verify quality gate artifacts.', 'codex'),
+    ],
+    edges: [prompt06Edge('scout', 'builder'), prompt06Edge('builder', 'reviewer')],
+  },
+  {
+    name: 'quality-medium-contract',
+    title: 'Medium contract quality gate',
+    task: 'Create a contract validation package with scout/context, builder/output, reviewer verdict, JSON fixtures, and Node validator.',
+    expectedFiles: expectedWithArtifacts(['contract_context.md', 'requests.json', 'responses.json', 'validate_contract.mjs', 'builder_output.md', 'reviewer_verdict.md', 'README.md'], ['scout', 'builder', 'reviewer']),
+    runInstruction: 'Run node validate_contract.mjs requests.json responses.json.',
+    agents: [
+      prompt06Agent('scout', 'scout', 'Gemini Contract Scout', 'Create contract_context.md and fixture requirements.', 'gemini'),
+      prompt06Agent('builder', 'builder', 'Claude Contract Builder', 'Create fixtures, validator, builder_output.md, and artifact.', 'claude'),
+      prompt06Agent('reviewer', 'reviewer', 'OpenCode Contract Reviewer', 'Create reviewer verdict referencing scout and builder outputs.', 'opencode'),
+    ],
+    edges: [prompt06Edge('scout', 'builder'), prompt06Edge('builder', 'reviewer')],
+  },
+  {
+    name: 'quality-large-supply-chain',
+    title: 'Large supply-chain quality gate',
+    task: 'Create a supply-chain quality package with coordinator plan, scout branches, builder branches, tester result, reviewer verdict, quality summary, Python processing, and browser report.',
+    expectedFiles: expectedWithArtifacts(['coordinator_plan.md', 'suppliers.csv', 'score_suppliers.py', 'supplier_scores.json', 'supplier_dashboard.html', 'supplier_dashboard.js', 'tester_result.md', 'reviewer_final_verdict.md', 'quality_summary.md', 'README.md'], ['coordinator', 'scout-data', 'scout-risk', 'builder-score', 'builder-dashboard', 'tester', 'reviewer']),
+    runInstruction: 'Run python score_suppliers.py --input suppliers.csv --output supplier_scores.json, then open supplier_dashboard.html.',
+    agents: [
+      prompt06Agent('coordinator', 'coordinator', 'Codex Supply Coordinator', 'Create coordinator_plan.md and assign exact quality artifacts.', 'codex'),
+      prompt06Agent('scout-data', 'scout', 'Claude Data Scout', 'Define supplier data requirements and branch artifact.', 'claude'),
+      prompt06Agent('scout-risk', 'scout', 'Gemini Risk Scout', 'Define risk scoring requirements and branch artifact.', 'gemini'),
+      prompt06Agent('builder-score', 'builder', 'OpenCode Score Builder', 'Create suppliers.csv, score_suppliers.py, supplier_scores.json, and artifact.', 'opencode'),
+      prompt06Agent('builder-dashboard', 'builder', 'Codex Dashboard Builder', 'Create dashboard HTML/JS and artifact.', 'codex'),
+      prompt06Agent('tester', 'tester', 'Claude Supply Tester', 'Create tester_result.md from both builder outputs.', 'claude'),
+      prompt06Agent('reviewer', 'reviewer', 'Gemini Supply Reviewer', 'Create reviewer_final_verdict.md and quality_summary.md.', 'gemini'),
+    ],
+    edges: [prompt06Edge('coordinator', 'scout-data'), prompt06Edge('coordinator', 'scout-risk'), prompt06Edge('scout-data', 'builder-score'), prompt06Edge('scout-risk', 'builder-score'), prompt06Edge('scout-data', 'builder-dashboard'), prompt06Edge('builder-score', 'tester'), prompt06Edge('builder-dashboard', 'tester'), prompt06Edge('tester', 'reviewer')],
+  },
+  {
+    name: 'quality-large-release-gate',
+    title: 'Large release readiness quality gate',
+    task: 'Create a release readiness package with coordinator plan, three scouts, three builders, two testers, final verdict, and quality summary. Include Python and Node verification.',
+    expectedFiles: expectedWithArtifacts(['coordinator_plan.md', 'release_inputs.json', 'build_release_report.py', 'release_report.md', 'verify_release.mjs', 'tester_functional.md', 'tester_security.md', 'reviewer_final_verdict.md', 'quality_summary.md', 'README.md'], ['coordinator', 'scout-product', 'scout-security', 'scout-test', 'builder-report', 'builder-verifier', 'builder-docs', 'tester-functional', 'tester-security', 'reviewer']),
+    runInstruction: 'Run python build_release_report.py --input release_inputs.json --output release_report.md, then node verify_release.mjs release_report.md.',
+    agents: [
+      prompt06Agent('coordinator', 'coordinator', 'OpenCode Release Coordinator', 'Create coordinator_plan.md and assign quality-gate artifacts.', 'opencode'),
+      prompt06Agent('scout-product', 'scout', 'Codex Product Scout', 'Define product checks and artifact.', 'codex'),
+      prompt06Agent('scout-security', 'scout', 'Claude Security Scout', 'Define security checks and artifact.', 'claude'),
+      prompt06Agent('scout-test', 'scout', 'Gemini Test Scout', 'Define test checks and artifact.', 'gemini'),
+      prompt06Agent('builder-report', 'builder', 'Codex Report Builder', 'Create release inputs, Python report builder, release_report.md, and artifact.', 'codex'),
+      prompt06Agent('builder-verifier', 'builder', 'OpenCode Verifier Builder', 'Create verify_release.mjs and artifact.', 'opencode'),
+      prompt06Agent('builder-docs', 'builder', 'Claude Docs Builder', 'Create README sections and artifact.', 'claude'),
+      prompt06Agent('tester-functional', 'tester', 'Gemini Functional Tester', 'Create tester_functional.md from builder outputs.', 'gemini'),
+      prompt06Agent('tester-security', 'tester', 'Codex Security Tester', 'Create tester_security.md from security and builder outputs.', 'codex'),
+      prompt06Agent('reviewer', 'reviewer', 'Claude Release Reviewer', 'Create final verdict and quality summary referencing all upstream artifacts.', 'claude'),
+    ],
+    edges: [
+      prompt06Edge('coordinator', 'scout-product'),
+      prompt06Edge('coordinator', 'scout-security'),
+      prompt06Edge('coordinator', 'scout-test'),
+      prompt06Edge('scout-product', 'builder-report'),
+      prompt06Edge('scout-security', 'builder-verifier'),
+      prompt06Edge('scout-test', 'builder-docs'),
+      prompt06Edge('builder-report', 'tester-functional'),
+      prompt06Edge('builder-verifier', 'tester-security'),
+      prompt06Edge('builder-docs', 'tester-functional'),
+      prompt06Edge('tester-functional', 'reviewer'),
+      prompt06Edge('tester-security', 'reviewer'),
+    ],
+  },
+  {
+    name: 'quality-custom-mobile-data',
+    title: 'Custom mobile data quality gate',
+    task: 'Create a mobile telemetry data quality package with Python normalization, JSON output, browser inspection table, tester result, and quality summary.',
+    expectedFiles: expectedWithArtifacts(['mobile_events.csv', 'normalize_mobile.py', 'mobile_events.json', 'inspection.html', 'inspection.js', 'tester_result.md', 'reviewer_final_verdict.md', 'quality_summary.md', 'README.md'], ['coordinator', 'builder-data', 'builder-ui', 'tester', 'reviewer']),
+    runInstruction: 'Run python normalize_mobile.py --input mobile_events.csv --output mobile_events.json, then open inspection.html.',
+    agents: [
+      prompt06Agent('coordinator', 'coordinator', 'Gemini Mobile Coordinator', 'Create plan artifact and assign data/UI branches.', 'gemini'),
+      prompt06Agent('builder-data', 'builder', 'Claude Mobile Data Builder', 'Create CSV, Python normalizer, JSON, and artifact.', 'claude'),
+      prompt06Agent('builder-ui', 'builder', 'Codex Mobile UI Builder', 'Create inspection HTML/JS and artifact.', 'codex'),
+      prompt06Agent('tester', 'tester', 'OpenCode Mobile Tester', 'Create tester_result.md by consuming both branches.', 'opencode'),
+      prompt06Agent('reviewer', 'reviewer', 'Gemini Mobile Reviewer', 'Create verdict and quality summary.', 'gemini'),
+    ],
+    edges: [prompt06Edge('coordinator', 'builder-data'), prompt06Edge('coordinator', 'builder-ui'), prompt06Edge('builder-data', 'tester'), prompt06Edge('builder-ui', 'tester'), prompt06Edge('tester', 'reviewer')],
+  },
+  {
+    name: 'quality-custom-pricing',
+    title: 'Custom pricing quality gate',
+    task: 'Create a pricing scenario package with Python scenario evaluation, Node verifier, reviewer verdict, and quality summary.',
+    expectedFiles: expectedWithArtifacts(['pricing_scenarios.json', 'evaluate_pricing.py', 'pricing_results.json', 'verify_pricing.mjs', 'tester_result.md', 'reviewer_final_verdict.md', 'quality_summary.md', 'README.md'], ['coordinator', 'builder-python', 'builder-node', 'tester', 'reviewer']),
+    runInstruction: 'Run python evaluate_pricing.py --input pricing_scenarios.json --output pricing_results.json, then node verify_pricing.mjs pricing_results.json.',
+    agents: [
+      prompt06Agent('coordinator', 'coordinator', 'Codex Pricing Coordinator', 'Plan artifacts and assign Python/Node builders.', 'codex'),
+      prompt06Agent('builder-python', 'builder', 'Gemini Pricing Python Builder', 'Create scenarios, Python evaluator, JSON output, and artifact.', 'gemini'),
+      prompt06Agent('builder-node', 'builder', 'Claude Pricing Node Builder', 'Create Node verifier and artifact.', 'claude'),
+      prompt06Agent('tester', 'tester', 'OpenCode Pricing Tester', 'Create tester_result.md from both builders.', 'opencode'),
+      prompt06Agent('reviewer', 'reviewer', 'Codex Pricing Reviewer', 'Create final verdict and quality summary.', 'codex'),
+    ],
+    edges: [prompt06Edge('coordinator', 'builder-python'), prompt06Edge('coordinator', 'builder-node'), prompt06Edge('builder-python', 'tester'), prompt06Edge('builder-node', 'tester'), prompt06Edge('tester', 'reviewer')],
+  },
+  {
+    name: 'quality-custom-accessibility',
+    title: 'Custom accessibility audit quality gate',
+    task: 'Create an accessibility audit package with HTML sample, Node audit script, findings report, final verdict, and quality summary.',
+    expectedFiles: expectedWithArtifacts(['sample_page.html', 'audit_accessibility.mjs', 'accessibility_findings.json', 'tester_result.md', 'reviewer_final_verdict.md', 'quality_summary.md', 'README.md'], ['scout', 'builder', 'tester', 'reviewer']),
+    runInstruction: 'Run node audit_accessibility.mjs sample_page.html accessibility_findings.json.',
+    agents: [
+      prompt06Agent('scout', 'scout', 'Claude Accessibility Scout', 'Define accessibility checks and branch artifact.', 'claude'),
+      prompt06Agent('builder', 'builder', 'Codex Accessibility Builder', 'Create sample page, audit script, findings JSON, and artifact.', 'codex'),
+      prompt06Agent('tester', 'tester', 'Gemini Accessibility Tester', 'Create tester_result.md from audit output.', 'gemini'),
+      prompt06Agent('reviewer', 'reviewer', 'OpenCode Accessibility Reviewer', 'Create final verdict and quality summary.', 'opencode'),
+    ],
+    edges: [prompt06Edge('scout', 'builder'), prompt06Edge('builder', 'tester'), prompt06Edge('tester', 'reviewer')],
+  },
+  {
+    name: 'quality-custom-data-contract',
+    title: 'Custom data contract quality gate',
+    task: 'Create a data contract quality package with JSON schema, Python fixture generator, Node contract checker, tester result, verdict, and quality summary.',
+    expectedFiles: expectedWithArtifacts(['schema.json', 'generate_fixtures.py', 'records.json', 'check_contract.mjs', 'tester_result.md', 'reviewer_final_verdict.md', 'quality_summary.md', 'README.md'], ['coordinator', 'builder-fixtures', 'builder-checker', 'tester', 'reviewer']),
+    runInstruction: 'Run python generate_fixtures.py --schema schema.json --output records.json, then node check_contract.mjs schema.json records.json.',
+    agents: [
+      prompt06Agent('coordinator', 'coordinator', 'OpenCode Contract Coordinator', 'Create coordinator plan and assign contract branches.', 'opencode'),
+      prompt06Agent('builder-fixtures', 'builder', 'Claude Fixture Builder', 'Create schema, fixture generator, records, and artifact.', 'claude'),
+      prompt06Agent('builder-checker', 'builder', 'Gemini Checker Builder', 'Create Node contract checker and artifact.', 'gemini'),
+      prompt06Agent('tester', 'tester', 'Codex Contract Tester', 'Create tester_result.md by consuming both branches.', 'codex'),
+      prompt06Agent('reviewer', 'reviewer', 'Claude Contract Reviewer', 'Create final verdict and quality summary.', 'claude'),
+    ],
+    edges: [prompt06Edge('coordinator', 'builder-fixtures'), prompt06Edge('coordinator', 'builder-checker'), prompt06Edge('builder-fixtures', 'tester'), prompt06Edge('builder-checker', 'tester'), prompt06Edge('tester', 'reviewer')],
+  },
+  {
+    name: 'quality-custom-ops-runbook',
+    title: 'Custom ops runbook quality gate',
+    task: 'Create an operations runbook package with Python incident generator, Markdown runbook, Node verifier, tester result, final verdict, and quality summary.',
+    expectedFiles: expectedWithArtifacts(['incident_inputs.json', 'generate_runbook.py', 'RUNBOOK.md', 'verify_runbook.mjs', 'tester_result.md', 'reviewer_final_verdict.md', 'quality_summary.md', 'README.md'], ['coordinator', 'builder-runbook', 'builder-verifier', 'tester', 'reviewer']),
+    runInstruction: 'Run python generate_runbook.py --input incident_inputs.json --output RUNBOOK.md, then node verify_runbook.mjs RUNBOOK.md.',
+    agents: [
+      prompt06Agent('coordinator', 'coordinator', 'Codex Runbook Coordinator', 'Create coordinator plan and assign runbook/verifier branches.', 'codex'),
+      prompt06Agent('builder-runbook', 'builder', 'Gemini Runbook Builder', 'Create inputs, Python generator, RUNBOOK.md, and artifact.', 'gemini'),
+      prompt06Agent('builder-verifier', 'builder', 'OpenCode Verifier Builder', 'Create verify_runbook.mjs and artifact.', 'opencode'),
+      prompt06Agent('tester', 'tester', 'Claude Runbook Tester', 'Create tester_result.md by consuming both branches.', 'claude'),
+      prompt06Agent('reviewer', 'reviewer', 'Gemini Runbook Reviewer', 'Create final verdict and quality summary.', 'gemini'),
+    ],
+    edges: [prompt06Edge('coordinator', 'builder-runbook'), prompt06Edge('coordinator', 'builder-verifier'), prompt06Edge('builder-runbook', 'tester'), prompt06Edge('builder-verifier', 'tester'), prompt06Edge('tester', 'reviewer')],
   },
 ];
 
@@ -1871,6 +2745,64 @@ function buildPrompt06Mission(
         'The final reviewer must make sure README lists the concrete files and local verification command so output linking can point to user-facing files, not only node notes.',
       ]
     : [];
+  const prompt07Instructions = promptNumber === '07'
+    ? [
+        'Prompt 07 artifact organization requirements: each agent must create or verify a distinct branch artifact under branch-artifacts using its exact node ID in the filename.',
+        'Final outputs must be concrete runnable/openable/readable project files, not only final.md or result.md notes.',
+        'The final reviewer must list every user-facing output path in README.md and verify that no output is outside docks-testing.',
+      ]
+    : [];
+  const prompt08Instructions = promptNumber === '08'
+    ? [
+        'Prompt 08 failure recovery requirements: if your role is the controlled failure probe, intentionally complete the node with outcome "failure" after writing concise failure evidence.',
+        'Recovery and review nodes must inspect the failed upstream context, produce recovery artifacts, and clearly distinguish expected failure behavior from broken app behavior.',
+        'Do not treat the expected failed node as a reason to stop the workflow; on_failure edges should carry the recovery path.',
+      ]
+    : [];
+  const prompt09Instructions = promptNumber === '09'
+    ? [
+        'Prompt 09 terminal visibility requirements: produce visible terminal output during verification, including a bounded verbose run of the generated CLI or script.',
+        'Keep output large enough to exercise PTY buffering but bounded enough to avoid UI freezes or oversized reports.',
+        'The final reviewer must note terminal output visibility, tail separation, and replay/remount observations available from the run evidence.',
+      ]
+    : [];
+  const prompt10Instructions = promptNumber === '10'
+    ? [
+        `Prompt 10 NodeTree Mission Control operations under test: ${(spec.nodeTreeOperations ?? []).join(', ') || 'create, edit, branch, merge, run, status, output link'}.`,
+        'Treat this as a NodeTree-controlled mission model run: preserve exact node IDs, branch ownership, status evidence, and concrete output links.',
+        'The final reviewer must ensure README points to concrete deliverable files and summarizes NodeTree operation coverage.',
+      ]
+    : [];
+  const prompt11Instructions = promptNumber === '11'
+    ? [
+        'Prompt 11 planner/template stress requirements: treat this workflow as generated from a planner/template DAG, verify the DAG shape through exact node IDs, and produce a concrete project deliverable.',
+        'Every multi-agent branch must preserve file ownership and write branch-artifacts for node-level evidence when those files are listed.',
+      ]
+    : [];
+  const prompt12Instructions = promptNumber === '12'
+    ? [
+        'Prompt 12 MCP handoff reliability requirements: every agent must fetch task details, preserve exact source and target node IDs in handoffs/completions, and write its listed branch artifact before completing.',
+        'Downstream agents must read upstream files and branch-artifacts, then mention which upstream node artifacts they consumed.',
+      ]
+    : [];
+  const prompt13Instructions = promptNumber === '13'
+    ? [
+        'Prompt 13 consecutive-run requirements: this execution must write a fresh run-specific deliverable in the provided output directory and must not reuse files from earlier workflow folders.',
+        'Agents should note runtime/session cleanup observations in branch-artifacts when those files are listed.',
+      ]
+    : [];
+  const prompt14Instructions = promptNumber === '14'
+    ? [
+        'Prompt 14 branch/merge requirements: every branch must produce a distinct artifact, merge/review agents must reference all upstream artifacts, and no branch should overwrite another branch output.',
+        'Handoff and completion summaries must name exact source and destination node IDs.',
+      ]
+    : [];
+  const prompt15Instructions = promptNumber === '15'
+    ? [
+        'Prompt 15 quality-gate requirements: all expected gate artifacts must exist before success, quality/reviewer output must reference upstream artifacts, and each workflow needs a concrete integrated deliverable.',
+        'At least one non-markdown runnable/openable source file must be present unless this specific task is explicitly a documentation/report deliverable.',
+      ]
+    : [];
   const prompt = [
     `LIVE_PROMPT_${promptNumber} workflow=${spec.name}.`,
     `Workspace/output directory: ${outputDir}.`,
@@ -1880,6 +2812,15 @@ function buildPrompt06Mission(
     `Runnable verification: ${spec.runInstruction}`,
     ...branchMergeInstructions,
     ...nodeTreeInstructions,
+    ...prompt07Instructions,
+    ...prompt08Instructions,
+    ...prompt09Instructions,
+    ...prompt10Instructions,
+    ...prompt11Instructions,
+    ...prompt12Instructions,
+    ...prompt13Instructions,
+    ...prompt14Instructions,
+    ...prompt15Instructions,
     'This must be a real runnable/openable project, not markdown-only evidence.',
     'Keep the project compact and bounded: no large embedded assets, no long generated data dumps, and target small text/source files.',
     'Do not create screenshots, preview images, generated media, or dev-server evidence unless this node is explicitly the tester and the project cannot be verified from files alone.',
@@ -1923,6 +2864,24 @@ function buildPrompt06Mission(
         promptNumber === '05'
           ? `If you are producing branch work, write a distinct artifact under branch-artifacts/${agent.id}.md or a similarly named source fragment. If you are merging, testing, or reviewing, inspect upstream context and branch-artifacts before completing.`
           : '',
+        promptNumber === '07'
+          ? `Write or verify an artifact under branch-artifacts/${agent.id}.md, and keep all project outputs inside the configured output directory.`
+          : '',
+        promptNumber === '08'
+          ? `This is a failure-recovery workflow. Follow your responsibility exactly; controlled failure nodes should call complete_task with outcome "failure", while recovery/review nodes should consume that failure context and complete normally.`
+          : '',
+        promptNumber === '09'
+          ? 'Make terminal-visible progress during verification, but keep generated output bounded and do not spam unbounded logs.'
+          : '',
+        promptNumber === '10'
+          ? `NodeTree operations under test: ${(spec.nodeTreeOperations ?? []).join(', ') || 'graph run and output linking'}. Mention concrete output files and status evidence when completing.`
+          : '',
+        ['11', '12', '13', '14', '15'].includes(promptNumber)
+          ? `If branch-artifacts/${agent.id}.md is listed or appropriate for your role, write or verify that node-specific artifact. Preserve exact node IDs in handoffs and completion summaries.`
+          : '',
+        promptNumber === '15'
+          ? 'Treat missing expected files as a failed quality gate; reviewers/testers must verify the required artifacts before completing successfully.'
+          : '',
         'Keep your contribution compact and finish quickly once your role is satisfied.',
         'Avoid screenshots, preview images, browser automation, and extra generated assets unless your named responsibility is testing and file checks are insufficient.',
         'Complete your node with complete_task or handoff_task after your contribution or verification is done.',
@@ -1932,7 +2891,7 @@ function buildPrompt06Mission(
           terminalId: `live-${suiteSlug}-${suffix}-${index + 1}-${agent.id}`,
           terminalTitle: `${agent.title} (${spec.name})`,
           cli,
-          model: LIVE_WORKFLOW_MODEL,
+          model: liveWorkflowModelForCli(cli),
           yolo: true,
           executionMode: 'interactive_pty',
           paneId: `pane-live-${suiteSlug}-${suffix}-${index + 1}`,
@@ -2081,6 +3040,8 @@ async function runPrompt06Workflow(
         const validation = await validateOutputFiles(outputDir, spec.expectedFiles);
         const failures = Object.values(run.nodeStates).filter(node => node.state === 'failed');
         const error = failures.map(node => `${node.nodeId}: failed`).join('; ') || (validation.missingFiles.length ? `Missing files: ${validation.missingFiles.join(', ')}` : undefined);
+        const expectedFailureRecovered = Boolean(spec.expectedFailure && failures.length && validation.missingFiles.length === 0);
+        const isSuccessfulResult = expectedFailureRecovered || (!failures.length && validation.missingFiles.length === 0);
         return {
           cli: missionCliLabel,
           cliSequence: missionCliSequence,
@@ -2088,8 +3049,8 @@ async function runPrompt06Workflow(
           phase: 'large',
           taskType: 'handoff',
           missionId: mission.missionId,
-          status: failures.length || validation.missingFiles.length ? 'failed' : 'passed',
-          outcome: failures.length || validation.missingFiles.length ? 'failure' : 'success',
+          status: isSuccessfulResult ? 'passed' : 'failed',
+          outcome: isSuccessfulResult ? 'success' : 'failure',
           durationMs: Date.now() - startedAt,
           nodeIds: mission.nodes.map(node => node.id),
           terminalIds: mission.nodes.map(node => node.terminal.terminalId),
@@ -2104,10 +3065,14 @@ async function runPrompt06Workflow(
           failureCategory: classifyFailureCategory(error, sessionEvents, terminalTails),
           uiScreenwatch: screenwatch.summary(),
           nodeFinalStates: buildNodeFinalStates(mission.missionId),
-          error,
+          error: expectedFailureRecovered ? `Expected failure recovered: ${error}` : error,
         };
       }
-      if (orchestratorEvents.some(event => event.type === 'node_failed')) break;
+      const failedEvent = orchestratorEvents.find(event => event.type === 'node_failed');
+      const hasFailureRecoveryEdge = failedEvent && spec.edges.some(edge =>
+        edge.fromNodeId === failedEvent.nodeId && edge.condition === 'on_failure',
+      );
+      if (failedEvent && !hasFailureRecoveryEdge) break;
       await sleep(1_000);
     }
 
@@ -2411,6 +3376,59 @@ async function runPrompt04NodeTreeMissionControlHarness(options: LiveWorkflowHar
   }
 }
 
+async function runPrompt0710CappedHarness(options: LiveWorkflowHarnessOptions): Promise<void> {
+  const selectedWorkflows = selectPromptWorkflows(PROMPT_07_10_CAPPED_WORKFLOWS);
+  const report = {
+    startedAt: new Date().toISOString(),
+    finishedAt: null as string | null,
+    suiteName: 'prompt07_10_capped',
+    workflowFilter: LIVE_WORKFLOW_FILTER ?? null,
+    executionPath: 'live_app_harness',
+    liveRuntimeLaunched: true,
+    note: 'Runs prompts 07-10 as a bounded four-workflow live app/runtime suite per operator cap. Each workflow uses mixed Codex, Claude, Gemini, and OpenCode interactive PTY nodes and produces concrete deliverables under the prompt-specific docks-testing root.',
+    workflows: selectedWorkflows.map(({ spec, index }) => ({
+      index: index + 1,
+      promptNumber: spec.promptNumber,
+      suiteDirName: spec.suiteDirName,
+      name: spec.name,
+      title: spec.title,
+      agentCount: spec.agents.length,
+      clis: spec.agents.map(agent => agent.cli ?? 'codex'),
+      expectedFailure: spec.expectedFailure ?? false,
+      expectedFiles: spec.expectedFiles,
+      runInstruction: spec.runInstruction,
+      nodeTreeOperations: spec.nodeTreeOperations ?? [],
+      edges: spec.edges,
+    })),
+    results: [] as LiveWorkflowResult[],
+  };
+
+  await writeReport(options.outputPath, report);
+  for (let selectedIndex = 0; selectedIndex < selectedWorkflows.length; selectedIndex += 1) {
+    const { spec, index } = selectedWorkflows[selectedIndex];
+    const result = await runPrompt06Workflow(
+      spec,
+      index,
+      options,
+      spec.suiteDirName ?? `prompt-${spec.promptNumber ?? '07-10'}`,
+      spec.promptNumber ?? '07-10',
+      spec.suiteSlug ?? 'prompt07-10',
+    );
+    report.results.push(result);
+    await writeReport(options.outputPath, report);
+    if (selectedIndex < selectedWorkflows.length - 1) {
+      await waitForPrompt06McpHealth(`Prompt ${spec.promptNumber ?? '07-10'}`);
+    }
+  }
+
+  report.finishedAt = new Date().toISOString();
+  await writeReport(options.outputPath, report);
+
+  if (options.closeWhenDone) {
+    await Window.getCurrent().close();
+  }
+}
+
 async function runPrompt11MixedCliSmokeHarness(options: LiveWorkflowHarnessOptions): Promise<void> {
   const selectedWorkflows = selectPromptWorkflows(PROMPT_11_WORKFLOWS);
   const report = {
@@ -2460,9 +3478,408 @@ async function runPrompt11MixedCliSmokeHarness(options: LiveWorkflowHarnessOptio
   }
 }
 
+async function runPromptSpecSuiteHarness(
+  options: LiveWorkflowHarnessOptions,
+  workflows: Prompt06WorkflowSpec[],
+  suiteName: string,
+  promptNumber: string,
+  suiteDirName: string,
+  suiteSlug: string,
+  note: string,
+): Promise<void> {
+  const selectedWorkflows = selectPromptWorkflows(workflows);
+  const report = {
+    startedAt: new Date().toISOString(),
+    finishedAt: null as string | null,
+    suiteName,
+    promptNumber,
+    workflowFilter: LIVE_WORKFLOW_FILTER ?? null,
+    executionPath: 'live_app_harness',
+    liveRuntimeLaunched: true,
+    note,
+    workflows: selectedWorkflows.map(({ spec, index }) => ({
+      index: index + 1,
+      name: spec.name,
+      title: spec.title,
+      agentCount: spec.agents.length,
+      clis: spec.agents.map(agent => agent.cli ?? 'codex'),
+      expectedFailure: spec.expectedFailure ?? false,
+      expectedFiles: spec.expectedFiles,
+      runInstruction: spec.runInstruction,
+      edges: spec.edges,
+    })),
+    results: [] as LiveWorkflowResult[],
+  };
+
+  await writeReport(options.outputPath, report);
+  for (let selectedIndex = 0; selectedIndex < selectedWorkflows.length; selectedIndex += 1) {
+    const { spec, index } = selectedWorkflows[selectedIndex];
+    const result = await runPrompt06Workflow(
+      spec,
+      index,
+      options,
+      spec.suiteDirName ?? suiteDirName,
+      spec.promptNumber ?? promptNumber,
+      spec.suiteSlug ?? suiteSlug,
+    );
+    report.results.push(result);
+    await writeReport(options.outputPath, report);
+    if (selectedIndex < selectedWorkflows.length - 1) {
+      await waitForPrompt06McpHealth(`Prompt ${promptNumber}`);
+    }
+  }
+
+  report.finishedAt = new Date().toISOString();
+  await writeReport(options.outputPath, report);
+
+  if (options.closeWhenDone) {
+    await Window.getCurrent().close();
+  }
+}
+
+function buildPrompt05ManualDefinition(name: string, nodeIds: string[]) {
+  const now = new Date().toISOString();
+  return {
+    id: `prompt05-${name}`,
+    name: `Prompt 05 ${name}`,
+    createdAt: now,
+    updatedAt: now,
+    nodes: [
+      {
+        id: `${name}-task`,
+        kind: 'task',
+        roleId: 'task',
+        config: {
+          prompt: `Prompt 05 manual intervention workflow ${name}.`,
+          mode: 'build',
+        },
+      },
+      ...nodeIds.map((nodeId, index) => ({
+        id: nodeId,
+        kind: 'agent',
+        roleId: index === 0 ? 'builder' : 'reviewer',
+        config: {
+          cli: 'codex',
+          executionMode: 'manual',
+          terminalId: `prompt05-${name}-${nodeId}`,
+          profileId: index === 0 ? 'builder' : 'reviewer',
+          retryPolicy: { maxRetries: 1, retryOn: ['unknown'], backoffMs: 0 },
+        },
+      })),
+    ],
+    edges: [
+      { fromNodeId: `${name}-task`, toNodeId: nodeIds[0], condition: 'always' },
+      ...nodeIds.slice(1).map(nodeId => ({ fromNodeId: nodeIds[0], toNodeId: nodeId, condition: 'on_success' })),
+    ],
+  };
+}
+
+async function waitForPrompt05State(missionId: string, nodeId: string, states: string[], timeoutMs = 8_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const run = workflowOrchestrator.getRun(missionId);
+    const state = run?.nodeStates[nodeId]?.state;
+    if (state && states.includes(state)) return state;
+    await sleep(100);
+  }
+  const run = workflowOrchestrator.getRun(missionId);
+  throw new Error(`Timed out waiting for ${nodeId} in ${missionId}; last state=${run?.nodeStates[nodeId]?.state ?? '<missing>'}`);
+}
+
+async function runPrompt05ManualWorkflow(
+  index: number,
+  name: string,
+  action: (missionId: string, primaryNodeId: string, extraNodeId: string | null) => Promise<Record<string, unknown>>,
+  options: LiveWorkflowHarnessOptions,
+) {
+  const outputDir = await ensureWorkflowDirectory(
+    joinWindowsPath(options.repoRoot, 'docks-testing', 'manual-intervention'),
+    `workflow-${String(index).padStart(2, '0')}-${name}-${Date.now().toString(36)}`,
+  );
+  const primaryNodeId = `${name}-agent`;
+  const extraNodeId = name.includes('cancel') ? `${name}-reviewer` : null;
+  const definition = buildPrompt05ManualDefinition(name, extraNodeId ? [primaryNodeId, extraNodeId] : [primaryNodeId]) as any;
+  const missionId = `live-prompt05-manual-${name}-${Date.now().toString(36)}`;
+  const startedAt = Date.now();
+  const sessionEvents: Array<Record<string, unknown>> = [];
+  const runtimeUnsub = runtimeManager.subscribe(event => {
+    if ('missionId' in event && event.missionId !== missionId) return;
+    sessionEvents.push(compactEvent({ ...event, at: Date.now() }));
+  });
+
+  try {
+    const run = workflowOrchestrator.startRun(definition, { runId: missionId, workspaceDir: outputDir });
+    await waitForPrompt05State(missionId, primaryNodeId, ['manual_takeover']);
+    const actionResult = await action(missionId, primaryNodeId, extraNodeId);
+    const finalRun = workflowOrchestrator.getRun(missionId) ?? run;
+    return {
+      index,
+      name,
+      missionId,
+      status: 'passed',
+      durationMs: Date.now() - startedAt,
+      outputDir,
+      actionResult,
+      nodeFinalStates: Object.values(finalRun.nodeStates).map((nodeState: any) => ({
+        nodeId: nodeState.nodeId,
+        state: nodeState.state,
+        attempt: nodeState.attempt,
+      })),
+      sessionEvents,
+    };
+  } catch (error) {
+    const finalRun = workflowOrchestrator.getRun(missionId);
+    return {
+      index,
+      name,
+      missionId,
+      status: 'failed',
+      durationMs: Date.now() - startedAt,
+      outputDir,
+      error: error instanceof Error ? error.message : String(error),
+      nodeFinalStates: finalRun ? Object.values(finalRun.nodeStates).map((nodeState: any) => ({
+        nodeId: nodeState.nodeId,
+        state: nodeState.state,
+        attempt: nodeState.attempt,
+      })) : [],
+      sessionEvents,
+    };
+  } finally {
+    runtimeUnsub();
+    const run = workflowOrchestrator.getRun(missionId);
+    if (run && !['completed', 'failed', 'cancelled'].includes(run.status)) {
+      workflowOrchestrator.cancelRun(missionId);
+    }
+  }
+}
+
+async function runPrompt05ManualInterventionHarness(options: LiveWorkflowHarnessOptions): Promise<void> {
+  await invoke('workspace_create_dir', {
+    parentPath: joinWindowsPath(options.repoRoot, 'docks-testing'),
+    name: 'manual-intervention',
+  }).catch(error => {
+    if (!String(error).toLowerCase().includes('already exists')) throw error;
+  });
+
+  const report = {
+    startedAt: new Date().toISOString(),
+    finishedAt: null as string | null,
+    suiteName: 'prompt05_manual_intervention',
+    workflowFilter: LIVE_WORKFLOW_FILTER ?? null,
+    executionPath: 'live_app_harness_manual_runtime',
+    liveRuntimeLaunched: true,
+    note: 'Runs capped Prompt 05 manual-intervention workflows through WorkflowOrchestrator and the app RuntimeManager manual execution path.',
+    results: [] as Array<Record<string, unknown>>,
+  };
+
+  await writeReport(options.outputPath, report);
+  const workflows = [
+    {
+      name: 'takeover',
+      action: async (missionId: string, nodeId: string) => {
+        const run = workflowOrchestrator.getRun(missionId);
+        return {
+          state: run?.nodeStates[nodeId]?.state,
+          terminalId: run?.nodeStates[nodeId]?.runtimeSession?.terminalId ?? null,
+          manualTakeoverEvents: run?.events.filter(event => event.type === 'node_state_changed' && event.nodeId === nodeId).length ?? 0,
+        };
+      },
+    },
+    {
+      name: 'resume',
+      action: async (missionId: string, nodeId: string) => {
+        const run = workflowOrchestrator.getRun(missionId);
+        if (!run) throw new Error(`Missing run ${missionId}`);
+        workflowOrchestrator.transitionNodeState(run, nodeId, 'injecting_task');
+        workflowOrchestrator.transitionNodeState(run, nodeId, 'running');
+        workflowOrchestrator.completeNode({ nodeId, attempt: run.nodeStates[nodeId]?.attempt ?? 1, outcome: 'success', summary: 'manual resume completed' });
+        return { finalState: run.nodeStates[nodeId]?.state, runStatus: run.status };
+      },
+    },
+    {
+      name: 'force-complete',
+      action: async (missionId: string, nodeId: string) => {
+        const run = workflowOrchestrator.getRun(missionId);
+        if (!run) throw new Error(`Missing run ${missionId}`);
+        workflowOrchestrator.completeNode({ nodeId, attempt: run.nodeStates[nodeId]?.attempt ?? 1, outcome: 'success', summary: 'manual completion' });
+        return { finalState: run.nodeStates[nodeId]?.state, runStatus: run.status };
+      },
+    },
+    {
+      name: 'fail-retry-cancel',
+      action: async (missionId: string, nodeId: string, reviewerNodeId: string | null) => {
+        const run = workflowOrchestrator.getRun(missionId);
+        if (!run) throw new Error(`Missing run ${missionId}`);
+        workflowOrchestrator.completeNode({ nodeId, attempt: run.nodeStates[nodeId]?.attempt ?? 1, outcome: 'failure', summary: 'manual failure' });
+        const reviewerAfterFailure = reviewerNodeId ? run.nodeStates[reviewerNodeId]?.state : null;
+        workflowOrchestrator.activateNodeInternal(run, nodeId);
+        await waitForPrompt05State(missionId, nodeId, ['manual_takeover']);
+        workflowOrchestrator.cancelRun(missionId);
+        return {
+          retryAttempt: run.nodeStates[nodeId]?.attempt,
+          runStatus: run.status,
+          reviewerAfterFailure,
+          reviewerFinalState: reviewerNodeId ? run.nodeStates[reviewerNodeId]?.state : null,
+        };
+      },
+    },
+  ];
+
+  for (let index = 0; index < workflows.length; index += 1) {
+    const workflow = workflows[index];
+    const result = await runPrompt05ManualWorkflow(index + 1, workflow.name, workflow.action, options);
+    report.results.push(result);
+    await writeReport(options.outputPath, report);
+  }
+
+  report.finishedAt = new Date().toISOString();
+  await writeReport(options.outputPath, report);
+
+  if (options.closeWhenDone) {
+    await Window.getCurrent().close();
+  }
+}
+
+async function runRuntimeViewLayoutMockHarness(options: LiveWorkflowHarnessOptions): Promise<void> {
+  const now = new Date().toISOString();
+  const missionId = `runtime-view-layout-mock-${Date.now().toString(36)}`;
+  const outputDir = await ensureWorkflowDirectory(
+    joinWindowsPath(options.repoRoot, 'docks-testing'),
+    `runtime-view-layout-mock-${Date.now().toString(36)}`,
+  );
+  const agentIds = ['agent-1', 'agent-2', 'agent-3', 'agent-4', 'agent-5'];
+  const edges = [
+    { fromNodeId: 'agent-1', toNodeId: 'agent-3', condition: 'on_success' as const },
+    { fromNodeId: 'agent-2', toNodeId: 'agent-3', condition: 'on_success' as const },
+    { fromNodeId: 'agent-3', toNodeId: 'agent-4', condition: 'on_success' as const },
+    { fromNodeId: 'agent-3', toNodeId: 'agent-5', condition: 'on_success' as const },
+  ];
+  const definition = {
+    id: 'runtime-view-layout-mock',
+    name: 'Runtime View Layout Mock',
+    createdAt: now,
+    updatedAt: now,
+    nodes: agentIds.map((nodeId, index) => ({
+      id: nodeId,
+      kind: 'agent',
+      roleId: `agent${index + 1}`,
+      config: {
+        cli: 'codex',
+        model: liveWorkflowModelForCli('codex'),
+        executionMode: 'manual',
+        terminalId: `runtime-view-layout-${nodeId}`,
+        terminalTitle: `Agent ${index + 1}`,
+        profileId: `agent${index + 1}`,
+        retryPolicy: { maxRetries: 0, retryOn: ['unknown'], backoffMs: 0 },
+      },
+    })),
+    edges,
+  } as any;
+
+  const report = {
+    startedAt: new Date().toISOString(),
+    finishedAt: null as string | null,
+    suiteName: 'runtime_view_layout_mock',
+    executionPath: 'live_app_harness_manual_runtime',
+    liveRuntimeLaunched: true,
+    note: 'Creates a deterministic Codex-only manual-runtime graph shaped as Agent 1 + Agent 2 -> Agent 3 -> Agent 4 + Agent 5 for Runtime view visual validation. Model is applied only when the installed Codex CLI accepts it.',
+    missionId,
+    outputDir,
+    graphShape: 'agent-1 + agent-2 -> agent-3 -> agent-4 + agent-5',
+    model: liveWorkflowModelForCli('codex') ?? null,
+    nodeFinalStates: [] as Array<Record<string, unknown>>,
+  };
+
+  await writeReport(options.outputPath, report);
+  const run = workflowOrchestrator.startRun(definition, { runId: missionId, workspaceDir: outputDir });
+  useWorkspaceStore.getState().setGlobalGraph({
+    id: 'runtime-view-layout-mock',
+    nodes: [
+      {
+        id: 'task',
+        type: 'workflow.task',
+        data: { label: 'Task' },
+        config: { prompt: 'Runtime layout mock task', position: { x: 260, y: 0 } },
+      },
+      ...agentIds.map((nodeId, index) => ({
+        id: nodeId,
+        type: 'workflow.agent',
+        data: { label: `Agent ${index + 1}` },
+        config: {
+          roleId: `agent${index + 1}`,
+          cli: 'codex',
+          executionMode: 'manual',
+          position: {
+            x: index < 2 ? index * 520 : index === 2 ? 260 : (index - 3) * 520,
+            y: index < 2 ? 180 : index === 2 ? 360 : 540,
+          },
+        },
+      })),
+    ],
+    edges: [
+      { fromNodeId: 'task', toNodeId: 'agent-1', condition: 'always' },
+      { fromNodeId: 'task', toNodeId: 'agent-2', condition: 'always' },
+      ...edges,
+    ],
+  } as any);
+  useWorkspaceStore.getState().setAppMode('runtime');
+
+  for (let index = 0; index < agentIds.length; index += 1) {
+    const nodeId = agentIds[index];
+    const session = runtimeManager.getSessionForNode(missionId, nodeId, 1)
+      ?? await runtimeManager.createRuntimeForNode({
+        missionId,
+        nodeId,
+        attempt: 1,
+        role: `agent${index + 1}`,
+        agentId: `agent${index + 1}`,
+        profileId: `agent${index + 1}`,
+        cliId: 'codex',
+        executionMode: 'manual',
+        terminalId: `runtime-view-layout-${nodeId}`,
+        paneId: undefined,
+        workspaceDir: outputDir,
+        goal: 'Runtime view vertical layout visual validation.',
+        instructionOverride: null,
+        model: liveWorkflowModelForCli('codex') ?? null,
+        yolo: false,
+      });
+    if (session.state !== 'manual_takeover') {
+      session.transitionTo('manual_takeover');
+    }
+  }
+
+  report.finishedAt = new Date().toISOString();
+  report.nodeFinalStates = Object.values(run.nodeStates).map((nodeState: any) => ({
+    nodeId: nodeState.nodeId,
+    state: nodeState.state,
+    attempt: nodeState.attempt,
+  }));
+  await writeReport(options.outputPath, report);
+
+  if (options.closeWhenDone) {
+    await Window.getCurrent().close();
+  }
+}
+
 export async function runLiveWorkflowHarness(options: LiveWorkflowHarnessOptions): Promise<void> {
+  if (options.suiteName === 'runtime_view_layout_mock') {
+    await runRuntimeViewLayoutMockHarness(options);
+    return;
+  }
+
+  if (options.suiteName === 'prompt05_manual_intervention') {
+    await runPrompt05ManualInterventionHarness(options);
+    return;
+  }
+
   if (options.suiteName === 'prompt04_nodetree_mission_control') {
     await runPrompt04NodeTreeMissionControlHarness(options);
+    return;
+  }
+
+  if (options.suiteName === 'prompt07_10_capped') {
+    await runPrompt0710CappedHarness(options);
     return;
   }
 
@@ -2488,6 +3905,58 @@ export async function runLiveWorkflowHarness(options: LiveWorkflowHarnessOptions
 
   if (options.suiteName === 'prompt11_mixed_cli_smoke') {
     await runPrompt11MixedCliSmokeHarness(options);
+    return;
+  }
+
+  if (options.suiteName === 'prompt12_mcp_handoff') {
+    await runPromptSpecSuiteHarness(
+      options,
+      PROMPT_12_WORKFLOWS,
+      'prompt12_mcp_handoff',
+      '12',
+      'mcp-handoff',
+      'prompt12',
+      'Runs Prompt 12 MCP handoff reliability workflows through MissionOrchestrator, WorkflowOrchestrator, RuntimeManager, and PTY-backed mixed CLI sessions with concrete multi-stack deliverables.',
+    );
+    return;
+  }
+
+  if (options.suiteName === 'prompt13_consecutive_runs') {
+    await runPromptSpecSuiteHarness(
+      options,
+      PROMPT_13_WORKFLOWS,
+      'prompt13_consecutive_runs',
+      '13',
+      'consecutive-runs',
+      'prompt13',
+      'Runs Prompt 13 consecutive workflow executions through live app runtime paths with fresh run-specific outputs, repeated shapes, and cleanup-focused evidence.',
+    );
+    return;
+  }
+
+  if (options.suiteName === 'prompt14_branching_merge') {
+    await runPromptSpecSuiteHarness(
+      options,
+      PROMPT_14_WORKFLOWS,
+      'prompt14_branching_merge',
+      '14',
+      'branching-merge',
+      'prompt14',
+      'Runs Prompt 14 branching and merge stress workflows through live mixed CLI runtime sessions with branch-owned artifacts and integrated deliverables.',
+    );
+    return;
+  }
+
+  if (options.suiteName === 'prompt15_quality_gate_sim') {
+    await runPromptSpecSuiteHarness(
+      options,
+      PROMPT_15_WORKFLOWS,
+      'prompt15_quality_gate_sim',
+      '15',
+      'quality-gate-sim',
+      'prompt15',
+      'Runs Prompt 15 mixed workflow quality-gate simulations through live mixed CLI runtime sessions with required gate artifacts and concrete deliverables.',
+    );
     return;
   }
 

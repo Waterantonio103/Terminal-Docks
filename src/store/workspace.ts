@@ -12,7 +12,7 @@ export function arrayMove<T>(array: T[], fromIndex: number, toIndex: number): T[
 }
 
 export type PaneType = 'terminal' | 'editor' | 'taskboard' | 'activityfeed' | 'launcher' | 'missioncontrol' | 'nodetree' | 'inbox';
-export type AppMode = 'workflow' | 'runtime' | 'workspace';
+export type AppMode = 'workflow' | 'runtime' | 'workspace' | 'actioncenter';
 export type WorkflowNodeStatus =
   | 'idle'
   | 'unbound'
@@ -663,16 +663,14 @@ export const useWorkspaceStore = create<WorkspaceState>()(
         const panes = selectActivePanes(state);
         
         // Singleton logic for specific pane types
-        if (type === 'missioncontrol') {
-          const existing = panes.find(p => p.type === 'missioncontrol');
+        if (type === 'missioncontrol' || type === 'inbox') {
+          const existing = panes.find(p => p.type === type);
           if (existing) {
             return {
               ...withActivePanes(state, ps => 
-                ps.map(p => p.id === existing.id ? { ...p, data: { ...p.data, ...data } } : p)
+                ps.map(p => p.id === existing.id ? { ...p, title, data: { ...p.data, ...data } } : p)
               ),
-              messages: [],
-              results: [],
-              tasks: [],
+              ...(type === 'missioncontrol' ? { messages: [], results: [], tasks: [] } : {}),
               activePaneId: existing.id
             };
           }

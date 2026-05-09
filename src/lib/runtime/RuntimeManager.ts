@@ -124,6 +124,7 @@ const BOOTSTRAP_INJECTION_TIMEOUT_MS = 10_000;
 const MISSING_MCP_COMPLETION_RENUDGE_MS = 4_000;
 const MISSING_MCP_COMPLETION_FAIL_MS = 90_000;
 const POST_ACK_NO_PROGRESS_WINDOW_MS = readRuntimeEnvNumber('VITE_RUNTIME_POST_ACK_NO_PROGRESS_WINDOW_MS', 60_000, 1_000);
+const POST_ACK_NO_MCP_COMPLETION_MAX_MS = readRuntimeEnvNumber('VITE_RUNTIME_POST_ACK_NO_MCP_COMPLETION_MAX_MS', 180_000, 30_000);
 const MAX_RETAINED_RUNTIME_VIEW_SESSIONS = readRuntimeEnvNumber('VITE_RUNTIME_RETAINED_VIEW_SESSIONS', 16, 0);
 const RUNTIME_COMPLETION_POLL_MS = 2_000;
 const CODEX_IDLE_WAIT_MS = 1_000;
@@ -1687,6 +1688,7 @@ class RuntimeManager {
       snapshot: this.getPostAckSnapshot(state),
       now: Date.now(),
       windowMs: POST_ACK_NO_PROGRESS_WINDOW_MS,
+      maxRuntimeMs: POST_ACK_NO_MCP_COMPLETION_MAX_MS,
       blockedOnPermission: Boolean(session.activePermission),
     });
     if (decision.action !== 'nudge' || !decision.reason) {
@@ -1774,6 +1776,7 @@ class RuntimeManager {
       snapshot: this.getPostAckSnapshot(state),
       now: Date.now(),
       windowMs: POST_ACK_NO_PROGRESS_WINDOW_MS,
+      maxRuntimeMs: POST_ACK_NO_MCP_COMPLETION_MAX_MS,
       blockedOnPermission: Boolean(session.activePermission),
     });
     if (decision.action === 'nudge') {
@@ -3223,6 +3226,12 @@ class RuntimeManager {
   }
 
   private async failRuntimeForMissingPty(session: RuntimeSession, error: unknown): Promise<void> {
+    if (session.state === 'manual_takeover') {
+      console.warn(
+        `[runtime] ignoring missing PTY for manual takeover session=${session.sessionId} terminal=${session.terminalId}`,
+      );
+      return;
+    }
     if (isRuntimeSessionTerminal(session.state)) {
       console.warn(
         `[runtime] ignoring missing PTY for terminal session session=${session.sessionId} state=${session.state}`,

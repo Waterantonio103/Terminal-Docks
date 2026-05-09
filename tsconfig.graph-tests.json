@@ -24,6 +24,7 @@
     "src/lib/runtime/RuntimeTypes.ts",
     "src/lib/runtime/RuntimeProgressWatchdog.ts",
     "src/lib/runtime/RuntimeReadinessGate.ts",
+    "src/lib/actionCenter/*.ts",
     "src/lib/runtime/adapters/CliAdapter.ts",
     "src/lib/runtime/adapters/codex.ts",
     "src/lib/runtime/adapters/opencode.ts",

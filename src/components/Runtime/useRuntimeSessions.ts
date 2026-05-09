@@ -20,6 +20,8 @@ import { useWorkspaceStore } from '../../store/workspace';
 
 export type { LiveRuntimeSession } from './RuntimeObserver';
 
+const EMPTY_GRAPH = { nodes: [] };
+
 export interface EnrichedRuntimeSession extends LiveRuntimeSession {
   position?: { x: number; y: number };
   cliConfig?: string;
@@ -44,10 +46,10 @@ export function useRuntimeSessions(): EnrichedRuntimeSession[] {
     };
   }, []);
 
-  const globalGraph = useWorkspaceStore((s) => s.globalGraph);
+  const globalGraph = useWorkspaceStore((s) => s.globalGraph ?? EMPTY_GRAPH);
 
   const enriched = useMemo(() => {
-    const nodeMap = new Map(globalGraph.nodes.map((n) => [n.id, n]));
+    const nodeMap = new Map((globalGraph.nodes ?? []).map((n) => [n.id, n]));
 
     return sessions.map((session) => {
       const node = nodeMap.get(session.nodeId);
