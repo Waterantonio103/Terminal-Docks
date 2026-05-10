@@ -18,9 +18,20 @@ import { registerInboxTools } from './tools/inbox.mjs';
 import { registerDebugTools } from './debug/index.mjs';
 import { registerResources } from './resources/index.mjs';
 import { registerPrompts } from './prompts/index.mjs';
+import {
+  callProxyTool,
+  initMcpSourceRegistry,
+  jsonRpcError,
+  jsonRpcResult,
+  listAgentVisibleProxyTools,
+  refreshEnabledSourcesInBackground,
+  registerMcpSourceRoutes,
+  resolveProxyTool,
+} from './mcp-sources.mjs';
 
 // Initialize DB
 initDb();
+initMcpSourceRegistry();
 
 function createMcpServer(getSessionId) {
   const server = new McpServer({ name: 'starlink-mcp', version: '2.0.0' });
@@ -49,6 +60,7 @@ app.use(cors({
 app.use(express.json());
 
 app.get('/health', (_req, res) => res.json({ ok: true }));
+registerMcpSourceRoutes(app);
 
 app.post('/internal/frontend-error', (req, res) => {
   const body = req.body ?? {};
@@ -207,6 +219,159 @@ function registerRuntimeBootstrap(body) {
   return { ok: true, sessionId };
 }
 
+function normalizeHeaderValue(value) {
+  return Array.isArray(value) ? value[0] : value;
+}
+
+function getToolCallsFromBody(body) {
+  const messages = Array.isArray(body) ? body : [body];
+  return messages
+    .filter(message => message?.method === 'tools/call' && typeof message?.params?.name === 'string')
+    .map(message => ({
+      id: message.id ?? null,
+      toolName: message.params.name,
+    }))
+    .filter(call => !call.toolName.startsWith('debug_'));
+}
+
+function emitToolCallEvent(phase, sessionId, toolName, requestId, error = null) {
+  const sid = sessionId || 'unknown';
+  const session = sessions[sid] ?? {};
+  const proxy = resolveProxyTool(toolName);
+  const proxyEntry = proxy.entry;
+  emitAgentEvent({
+    type: `tool:${phase}`,
+    sessionId: sid,
+    missionId: session.missionId ?? undefined,
+    nodeId: session.nodeId ?? undefined,
+    attempt: session.attempt ?? undefined,
+    role: session.role ?? undefined,
+    agentId: session.agentId ?? sid,
+    toolName,
+    sourceId: proxyEntry?.sourceId,
+    proxiedToolName: proxyEntry ? toolName : undefined,
+    upstreamToolName: proxyEntry?.originalName,
+    requestId,
+    error: error ? String(error) : undefined,
+    at: Date.now(),
+  });
+}
+
+async function handleMcpRequestWithToolEvents(req, res, handler) {
+  const sessionId = normalizeHeaderValue(req.headers['mcp-session-id']) ?? null;
+  const calls = getToolCallsFromBody(req.body);
+  for (const call of calls) emitToolCallEvent('started', sessionId, call.toolName, call.id);
+  try {
+    const result = await handler();
+    const failedToolIds = result?.failedToolIds instanceof Set ? result.failedToolIds : new Set();
+    for (const call of calls) {
+      if (failedToolIds.has(call.id) || failedToolIds.has(call.toolName)) {
+        emitToolCallEvent('error', sessionId, call.toolName, call.id, result?.error ?? 'MCP tool call failed');
+      } else {
+        emitToolCallEvent('completed', sessionId, call.toolName, call.id);
+      }
+    }
+  } catch (error) {
+    for (const call of calls) emitToolCallEvent('error', sessionId, call.toolName, call.id, error);
+    throw error;
+  }
+}
+
+function isSingleRpc(body, method) {
+  return body && !Array.isArray(body) && body.jsonrpc === '2.0' && body.method === method;
+}
+
+function appendProxyToolsToPayload(payload) {
+  if (payload?.result && Array.isArray(payload.result.tools)) {
+    return {
+      ...payload,
+      result: {
+        ...payload.result,
+        tools: [...payload.result.tools, ...listAgentVisibleProxyTools()],
+      },
+    };
+  }
+  return payload;
+}
+
+function appendProxyToolsToText(text) {
+  const trimmed = String(text || '').trim();
+  if (!trimmed) return text;
+  if (!trimmed.split(/\r?\n/).some(line => line.startsWith('data:'))) {
+    return JSON.stringify(appendProxyToolsToPayload(JSON.parse(trimmed)));
+  }
+  return trimmed.split(/(\r?\n\r?\n)/).map(frame => {
+    if (/^\r?\n\r?\n$/.test(frame)) return frame;
+    const lines = frame.split(/\r?\n/);
+    const dataLines = lines.filter(line => line.startsWith('data:'));
+    if (!dataLines.length) return frame;
+    const data = dataLines.map(line => line.slice(5).trim()).join('\n').trim();
+    if (!data || data === '[DONE]') return frame;
+    const updated = appendProxyToolsToPayload(JSON.parse(data));
+    return lines.map(line => line.startsWith('data:') ? `data: ${JSON.stringify(updated)}` : line).join('\n');
+  }).join('');
+}
+
+async function handleToolsListWithProxy(req, res, handler) {
+  const chunks = [];
+  const originalWrite = res.write.bind(res);
+  const originalEnd = res.end.bind(res);
+  const originalSetHeader = res.setHeader.bind(res);
+  const originalWriteHead = res.writeHead.bind(res);
+  const toBuffer = (chunk, encoding) => {
+    if (Buffer.isBuffer(chunk)) return chunk;
+    if (chunk instanceof Uint8Array) return Buffer.from(chunk);
+    return Buffer.from(String(chunk), typeof encoding === 'string' ? encoding : undefined);
+  };
+  res.setHeader = (name, value) => {
+    if (String(name).toLowerCase() === 'content-length') return res;
+    return originalSetHeader(name, value);
+  };
+  res.writeHead = (statusCode, reasonPhrase, headers) => {
+    if (headers && typeof headers === 'object') {
+      delete headers['content-length'];
+      delete headers['Content-Length'];
+    }
+    return originalWriteHead(statusCode, reasonPhrase, headers);
+  };
+  res.write = (chunk, encoding, callback) => {
+    chunks.push(toBuffer(chunk, encoding));
+    if (typeof callback === 'function') callback();
+    return true;
+  };
+  res.end = (chunk, encoding, callback) => {
+    if (chunk) chunks.push(toBuffer(chunk, encoding));
+    const original = Buffer.concat(chunks).toString('utf8');
+    let output = original;
+    try {
+      output = appendProxyToolsToText(original);
+    } catch (error) {
+      console.warn('[mcp] Failed to append proxy tools:', error);
+    }
+    res.setHeader = originalSetHeader;
+    res.writeHead = originalWriteHead;
+    return originalEnd(output, typeof encoding === 'string' ? encoding : undefined, callback);
+  };
+  await handler();
+}
+
+async function handleProxyToolCall(req, res) {
+  if (!isSingleRpc(req.body, 'tools/call')) return { handled: false };
+  const toolName = req.body.params?.name;
+  if (typeof toolName !== 'string') return { handled: false };
+  const resolved = resolveProxyTool(toolName);
+  if (!resolved.ok && resolved.reason === 'not_found') return { handled: false };
+  try {
+    const result = await callProxyTool(toolName, req.body.params?.arguments ?? {});
+    res.json(jsonRpcResult(req.body.id, result));
+    return { handled: true };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    res.json(jsonRpcError(req.body.id, message));
+    return { handled: true, failedToolIds: new Set([req.body.id, toolName]), error: message };
+  }
+}
+
 app.post('/internal/push', (req, res) => {
   const expected = process.env.MCP_INTERNAL_PUSH_TOKEN;
   if (!expected) return res.status(503).json({ ok: false, error: 'Internal push token not configured' });
@@ -283,23 +448,39 @@ app.post('/internal/push', (req, res) => {
 });
 
 app.post('/mcp', async (req, res) => {
-  const sid = req.headers['mcp-session-id'];
-  if (sid && sessions[sid]?.transport) {
-    await sessions[sid].transport.handleRequest(req, res, req.body);
-  } else {
-    let initializedSessionId = null;
-    const transport = new StreamableHTTPServerTransport({
-      sessionIdGenerator: () => randomUUID(),
-      onsessioninitialized: (sessionId) => {
-        initializedSessionId = sessionId;
-        sessions[sessionId] = { transport };
-      },
-    });
-    const mcpServer = createMcpServer(() => initializedSessionId);
-    transport.onclose = () => { if (initializedSessionId) delete sessions[initializedSessionId]; };
-    await mcpServer.connect(transport);
-    await transport.handleRequest(req, res, req.body);
-  }
+  const sid = normalizeHeaderValue(req.headers['mcp-session-id']);
+  await handleMcpRequestWithToolEvents(req, res, async () => {
+    const proxyCall = await handleProxyToolCall(req, res);
+    if (proxyCall.handled) return proxyCall;
+
+    const handleTransport = async () => {
+      if (sid && sessions[sid]?.transport) {
+      await sessions[sid].transport.handleRequest(req, res, req.body);
+      } else {
+      let initializedSessionId = null;
+      const transport = new StreamableHTTPServerTransport({
+        sessionIdGenerator: () => randomUUID(),
+        onsessioninitialized: (sessionId) => {
+          initializedSessionId = sessionId;
+          sessions[sessionId] = { transport };
+        },
+      });
+      const mcpServer = createMcpServer(() => initializedSessionId);
+      transport.onclose = () => { if (initializedSessionId) delete sessions[initializedSessionId]; };
+      await mcpServer.connect(transport);
+      await transport.handleRequest(req, res, req.body);
+      }
+    };
+
+    if (isSingleRpc(req.body, 'tools/list')) {
+      await handleToolsListWithProxy(req, res, handleTransport);
+      void refreshEnabledSourcesInBackground();
+      return {};
+    }
+
+    await handleTransport();
+    return {};
+  });
 });
 
 app.get('/mcp', async (req, res) => {

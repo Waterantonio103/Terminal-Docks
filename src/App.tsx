@@ -10,7 +10,7 @@ import { listen } from '@tauri-apps/api/event';
 import { defaultWindowIcon } from '@tauri-apps/api/app';
 import { homeDir } from '@tauri-apps/api/path';
 import { Window } from '@tauri-apps/api/window';
-import { TerminalSquare, FileCode2, KanbanSquare, Activity, Plus, Rocket, Monitor, Minus, Square, X, Network, FolderTree, LayoutGrid, Maximize, Settings, Bell } from 'lucide-react';
+import { TerminalSquare, FileCode2, KanbanSquare, Activity, Plus, Rocket, Monitor, Minus, Square, X, Network, FolderTree, LayoutGrid, Maximize, Settings, Bell, Toolbox } from 'lucide-react';
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { detectRoleFromText, normalizeCli } from './lib/cliDetection';
 import { refreshCliDetectionForTerminals } from './lib/terminalCliRuntime';
@@ -20,6 +20,7 @@ import { SettingsOverlay } from './components/Settings/SettingsOverlay';
 import { clearLastFatalReport, readBreadcrumbs, readLastFatalReport, recordBreadcrumb, stringifyUnknownError, writeFatalReport, type FatalErrorReport } from './lib/diagnostics';
 import { useActionCenterItems } from './components/ActionCenter/useActionCenterItems';
 import { ActionCenterPane } from './components/ActionCenter/ActionCenterPane';
+import { McpToolboxPage } from './components/McpToolbox/McpToolboxPage';
 import './App.css';
 
 // Safe access to window
@@ -76,7 +77,7 @@ function sendFrontendErrorToDebugMcp(report: FatalErrorReport, name?: string) {
     .catch(() => {});
 }
 
-function App() {
+function MainApp() {
   useEffect(() => {
     if (appWindow) {
       defaultWindowIcon()
@@ -250,7 +251,7 @@ function App() {
             </div>
           ) : (
             <div className="flex items-center gap-2 text-xs font-bold text-accent-primary uppercase tracking-widest">
-               {appMode === 'runtime' ? <Monitor size={14} /> : appMode === 'actioncenter' ? <Bell size={14} /> : <Network size={14} />}
+               {appMode === 'runtime' ? <Monitor size={14} /> : appMode === 'actioncenter' ? <Bell size={14} /> : appMode === 'mcptoolbox' ? <Toolbox size={14} /> : <Network size={14} />}
                <span>{modeLabel}</span>
             </div>
           )}
@@ -276,7 +277,7 @@ function App() {
               </div>
               <DebugPanel />
             </div>
-          ) : appMode === 'runtime' ? <RuntimeView /> : appMode === 'actioncenter' ? <ActionCenterPane /> : (
+          ) : appMode === 'runtime' ? <RuntimeView /> : appMode === 'actioncenter' ? <ActionCenterPane /> : appMode === 'mcptoolbox' ? <McpToolboxPage /> : (
             <>
               {layoutMode === 'grid' && (
                 <div className="flex items-center h-8 bg-bg-titlebar border-b border-border-panel px-2 gap-0.5 overflow-x-auto shrink-0 select-none relative" data-tauri-drag-region>
@@ -331,10 +332,15 @@ function App() {
   );
 }
 
+function App() {
+  return <MainApp />;
+}
+
 const MODE_OPTIONS: Array<{ id: AppMode; label: string; icon: React.ReactNode }> = [
   { id: 'workflow', label: 'Workflow', icon: <Network size={18} /> },
   { id: 'runtime', label: 'Runtime', icon: <Monitor size={18} /> },
   { id: 'workspace', label: 'Workspace', icon: <FolderTree size={18} /> },
+  { id: 'mcptoolbox', label: 'MCP Toolbox', icon: <Toolbox size={18} /> },
   { id: 'actioncenter', label: 'Action Center', icon: <Bell size={18} /> },
 ];
 

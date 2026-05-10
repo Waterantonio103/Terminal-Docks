@@ -12,7 +12,7 @@ export function arrayMove<T>(array: T[], fromIndex: number, toIndex: number): T[
 }
 
 export type PaneType = 'terminal' | 'editor' | 'taskboard' | 'activityfeed' | 'launcher' | 'missioncontrol' | 'nodetree' | 'inbox';
-export type AppMode = 'workflow' | 'runtime' | 'workspace' | 'actioncenter';
+export type AppMode = 'workflow' | 'runtime' | 'workspace' | 'actioncenter' | 'mcptoolbox';
 export type WorkflowNodeStatus =
   | 'idle'
   | 'unbound'
