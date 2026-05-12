@@ -1,16 +1,19 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { DotTunnelBackground } from '../shared/DotTunnelBackground';
+import { UiGraphShaderBackground } from './UiGraphShaderBackground';
+import { WorkflowPresetPicker } from './WorkflowPresetPicker';
 import { ModelDiscoveryLoading } from '../models/ModelDiscoveryLoading';
 import { AgentActionBadge } from '../models/AgentActionBadge';
-import { ArrowUpRight, ChevronDown, ChevronLeft, Play, Plus, RefreshCw, ScanSearch, Sparkles, Square, Terminal, Trash2, UserCheck, Workflow, X } from 'lucide-react';
+import { AlignJustify, ArrowUpRight, ChevronDown, ChevronLeft, FolderOpen, Play, Plus, RefreshCw, ScanSearch, ShieldCheck, Sparkles, Square, Terminal, Trash2, UserCheck, Workflow, X, Zap } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
 import { openUrl } from '@tauri-apps/plugin-opener';
+import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import { emit, listen } from '@tauri-apps/api/event';
 import agentsConfig from '../../config/agents';
 import { compileMission, validateGraph } from '../../lib/graphCompiler';
 import { generateId } from '../../lib/graphUtils';
-import { buildPresetFlowGraph, getWorkflowPreset } from '../../lib/workflowPresets';
-import { workflowStatusLabel, workflowStatusTone } from '../../lib/workflowStatus';
+import { buildPresetFlowGraph, type PresetDefinition } from '../../lib/workflowPresets';
+import { isWorkflowStatusActive, workflowStatusLabel, workflowStatusTone } from '../../lib/workflowStatus';
 import {
   legacyGraphToNodeDocument,
   nodeDocumentToFlowGraph,
@@ -27,7 +30,7 @@ import { runtimeExecutor } from '../../lib/runtime/RuntimeExecutor';
 import { missionOrchestrator } from '../../lib/workflow/MissionOrchestrator';
 import { terminalOutputBus } from '../../lib/runtime/TerminalOutputBus';
 import { supportsHeadless } from '../../lib/cliIdentity';
-import { useWorkspaceStore, type MissionAgent, type Pane, type ResultEntry, type WorkflowAgentCli, type WorkflowExecutionMode, type WorkflowGraph } from '../../store/workspace';
+import { useWorkspaceStore, type FrontendWorkflowMode, type MissionAgent, type Pane, type ResultEntry, type WorkflowAgentCli, type WorkflowExecutionMode, type WorkflowGraph } from '../../store/workspace';
 import { discoverModelsForCli, supportsModelDiscovery } from '../../lib/models/modelDiscoveryService';
 import type { CliId, CliModel, ModelDiscoveryResult } from '../../lib/models/modelTypes';
 import { useMissionSnapshot } from '../../hooks/useMissionSnapshot';
@@ -71,6 +74,21 @@ const SOCKET_SNAP_RADIUS = 48;
 const SUPPORTED_WORKFLOW_CLIS = new Set(['claude', 'gemini', 'opencode', 'codex', 'custom', 'ollama', 'lmstudio']);
 const SELECTABLE_WORKFLOW_CLIS: WorkflowAgentCli[] = ['claude', 'codex', 'gemini', 'opencode', 'custom', 'ollama', 'lmstudio'];
 const SELECTABLE_EXECUTION_MODES: WorkflowExecutionMode[] = ['api', 'streaming_headless', 'headless', 'interactive_pty', 'manual'];
+const UI_FRONTEND_WORKFLOW_MODES: Array<{ value: Exclude<FrontendWorkflowMode, 'off'>; label: string; icon: typeof Workflow }> = [
+  { value: 'fast', label: 'UI Fast', icon: Zap },
+  { value: 'aligned', label: 'UI Aligned', icon: AlignJustify },
+  { value: 'strict_ui', label: 'Strict UI', icon: ShieldCheck },
+];
+const STANDARD_AGENT_ROLE_IDS = new Set(['scout', 'coordinator', 'builder', 'tester', 'security', 'reviewer']);
+const UI_AGENT_ROLE_IDS = new Set([
+  'frontend_product',
+  'frontend_designer',
+  'frontend_architect',
+  'frontend_builder',
+  'interaction_qa',
+  'accessibility_reviewer',
+  'visual_polish_reviewer',
+]);
 const MAX_RUNTIME_SNIPPET_BYTES = 3072;
 const MODEL_DOC_URLS: Record<string, string | null> = {
   claude: 'https://code.claude.com/docs/en/model-config',
@@ -153,10 +171,14 @@ function toLinkCanvas(point: Point2D) {
   return { x: point.x + LINK_CANVAS_HALF, y: point.y + LINK_CANVAS_HALF };
 }
 
-function borderClass(selected: boolean) {
-  return selected
-    ? 'border-accent-primary shadow-[0_0_0_1px_color-mix(in_srgb,var(--color-accent-primary)_60%,transparent)]'
-    : 'border-border-panel shadow-[0_10px_24px_rgba(0,0,0,0.28)]';
+function borderClass(selected: boolean, active = false) {
+  if (selected) {
+    return 'border-accent-primary shadow-[0_0_0_1px_color-mix(in_srgb,var(--color-accent-primary)_60%,transparent)]';
+  }
+  if (active) {
+    return 'border-accent-primary/70 shadow-[0_0_0_1px_color-mix(in_srgb,var(--color-accent-primary)_45%,transparent),0_0_26px_color-mix(in_srgb,var(--color-accent-primary)_18%,transparent)]';
+  }
+  return 'border-border-panel shadow-[0_10px_24px_rgba(0,0,0,0.28)]';
 }
 
 const CLEAR_SCREEN_MARKERS = ['[2J', '[3J', '[H[J', 'c'];
@@ -200,6 +222,13 @@ function shortId(value: string | null | undefined, max = 26): string {
   if (!value) return '—';
   if (value.length <= max) return value;
   return `${value.slice(0, max)}…`;
+}
+
+function folderLabel(value: string | null | undefined): string {
+  const trimmed = String(value ?? '').trim();
+  if (!trimmed) return 'Select folder';
+  const normalized = trimmed.replace(/[\\/]+$/, '');
+  return normalized.split(/[\\/]/).filter(Boolean).pop() || normalized;
 }
 
 
@@ -265,6 +294,10 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
   const results = useWorkspaceStore(state => state.results);
   const addPane = useWorkspaceStore(state => state.addPane);
   const setAppMode = useWorkspaceStore(state => state.setAppMode);
+  const uiFrontendMode = useWorkspaceStore(state => state.uiFrontendMode);
+  const setUiFrontendMode = useWorkspaceStore(state => state.setUiFrontendMode);
+  const setWorkspaceDir = useWorkspaceStore(state => state.setWorkspaceDir);
+  const canvasEffectsEnabled = useWorkspaceStore(state => state.canvasEffectsEnabled);
   const updatePaneDataByTerminalId = useWorkspaceStore(state => state.updatePaneDataByTerminalId);
   const setNodeTerminalBinding = useWorkspaceStore(state => state.setNodeTerminalBinding);
   const nodeRuntimeBindings = useWorkspaceStore(state => state.nodeRuntimeBindings);
@@ -288,11 +321,13 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
   const [detectedModels, setDetectedModels] = useState<Map<CliId, ModelDiscoveryResult>>(new Map());
   const [loadingModels, setLoadingModels] = useState<Set<WorkflowAgentCli>>(new Set());
   const [customModelNodeIds, setCustomModelNodeIds] = useState<Set<string>>(new Set());
-  const [modelDropdownOpen, setModelDropdownOpen] = useState(false);
+  const [modelDropdownOpenNodeId, setModelDropdownOpenNodeId] = useState<string | null>(null);
+  const [presetPickerOpen, setPresetPickerOpen] = useState(false);
   const modelDropdownRef = useRef<HTMLDivElement>(null);
 
   const registry = useMemo(() => createWorkflowNodeRegistry(), []);
   const [state, setState] = useState<NodeDocumentState>(() => legacyGraphToNodeDocument(graph));
+  const stateRef = useRef(state);
   const [interaction, setInteraction] = useState<CanvasInteraction>({ kind: 'idle' });
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const [hoveredInput, setHoveredInput] = useState<LinkHoverTarget>(null);
@@ -306,6 +341,21 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
   const isUserChangeRef = useRef(false);
   const missionSnapshot = useMissionSnapshot(activeMissionId);
   const workflowEvents = useWorkflowEvents(activeMissionId);
+
+  useEffect(() => {
+    stateRef.current = state;
+  }, [state]);
+
+  useEffect(() => {
+    return () => {
+      const serialized = nodeDocumentToWorkflowGraph(stateRef.current.document, registry);
+      const json = JSON.stringify(serialized);
+      if (json !== lastGraphSnapshotRef.current) {
+        lastGraphSnapshotRef.current = json;
+        onGraphChange?.(serialized);
+      }
+    };
+  }, [onGraphChange, registry]);
 
   // Sync pane.data.cli from the persisted graph node configs before any useEffect
   // (including TerminalPane's initPty) can fire. useLayoutEffect runs synchronously
@@ -374,6 +424,29 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
 
   const activeTree = state.document.trees[getActiveTreeId(state.editor)];
   const view = getViewState(state.editor);
+  const taskNode = useMemo(
+    () => Object.values(activeTree.nodes).find(node => node.type === 'workflow.task') ?? null,
+    [activeTree.nodes]
+  );
+  const nodeFrontendMode = (taskNode?.properties.frontendMode === 'fast' ||
+    taskNode?.properties.frontendMode === 'aligned' ||
+    taskNode?.properties.frontendMode === 'strict_ui')
+    ? taskNode.properties.frontendMode as FrontendWorkflowMode
+    : 'off';
+  const graphUsesUiRoles = useMemo(
+    () => Object.values(activeTree.nodes).some(node =>
+      node.type === 'workflow.agent' && UI_AGENT_ROLE_IDS.has(String(node.properties.roleId ?? ''))
+    ),
+    [activeTree.nodes]
+  );
+  const graphUsesUiBackground = graphUsesUiRoles || nodeFrontendMode !== 'off';
+  const frontendMode: FrontendWorkflowMode = graphUsesUiBackground
+    ? (nodeFrontendMode === 'off' ? uiFrontendMode : nodeFrontendMode)
+    : 'off';
+  useEffect(() => {
+    if (!graphUsesUiRoles || !taskNode || nodeFrontendMode !== 'off') return;
+    applyOperator({ type: 'set_node_property', nodeId: taskNode.id, key: 'frontendMode', value: uiFrontendMode });
+  }, [applyOperator, graphUsesUiRoles, nodeFrontendMode, taskNode, uiFrontendMode]);
   const materializedNodes = useMemo(
     () => Object.values(activeTree.nodes).map(node => materializeNode(state.document, activeTree, node, registry)),
     [activeTree, registry, state.document]
@@ -540,6 +613,60 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
         .sort((left, right) => left.category.localeCompare(right.category) || left.label.localeCompare(right.label)),
     [registry]
   );
+  const agentRoleOptions = useMemo(
+    () => agentsConfig.agents.filter(agent =>
+      graphUsesUiBackground
+        ? UI_AGENT_ROLE_IDS.has(agent.id)
+        : STANDARD_AGENT_ROLE_IDS.has(agent.id)
+    ),
+    [graphUsesUiBackground]
+  );
+  const validAgentRoleIds = graphUsesUiBackground ? UI_AGENT_ROLE_IDS : STANDARD_AGENT_ROLE_IDS;
+  const defaultAgentRoleId = graphUsesUiBackground ? 'frontend_product' : 'scout';
+
+  useEffect(() => {
+    setState(previous => {
+      const activeTreeId = getActiveTreeId(previous.editor);
+      const tree = previous.document.trees[activeTreeId];
+      if (!tree) return previous;
+
+      let changed = false;
+      const nodes = Object.fromEntries(
+        Object.entries(tree.nodes).map(([nodeId, node]) => {
+          if (node.type !== 'workflow.agent') return [nodeId, node];
+          const roleId = String(node.properties.roleId ?? '');
+          if (validAgentRoleIds.has(roleId)) return [nodeId, node];
+          changed = true;
+          return [
+            nodeId,
+            {
+              ...node,
+              properties: {
+                ...node.properties,
+                roleId: defaultAgentRoleId,
+              },
+            },
+          ];
+        })
+      );
+
+      if (!changed) return previous;
+      isUserChangeRef.current = true;
+      return {
+        ...previous,
+        document: {
+          ...previous.document,
+          trees: {
+            ...previous.document.trees,
+            [activeTreeId]: {
+              ...tree,
+              nodes,
+            },
+          },
+        },
+      };
+    });
+  }, [activeTree.nodes, defaultAgentRoleId, validAgentRoleIds]);
 
   useEffect(() => {
     if (inspectorNodeId && !activeTree.nodes[inspectorNodeId]) {
@@ -1068,15 +1195,16 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
           storeBeforeCreate.removePane(oldPane.id);
         }
 
-        // Spawn a real terminal pane for this node (inline so it doesn't depend
-        // on stale component state via createAndBindRuntime).
+        // Allocate a runtime terminal id without adding a Workspace pane.
+        // RuntimeManager owns the PTY launch, and RuntimeView renders the live
+        // terminal stream through a synthetic pane wrapper.
         const paneTitle = `Runtime ${role}`;
-        const { paneId, terminalId } = useWorkspaceStore.getState().createRuntimeTerminal({
-          nodeId,
-          roleId: role,
-          cli: selectedCli,
-          executionMode: 'interactive_pty',
-          title: paneTitle,
+        const paneId = `runtime-pane-${nodeId}`;
+        const terminalId = generateId();
+        useWorkspaceStore.getState().setNodeRuntimeBinding(nodeId, {
+          terminalId,
+          runtimeSessionId: null,
+          adapterStatus: null,
         });
 
         const created = { id: terminalId, paneId, title: paneTitle, cli: selectedCli };
@@ -1123,23 +1251,8 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
         terminalClis,
         authoringMode: 'graph',
         runVersion: 1,
+        frontendMode,
       });
-
-      const agents: MissionAgent[] = mission.nodes.map(node => ({
-        terminalId: node.terminal.terminalId,
-        title: node.terminal.terminalTitle,
-        roleId: node.roleId,
-        paneId: node.terminal.paneId,
-        status: 'idle',
-        attempt: 0,
-        lastPayload: null,
-        attemptHistory: [],
-        nodeId: node.id,
-        runtimeSessionId: null,
-        runtimeCli: node.terminal.cli,
-        runtimeBootstrapState: 'NOT_CONNECTED',
-        runtimeBootstrapReason: null,
-      }));
 
       const nodeById = new Map(mission.nodes.map(node => [node.id, node]));
       const startNodes = mission.metadata.startNodeIds
@@ -1172,13 +1285,6 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
       setActiveMissionId(missionId);
       activeMissionRef.current = mission;
 
-      addPane('missioncontrol', 'Mission Control', {
-        taskDescription: mission.task.prompt ?? '',
-        agents,
-        missionId,
-        mission,
-      });
-
       // Persist mission to shared SQLite so MCP tools (complete_task, get_task_details, etc.) can find it.
       // Uses seed_mission_to_db (not start_mission_graph) to avoid the Rust engine emitting
       // workflow-runtime-activation-requested, which would double-activate nodes alongside the TS orchestrator.
@@ -1205,7 +1311,7 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
       setValidationTone('error');
       setValidationMessage(error instanceof Error ? error.message : String(error));
     }
-  }, [registry, state.document, workspaceDir, graph.id, openTerminals, tabs, addPane, setAppMode, applyOperator, setNodeTerminalBinding]);
+  }, [registry, state.document, workspaceDir, graph.id, openTerminals, tabs, addPane, setAppMode, applyOperator, setNodeTerminalBinding, frontendMode]);
 
   const viewRuntimeMapping = useCallback(() => {
     try {
@@ -1227,6 +1333,7 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
         terminalClis: {},
         authoringMode: 'graph',
         runVersion: 1,
+        frontendMode,
       });
 
       const layerText = mission.metadata.executionLayers
@@ -1239,12 +1346,9 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
       setValidationTone('error');
       setValidationMessage(error instanceof Error ? error.message : String(error));
     }
-  }, [registry, state.document, workspaceDir]);
+  }, [registry, state.document, workspaceDir, frontendMode]);
 
-  const importPresetGraph = useCallback(() => {
-    const preset = getWorkflowPreset('parallel_delivery');
-    if (!preset) return;
-
+  const importPresetGraph = useCallback((preset: PresetDefinition) => {
     const missionId = generateId();
     const bindingsByRole: Record<string, { terminalId: string; terminalTitle: string; paneId?: string }> = {};
     for (const terminal of openTerminals) {
@@ -1257,14 +1361,20 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
       }
     }
 
+    const currentPrompt = String(taskNode?.properties.prompt ?? '').trim();
+    const currentWorkspaceDir = String(taskNode?.properties.workspaceDir ?? workspaceDir ?? '').trim();
+    const taskMode = taskNode?.properties.mode === 'edit' ? 'edit' : 'build';
+    const presetFrontendMode = preset.frontendMode ?? 'off';
+
     const flow = buildPresetFlowGraph({
       preset,
       missionId,
-      prompt: 'Imported preset objective',
-      mode: 'build',
-      workspaceDir,
+      prompt: currentPrompt || 'Imported preset objective',
+      mode: taskMode,
+      workspaceDir: currentWorkspaceDir || workspaceDir,
       bindingsByRole,
       instructionOverrides: {},
+      frontendMode: presetFrontendMode,
     });
 
     const workflowGraph: WorkflowGraph = {
@@ -1280,6 +1390,11 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
               prompt: String(data.prompt ?? ''),
               mode: data.mode === 'edit' ? 'edit' : 'build',
               workspaceDir: String(data.workspaceDir ?? ''),
+              frontendMode: data.frontendMode as FrontendWorkflowMode,
+              specProfile: data.specProfile === 'frontend_three_file' ? 'frontend_three_file' : 'none',
+              authoringMode: 'preset',
+              presetId: preset.id,
+              runVersion: 1,
               position: node.position,
             },
           };
@@ -1294,8 +1409,14 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
             terminalId: String(data.terminalId ?? ''),
             terminalTitle: String(data.terminalTitle ?? ''),
             paneId: String(data.paneId ?? ''),
+            cli: data.cli as WorkflowAgentCli,
+            model: String(data.model ?? ''),
+            executionMode: data.executionMode as WorkflowExecutionMode,
             autoLinked: Boolean(data.autoLinked),
             position: node.position,
+            authoringMode: 'preset',
+            presetId: preset.id,
+            runVersion: 1,
           },
         };
       }),
@@ -1310,9 +1431,10 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
     lastGraphSnapshotRef.current = snapshot;
     setState(legacyGraphToNodeDocument(workflowGraph));
     onGraphChange?.(workflowGraph);
+    setPresetPickerOpen(false);
     setValidationTone('ok');
-    setValidationMessage(`Imported preset "${preset.name}" into the graph editor.`);
-  }, [onGraphChange, openTerminals, workspaceDir]);
+    setValidationMessage(`Applied preset "${preset.name}" into the graph editor.`);
+  }, [frontendMode, onGraphChange, openTerminals, taskNode?.properties.mode, taskNode?.properties.prompt, taskNode?.properties.workspaceDir, workspaceDir]);
 
   useEffect(() => {
     if (!lastAddedNodeId) return;
@@ -1333,6 +1455,16 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
         const newNodeId = next.editor.activeNodeId;
         
         if (newNodeId) {
+          const tree = next.document.trees[getActiveTreeId(next.editor)];
+          const newNode = tree.nodes[newNodeId];
+          if (newNode?.type === 'workflow.agent') {
+            next = applyNodeEditorOperator(next.document, next.editor, registry, {
+              type: 'set_node_property',
+              nodeId: newNodeId,
+              key: 'roleId',
+              value: defaultAgentRoleId,
+            });
+          }
           setLastAddedNodeId(newNodeId);
         }
 
@@ -1365,7 +1497,7 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
       }
       setContextMenu(null);
     },
-    [registry]
+    [defaultAgentRoleId, registry]
   );
 
   const deleteNodeById = useCallback(
@@ -1821,6 +1953,49 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
     ? String(inspectedNode?.properties.cli ?? 'claude')
     : 'claude') as WorkflowAgentCli;
 
+  const agentCliValues = useMemo(() => {
+    return Object.values(activeTree.nodes)
+      .filter(node => node.type === 'workflow.agent')
+      .map(node => (
+        SELECTABLE_WORKFLOW_CLIS.includes(String(node.properties.cli ?? '') as WorkflowAgentCli)
+          ? String(node.properties.cli)
+          : 'claude'
+      ) as WorkflowAgentCli);
+  }, [activeTree.nodes]);
+
+  const globalAgentCli = useMemo(() => {
+    if (agentCliValues.length === 0) return '';
+    const first = agentCliValues[0];
+    return agentCliValues.every(cli => cli === first) ? first : '';
+  }, [agentCliValues]);
+
+  const applyGlobalAgentCli = useCallback((cli: WorkflowAgentCli) => {
+    for (const node of Object.values(activeTree.nodes)) {
+      if (node.type !== 'workflow.agent') continue;
+      applyOperator({ type: 'set_node_property', nodeId: node.id, key: 'cli', value: cli });
+      applyOperator({ type: 'set_node_property', nodeId: node.id, key: 'model', value: '' });
+      if (!supportsHeadless(cli)) {
+        applyOperator({ type: 'set_node_property', nodeId: node.id, key: 'executionMode', value: 'interactive_pty' });
+      }
+    }
+    setCustomModelNodeIds(new Set());
+    setValidationTone('ok');
+    setValidationMessage(`Set ${agentCliValues.length} agent node${agentCliValues.length === 1 ? '' : 's'} to ${cli.toUpperCase()}.`);
+  }, [activeTree.nodes, agentCliValues.length, applyOperator]);
+
+  const selectTaskWorkspaceDir = useCallback(async (nodeId: string, currentValue: unknown) => {
+    const current = String(currentValue ?? workspaceDir ?? '').trim();
+    const selected = await openDialog({
+      directory: true,
+      multiple: false,
+      defaultPath: current || workspaceDir || undefined,
+    });
+    if (typeof selected !== 'string' || !selected.trim()) return;
+    const nextDir = selected.trim();
+    applyOperator({ type: 'set_node_property', nodeId, key: 'workspaceDir', value: nextDir });
+    setWorkspaceDir(nextDir);
+  }, [applyOperator, setWorkspaceDir, workspaceDir]);
+
   useEffect(() => {
     if (!inspectorNodeId) return;
     if (supportsModelDiscovery(inspectedCli) && !detectedModels.has(inspectedCli) && !loadingModels.has(inspectedCli)) {
@@ -1829,15 +2004,15 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
   }, [inspectorNodeId, inspectedCli, detectedModels, loadingModels, triggerModelDetection]);
 
   useEffect(() => {
-    if (!modelDropdownOpen) return;
+    if (!modelDropdownOpenNodeId) return;
     const handler = (e: MouseEvent) => {
       if (modelDropdownRef.current && !modelDropdownRef.current.contains(e.target as Node)) {
-        setModelDropdownOpen(false);
+        setModelDropdownOpenNodeId(null);
       }
     };
     document.addEventListener('mousedown', handler);
     return () => document.removeEventListener('mousedown', handler);
-  }, [modelDropdownOpen]);
+  }, [modelDropdownOpenNodeId]);
 
   return (
     <div className="h-full w-full background-bg-app text-text-primary flex flex-col">
@@ -1847,6 +2022,21 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
           <span>Node Graph Architecture</span>
         </div>
         <div className="flex items-center gap-2 text-[11px]">
+          <select
+            value={globalAgentCli}
+            onChange={event => {
+              const value = event.target.value as WorkflowAgentCli;
+              if (SELECTABLE_WORKFLOW_CLIS.includes(value)) applyGlobalAgentCli(value);
+            }}
+            disabled={agentCliValues.length === 0}
+            className="background-bg-surface border border-border-panel rounded px-2 py-1 text-[11px] text-text-secondary disabled:opacity-40"
+            title="Set runtime CLI for every agent node in this graph"
+          >
+            <option value="">{agentCliValues.length === 0 ? 'No agents' : 'Mixed CLI'}</option>
+            {SELECTABLE_WORKFLOW_CLIS.map(cli => (
+              <option key={cli} value={cli}>{cli.toUpperCase()}</option>
+            ))}
+          </select>
           {state.editor.treePath.length > 1 && (
             <button
               onClick={() => applyOperator({ type: 'end_group_edit' })}
@@ -1867,9 +2057,9 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
           <button onClick={viewRuntimeMapping} className="px-2.5 py-1 rounded border border-border-panel text-text-muted hover:text-text-primary hover:background-bg-panel">
             Runtime Map
           </button>
-          <button onClick={importPresetGraph} className="px-2.5 py-1 rounded border border-border-panel text-text-muted hover:text-text-primary hover:background-bg-panel">
+          <button onClick={() => setPresetPickerOpen(true)} className="px-2.5 py-1 rounded border border-border-panel text-text-muted hover:text-text-primary hover:background-bg-panel">
             <Sparkles size={12} className="inline mr-1" />
-            Import Preset
+            Workflow Presets
           </button>
           <button onClick={() => applyOperator({ type: 'delete_selection' })} className="px-2.5 py-1 rounded border border-border-panel text-text-muted hover:text-red-300 hover:bg-red-500/10">
             <Trash2 size={12} className="inline mr-1" />
@@ -1877,6 +2067,13 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
           </button>
         </div>
       </div>
+
+      <WorkflowPresetPicker
+        open={presetPickerOpen}
+        initialMode="build"
+        onClose={() => setPresetPickerOpen(false)}
+        onApply={importPresetGraph}
+      />
 
       <div className="px-3 py-2 shrink-0 border-b border-border-panel background-bg-surface flex items-center justify-between text-[11px]">
         <div className="flex items-center gap-2">
@@ -1891,7 +2088,11 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
       </div>
 
       <div ref={canvasRef} className="relative flex-1 overflow-hidden" onMouseDown={onCanvasMouseDown} onContextMenu={onCanvasContextMenu}>
-        <DotTunnelBackground />
+        {canvasEffectsEnabled && (
+          graphUsesUiBackground
+            ? <UiGraphShaderBackground />
+            : <DotTunnelBackground />
+        )}
         <div
           className="absolute inset-0 opacity-60"
           style={{
@@ -1992,11 +2193,12 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
             const artifactHints = artifactHintsByNodeId.get(materializedNode.node.id) ?? [];
             const nodeEvents = workflowEvents.filter(e => e.nodeId === materializedNode.node.id);
             const latestNodeEvent = nodeEvents[0];
+            const isActiveAgent = materializedNode.node.type === 'workflow.agent' && isWorkflowStatusActive(runtimeStatus);
 
             return (
               <div
                 key={materializedNode.node.id}
-                className={`absolute rounded-xl border background-bg-panel ${borderClass(isSelected)}`}
+                className={`absolute rounded-xl border background-bg-panel ${borderClass(isSelected, isActiveAgent)}`}
                 style={{ left: rect.x, top: rect.y, width: rect.width, minHeight: rect.height, zIndex: isFrame ? 0 : 10 }}
                 onDoubleClick={() => {
                   if (materializedNode.node.type === 'workflow.group') {
@@ -2134,13 +2336,47 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
                           <option value="build">Build</option>
                           <option value="edit">Edit</option>
                         </select>
-                        <input
-                          value={String(materializedNode.node.properties.workspaceDir ?? workspaceDir ?? '')}
-                          onChange={event => applyOperator({ type: 'set_node_property', nodeId: materializedNode.node.id, key: 'workspaceDir', value: event.target.value })}
-                          placeholder="Workspace dir"
-                          className="background-bg-surface border border-border-panel rounded-lg px-2 py-1.5 text-[11px]"
-                        />
+                        {(() => {
+                          const taskDir = String(materializedNode.node.properties.workspaceDir ?? workspaceDir ?? '').trim();
+                          return (
+                            <button
+                              type="button"
+                              onClick={() => void selectTaskWorkspaceDir(materializedNode.node.id, materializedNode.node.properties.workspaceDir)}
+                              title={taskDir || 'Select workspace directory'}
+                              className="min-w-0 background-bg-surface border border-border-panel rounded-lg px-2 py-1.5 text-[11px] text-text-secondary hover:text-text-primary hover:border-accent-primary/40 flex items-center gap-1.5"
+                            >
+                              <FolderOpen size={12} className="shrink-0 text-accent-primary" />
+                              <span className="truncate">{folderLabel(taskDir)}</span>
+                            </button>
+                          );
+                        })()}
                       </div>
+                      {graphUsesUiBackground && (
+                      <div className="flex gap-1 rounded-lg border border-border-panel background-bg-surface p-1">
+                        {UI_FRONTEND_WORKFLOW_MODES.map(mode => {
+                          const ModeIcon = mode.icon;
+                          const selected = uiFrontendMode === mode.value;
+                          return (
+                            <button
+                              key={mode.value}
+                              type="button"
+                              onClick={() => {
+                                setUiFrontendMode(mode.value);
+                                applyOperator({ type: 'set_node_property', nodeId: materializedNode.node.id, key: 'frontendMode', value: mode.value });
+                              }}
+                              className={`group relative h-7 flex-1 rounded flex items-center justify-center hover:bg-white/5 ${selected ? 'text-accent-primary bg-accent-primary/10' : 'text-text-secondary'}`}
+                              title={mode.label}
+                              aria-label={mode.label}
+                            >
+                              <ModeIcon size={13} />
+                              <span className="pointer-events-none absolute top-8 left-1/2 -translate-x-1/2 whitespace-nowrap rounded border border-border-panel background-bg-panel px-2 py-1 text-[10px] text-text-secondary opacity-0 shadow-xl group-hover:opacity-100">
+                                {mode.label}
+                              </span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                      )}
                     </div>
                   )}
 
@@ -2148,11 +2384,13 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
                     <div className="space-y-2">
                       <div className="grid grid-cols-2 gap-2">
                         <select
-                          value={String(materializedNode.node.properties.roleId ?? 'agent')}
+                          value={agentRoleOptions.some(agent => agent.id === String(materializedNode.node.properties.roleId ?? ''))
+                            ? String(materializedNode.node.properties.roleId)
+                            : defaultAgentRoleId}
                           onChange={event => applyOperator({ type: 'set_node_property', nodeId: materializedNode.node.id, key: 'roleId', value: event.target.value })}
                           className="flex-1 background-bg-surface border border-border-panel rounded-lg px-2 py-1.5 text-[11px]"
                         >
-                          {agentsConfig.agents.map(agent => (
+                          {agentRoleOptions.map(agent => (
                             <option key={agent.id} value={agent.id}>
                               {agent.name}
                             </option>
@@ -2189,12 +2427,12 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
                           <div className="grid gap-2" style={{ gridTemplateColumns: '1fr auto' }}>
                             {isSupported ? (
                               <div className="min-w-0 space-y-1">
-                                <div className="relative" ref={modelDropdownRef}>
+                                <div className="relative" ref={modelDropdownOpenNodeId === materializedNode.node.id ? modelDropdownRef : undefined}>
                                   <button
                                     type="button"
                                     onClick={() => {
-                                      const opening = !modelDropdownOpen;
-                                      setModelDropdownOpen(opening);
+                                      const opening = modelDropdownOpenNodeId !== materializedNode.node.id;
+                                      setModelDropdownOpenNodeId(opening ? materializedNode.node.id : null);
                                       if (opening && !isLoading && !modelResult) {
                                         triggerModelDetection(activeCli, false);
                                       }
@@ -2204,7 +2442,7 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
                                     <span className="truncate">{currentModel || 'MODEL'}</span>
                                     <ChevronDown size={10} className="text-text-muted" />
                                   </button>
-                                  {modelDropdownOpen && (
+                                  {modelDropdownOpenNodeId === materializedNode.node.id && (
                                     <div className="absolute z-50 left-0 right-0 top-full mt-1 background-bg-surface border border-border-panel rounded-lg shadow-lg max-h-60 overflow-y-auto py-1" onWheel={e => e.stopPropagation()}>
                                       <button
                                         type="button"
@@ -2212,7 +2450,7 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
                                         onClick={() => {
                                           setCustomModelNodeIds(prev => { const next = new Set(prev); next.delete(materializedNode.node.id); return next; });
                                           applyOperator({ type: 'set_node_property', nodeId: materializedNode.node.id, key: 'model', value: '' });
-                                          setModelDropdownOpen(false);
+                                          setModelDropdownOpenNodeId(null);
                                         }}
                                       >
                                         Default model
@@ -2231,7 +2469,7 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
                                               onClick={() => {
                                                 setCustomModelNodeIds(prev => { const next = new Set(prev); next.delete(materializedNode.node.id); return next; });
                                                 applyOperator({ type: 'set_node_property', nodeId: materializedNode.node.id, key: 'model', value: model.id });
-                                                setModelDropdownOpen(false);
+                                                setModelDropdownOpenNodeId(null);
                                               }}
                                             >
                                               {model.label}
@@ -2248,7 +2486,7 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
                                           className="w-full text-left px-2 py-1.5 text-[11px] hover:bg-white/5 text-text-muted border-t border-border-panel/50 mt-1"
                                           onClick={() => {
                                             setCustomModelNodeIds(prev => new Set(prev).add(materializedNode.node.id));
-                                            setModelDropdownOpen(false);
+                                            setModelDropdownOpenNodeId(null);
                                           }}
                                         >
                                           Custom model ID...

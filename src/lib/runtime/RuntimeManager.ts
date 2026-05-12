@@ -59,11 +59,12 @@ import {
 import { buildNewTaskSignal } from '../missionRuntime.js';
 import { buildStartAgentRunRequest } from '../runtimeDispatcher.js';
 import {
-  buildCodexInteractiveLaunchCommand,
+  buildCodexInteractiveLaunchArgs,
   buildCodexFollowupTaskSignal,
   buildGeminiInteractiveLaunchCommand,
   buildPtyLaunchCommand,
   formatLaunchArgsForLog,
+  normalizeCodexModelId,
   redactSensitiveLaunchValue,
   resolveCodexYoloFlag,
 } from '../cliCommandBuilders.js';
@@ -110,6 +111,11 @@ const MCP_HEALTH_RETRY_ATTEMPTS = 3;
 const MCP_HEALTH_RETRY_DELAY_MS = 1_000;
 const MCP_REGISTRATION_TIMEOUT_MS = 8_000;
 const TASK_ACK_TIMEOUT_MS = readRuntimeEnvNumber('VITE_RUNTIME_TASK_ACK_TIMEOUT_MS', 60_000, 30_000);
+const CODEX_TASK_ACK_TIMEOUT_MS = readRuntimeEnvNumber(
+  'VITE_RUNTIME_CODEX_TASK_ACK_TIMEOUT_MS',
+  180_000,
+  TASK_ACK_TIMEOUT_MS,
+);
 const GEMINI_TASK_ACK_TIMEOUT_MS = readRuntimeEnvNumber(
   'VITE_RUNTIME_GEMINI_TASK_ACK_TIMEOUT_MS',
   180_000,
@@ -154,8 +160,26 @@ function managedInjectionReadyWaitMsForCli(cliId: string): number {
 }
 
 function taskAckTimeoutMsForCli(cliId: string): number {
+  if (cliId === 'codex') return CODEX_TASK_ACK_TIMEOUT_MS;
   if (cliId === 'claude') return CLAUDE_TASK_ACK_TIMEOUT_MS;
   return cliId === 'gemini' ? GEMINI_TASK_ACK_TIMEOUT_MS : TASK_ACK_TIMEOUT_MS;
+}
+
+function joinRuntimePath(...parts: string[]): string {
+  return parts
+    .filter(Boolean)
+    .join('\\')
+    .replace(/[\\\/]+/g, '\\');
+}
+
+function inferCodexTrustedProjectDir(workspaceDir: string | null | undefined): string | null {
+  const workspace = workspaceDir?.trim();
+  if (!workspace) return null;
+  const normalized = workspace.replace(/[\\\/]+/g, '\\').replace(/\\+$/g, '');
+  const marker = '\\docks-testing\\';
+  const markerIndex = normalized.toLowerCase().indexOf(marker);
+  const trustedPath = markerIndex > 0 ? normalized.slice(0, markerIndex) : normalized;
+  return trustedPath.toLowerCase();
 }
 
 function isManagedCliActiveWorkStatus(status: StatusDetectionResult | null | undefined): boolean {
@@ -223,6 +247,11 @@ type SnapshotListener = (snapshot: RuntimeManagerSnapshot) => void;
 function normalizeModelForReuse(value: string | null | undefined): string | null {
   const trimmed = typeof value === 'string' ? value.trim() : '';
   return trimmed || null;
+}
+
+function normalizeModelForCli(cliId: string, value: string | null | undefined): string | null {
+  if (cliId === 'codex') return normalizeCodexModelId(value);
+  return normalizeModelForReuse(value);
 }
 
 function previewText(value: string | null | undefined, limit = 280): string | null {
@@ -534,7 +563,7 @@ class RuntimeManager {
     }
 
     console.log(
-      `[runtime] create cli=${args.cliId} model=${normalizeModelForReuse(args.modelId ?? args.model) ?? '<default>'} yolo=${Boolean(args.yolo)} executionMode=${args.executionMode} workspace=${args.workspaceDir ?? '<none>'}`,
+      `[runtime] create cli=${args.cliId} model=${normalizeModelForCli(args.cliId, args.modelId ?? args.model) ?? '<default>'} yolo=${Boolean(args.yolo)} executionMode=${args.executionMode} workspace=${args.workspaceDir ?? '<none>'}`,
     );
 
     this.forgetRetainedSessionsForRuntime(args.missionId, args.nodeId, args.terminalId);
@@ -552,10 +581,12 @@ class RuntimeManager {
       paneId: args.paneId,
       workspaceDir: args.workspaceDir,
       goal: args.goal ?? undefined,
+      frontendMode: args.frontendMode,
+      frontendCategory: args.frontendCategory,
       instructionOverride: args.instructionOverride ?? undefined,
       legalTargets: args.legalTargets,
       upstreamPayloads: args.upstreamPayloads,
-      model: args.modelId ?? args.model,
+      model: normalizeModelForCli(args.cliId, args.modelId ?? args.model),
       yolo: args.yolo,
     });
 
@@ -2777,35 +2808,54 @@ class RuntimeManager {
       TD_WORKSPACE: session.workspaceDir ?? '',
       TD_KIND: session.cliId,
     };
+    if (session.cliId === 'codex' && session.workspaceDir?.trim()) {
+      env.CODEX_HOME = joinRuntimePath(session.workspaceDir.trim(), '.terminal-docks', 'codex-home');
+    }
 
-    console.log('[runtime] spawning workflow shell', {
-      terminalId: session.terminalId,
-      cli: session.cliId,
-    });
+    const launch = await this.buildInteractiveWorkflowShellLaunchCommand(session, activationPayload);
+    const directLaunch = launch.command === 'codex' && launch.args?.length;
 
-    await this.safeSpawnTerminal(session.terminalId, {
-      rows,
-      cols,
-      cwd: session.workspaceDir ?? null,
-      env,
-    });
+    if (directLaunch) {
+      console.log(`[runtime] spawning workflow CLI directly terminal=${session.terminalId} cli=${session.cliId} args=${formatLaunchArgsForLog(launch.args ?? [], { redactLastArg: true })}`);
+      await this.safeSpawnTerminal(session.terminalId, {
+        rows,
+        cols,
+        cwd: session.workspaceDir ?? null,
+        command: launch.command,
+        args: launch.args,
+        env,
+      });
+    } else {
+      console.log('[runtime] spawning workflow shell', {
+        terminalId: session.terminalId,
+        cli: session.cliId,
+      });
 
-    console.log(`[runtime] shell spawn success terminal=${session.terminalId} cli=${session.cliId}`);
+      await this.safeSpawnTerminal(session.terminalId, {
+        rows,
+        cols,
+        cwd: session.workspaceDir ?? null,
+        env,
+      });
+    }
+
+    console.log(`[runtime] ${directLaunch ? 'direct CLI' : 'shell'} spawn success terminal=${session.terminalId} cli=${session.cliId}`);
     await resizeTerminal(session.terminalId, rows, cols).catch(() => {});
     await emit('terminal-refit-requested', { terminalId: session.terminalId }).catch(() => {});
 
     const terminalReady = await this.waitForTerminalReady(session.terminalId, 5_000);
     if (!terminalReady) {
-      throw new Error(`Terminal ${session.terminalId} did not become active after shell spawn for CLI "${session.cliId}" (node: ${session.nodeId}).`);
+      throw new Error(`Terminal ${session.terminalId} did not become active after ${directLaunch ? 'direct CLI' : 'shell'} spawn for CLI "${session.cliId}" (node: ${session.nodeId}).`);
     }
 
-    await sleep(SHELL_LAUNCH_SETTLE_MS);
-    const launch = await this.buildInteractiveWorkflowShellLaunchCommand(session, activationPayload);
-    const launchCmd = launch.command;
+    if (!directLaunch) {
+      await sleep(SHELL_LAUNCH_SETTLE_MS);
+      const launchCmd = launch.command;
 
-    console.log(`[runtime] writing CLI launch command: ${launch.promptDeliveredAtLaunch ? `${session.cliId} <startup-prompt:redacted>` : launchCmd}`);
-    await this.writeToTerminalOrFail(session, `${launchCmd}\r`);
-    await sleep(150);
+      console.log(`[runtime] writing CLI launch command: ${launch.promptDeliveredAtLaunch ? `${session.cliId} <startup-prompt:redacted>` : launchCmd}`);
+      await this.writeToTerminalOrFail(session, `${launchCmd}\r`);
+      await sleep(150);
+    }
     await resizeTerminal(session.terminalId, rows, cols).catch(() => {});
 
     useWorkspaceStore.getState().updatePaneDataByTerminalId(session.terminalId, {
@@ -2854,7 +2904,7 @@ class RuntimeManager {
   private async buildInteractiveWorkflowShellLaunchCommand(
     session: RuntimeSession,
     activationPayload: import('../missionRuntime.js').RuntimeActivationPayload,
-  ): Promise<{ command: string; promptDeliveredAtLaunch: boolean }> {
+  ): Promise<{ command: string; args?: string[]; promptDeliveredAtLaunch: boolean }> {
     if (session.cliId === 'gemini') {
       const missionId = escapeGeminiStartupPromptValue(session.missionId);
       const nodeId = escapeGeminiStartupPromptValue(session.nodeId);
@@ -2892,15 +2942,18 @@ class RuntimeManager {
       await getMcpBaseUrl(),
     ).replace(/\r$/, '');
     const resolvedYoloFlag = session.yolo ? await resolveCodexYoloFlag() : null;
+    const trustedProjectDir = inferCodexTrustedProjectDir(session.workspaceDir);
     return {
-      command: buildCodexInteractiveLaunchCommand({
+      command: 'codex',
+      args: buildCodexInteractiveLaunchArgs({
         modelId: session.model || null,
         yolo: session.yolo,
         workspaceDir: session.workspaceDir,
         mcpUrl: await getMcpUrl(),
         bootstrapPrompt,
         resolvedYoloFlag,
-        shellKind: 'windows',
+        disableKnownGlobalMcps: false,
+        trustedProjectDir,
       }),
       promptDeliveredAtLaunch: true,
     };
@@ -3023,7 +3076,8 @@ class RuntimeManager {
       `Call connect_agent with role="${role}", agentId="${session.agentId}", terminalId="${session.terminalId}", ` +
       `cli="${session.cliId}", profileId="${profileId}", sessionId="${session.sessionId}", runtimeSessionId="${session.sessionId}", ` +
       `missionId="${session.missionId}", nodeId="${session.nodeId}", attempt=${session.attempt}${payloadSuffix}. ` +
-      'After connection, wait for NEW_TASK and run get_task_details.';
+      'Use the configured Terminal Docks MCP tools in this Codex session; do not search the web for the local MCP URL. ' +
+      'After connection, wait for NEW_TASK. If get_current_task or get_task_details returns an active task, execute the actual task payload immediately and call complete_task as your final MCP action. Do not stop after connecting or after reporting that the task is ready.';
     return `${prompt}\r`;
   }
 
@@ -3056,6 +3110,8 @@ class RuntimeManager {
         nodeId: session.nodeId,
         runId: `run-${session.sessionId}`,
         attempt: session.attempt,
+        frontendMode: session.frontendMode ?? 'off',
+        frontendCategory: session.frontendCategory ?? 'marketing_site',
       },
       expectedDeliverable: {
         schema: 'completion_payload_v1',
@@ -3088,6 +3144,8 @@ class RuntimeManager {
       attempt: session.attempt,
       goal: session.goal || '',
       workspaceDir: session.workspaceDir,
+      frontendMode: session.frontendMode ?? 'off',
+      frontendCategory: session.frontendCategory ?? 'marketing_site',
       assignment,
       expectedNextAction: {
         signal: 'NEW_TASK',

@@ -69,6 +69,8 @@ run('codex adapter launch preserves MCP config shape without unsupported yolo al
   assert.equal(launch.args.includes('--dangerously-bypass-approvals-and-sandbox'), true);
   assert.equal(launch.args.includes('--yolo'), false);
   assert.equal(launch.args.some(arg => arg.startsWith('mcp_servers.terminal-docks.url=')), true);
+  assert.equal(launch.args.includes('mcp_servers.terminal-docks.startup_timeout_sec=30'), true);
+  assert.equal(launch.args.includes('mcp_servers.terminal-docks.tool_timeout_sec=120'), true);
 });
 
 run('opencode TUI launch uses project positional and avoids invented stability flags', () => {

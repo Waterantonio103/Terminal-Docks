@@ -140,6 +140,7 @@ export function createWorkflowNodeRegistry() {
       authoringMode: 'graph',
       presetId: '',
       runVersion: 1,
+      frontendMode: 'off',
     }),
     declare: (_context, builder) => {
       builder.addOutput('start', 'Start', 'flow');

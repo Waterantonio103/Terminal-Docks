@@ -268,6 +268,15 @@ export function formatLaunchArgsForLog(args: string[], options: { redactLastArg?
 // Cached result of resolveCodexYoloFlag — undefined means not yet probed.
 let _cachedCodexYoloFlag: string | null | undefined = undefined;
 
+export function normalizeCodexModelId(modelId: string | null | undefined): string | null {
+  const trimmed = typeof modelId === 'string' ? modelId.trim() : '';
+  if (!trimmed) return null;
+  if (/^gpt-\d/i.test(trimmed) || /^o\d/i.test(trimmed) || /^codex/i.test(trimmed)) {
+    return trimmed.toLowerCase();
+  }
+  return trimmed;
+}
+
 /**
  * Detect the correct yolo flag for the installed Codex CLI.
  * Prefers --yolo (newer versions); falls back to --dangerously-bypass-approvals-and-sandbox.
@@ -306,25 +315,47 @@ function buildCodexInteractiveFlagArgs({
   workspaceDir,
   mcpUrl,
   resolvedYoloFlag,
+  disableKnownGlobalMcps = true,
+  trustedProjectDir,
 }: {
   modelId?: string | null;
   yolo?: boolean;
   workspaceDir?: string | null;
   mcpUrl?: string | null;
   resolvedYoloFlag?: string | null;
+  disableKnownGlobalMcps?: boolean;
+  trustedProjectDir?: string | null;
 }): string[] {
   const yoloFlag = yolo ? (resolvedYoloFlag ?? '--dangerously-bypass-approvals-and-sandbox') : null;
+  const normalizedModelId = normalizeCodexModelId(modelId);
+  const trustedProject = trustedProjectDir?.trim();
+  const trustedProjectKey = trustedProject ? trustedProject.replace(/"/g, '\\"') : null;
   console.log(`[codex] buildCodexInteractiveFlagArgs: resolved yolo flag=${yoloFlag ?? '<none>'}`);
   const args = [
     // Keep workflow-launched Codex sessions focused on Terminal Docks. The
     // user's Codex config may include unrelated MCP servers that add startup
     // latency or fail independently of the workflow under test.
-    '-c',
-    'mcp_servers.pencil.enabled=false',
-    '-c',
-    'mcp_servers.excalidraw.enabled=false',
-    ...(mcpUrl?.trim() ? ['-c', `mcp_servers.terminal-docks.url="${mcpUrl.trim()}"`] : []),
-    ...(modelId?.trim() ? ['--model', modelId.trim()] : []),
+    ...(disableKnownGlobalMcps ? [
+      '-c',
+      'mcp_servers.pencil.enabled=false',
+      '-c',
+      'mcp_servers.excalidraw.enabled=false',
+    ] : []),
+    ...(trustedProjectKey ? [
+      '-c',
+      `projects."${trustedProjectKey}".trust_level="trusted"`,
+    ] : []),
+    ...(mcpUrl?.trim() ? [
+      '-c',
+      `mcp_servers.terminal-docks.url="${mcpUrl.trim()}"`,
+      '-c',
+      'mcp_servers.terminal-docks.enabled=true',
+      '-c',
+      'mcp_servers.terminal-docks.startup_timeout_sec=30',
+      '-c',
+      'mcp_servers.terminal-docks.tool_timeout_sec=120',
+    ] : []),
+    ...(normalizedModelId ? ['--model', normalizedModelId] : []),
     ...(workspaceDir?.trim() ? ['--cd', workspaceDir.trim()] : []),
     '--no-alt-screen',
     ...(yoloFlag ? [yoloFlag] : []),
@@ -341,6 +372,8 @@ export function buildCodexInteractiveLaunchCommand({
   bootstrapPrompt,
   resolvedYoloFlag,
   shellKind = 'windows',
+  disableKnownGlobalMcps,
+  trustedProjectDir,
 }: {
   modelId?: string | null;
   yolo?: boolean;
@@ -349,9 +382,11 @@ export function buildCodexInteractiveLaunchCommand({
   bootstrapPrompt: string;
   resolvedYoloFlag?: string | null;
   shellKind?: ShellKind;
+  disableKnownGlobalMcps?: boolean;
+  trustedProjectDir?: string | null;
 }): string {
   const normalizedPrompt = bootstrapPrompt.replace(/\s+/g, ' ').trim();
-  const parts: string[] = ['codex', ...buildCodexInteractiveFlagArgs({ modelId, yolo, workspaceDir, mcpUrl, resolvedYoloFlag })];
+  const parts: string[] = ['codex', ...buildCodexInteractiveFlagArgs({ modelId, yolo, workspaceDir, mcpUrl, resolvedYoloFlag, disableKnownGlobalMcps, trustedProjectDir })];
   parts.push(quoteShellArgument(normalizedPrompt, shellKind));
   return parts.join(' ');
 }
@@ -363,6 +398,8 @@ export function buildCodexInteractiveLaunchArgs({
   mcpUrl,
   bootstrapPrompt,
   resolvedYoloFlag,
+  disableKnownGlobalMcps,
+  trustedProjectDir,
 }: {
   modelId?: string | null;
   yolo?: boolean;
@@ -370,9 +407,11 @@ export function buildCodexInteractiveLaunchArgs({
   mcpUrl?: string | null;
   bootstrapPrompt: string;
   resolvedYoloFlag?: string | null;
+  disableKnownGlobalMcps?: boolean;
+  trustedProjectDir?: string | null;
 }): string[] {
   return [
-    ...buildCodexInteractiveFlagArgs({ modelId, yolo, workspaceDir, mcpUrl, resolvedYoloFlag }),
+    ...buildCodexInteractiveFlagArgs({ modelId, yolo, workspaceDir, mcpUrl, resolvedYoloFlag, disableKnownGlobalMcps, trustedProjectDir }),
     bootstrapPrompt,
   ];
 }
@@ -422,13 +461,13 @@ export function buildCodexFollowupTaskSignal({
     const escapedMissionId = escapeInlineInstruction(missionId.trim());
     const escapedNodeId = escapeInlineInstruction(nodeId.trim());
     const safeAttempt = Number.isInteger(attempt) && Number(attempt) > 0 ? Number(attempt) : 1;
-    return `NEW_TASK. call get_task_details({ missionId: "${escapedMissionId}", nodeId: "${escapedNodeId}" }), execute it, then call complete_task({ missionId: "${escapedMissionId}", nodeId: "${escapedNodeId}", attempt: ${safeAttempt}, outcome: "success" or "failure", summary: "<concise summary>" }) as the final MCP action. Do not stop after a normal final answer.`;
+    return `NEW_TASK. call get_task_details({ missionId: "${escapedMissionId}", nodeId: "${escapedNodeId}" }), execute the actual task from that payload, then call complete_task({ missionId: "${escapedMissionId}", nodeId: "${escapedNodeId}", attempt: ${safeAttempt}, outcome: "success" or "failure", summary: "<concise summary>" }) as the final MCP action. Do not stop after connecting, after reading task details, or after a normal final answer.`;
   }
   if (sessionId?.trim()) {
     const escaped = escapeInlineInstruction(sessionId.trim());
-    return `NEW_TASK. call get_current_task({ sessionId: "${escaped}" }), execute it, then call complete_task as the final MCP action. Do not stop after a normal final answer.`;
+    return `NEW_TASK. call get_current_task({ sessionId: "${escaped}" }), execute the active task it returns, then call complete_task as the final MCP action. Do not stop after connecting, after reading task details, or after a normal final answer.`;
   }
-  return 'NEW_TASK. call get_current_task(), execute it, then call complete_task as the final MCP action. Do not stop after a normal final answer.';
+  return 'NEW_TASK. call get_current_task(), execute the active task it returns, then call complete_task as the final MCP action. Do not stop after connecting, after reading task details, or after a normal final answer.';
 }
 
 export interface PtyLaunchOptions {
@@ -482,7 +521,8 @@ export function buildPtyLaunchCommandParts(
 
   if (cli === 'codex') {
     const args: string[] = [];
-    if (model) args.push('--model', model);
+    const codexModel = normalizeCodexModelId(model);
+    if (codexModel) args.push('--model', codexModel);
     if (workspaceDir) args.push('--cd', workspaceDir);
     args.push('--no-alt-screen');
     if (options.yolo) args.push('--dangerously-bypass-approvals-and-sandbox');

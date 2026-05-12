@@ -23,7 +23,9 @@ import {
   initMcpSourceRegistry,
   jsonRpcError,
   jsonRpcResult,
+  listAgentVisibleProxyResources,
   listAgentVisibleProxyTools,
+  readProxyResource,
   refreshEnabledSourcesInBackground,
   registerMcpSourceRoutes,
   resolveProxyTool,
@@ -281,24 +283,37 @@ function isSingleRpc(body, method) {
   return body && !Array.isArray(body) && body.jsonrpc === '2.0' && body.method === method;
 }
 
-function appendProxyToolsToPayload(payload) {
+function appendProxyToolsToPayload(payload, context = {}) {
   if (payload?.result && Array.isArray(payload.result.tools)) {
     return {
       ...payload,
       result: {
         ...payload.result,
-        tools: [...payload.result.tools, ...listAgentVisibleProxyTools()],
+        tools: [...payload.result.tools, ...listAgentVisibleProxyTools(context)],
       },
     };
   }
   return payload;
 }
 
-function appendProxyToolsToText(text) {
+function appendResourcesToPayload(payload, context = {}) {
+  if (payload?.result && Array.isArray(payload.result.resources)) {
+    return {
+      ...payload,
+      result: {
+        ...payload.result,
+        resources: [...payload.result.resources, ...listAgentVisibleProxyResources(context)],
+      },
+    };
+  }
+  return payload;
+}
+
+function appendProxyPayloadToText(text, appendFn, context = {}) {
   const trimmed = String(text || '').trim();
   if (!trimmed) return text;
   if (!trimmed.split(/\r?\n/).some(line => line.startsWith('data:'))) {
-    return JSON.stringify(appendProxyToolsToPayload(JSON.parse(trimmed)));
+    return JSON.stringify(appendFn(JSON.parse(trimmed), context));
   }
   return trimmed.split(/(\r?\n\r?\n)/).map(frame => {
     if (/^\r?\n\r?\n$/.test(frame)) return frame;
@@ -307,12 +322,12 @@ function appendProxyToolsToText(text) {
     if (!dataLines.length) return frame;
     const data = dataLines.map(line => line.slice(5).trim()).join('\n').trim();
     if (!data || data === '[DONE]') return frame;
-    const updated = appendProxyToolsToPayload(JSON.parse(data));
+    const updated = appendFn(JSON.parse(data), context);
     return lines.map(line => line.startsWith('data:') ? `data: ${JSON.stringify(updated)}` : line).join('\n');
   }).join('');
 }
 
-async function handleToolsListWithProxy(req, res, handler) {
+async function handleListWithProxy(req, res, handler, appendFn, context = {}) {
   const chunks = [];
   const originalWrite = res.write.bind(res);
   const originalEnd = res.end.bind(res);
@@ -344,9 +359,9 @@ async function handleToolsListWithProxy(req, res, handler) {
     const original = Buffer.concat(chunks).toString('utf8');
     let output = original;
     try {
-      output = appendProxyToolsToText(original);
+      output = appendProxyPayloadToText(original, appendFn, context);
     } catch (error) {
-      console.warn('[mcp] Failed to append proxy tools:', error);
+      console.warn('[mcp] Failed to append proxy payload:', error);
     }
     res.setHeader = originalSetHeader;
     res.writeHead = originalWriteHead;
@@ -355,20 +370,39 @@ async function handleToolsListWithProxy(req, res, handler) {
   await handler();
 }
 
-async function handleProxyToolCall(req, res) {
+async function handleProxyToolCall(req, res, context = {}) {
   if (!isSingleRpc(req.body, 'tools/call')) return { handled: false };
   const toolName = req.body.params?.name;
   if (typeof toolName !== 'string') return { handled: false };
-  const resolved = resolveProxyTool(toolName);
+  const resolved = resolveProxyTool(toolName, context);
   if (!resolved.ok && resolved.reason === 'not_found') return { handled: false };
   try {
-    const result = await callProxyTool(toolName, req.body.params?.arguments ?? {});
+    const result = await callProxyTool(toolName, req.body.params?.arguments ?? {}, context);
     res.json(jsonRpcResult(req.body.id, result));
     return { handled: true };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     res.json(jsonRpcError(req.body.id, message));
     return { handled: true, failedToolIds: new Set([req.body.id, toolName]), error: message };
+  }
+}
+
+async function handleProxyResourceRead(req, res, context = {}) {
+  if (!isSingleRpc(req.body, 'resources/read')) return { handled: false };
+  const uri = req.body.params?.uri;
+  if (typeof uri !== 'string' || !uri.startsWith('td-mcp://')) return { handled: false };
+  try {
+    const read = await readProxyResource(uri, context);
+    if (!read.ok) {
+      res.json(jsonRpcError(req.body.id, `MCP resource ${uri} is unavailable: ${read.reason}.`));
+      return { handled: true, failedToolIds: new Set([req.body.id]), error: read.reason };
+    }
+    res.json(jsonRpcResult(req.body.id, read.result));
+    return { handled: true };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    res.json(jsonRpcError(req.body.id, message));
+    return { handled: true, failedToolIds: new Set([req.body.id]), error: message };
   }
 }
 
@@ -449,9 +483,12 @@ app.post('/internal/push', (req, res) => {
 
 app.post('/mcp', async (req, res) => {
   const sid = normalizeHeaderValue(req.headers['mcp-session-id']);
+  const context = { sessionId: sid ?? undefined, role: sid ? sessions[sid]?.role : undefined };
   await handleMcpRequestWithToolEvents(req, res, async () => {
-    const proxyCall = await handleProxyToolCall(req, res);
+    const proxyCall = await handleProxyToolCall(req, res, context);
     if (proxyCall.handled) return proxyCall;
+    const proxyResource = await handleProxyResourceRead(req, res, context);
+    if (proxyResource.handled) return proxyResource;
 
     const handleTransport = async () => {
       if (sid && sessions[sid]?.transport) {
@@ -460,6 +497,7 @@ app.post('/mcp', async (req, res) => {
       let initializedSessionId = null;
       const transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: () => randomUUID(),
+        enableJsonResponse: true,
         onsessioninitialized: (sessionId) => {
           initializedSessionId = sessionId;
           sessions[sessionId] = { transport };
@@ -473,7 +511,13 @@ app.post('/mcp', async (req, res) => {
     };
 
     if (isSingleRpc(req.body, 'tools/list')) {
-      await handleToolsListWithProxy(req, res, handleTransport);
+      await handleListWithProxy(req, res, handleTransport, appendProxyToolsToPayload, context);
+      void refreshEnabledSourcesInBackground();
+      return {};
+    }
+
+    if (isSingleRpc(req.body, 'resources/list')) {
+      await handleListWithProxy(req, res, handleTransport, appendResourcesToPayload, context);
       void refreshEnabledSourcesInBackground();
       return {};
     }
@@ -486,6 +530,12 @@ app.post('/mcp', async (req, res) => {
 app.get('/mcp', async (req, res) => {
   const sid = req.headers['mcp-session-id'];
   if (!sid || !sessions[sid]?.transport) return res.status(400).send('Invalid session');
+  await sessions[sid].transport.handleRequest(req, res);
+});
+
+app.delete('/mcp', async (req, res) => {
+  const sid = normalizeHeaderValue(req.headers['mcp-session-id']);
+  if (!sid || !sessions[sid]?.transport) return res.status(404).send('Invalid session');
   await sessions[sid].transport.handleRequest(req, res);
 });
 

@@ -73,7 +73,16 @@ function parseColorToHex(color: string): string {
 }
 
 export function SettingsOverlay() {
-  const { theme, setTheme, setShowSettings, customTheme, setCustomThemeColor, resetCustomTheme } = useWorkspaceStore();
+  const {
+    theme,
+    setTheme,
+    setShowSettings,
+    customTheme,
+    setCustomThemeColor,
+    resetCustomTheme,
+    canvasEffectsEnabled,
+    setCanvasEffectsEnabled,
+  } = useWorkspaceStore();
   const [activePicker, setActivePicker] = useState<keyof CustomThemeColors | null>(null);
   const pickerRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -233,6 +242,29 @@ export function SettingsOverlay() {
                   </div>
                </div>
             </div>
+          </section>
+
+          {/* Canvas Effects Section */}
+          <section className="space-y-6">
+            <div className="flex items-center gap-2 border-b border-border-panel pb-2">
+              <Sparkles size={16} className="text-text-muted" />
+              <h2 className="text-xs font-bold uppercase text-text-secondary">Canvas</h2>
+            </div>
+
+            <label className="background-bg-panel border border-border-panel rounded-2xl p-5 flex items-center justify-between gap-6 cursor-pointer">
+              <div className="min-w-0">
+                <div className="text-sm font-bold text-text-primary">Background effects</div>
+                <div className="text-[11px] text-text-muted mt-1 leading-relaxed">
+                  Controls animated Node Graph canvas effects, including the UI-mode pulse shader.
+                </div>
+              </div>
+              <input
+                type="checkbox"
+                checked={canvasEffectsEnabled}
+                onChange={(event) => setCanvasEffectsEnabled(event.target.checked)}
+                className="h-5 w-5 accent-accent-primary shrink-0"
+              />
+            </label>
           </section>
 
           {/* Custom Theme Section */}

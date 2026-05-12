@@ -2,6 +2,13 @@ import { z } from 'zod';
 import { db } from '../db/index.mjs';
 import { makeToolText, appendWorkflowEvent } from '../utils/index.mjs';
 import { emitAgentEvent } from '../state.mjs';
+import {
+  buildFrontendSpecFramework,
+  classifyFrontendCategory,
+  evaluateFrontendSpecCoverage,
+  FRONTEND_CATEGORY_OVERLAYS,
+  FRONTEND_SPEC_MODES,
+} from '../utils/frontend-spec-framework.mjs';
 
 export function registerQualityTools(server, getSessionId) {
   server.registerTool('submit_test_result', {
@@ -86,5 +93,49 @@ export function registerQualityTools(server, getSessionId) {
       payload: { objective }
     });
     return { content: [{ type: 'text', text: 'Quality gate requested. Mission Control will schedule a reviewer.' }] };
+  });
+
+  server.registerTool('get_frontend_spec_framework', {
+    title: 'Get Frontend Spec Framework',
+    description: 'Return fill-in schemas, category overlays, intake steps, and rubrics for frontend PRD.md, DESIGN.md, and structure.md specs.',
+    inputSchema: {
+      categoryId: z.enum(Object.keys(FRONTEND_CATEGORY_OVERLAYS)).optional(),
+      mode: z.enum(Object.keys(FRONTEND_SPEC_MODES)).optional(),
+    }
+  }, async ({ categoryId, mode }) => {
+    return makeToolText(JSON.stringify(buildFrontendSpecFramework({ categoryId, mode }), null, 2));
+  });
+
+  server.registerTool('classify_frontend_spec_request', {
+    title: 'Classify Frontend Spec Request',
+    description: 'Classify a frontend task into the closest framework category before spec intake.',
+    inputSchema: {
+      prompt: z.string().min(1),
+    }
+  }, async ({ prompt }) => {
+    return makeToolText(JSON.stringify(classifyFrontendCategory(prompt), null, 2));
+  });
+
+  server.registerTool('evaluate_frontend_spec_intake', {
+    title: 'Evaluate Frontend Spec Intake',
+    description: 'Grade supplied PRD.md, DESIGN.md, and structure.md/architecture.md content for schema coverage without overwriting user files.',
+    inputSchema: {
+      categoryId: z.enum(Object.keys(FRONTEND_CATEGORY_OVERLAYS)).optional(),
+      prdText: z.string().optional(),
+      designText: z.string().optional(),
+      structureText: z.string().optional(),
+      architectureText: z.string().optional(),
+    }
+  }, async ({ categoryId = 'marketing_site', prdText, designText, structureText, architectureText }) => {
+    const result = evaluateFrontendSpecCoverage({
+      categoryId,
+      suppliedFiles: {
+        'PRD.md': prdText,
+        'DESIGN.md': designText,
+        'structure.md': structureText,
+        'architecture.md': architectureText,
+      },
+    });
+    return makeToolText(JSON.stringify(result, null, 2));
   });
 }

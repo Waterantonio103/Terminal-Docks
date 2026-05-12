@@ -1,6 +1,7 @@
 import { db } from '../db/index.mjs';
 import { loadAgentRoster } from '../utils/index.mjs';
 import { sessions } from '../state.mjs';
+import { buildFrontendSpecFramework } from '../utils/frontend-spec-framework.mjs';
 
 export function registerResources(server) {
   server.registerResource('mission', 'mission://{missionId}', {
@@ -38,5 +39,16 @@ export function registerResources(server) {
     title: 'Active Sessions',
   }, async () => ({
     contents: [{ uri: 'sessions://live', mimeType: 'application/json', text: JSON.stringify(Object.keys(sessions), null, 2) }]
+  }));
+
+  server.registerResource('frontend_spec_framework', 'frontend-spec://framework', {
+    title: 'Frontend Spec Framework',
+    description: 'Fill-in schemas, category overlays, intake steps, and rubrics for frontend PRD.md, DESIGN.md, and structure.md specs.',
+  }, async () => ({
+    contents: [{
+      uri: 'frontend-spec://framework',
+      mimeType: 'application/json',
+      text: JSON.stringify(buildFrontendSpecFramework(), null, 2),
+    }]
   }));
 }

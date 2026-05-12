@@ -2,6 +2,7 @@ import { db } from '../db/index.mjs';
 import { parseJsonSafe } from '../utils/index.mjs';
 import { getMissionNode, getMissionNodeRuntime, getRuntimeSessionByAttempt, getLegalOutgoingTargets, loadCompiledMissionRecord } from '../utils/workflow.mjs';
 import { ackTaskPush, emitAgentEvent } from '../state.mjs';
+import { buildFrontendSpecFramework } from '../utils/frontend-spec-framework.mjs';
 
 export function extractUpstreamContext(inboxMessages) {
   const findings = [];
@@ -65,6 +66,9 @@ export function buildTaskDetails(missionId, nodeId) {
       authoringMode: 'adhoc',
       presetId: null,
       runVersion: 1,
+      frontendMode: 'off',
+      frontendCategory: 'marketing_site',
+      specProfile: 'none',
       objective: '',
       task: null,
       node: {
@@ -142,6 +146,12 @@ export function buildTaskDetails(missionId, nodeId) {
   const events = db.prepare(
     "SELECT id, type, severity, message, created_at FROM workflow_events WHERE mission_id = ? ORDER BY id ASC"
   ).all(missionId);
+  const frontendMode = record.mission.metadata?.frontendMode ?? 'off';
+  const frontendCategory = record.mission.metadata?.frontendCategory ?? 'marketing_site';
+  const specProfile = record.mission.metadata?.specProfile ?? 'none';
+  const frontendFramework = frontendMode !== 'off' || specProfile === 'frontend_three_file'
+    ? buildFrontendSpecFramework({ categoryId: frontendCategory, mode: frontendMode === 'off' ? 'aligned' : frontendMode })
+    : null;
 
   return {
     missionId,
@@ -151,6 +161,10 @@ export function buildTaskDetails(missionId, nodeId) {
     authoringMode: record.mission.metadata?.authoringMode ?? null,
     presetId: record.mission.metadata?.presetId ?? null,
     runVersion: Number.isInteger(record.mission.metadata?.runVersion) ? record.mission.metadata.runVersion : 1,
+    frontendMode,
+    frontendCategory,
+    specProfile,
+    frontendFramework,
     goal: record.mission.task?.prompt ?? '',
     objective: node.instructionOverride || record.mission.task?.prompt || '',
     acceptanceCriteria: node.acceptanceCriteria || [],
@@ -201,6 +215,10 @@ export function buildTaskDetails(missionId, nodeId) {
       terminalId: node.terminal?.terminalId ?? runtimeSession?.terminal_id ?? null,
       modelId: node.terminal?.model ?? null,
       yolo: Boolean(node.terminal?.yolo),
+      frontendMode,
+      frontendCategory,
+      specProfile,
+      frontendFramework,
     },
   };
 }

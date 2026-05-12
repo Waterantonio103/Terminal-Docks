@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import {
   Layout, Save, Trash2, Play,
-  Activity, Monitor,
+  Activity, Monitor, Sparkles,
 } from 'lucide-react';
 import { useWorkspaceStore, selectActivePanes } from '../../store/workspace';
 
@@ -9,6 +9,8 @@ export function SettingsTab() {
   const { savedLayouts, saveLayout, loadLayout, deleteLayout, clearPanes } =
     useWorkspaceStore();
   const panes = useWorkspaceStore(selectActivePanes);
+  const canvasEffectsEnabled = useWorkspaceStore(state => state.canvasEffectsEnabled);
+  const setCanvasEffectsEnabled = useWorkspaceStore(state => state.setCanvasEffectsEnabled);
   const [layoutName, setLayoutName] = useState('');
   const [confirmClear, setConfirmClear] = useState(false);
 
@@ -109,6 +111,27 @@ export function SettingsTab() {
           </div>
         </section>
       )}
+
+      {/* Canvas */}
+      <section className="space-y-3">
+        <div className="flex items-center gap-2 border-b border-border-panel pb-2 px-1">
+          <Sparkles size={14} className="text-text-muted" />
+          <h2 className="text-[10px] font-bold uppercase text-text-secondary tracking-widest">Canvas</h2>
+        </div>
+
+        <label className="flex items-center justify-between gap-3 px-1 py-1.5 cursor-pointer">
+          <div className="min-w-0">
+            <div className="text-xs font-bold text-text-primary">Canvas effects</div>
+            <div className="text-[10px] text-text-muted leading-relaxed">Animated Node Graph backgrounds.</div>
+          </div>
+          <input
+            type="checkbox"
+            checked={canvasEffectsEnabled}
+            onChange={(event) => setCanvasEffectsEnabled(event.target.checked)}
+            className="h-4 w-4 accent-accent-primary shrink-0"
+          />
+        </label>
+      </section>
 
       {/* Workspace Controls */}
       <section className="mt-auto pt-4 border-t border-border-panel space-y-4">

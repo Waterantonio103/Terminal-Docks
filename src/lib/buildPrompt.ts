@@ -1,5 +1,5 @@
 import agentsConfig from '../config/agents.js';
-import type { WorkflowAuthoringMode } from '../store/workspace.js';
+import type { FrontendSpecCategory, FrontendWorkflowMode, WorkflowAuthoringMode } from '../store/workspace.js';
 
 type AgentDef = (typeof agentsConfig.agents)[number];
 
@@ -23,6 +23,8 @@ export interface LaunchContext {
   authoringMode?: WorkflowAuthoringMode;
   presetId?: string | null;
   runVersion?: number;
+  frontendMode?: FrontendWorkflowMode;
+  frontendCategory?: FrontendSpecCategory;
   instanceNum?: number;
   totalInstances?: number;
   task: string;
@@ -96,6 +98,9 @@ export function buildLaunchPrompt(agentId: string, ctx: LaunchContext, instructi
     }
     if (typeof ctx.runVersion === 'number') {
       lines.push(`Graph runVersion: ${ctx.runVersion}.`);
+    }
+    if (ctx.frontendMode && ctx.frontendMode !== 'off') {
+      lines.push(`Frontend/UI workflow mode: ${ctx.frontendMode}. Infer the product type from the task prompt and supplied specs, then use accepted PRD.md, DESIGN.md, and structure.md/architecture.md specs as binding artifacts before implementation or review.`);
     }
 
     lines.push(`Mission: ${ctx.missionId}. Node: ${ctx.nodeId}. Current attempt: ${ctx.attempt ?? 1}.`);

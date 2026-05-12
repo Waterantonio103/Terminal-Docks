@@ -155,6 +155,30 @@ try {
     assert.match(details.completionContract.note, /Natural-language final answers do not complete/);
   });
 
+  await run('get_task_details includes frontend framework for strict UI missions', async () => {
+    resetStarlinkState();
+    const mission = demoMission();
+    mission.metadata.frontendMode = 'strict_ui';
+    mission.metadata.frontendCategory = 'admin_internal_tool';
+    mission.metadata.specProfile = 'frontend_three_file';
+    seedCompiledMission(mission);
+    seedMissionNodeRuntime({
+      missionId: 'mission-graph',
+      nodeId: 'builder',
+      roleId: 'builder',
+      status: 'running',
+      attempt: 1,
+      currentWaveId: 'root:mission-graph',
+    });
+
+    const details = buildTaskDetails('mission-graph', 'builder');
+    assert.equal(details.frontendMode, 'strict_ui');
+    assert.equal(details.specProfile, 'frontend_three_file');
+    assert.equal(details.frontendFramework.categoryId, 'admin_internal_tool');
+    assert.ok(details.frontendFramework.schemas['PRD.md'].requiredSections.includes('Target Users'));
+    assert.equal(details.assignment.frontendFramework.categoryId, 'admin_internal_tool');
+  });
+
   await run('get_current_task resolves the bound runtime session', async () => {
     resetStarlinkState();
     seedCompiledMission(demoMission());

@@ -27,6 +27,10 @@ const MCP_PERMISSION_PROMPT_RE =
   /Allow\s+the\s+.+?\s+MCP\s+server\s+to\s+run\s+tool\s+"[^"]+"\?\s*[\s\S]*(?:\b1\.\s*Allow\b|\bAlways\s+allow\b|\benter\s+to\s+submit\b)/i;
 const GENERIC_PERMISSION_PROMPT_RE =
   /(?:allow|approve|grant)\s+(?:this\s+)?(?:command|tool|operation|request|permission)\??\s*[\s\S]*(?:\b1\.\s*Allow\b|\bAlways\s+allow\b|\by\/n\b|\[y\/n\])/i;
+const CONFIRMATION_PERMISSION_PROMPT_RE =
+  /(?:\bproceed\??\s*(?:\(\s*y\s*\)|\[\s*y\s*\/\s*n\s*\]|\byes\b|\by\/n\b)|\b(?:yes|no)\b[\s\S]{0,80}\b(?:approve|deny|edit|edits|command|tool|proceed)\b|\bapprove\s+edits\s+manually\b)/i;
+const CODEX_STARTUP_PERMISSION_PROMPT_RE =
+  /(?:\b(?:do\s+you\s+)?(?:want\s+to\s+)?trust\s+(?:the\s+)?(?:files\s+in\s+)?(?:this\s+)?folder\b[\s\S]{0,180}(?:\by\s*\/\s*n\b|\[\s*y\s*\/\s*n\s*\]|\(\s*y\s*\/\s*n\s*\)|\byes\b|\bno\b|\?)|\b(?:enable|allow|approve|grant|turn\s+on)\s+(?:the\s+)?(?:admin\s+)?sandbox\b[\s\S]{0,220}(?:\by\s*\/\s*n\b|\[\s*y\s*\/\s*n\s*\]|\(\s*y\s*\/\s*n\s*\)|\byes\b|\bno\b|\?)|\badmin\s+sandbox\b[\s\S]{0,220}(?:\by\s*\/\s*n\b|\[\s*y\s*\/\s*n\s*\]|\(\s*y\s*\/\s*n\s*\)|\byes\b|\bno\b|\?))/i;
 const COMPLETION_RE = /(?:\btask\s+(?:completed|complete)\b|turn\.completed|exit code\s+0|(?:^|\n)\s*[─-]+\s*worked for\b|\bworked for\s+\d+\s*(?:s|m|h))/i;
 const FAILURE_RE =
   /(?:\btask\s+failed\b|\bfatal error\b|\buncaught exception\b|\bMCP error\b|exit code\s+[1-9]|\bfailed process\b|\bcommand not found\b|\bnot recognized as\b|\bunknown option\b|\bunexpected argument\b|\binvalid flag\b|(?:^|\n)\s*(?:error|fatal):)/i;
@@ -100,7 +104,16 @@ export const codexAdapter: CliAdapter = {
       'mcp_servers.pencil.enabled=false',
       '-c',
       'mcp_servers.excalidraw.enabled=false',
-      ...(context.mcpUrl?.trim() ? ['-c', `mcp_servers.terminal-docks.url="${context.mcpUrl.trim()}"`] : []),
+      ...(context.mcpUrl?.trim() ? [
+        '-c',
+        `mcp_servers.terminal-docks.url="${context.mcpUrl.trim()}"`,
+        '-c',
+        'mcp_servers.terminal-docks.enabled=true',
+        '-c',
+        'mcp_servers.terminal-docks.startup_timeout_sec=30',
+        '-c',
+        'mcp_servers.terminal-docks.tool_timeout_sec=120',
+      ] : []),
     ];
     if (context.model?.trim()) args.push('--model', context.model.trim());
     if (context.workspaceDir?.trim()) args.push('--cd', context.workspaceDir.trim());
@@ -171,12 +184,12 @@ export const codexAdapter: CliAdapter = {
   },
 
   buildInitialPrompt(context: TaskContext): string {
-    return `NEW_TASK. call get_task_details({ missionId: "${escapeInstructionValue(context.missionId)}", nodeId: "${escapeInstructionValue(context.nodeId)}" }), execute it, then call complete_task as the final MCP action. Do not stop after a normal final answer.`;
+    return `NEW_TASK. call get_task_details({ missionId: "${escapeInstructionValue(context.missionId)}", nodeId: "${escapeInstructionValue(context.nodeId)}" }), execute the actual task from that payload, then call complete_task({ missionId: "${escapeInstructionValue(context.missionId)}", nodeId: "${escapeInstructionValue(context.nodeId)}", attempt: ${context.attempt}, outcome: "success" or "failure", summary: "<concise summary>" }) as the final MCP action. Do not stop after connecting, after reading task details, or after a normal final answer.`;
   },
 
   detectPermissionRequest(output: string): PermissionDetectionResult | null {
     const clean = stripTerminalControls(output);
-    if (!MCP_PERMISSION_PROMPT_RE.test(clean) && !GENERIC_PERMISSION_PROMPT_RE.test(clean)) {
+    if (!MCP_PERMISSION_PROMPT_RE.test(clean) && !GENERIC_PERMISSION_PROMPT_RE.test(clean) && !CONFIRMATION_PERMISSION_PROMPT_RE.test(clean) && !CODEX_STARTUP_PERMISSION_PROMPT_RE.test(clean)) {
       return null;
     }
 
@@ -184,7 +197,8 @@ export const codexAdapter: CliAdapter = {
     const promptLine = lines.slice(-12).join('\n');
 
     let category: PermissionRequest['category'] = 'unknown';
-    if (/bash|command|shell|exec|run\s/i.test(promptLine)) category = 'shell_execution';
+    if (/admin\s+sandbox|bash|command|shell|exec|run\s/i.test(promptLine)) category = 'shell_execution';
+    else if (/trust\s+(?:the\s+)?(?:files\s+in\s+)?(?:this\s+)?folder/i.test(promptLine)) category = 'file_read';
     else if (/edit|write|create|modify|delete.*file/i.test(promptLine)) category = 'file_edit';
     else if (/read|cat|open.*file/i.test(promptLine)) category = 'file_read';
     else if (/network|fetch|curl|http|request/i.test(promptLine)) category = 'network_access';
@@ -266,11 +280,11 @@ export const codexAdapter: CliAdapter = {
         const escapedNodeId = escapeInstructionValue(nodeId);
         target =
           `NEW_TASK. call get_task_details({ missionId: "${escapedMissionId}", nodeId: "${escapedNodeId}" }), ` +
-          'execute this graph node, then call ' +
+          'execute the actual task from that payload, then call ' +
           `complete_task({ missionId: "${escapedMissionId}", nodeId: "${escapedNodeId}", attempt: ${attempt}, outcome: "success" or "failure", summary: "<concise summary>" }) ` +
-          'as the final MCP action. Do not stop after a normal final answer.';
+          'as the final MCP action. Do not stop after connecting, after reading task details, or after a normal final answer.';
       } else if (sessionIdMatch) {
-        target = `NEW_TASK. call get_current_task({ sessionId: "${escapeInstructionValue(sessionIdMatch[1])}" }), execute it, then call complete_task as the final MCP action. Do not stop after a normal final answer.`;
+        target = `NEW_TASK. call get_current_task({ sessionId: "${escapeInstructionValue(sessionIdMatch[1])}" }), execute the active task it returns, then call complete_task as the final MCP action. Do not stop after connecting, after reading task details, or after a normal final answer.`;
       }
     }
 

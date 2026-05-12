@@ -3,6 +3,7 @@ import { listen } from '@tauri-apps/api/event';
 import { missionRepository } from '../../lib/missionRepository.js';
 import { runtimeManager } from '../../lib/runtime/RuntimeManager.js';
 import type { RuntimeManagerEvent } from '../../lib/runtime/RuntimeTypes.js';
+import { workflowOrchestrator } from '../../lib/workflow/WorkflowOrchestrator.js';
 import {
   countNeedsYou,
   deriveActionCenterItems,
@@ -15,11 +16,12 @@ import {
 const MAX_RECENT_EVENTS = 50;
 
 function titleForRuntimeEvent(event: RuntimeManagerEvent): string | null {
+  const completedLabel = runtimeAgentProgressLabel(event);
   switch (event.type) {
     case 'permission_resolved':
       return `Permission ${event.decision === 'approve' ? 'approved' : 'denied'}`;
     case 'session_completed':
-      return `Runtime ${event.outcome === 'success' ? 'completed' : 'failed'}`;
+      return `${completedLabel} ${event.outcome === 'success' ? 'completed' : 'failed'}`;
     case 'session_failed':
       return 'Runtime failed';
     case 'session_disconnected':
@@ -29,9 +31,27 @@ function titleForRuntimeEvent(event: RuntimeManagerEvent): string | null {
   }
 }
 
+function runtimeAgentProgressLabel(event: RuntimeManagerEvent): string {
+  if (!('sessionId' in event)) return 'Runtime';
+  const snapshot = runtimeManager.snapshot();
+  const session = snapshot.sessions.find(candidate => candidate.sessionId === event.sessionId);
+  const missionId = session?.missionId;
+  const nodeId = event.nodeId;
+  const run = missionId ? workflowOrchestrator.getRun(missionId) : undefined;
+  const nodeDefinition = run?.definition.nodes.find(node => node.id === nodeId);
+  const agentName = nodeDefinition?.config?.label || nodeDefinition?.roleId || session?.role || nodeId || 'Runtime';
+  const agentNodes = run?.definition.nodes.filter(node => node.kind === 'agent') ?? [];
+  const index = agentNodes.findIndex(node => node.id === nodeId);
+  const position = index >= 0 && agentNodes.length > 0 ? ` (${index + 1}/${agentNodes.length})` : '';
+  return `${agentName}${position}`;
+}
+
 function runtimeRecentEvent(event: RuntimeManagerEvent): ActionCenterRecentInput | null {
   const title = titleForRuntimeEvent(event);
   if (!title) return null;
+  const session = 'sessionId' in event
+    ? runtimeManager.snapshot().sessions.find(candidate => candidate.sessionId === event.sessionId)
+    : undefined;
 
   return {
     id: `${event.type}:${event.sessionId}:${Date.now()}`,
@@ -47,6 +67,7 @@ function runtimeRecentEvent(event: RuntimeManagerEvent): ActionCenterRecentInput
     severity: event.type === 'session_failed' || event.type === 'session_disconnected' ? 'critical' : 'success',
     sessionId: event.sessionId,
     nodeId: event.nodeId,
+    missionId: session?.missionId,
   };
 }
 
@@ -126,6 +147,20 @@ export function useActionCenterItems(): {
       if (!recent) return;
       setRecentEvents(prev => [recent, ...prev].slice(0, MAX_RECENT_EVENTS));
     });
+    const unlistenWorkflow = workflowOrchestrator.subscribe((event) => {
+      if (event.type !== 'run_completed') return;
+      const recent: ActionCenterRecentInput = {
+        id: `workflow-completed:${event.runId}:${Date.now()}`,
+        source: 'workflow',
+        eventType: 'run_completed',
+        title: 'Workflow completed',
+        detail: `Mission ${event.runId.slice(0, 8)} finished with ${event.outcome}.`,
+        createdAt: Date.now(),
+        severity: event.outcome === 'success' ? 'success' : 'warning',
+        missionId: event.runId,
+      };
+      setRecentEvents(prev => [recent, ...prev].slice(0, MAX_RECENT_EVENTS));
+    });
     const unlistenSnapshot = runtimeManager.subscribeSnapshot(() => {
       setSessions(snapshotSessions());
     });
@@ -134,6 +169,7 @@ export function useActionCenterItems(): {
       cancelled = true;
       if (unlistenInbox) unlistenInbox();
       unlistenRuntime();
+      unlistenWorkflow.unsubscribe();
       unlistenSnapshot();
     };
   }, [refreshInbox]);

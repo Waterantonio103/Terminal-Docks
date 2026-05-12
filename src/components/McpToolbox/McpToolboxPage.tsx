@@ -1,6 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
-import { Activity, AlertTriangle, Archive, Ban, Bot, Plus, RefreshCw, Save, SlidersHorizontal, Wrench, X } from 'lucide-react';
+import { Activity, AlertTriangle, Archive, Ban, Bot, Check, Plus, RefreshCw, RotateCcw, Save, Search, SlidersHorizontal, Wrench, X } from 'lucide-react';
 import type { CSSProperties } from 'react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import agentsConfig from '../../config/agents';
@@ -30,6 +30,13 @@ interface BackendTool {
   confirmation?: ToolConfirmationMode;
   risk?: ToolRisk;
   allowedRoles?: string[];
+  defaultArgs?: JsonObject;
+}
+
+interface BackendSourceAuth {
+  type: 'none' | 'bearer' | 'headers';
+  hasBearerToken?: boolean;
+  headerNames?: string[];
 }
 
 interface BackendSource {
@@ -45,8 +52,15 @@ interface BackendSource {
   confirmation: ToolConfirmationMode;
   risk: ToolRisk;
   allowedRoles: string[];
+  auth?: BackendSourceAuth;
+  config?: JsonObject | null;
+  defaultArgs?: JsonObject;
+  callTimeoutMs?: number;
+  staleAfterMs?: number;
+  trustAccepted?: boolean;
   lastDiscoveredAt?: string | null;
   tools: BackendTool[];
+  resources?: Array<{ proxiedUri: string; name: string; mimeType?: string | null; status: string }>;
 }
 
 interface ToolView {
@@ -63,6 +77,7 @@ interface ToolView {
   confirmation: ToolConfirmationMode;
   risk: ToolRisk;
   allowedRoles: string[];
+  defaultArgs: JsonObject;
 }
 
 interface SourceView extends Omit<BackendSource, 'tools'> {
@@ -74,20 +89,69 @@ interface McpFeedItem {
   id: string;
   agent: string;
   tool: string;
+  sourceId: string | null;
   result: string;
   timestamp: number;
 }
 
 interface AddSourceDraft {
   step: 1 | 2 | 3;
+  type: 'remote' | 'stdio' | 'managed';
   id: string;
   displayName: string;
   url: string;
+  probeHost: string;
+  probePorts: string;
+  command: string;
+  argsText: string;
+  authType: 'none' | 'bearer' | 'headers';
+  bearerToken: string;
+  headersText: string;
+  trustAccepted: boolean;
+  callTimeoutMs: number;
   enabled: boolean;
   saveDegraded: boolean;
   discoveredTools: McpToolDescriptor[];
+  discoveredResources: Array<{ name?: string; uri: string; mimeType?: string }>;
   error: string | null;
   testing: boolean;
+  probing: boolean;
+  probeResults: McpProbeResult[];
+}
+
+interface SourceConfigDraft {
+  id: string;
+  displayName: string;
+  enabled: boolean;
+  confirmation: ToolConfirmationMode;
+  risk: ToolRisk;
+  allowedRoles: string[];
+  defaultArgsText: string;
+  callTimeoutMs: number;
+  authType: 'none' | 'bearer' | 'headers';
+  bearerToken: string;
+  headersText: string;
+  trustAccepted: boolean;
+}
+
+interface McpApproval {
+  id: string;
+  sourceId: string;
+  proxiedName: string;
+  role?: string | null;
+  risk?: string | null;
+  confirmation?: string | null;
+  args?: JsonObject;
+  status: string;
+  requestedAt: string;
+}
+
+interface McpProbeResult {
+  url: string;
+  status: 'valid_mcp' | 'possible_mcp_sse' | 'rejected' | 'timeout' | 'unreachable' | string;
+  detail: string;
+  httpStatus?: number;
+  contentType?: string;
 }
 
 const MCP_PROTOCOL_VERSION = '2025-11-25';
@@ -194,6 +258,35 @@ function getToolParameters(schema?: JsonObject): string[] {
   return Object.keys(properties).slice(0, 5);
 }
 
+function stringifyPretty(value: unknown): string {
+  return JSON.stringify(isJsonObject(value) ? value : {}, null, 2);
+}
+
+function parseJsonObjectText(text: string, label: string): JsonObject {
+  if (!text.trim()) return {};
+  const parsed = JSON.parse(text) as unknown;
+  if (!isJsonObject(parsed)) throw new Error(`${label} must be a JSON object.`);
+  return parsed;
+}
+
+function formatTimestamp(value?: string | null): string {
+  if (!value) return 'not discovered';
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
+}
+
+function splitArgs(text: string): string[] {
+  return text
+    .split(/\s+/)
+    .map(part => part.trim())
+    .filter(Boolean);
+}
+
+function sourceHealthLabel(source: Pick<BackendSource, 'status' | 'lastDiscoveredAt' | 'archived'>): string {
+  if (source.archived) return 'Archived';
+  return `${source.status} · Last discovery ${formatTimestamp(source.lastDiscoveredAt)}`;
+}
+
 function statusFor(enabled: boolean, sourceStatus: string, toolStatus: string): ToolView['status'] {
   if (!enabled) return 'disabled';
   if (sourceStatus === 'degraded') return 'degraded';
@@ -217,6 +310,7 @@ function mergeStarlinkTools(source: BackendSource | undefined, tools: McpToolDes
     confirmation: source?.confirmation ?? 'inherit',
     risk: source?.risk ?? 'medium',
     allowedRoles: source?.allowedRoles ?? [],
+    defaultArgs: source?.defaultArgs ?? {},
     lastDiscoveredAt: source?.lastDiscoveredAt ?? null,
     tools: tools.map(tool => {
       const override = overrides.get(tool.name);
@@ -235,6 +329,7 @@ function mergeStarlinkTools(source: BackendSource | undefined, tools: McpToolDes
         confirmation: override?.confirmation ?? source?.confirmation ?? 'inherit',
         risk: override?.risk ?? source?.risk ?? 'medium',
         allowedRoles: override?.allowedRoles ?? source?.allowedRoles ?? [],
+        defaultArgs: override?.defaultArgs ?? {},
       };
     }),
     toolCount: tools.length,
@@ -258,6 +353,7 @@ function toSourceView(source: BackendSource): SourceView {
       confirmation: tool.confirmation ?? source.confirmation,
       risk: tool.risk ?? source.risk,
       allowedRoles: tool.allowedRoles?.length ? tool.allowedRoles : source.allowedRoles,
+      defaultArgs: tool.defaultArgs ?? {},
     } satisfies ToolView;
   });
   return { ...source, tools, toolCount: tools.length };
@@ -292,6 +388,7 @@ function toFeedItem(raw: unknown, fallbackIndex: number): McpFeedItem | null {
     id: `${timestamp}-${fallbackIndex}-${toolName ?? type}`,
     agent,
     tool: `${source}${toolName ?? type}`,
+    sourceId: typeof raw.sourceId === 'string' ? raw.sourceId : null,
     result,
     timestamp,
   };
@@ -319,14 +416,27 @@ function readLegacyConfig(): Record<string, unknown> | null {
 
 const emptyAddDraft = (): AddSourceDraft => ({
   step: 1,
+  type: 'remote',
   id: '',
   displayName: '',
   url: '',
+  probeHost: '127.0.0.1',
+  probePorts: '',
+  command: '',
+  argsText: '',
+  authType: 'none',
+  bearerToken: '',
+  headersText: '{}',
+  trustAccepted: false,
+  callTimeoutMs: 30000,
   enabled: false,
   saveDegraded: false,
   discoveredTools: [],
+  discoveredResources: [],
   error: null,
   testing: false,
+  probing: false,
+  probeResults: [],
 });
 
 export function McpToolboxPage() {
@@ -335,8 +445,12 @@ export function McpToolboxPage() {
   const [selectedToolName, setSelectedToolName] = useState<string | null>(null);
   const [editingTool, setEditingTool] = useState<ToolView | null>(null);
   const [draftConfig, setDraftConfig] = useState<ToolView | null>(null);
+  const [editingSource, setEditingSource] = useState<SourceView | null>(null);
+  const [sourceDraft, setSourceDraft] = useState<SourceConfigDraft | null>(null);
   const [addDraft, setAddDraft] = useState<AddSourceDraft | null>(null);
   const [feed, setFeed] = useState<McpFeedItem[]>([]);
+  const [approvals, setApprovals] = useState<McpApproval[]>([]);
+  const [eventFilterSourceId, setEventFilterSourceId] = useState<string>('all');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [lastSyncedAt, setLastSyncedAt] = useState<number | null>(null);
@@ -361,14 +475,16 @@ export function McpToolboxPage() {
         window.localStorage.removeItem(TOOL_CONFIG_STORAGE_KEY);
       }
 
-      const [registry, starlinkTools] = await Promise.all([
-        apiFetch<{ sources: BackendSource[] }>('/internal/mcp-sources'),
+      const [registry, starlinkTools, approvalPayload] = await Promise.all([
+        apiFetch<{ sources: BackendSource[] }>('/internal/mcp-sources?includeArchived=1'),
         listStarlinkTools(),
+        apiFetch<{ approvals: McpApproval[] }>('/internal/mcp-tool-approvals').catch(() => ({ approvals: [] })),
       ]);
       const starlinkSource = registry.sources.find(source => source.id === 'starlink');
       const externalSources = registry.sources.filter(source => source.id !== 'starlink').map(toSourceView);
       const nextSources = [mergeStarlinkTools(starlinkSource, starlinkTools), ...externalSources];
       setSources(nextSources);
+      setApprovals(approvalPayload.approvals ?? []);
       setSelectedSourceId(current => nextSources.some(source => source.id === current) ? current : 'starlink');
       setSelectedToolName(current => current ?? nextSources[0]?.tools[0]?.name ?? null);
       setLastSyncedAt(Date.now());
@@ -413,6 +529,9 @@ export function McpToolboxPage() {
   const selectedSource = sources.find(source => source.id === selectedSourceId) ?? sources[0] ?? null;
   const visibleTools = selectedSource?.tools ?? [];
   const selectedTool = visibleTools.find(tool => tool.name === selectedToolName) ?? visibleTools[0] ?? null;
+  const visibleFeed = eventFilterSourceId === 'all'
+    ? feed
+    : feed.filter(item => item.sourceId === eventFilterSourceId || item.tool.startsWith(`${eventFilterSourceId}:`) || item.tool.startsWith(`${eventFilterSourceId}_`));
 
   const toolbarText = useMemo(() => {
     if (loading) return 'Syncing MCP sources.';
@@ -428,6 +547,24 @@ export function McpToolboxPage() {
     setDraftConfig({ ...tool, allowedRoles: [...tool.allowedRoles] });
   }, []);
 
+  const openSourceConfig = useCallback((source: SourceView) => {
+    setEditingSource(source);
+    setSourceDraft({
+      id: source.id,
+      displayName: source.displayName,
+      enabled: source.enabled,
+      confirmation: source.confirmation,
+      risk: source.risk,
+      allowedRoles: [...source.allowedRoles],
+      defaultArgsText: stringifyPretty(source.defaultArgs),
+      callTimeoutMs: source.callTimeoutMs ?? 30000,
+      authType: source.auth?.type ?? 'none',
+      bearerToken: '',
+      headersText: '{}',
+      trustAccepted: !!source.trustAccepted,
+    });
+  }, []);
+
   const saveToolConfig = useCallback(async () => {
     if (!editingTool || !draftConfig) return;
     await apiFetch(`/internal/mcp-sources/${encodeURIComponent(editingTool.sourceId)}/tools/${encodeURIComponent(editingTool.name)}`, {
@@ -438,12 +575,44 @@ export function McpToolboxPage() {
         confirmation: draftConfig.confirmation,
         risk: draftConfig.risk,
         allowedRoles: draftConfig.allowedRoles,
+        defaultArgs: draftConfig.defaultArgs,
       }),
     });
     setEditingTool(null);
     setDraftConfig(null);
     await syncSources();
   }, [draftConfig, editingTool, syncSources]);
+
+  const saveSourceConfig = useCallback(async () => {
+    if (!editingSource || !sourceDraft) return;
+    setError(null);
+    try {
+      const auth = sourceDraft.authType === 'bearer'
+        ? { type: 'bearer', bearerToken: sourceDraft.bearerToken }
+        : sourceDraft.authType === 'headers'
+          ? { type: 'headers', headers: parseJsonObjectText(sourceDraft.headersText, 'Headers') }
+          : { type: 'none' };
+      await apiFetch(`/internal/mcp-sources/${encodeURIComponent(editingSource.id)}`, {
+        method: 'PATCH',
+        body: JSON.stringify({
+          displayName: sourceDraft.displayName,
+          enabled: sourceDraft.enabled,
+          confirmation: sourceDraft.confirmation,
+          risk: sourceDraft.risk,
+          allowedRoles: sourceDraft.allowedRoles,
+          defaultArgs: parseJsonObjectText(sourceDraft.defaultArgsText, 'Default arguments'),
+          callTimeoutMs: sourceDraft.callTimeoutMs,
+          trustAccepted: sourceDraft.trustAccepted,
+          ...(sourceDraft.authType === 'bearer' && !sourceDraft.bearerToken ? {} : { auth }),
+        }),
+      });
+      setEditingSource(null);
+      setSourceDraft(null);
+      await syncSources();
+    } catch (sourceError) {
+      setError(sourceError instanceof Error ? sourceError.message : String(sourceError));
+    }
+  }, [editingSource, sourceDraft, syncSources]);
 
   const refreshSelectedSource = useCallback(async () => {
     if (!selectedSource || selectedSource.id === 'starlink') {
@@ -461,15 +630,71 @@ export function McpToolboxPage() {
     await syncSources();
   }, [selectedSource, syncSources]);
 
+  const restoreSelectedSource = useCallback(async () => {
+    if (!selectedSource || selectedSource.id === 'starlink') return;
+    await apiFetch(`/internal/mcp-sources/${encodeURIComponent(selectedSource.id)}/restore`, { method: 'POST', body: '{}' });
+    await syncSources();
+  }, [selectedSource, syncSources]);
+
+  const resolveApproval = useCallback(async (approvalId: string, approved: boolean) => {
+    await apiFetch(`/internal/mcp-tool-approvals/${encodeURIComponent(approvalId)}/${approved ? 'approve' : 'reject'}`, {
+      method: 'POST',
+      body: JSON.stringify({ resolvedBy: 'toolbox' }),
+    });
+    await syncSources();
+  }, [syncSources]);
+
+  const probeAddSourcePort = useCallback(async () => {
+    if (!addDraft || addDraft.type !== 'remote') return;
+    setAddDraft(current => current ? { ...current, probing: true, error: null, probeResults: [] } : current);
+    try {
+      const payload = await apiFetch<{ results: McpProbeResult[] }>('/internal/mcp-sources/probe', {
+        method: 'POST',
+        body: JSON.stringify({
+          host: addDraft.probeHost,
+          ports: addDraft.probePorts,
+          timeoutMs: 1200,
+        }),
+      });
+      const results = payload.results ?? [];
+      const preferred = results.find(result => result.status === 'valid_mcp') ?? results.find(result => result.status === 'possible_mcp_sse');
+      setAddDraft(current => current ? {
+        ...current,
+        probing: false,
+        probeResults: results,
+        url: preferred?.url ?? current.url,
+      } : current);
+    } catch (probeError) {
+      setAddDraft(current => current ? {
+        ...current,
+        probing: false,
+        probeResults: [],
+        error: probeError instanceof Error ? probeError.message : String(probeError),
+      } : current);
+    }
+  }, [addDraft]);
+
   const testAddSource = useCallback(async () => {
     if (!addDraft) return;
     setAddDraft(current => current ? { ...current, testing: true, error: null } : current);
     try {
-      const result = await apiFetch<{ tools: McpToolDescriptor[] }>('/internal/mcp-sources/discover', {
+      const result = await apiFetch<{ tools: McpToolDescriptor[]; resources?: AddSourceDraft['discoveredResources'] }>('/internal/mcp-sources/discover', {
         method: 'POST',
-        body: JSON.stringify({ url: addDraft.url }),
+        body: JSON.stringify({
+          type: addDraft.type,
+          url: addDraft.url,
+          command: addDraft.command,
+          args: splitArgs(addDraft.argsText),
+          callTimeoutMs: addDraft.callTimeoutMs,
+          trustAccepted: addDraft.trustAccepted,
+          auth: addDraft.authType === 'bearer'
+            ? { type: 'bearer', bearerToken: addDraft.bearerToken }
+            : addDraft.authType === 'headers'
+              ? { type: 'headers', headers: parseJsonObjectText(addDraft.headersText, 'Headers') }
+              : { type: 'none' },
+        }),
       });
-      setAddDraft(current => current ? { ...current, testing: false, step: 3, discoveredTools: result.tools, error: null } : current);
+      setAddDraft(current => current ? { ...current, testing: false, step: 3, discoveredTools: result.tools, discoveredResources: result.resources ?? [], error: null } : current);
     } catch (testError) {
       setAddDraft(current => current ? {
         ...current,
@@ -487,9 +712,19 @@ export function McpToolboxPage() {
     await apiFetch('/internal/mcp-sources', {
       method: 'POST',
       body: JSON.stringify({
+        type: addDraft.type,
         id: addDraft.id,
         displayName: addDraft.displayName || addDraft.id,
         url: addDraft.url,
+        command: addDraft.command,
+        args: splitArgs(addDraft.argsText),
+        callTimeoutMs: addDraft.callTimeoutMs,
+        trustAccepted: addDraft.trustAccepted,
+        auth: addDraft.authType === 'bearer'
+          ? { type: 'bearer', bearerToken: addDraft.bearerToken }
+          : addDraft.authType === 'headers'
+            ? { type: 'headers', headers: parseJsonObjectText(addDraft.headersText, 'Headers') }
+            : { type: 'none' },
         enabled: addDraft.enabled && !degraded,
         saveDegraded: degraded ? addDraft.saveDegraded : true,
       }),
@@ -524,11 +759,14 @@ export function McpToolboxPage() {
               >
                 <div>
                   <strong>{source.displayName}</strong>
-                  <span>{source.status} · {source.type === 'builtin' ? 'Built-in' : 'Remote'}</span>
+                  <span>{sourceHealthLabel(source)} · {source.type === 'builtin' ? 'Built-in' : source.transport}</span>
                 </div>
                 <em>{source.toolCount}</em>
               </button>
             ))}
+            {!loading && sources.filter(source => source.id !== 'starlink').length === 0 && (
+              <div className="td-mcp-empty">No external sources configured.</div>
+            )}
           </div>
         </aside>
 
@@ -540,10 +778,23 @@ export function McpToolboxPage() {
             </div>
             <div className="td-mcp-toolbar-actions">
               {selectedSource && selectedSource.id !== 'starlink' && (
-                <button type="button" onClick={() => void archiveSelectedSource()}>
-                  <Archive size={12} />
-                  Archive
-                </button>
+                <>
+                  <button type="button" onClick={() => openSourceConfig(selectedSource)}>
+                    <SlidersHorizontal size={12} />
+                    Source
+                  </button>
+                  {selectedSource.archived ? (
+                    <button type="button" onClick={() => void restoreSelectedSource()}>
+                      <RotateCcw size={12} />
+                      Restore
+                    </button>
+                  ) : (
+                    <button type="button" onClick={() => void archiveSelectedSource()}>
+                      <Archive size={12} />
+                      Archive
+                    </button>
+                  )}
+                </>
               )}
               <button type="button" onClick={() => void refreshSelectedSource()} disabled={loading}>
                 <RefreshCw size={12} className={loading ? 'td-mcp-spin' : ''} />
@@ -616,14 +867,31 @@ export function McpToolboxPage() {
               <div className="td-mcp-call-feed-header">
                 <Bot size={14} />
                 <span>Live MCP Events</span>
+                <select value={eventFilterSourceId} onChange={event => setEventFilterSourceId(event.target.value)} aria-label="Filter MCP events by source">
+                  <option value="all">All</option>
+                  {sources.map(source => <option key={source.id} value={source.id}>{source.displayName}</option>)}
+                </select>
               </div>
-              {feed.length === 0 ? (
+              {approvals.map(approval => (
+                <div key={approval.id} className="td-mcp-call">
+                  <strong>{approval.role || 'agent'}</strong>
+                  <span>{approval.proxiedName}</span>
+                  <em>{approval.risk || approval.confirmation || 'approval'}</em>
+                  <button type="button" aria-label={`Approve ${approval.proxiedName}`} onClick={() => void resolveApproval(approval.id, true)}>
+                    <Check size={12} />
+                  </button>
+                  <button type="button" aria-label={`Reject ${approval.proxiedName}`} onClick={() => void resolveApproval(approval.id, false)}>
+                    <X size={12} />
+                  </button>
+                </div>
+              ))}
+              {visibleFeed.length === 0 ? (
                 <div className="td-mcp-call td-mcp-call-empty">
                   <Activity size={13} />
                   <span>Waiting for activity</span>
                   <em>{lastSyncedAt ? `Registry synced ${formatRelativeTime(lastSyncedAt)}` : 'No events yet'}</em>
                 </div>
-              ) : feed.map((call, index) => (
+              ) : visibleFeed.map((call, index) => (
                 <div key={call.id} className="td-mcp-call" style={{ '--td-call-index': index } as CSSProperties}>
                   <strong>{call.agent}</strong>
                   <span>{call.tool}</span>
@@ -631,6 +899,115 @@ export function McpToolboxPage() {
                 </div>
               ))}
             </aside>
+
+            {editingSource && sourceDraft && (
+              <div className="td-mcp-config-sheet" role="dialog" aria-modal="true" aria-label={`Configure ${editingSource.displayName}`}>
+                <div className="td-mcp-config-panel">
+                  <header>
+                    <div>
+                      <span>Configure Source</span>
+                      <strong>{editingSource.displayName}</strong>
+                    </div>
+                    <button type="button" aria-label="Close source configuration" onClick={() => { setEditingSource(null); setSourceDraft(null); }}>
+                      <X size={14} />
+                    </button>
+                  </header>
+                  <div className="td-mcp-config-body">
+                    <label>
+                      <span>Display name</span>
+                      <input value={sourceDraft.displayName} onChange={event => setSourceDraft({ ...sourceDraft, displayName: event.target.value })} />
+                    </label>
+                    <div className="td-mcp-config-grid">
+                      <label>
+                        <span>Confirmation</span>
+                        <select value={sourceDraft.confirmation} onChange={event => setSourceDraft({ ...sourceDraft, confirmation: event.target.value as ToolConfirmationMode })}>
+                          {CONFIRMATION_OPTIONS.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}
+                        </select>
+                      </label>
+                      <label>
+                        <span>Risk</span>
+                        <select value={sourceDraft.risk} onChange={event => setSourceDraft({ ...sourceDraft, risk: event.target.value as ToolRisk })}>
+                          {RISK_OPTIONS.filter(option => option.value !== 'inherit').map(option => <option key={option.value} value={option.value}>{option.label}</option>)}
+                        </select>
+                      </label>
+                    </div>
+                    <label>
+                      <span>Default arguments</span>
+                      <textarea value={sourceDraft.defaultArgsText} onChange={event => setSourceDraft({ ...sourceDraft, defaultArgsText: event.target.value })} />
+                      <em>JSON object merged before tool call arguments.</em>
+                    </label>
+                    <label>
+                      <span>Call timeout ms</span>
+                      <input value={sourceDraft.callTimeoutMs} onChange={event => setSourceDraft({ ...sourceDraft, callTimeoutMs: Number(event.target.value) || 30000 })} />
+                    </label>
+                    <div className="td-mcp-config-grid">
+                      <label>
+                        <span>Auth</span>
+                        <select value={sourceDraft.authType} onChange={event => setSourceDraft({ ...sourceDraft, authType: event.target.value as SourceConfigDraft['authType'] })}>
+                          <option value="none">None</option>
+                          <option value="bearer">Bearer token</option>
+                          <option value="headers">Custom headers</option>
+                        </select>
+                      </label>
+                      <label className="td-mcp-inline-check">
+                        <input type="checkbox" checked={sourceDraft.trustAccepted} onChange={event => setSourceDraft({ ...sourceDraft, trustAccepted: event.target.checked })} />
+                        <span>Trust public URL</span>
+                      </label>
+                    </div>
+                    {sourceDraft.authType === 'bearer' && (
+                      <label>
+                        <span>Bearer token</span>
+                        <input value={sourceDraft.bearerToken} placeholder={editingSource.auth?.hasBearerToken ? 'Stored token unchanged' : ''} onChange={event => setSourceDraft({ ...sourceDraft, bearerToken: event.target.value })} />
+                      </label>
+                    )}
+                    {sourceDraft.authType === 'headers' && (
+                      <label>
+                        <span>Headers JSON</span>
+                        <textarea value={sourceDraft.headersText} onChange={event => setSourceDraft({ ...sourceDraft, headersText: event.target.value })} />
+                      </label>
+                    )}
+                    <div className="td-mcp-role-picker">
+                      <span>Allowed roles</span>
+                      <div>
+                        {AGENT_ROLES.map(role => {
+                          const checked = sourceDraft.allowedRoles.includes(role.id);
+                          return (
+                            <label key={role.id}>
+                              <input
+                                type="checkbox"
+                                checked={checked}
+                                onChange={event => {
+                                  const allowedRoles = event.target.checked
+                                    ? [...sourceDraft.allowedRoles, role.id]
+                                    : sourceDraft.allowedRoles.filter(id => id !== role.id);
+                                  setSourceDraft({ ...sourceDraft, allowedRoles });
+                                }}
+                              />
+                              <span>{role.name}</span>
+                            </label>
+                          );
+                        })}
+                      </div>
+                      <em>{sourceDraft.allowedRoles.length === 0 ? 'All roles allowed' : `${sourceDraft.allowedRoles.length} role filter${sourceDraft.allowedRoles.length === 1 ? '' : 's'}`}</em>
+                    </div>
+                    <button
+                      type="button"
+                      className={sourceDraft.enabled ? 'td-mcp-disable-button' : 'td-mcp-enable-button'}
+                      onClick={() => setSourceDraft({ ...sourceDraft, enabled: !sourceDraft.enabled })}
+                    >
+                      {sourceDraft.enabled ? 'Disable Source' : 'Enable Source'}
+                    </button>
+                  </div>
+                  <footer>
+                    <button type="button" onClick={() => { setEditingSource(null); setSourceDraft(null); }}>Cancel</button>
+                    <button type="button" onClick={() => void saveSourceConfig()}>
+                      <Save size={13} />
+                      Save
+                    </button>
+                  </footer>
+                </div>
+              </div>
+            )}
 
             {editingTool && draftConfig && (
               <div className="td-mcp-config-sheet" role="dialog" aria-modal="true" aria-label={`Configure ${editingTool.displayName}`}>
@@ -687,6 +1064,19 @@ export function McpToolboxPage() {
                       </div>
                       <em>{draftConfig.allowedRoles.length === 0 ? 'All roles allowed' : `${draftConfig.allowedRoles.length} role filter${draftConfig.allowedRoles.length === 1 ? '' : 's'}`}</em>
                     </div>
+                    <label>
+                      <span>Default arguments</span>
+                      <textarea
+                        value={stringifyPretty(draftConfig.defaultArgs)}
+                        onChange={event => {
+                          try {
+                            setDraftConfig({ ...draftConfig, defaultArgs: parseJsonObjectText(event.target.value, 'Default arguments') });
+                          } catch {
+                            setDraftConfig({ ...draftConfig, defaultArgs: {} });
+                          }
+                        }}
+                      />
+                    </label>
                     <button
                       type="button"
                       className={draftConfig.enabled ? 'td-mcp-disable-button' : 'td-mcp-enable-button'}
@@ -720,10 +1110,23 @@ export function McpToolboxPage() {
                   </header>
                   <div className="td-mcp-config-body">
                     {addDraft.step === 1 && (
-                      <button type="button" className="td-mcp-source-choice active" onClick={() => setAddDraft({ ...addDraft, step: 2 })}>
-                        <strong>Remote HTTP/SSE MCP</strong>
-                        <span>Connect a localhost or private-network MCP endpoint.</span>
-                      </button>
+                      <>
+                        {[
+                          ['remote', 'Remote HTTP/SSE MCP', 'Connect a local, private-network, or trusted authenticated HTTP MCP endpoint.'],
+                          ['stdio', 'Stdio MCP command', 'Launch and supervise a local MCP server process over stdio.'],
+                          ['managed', 'Managed local MCP', 'Use the managed Node stdio integration when a known local command is selected.'],
+                        ].map(([type, title, description]) => (
+                          <button
+                            key={type}
+                            type="button"
+                            className={`td-mcp-source-choice ${addDraft.type === type ? 'active' : ''}`}
+                            onClick={() => setAddDraft({ ...addDraft, type: type as AddSourceDraft['type'], step: 2 })}
+                          >
+                            <strong>{title}</strong>
+                            <span>{description}</span>
+                          </button>
+                        ))}
+                      </>
                     )}
                     {addDraft.step === 2 && (
                       <>
@@ -736,10 +1139,86 @@ export function McpToolboxPage() {
                           <span>Display name</span>
                           <input value={addDraft.displayName} placeholder="Excalidraw" onChange={event => setAddDraft({ ...addDraft, displayName: event.target.value })} />
                         </label>
+                        {addDraft.type === 'remote' ? (
+                          <>
+                            <label>
+                              <span>MCP URL</span>
+                              <input value={addDraft.url} placeholder="http://127.0.0.1:3001/mcp" onChange={event => setAddDraft({ ...addDraft, url: event.target.value })} />
+                            </label>
+                            <div className="td-mcp-prober">
+                              <div className="td-mcp-config-grid">
+                                <label>
+                                  <span>Probe host</span>
+                                  <input value={addDraft.probeHost} placeholder="127.0.0.1" onChange={event => setAddDraft({ ...addDraft, probeHost: event.target.value })} />
+                                </label>
+                                <label>
+                                  <span>Probe port</span>
+                                  <input value={addDraft.probePorts} placeholder="9876" onChange={event => setAddDraft({ ...addDraft, probePorts: event.target.value })} />
+                                </label>
+                              </div>
+                              <button type="button" disabled={!addDraft.probePorts.trim() || addDraft.probing} onClick={() => void probeAddSourcePort()}>
+                                <Search size={13} className={addDraft.probing ? 'td-mcp-spin' : ''} />
+                                Probe Port
+                              </button>
+                              {addDraft.probeResults.length > 0 && (
+                                <div className="td-mcp-probe-results">
+                                  {addDraft.probeResults.map(result => (
+                                    <button
+                                      key={result.url}
+                                      type="button"
+                                      className={`td-mcp-probe-result ${result.status === 'valid_mcp' ? 'valid' : result.status === 'possible_mcp_sse' ? 'possible' : ''}`}
+                                      onClick={() => setAddDraft({ ...addDraft, url: result.url })}
+                                    >
+                                      <strong>{result.status.replace(/_/g, ' ')}</strong>
+                                      <span>{result.url}</span>
+                                      <em>{result.detail}</em>
+                                    </button>
+                                  ))}
+                                </div>
+                              )}
+                            </div>
+                            <div className="td-mcp-config-grid">
+                              <label>
+                                <span>Auth</span>
+                                <select value={addDraft.authType} onChange={event => setAddDraft({ ...addDraft, authType: event.target.value as AddSourceDraft['authType'] })}>
+                                  <option value="none">None</option>
+                                  <option value="bearer">Bearer token</option>
+                                  <option value="headers">Custom headers</option>
+                                </select>
+                              </label>
+                              <label className="td-mcp-inline-check">
+                                <input type="checkbox" checked={addDraft.trustAccepted} onChange={event => setAddDraft({ ...addDraft, trustAccepted: event.target.checked })} />
+                                <span>Trust public URL</span>
+                              </label>
+                            </div>
+                            {addDraft.authType === 'bearer' && (
+                              <label>
+                                <span>Bearer token</span>
+                                <input value={addDraft.bearerToken} onChange={event => setAddDraft({ ...addDraft, bearerToken: event.target.value })} />
+                              </label>
+                            )}
+                            {addDraft.authType === 'headers' && (
+                              <label>
+                                <span>Headers JSON</span>
+                                <textarea value={addDraft.headersText} onChange={event => setAddDraft({ ...addDraft, headersText: event.target.value })} />
+                              </label>
+                            )}
+                          </>
+                        ) : (
+                          <>
+                            <label>
+                              <span>Command</span>
+                              <input value={addDraft.command} placeholder="node" onChange={event => setAddDraft({ ...addDraft, command: event.target.value })} />
+                            </label>
+                            <label>
+                              <span>Arguments</span>
+                              <input value={addDraft.argsText} placeholder="./server.mjs --stdio" onChange={event => setAddDraft({ ...addDraft, argsText: event.target.value })} />
+                            </label>
+                          </>
+                        )}
                         <label>
-                          <span>MCP URL</span>
-                          <input value={addDraft.url} placeholder="http://127.0.0.1:3001/mcp" onChange={event => setAddDraft({ ...addDraft, url: event.target.value })} />
-                          <em>Public internet URLs are blocked until auth/trust handling lands.</em>
+                          <span>Call timeout ms</span>
+                          <input value={addDraft.callTimeoutMs} onChange={event => setAddDraft({ ...addDraft, callTimeoutMs: Number(event.target.value) || 30000 })} />
                         </label>
                       </>
                     )}
@@ -754,6 +1233,7 @@ export function McpToolboxPage() {
                           <div className="td-mcp-discovery-summary">
                             <strong>{addDraft.discoveredTools.length} tools discovered</strong>
                             <span>{addDraft.discoveredTools.slice(0, 6).map(tool => tool.name).join(', ') || 'No tools returned.'}</span>
+                            <span>{addDraft.discoveredResources.length} resources discovered</span>
                           </div>
                         )}
                         <label className="td-mcp-inline-check">
@@ -772,7 +1252,7 @@ export function McpToolboxPage() {
                       {addDraft.step === 1 ? 'Cancel' : 'Back'}
                     </button>
                     {addDraft.step === 2 ? (
-                      <button type="button" disabled={!SOURCE_ID_RE.test(addDraft.id) || !addDraft.url || addDraft.testing} onClick={() => void testAddSource()}>
+                      <button type="button" disabled={!SOURCE_ID_RE.test(addDraft.id) || (addDraft.type === 'remote' ? !addDraft.url : !addDraft.command) || addDraft.testing} onClick={() => void testAddSource()}>
                         <RefreshCw size={13} className={addDraft.testing ? 'td-mcp-spin' : ''} />
                         Test Discovery
                       </button>

@@ -3,7 +3,6 @@ import { WorkspaceGrid } from './components/Layout/WorkspaceGrid';
 import { QuickOpen } from './components/QuickOpen/QuickOpen';
 import { NodeTreePane } from './components/NodeTree/NodeTreePane';
 import { RuntimeView } from './components/Runtime/RuntimeView';
-import { DebugPanel } from './components/Debug/DebugPanel';
 import { useWorkspaceStore, PaneType, McpMessage, DbTask, type AppMode } from './store/workspace';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
@@ -21,6 +20,9 @@ import { clearLastFatalReport, readBreadcrumbs, readLastFatalReport, recordBread
 import { useActionCenterItems } from './components/ActionCenter/useActionCenterItems';
 import { ActionCenterPane } from './components/ActionCenter/ActionCenterPane';
 import { McpToolboxPage } from './components/McpToolbox/McpToolboxPage';
+import { missionRepository } from './lib/missionRepository';
+import { missionOrchestrator } from './lib/workflow/MissionOrchestrator';
+import type { ActionCenterActionId, ActionCenterItem } from './lib/actionCenter';
 import './App.css';
 
 // Safe access to window
@@ -162,8 +164,13 @@ function MainApp() {
     });
 
     if (changedNodes || nextTabs !== tabs) {
+      const workspaceState = useWorkspaceStore.getState();
       useWorkspaceStore.setState({ 
         globalGraph: { ...globalGraph, nodes: nextNodes },
+        workflowGraphs: {
+          ...workspaceState.workflowGraphs,
+          [workspaceState.workflowGraphMode]: { ...globalGraph, nodes: nextNodes },
+        },
         nodeRuntimeBindings: {},
         nodeTerminalBindings: {},
         tabs: nextTabs
@@ -275,7 +282,6 @@ function MainApp() {
               <div className="flex-1 min-w-0 overflow-hidden">
                 <NodeTreePane graph={globalGraph} onGraphChange={setGlobalGraph} />
               </div>
-              <DebugPanel />
             </div>
           ) : appMode === 'runtime' ? <RuntimeView /> : appMode === 'actioncenter' ? <ActionCenterPane /> : appMode === 'mcptoolbox' ? <McpToolboxPage /> : (
             <>
@@ -299,6 +305,7 @@ function MainApp() {
       </div>
 
       {showSettings && <SettingsOverlay />}
+      <GlobalNotificationOverlay />
       {draggingNew && (
         <div className="fixed pointer-events-none z-[9999] bg-accent-primary/20 border-2 border-accent-primary rounded-lg px-3 py-1.5 flex items-center gap-2 text-accent-primary font-bold shadow-2xl backdrop-blur-sm" style={{ left: draggingNew.x + 10, top: draggingNew.y + 10 }}>
           {PANE_ICONS[draggingNew.type]}<span className="text-xs uppercase tracking-wider">{draggingNew.type}</span>
@@ -329,6 +336,93 @@ function MainApp() {
     )}>
       {content}
     </ErrorBoundary>
+  );
+}
+
+function GlobalNotificationOverlay() {
+  const setAppMode = useWorkspaceStore((s) => s.setAppMode);
+  const { items, clearRecent } = useActionCenterItems();
+  const [dismissed, setDismissed] = useState<Set<string>>(() => new Set());
+  const item = items.find(candidate => !dismissed.has(candidate.id) && candidate.section === 'needs_you')
+    ?? items.find(candidate => !dismissed.has(candidate.id) && candidate.kind === 'recent_event');
+
+  useEffect(() => {
+    if (!item || item.section === 'needs_you') return;
+    const timer = window.setTimeout(() => {
+      setDismissed(prev => new Set(prev).add(item.id));
+      if (item.kind === 'recent_event') clearRecent(item.id);
+    }, 6000);
+    return () => window.clearTimeout(timer);
+  }, [clearRecent, item]);
+
+  const runAction = async (actionId: ActionCenterActionId, target: ActionCenterItem) => {
+    if (actionId === 'approve_permission' && target.kind === 'permission') {
+      await runtimeManager.resolvePermission({ sessionId: target.sessionId!, permissionId: target.permissionId, decision: 'approve' });
+      setDismissed(prev => new Set(prev).add(target.id));
+    } else if (actionId === 'deny_permission' && target.kind === 'permission') {
+      await runtimeManager.resolvePermission({ sessionId: target.sessionId!, permissionId: target.permissionId, decision: 'deny' });
+      setDismissed(prev => new Set(prev).add(target.id));
+    } else if (actionId === 'retry_runtime' && target.missionId && target.nodeId) {
+      await missionOrchestrator.retryNode(target.missionId, target.nodeId);
+      setDismissed(prev => new Set(prev).add(target.id));
+    } else if (actionId === 'approve_delegation' && target.kind === 'delegation') {
+      await missionRepository.invokeMcp('approve_inbox_item', { itemId: target.inboxItemId });
+      setDismissed(prev => new Set(prev).add(target.id));
+    } else if (actionId === 'reject_delegation' && target.kind === 'delegation') {
+      await missionRepository.invokeMcp('reject_inbox_item', { itemId: target.inboxItemId });
+      setDismissed(prev => new Set(prev).add(target.id));
+    } else {
+      setAppMode('actioncenter');
+    }
+  };
+
+  if (!item) return null;
+
+  return (
+    <div className="fixed right-4 top-14 z-[9000] w-[340px] max-w-[calc(100vw-2rem)] rounded-lg border border-border-panel bg-bg-panel/95 shadow-2xl backdrop-blur p-3">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="text-[10px] uppercase tracking-[0.2em] text-accent-primary">{item.section === 'needs_you' ? 'Needs You' : 'Update'}</div>
+          <div className="mt-1 text-sm font-semibold text-text-primary truncate">{item.title}</div>
+          {item.detail && <div className="mt-1 text-[11px] leading-snug text-text-muted line-clamp-3">{item.detail}</div>}
+        </div>
+        <button
+          className="shrink-0 text-text-muted hover:text-text-primary"
+          onClick={() => {
+            setDismissed(prev => new Set(prev).add(item.id));
+            if (item.kind === 'recent_event') clearRecent(item.id);
+          }}
+          title="Dismiss"
+        >
+          <X size={14} />
+        </button>
+      </div>
+      {item.actions.length > 0 && (
+        <div className="mt-3 flex flex-wrap gap-2">
+          {item.actions.slice(0, 3).map(action => (
+            <button
+              key={action.id}
+              className={`px-2 py-1 rounded border text-[11px] ${
+                action.tone === 'danger'
+                  ? 'border-red-400/30 bg-red-500/10 text-red-200 hover:bg-red-500/20'
+                  : action.tone === 'primary'
+                    ? 'border-accent-primary/40 bg-accent-primary/10 text-accent-primary hover:bg-accent-primary/20'
+                    : 'border-border-panel text-text-secondary hover:text-text-primary hover:bg-bg-surface'
+              }`}
+              onClick={() => void runAction(action.id, item)}
+            >
+              {action.label}
+            </button>
+          ))}
+          <button
+            className="px-2 py-1 rounded border border-border-panel text-[11px] text-text-muted hover:text-text-primary hover:bg-bg-surface"
+            onClick={() => setAppMode('actioncenter')}
+          >
+            More
+          </button>
+        </div>
+      )}
+    </div>
   );
 }
 

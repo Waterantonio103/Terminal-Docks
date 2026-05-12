@@ -96,6 +96,10 @@ function liveWorkflowModelForCli(cli: WorkflowAgentCli): string | undefined {
   return LIVE_WORKFLOW_CLI_MODELS[cli];
 }
 
+const PROMPT_03_CLI = VALID_CLIS.includes((import.meta.env.VITE_LIVE_WORKFLOW_PROMPT03_CLI || '').toLowerCase() as WorkflowAgentCli)
+  ? (import.meta.env.VITE_LIVE_WORKFLOW_PROMPT03_CLI || '').toLowerCase() as WorkflowAgentCli
+  : 'codex';
+
 interface LiveWorkflowTaskSpec {
   objective: string;
   expectedFiles: string[];
@@ -1133,6 +1137,51 @@ const PROMPT_06_WORKFLOWS: Prompt06WorkflowSpec[] = [
       prompt06Edge('integrator', 'risk-reviewer'),
       prompt06Edge('tester', 'reviewer'),
       prompt06Edge('risk-reviewer', 'reviewer'),
+    ],
+  },
+];
+
+const PROMPT_03_UI_MODE_WORKFLOWS: Prompt06WorkflowSpec[] = [
+  {
+    name: 'hospital-incident-triage-dashboard',
+    title: 'Hospital incident triage dashboard',
+    task: [
+      'Prompt 03 UI Mode Role Simulation: run the new UI builder mode as Strict UI.',
+      'Create a compact SaaS dashboard first screen for incident triage in a regional hospital operations center.',
+      'Target audience: hospital operations coordinators who scan active incidents, filter by severity/location/status, compare response times, and take the next action quickly.',
+      'Quality targets: dense but readable operational UI; no marketing hero, landing-page structure, or decorative filler; clear navigation, command area, filters, incident table/list, status indicators, priority metrics, and primary action; hospital incident-triage copy; cards only for metrics or repeated incident items; responsive desktop and mobile layouts.',
+      'Product Agent must create or accept PRD.md. Designer must create or accept DESIGN.md. Architecture Agent must create or accept ARCHITECTURE.md. Frontend Builder must implement the dashboard. Interaction QA must verify at least one state change or responsive behavior and write QA_REPORT.md. Accessibility Reviewer must check contrast, labels, keyboard affordances, focus states, non-color-only status indicators, and text fit, then write ACCESSIBILITY_REVIEW.md.',
+    ].join(' '),
+    expectedFiles: expectedWithArtifacts(
+      [
+        'PRD.md',
+        'DESIGN.md',
+        'INTERACTION_QA_PLAN.md',
+        'index.html',
+        'styles.css',
+        'script.js',
+        'QA_REPORT.md',
+        'ACCESSIBILITY_REVIEW.md',
+        'VISUAL_POLISH_REVIEW.md',
+        'README.md',
+      ],
+      ['product', 'designer', 'interaction-qa', 'builder', 'accessibility', 'visual-polish'],
+    ),
+    runInstruction: 'Open index.html in a browser and exercise the severity/status/location filters or incident action control.',
+    agents: [
+      prompt06Agent('product', 'frontend_product', 'Product Agent', 'Classify the UI category, define Strict UI requirements, and create PRD.md with concrete dashboard acceptance criteria.', PROMPT_03_CLI),
+      prompt06Agent('designer', 'frontend_designer', 'Designer', 'Create DESIGN.md with concrete layout, typography, color, density, state, responsive, and accessibility rules for the hospital incident dashboard.', PROMPT_03_CLI),
+      prompt06Agent('interaction-qa', 'interaction_qa', 'Interaction QA', 'Create INTERACTION_QA_PLAN.md with required filter/action/responsive states, then hand off the concrete QA checklist to the builder.', PROMPT_03_CLI),
+      prompt06Agent('builder', 'frontend_builder', 'Frontend Builder', 'Implement the runnable static dashboard in index.html, styles.css, and script.js, following PRD.md, DESIGN.md, and INTERACTION_QA_PLAN.md.', PROMPT_03_CLI),
+      prompt06Agent('accessibility', 'accessibility_reviewer', 'Accessibility Reviewer', 'Review accessibility and final visual polish, then write ACCESSIBILITY_REVIEW.md and ensure README.md lists the open/run instruction.', PROMPT_03_CLI),
+      prompt06Agent('visual-polish', 'visual_polish_reviewer', 'Visual Polish Reviewer', 'Inspect the finished dashboard for landing-page drift, density, visual hierarchy, responsive fit, and domain specificity; write VISUAL_POLISH_REVIEW.md and QA_REPORT.md.', PROMPT_03_CLI),
+    ],
+    edges: [
+      prompt06Edge('product', 'designer'),
+      prompt06Edge('designer', 'interaction-qa'),
+      prompt06Edge('interaction-qa', 'builder'),
+      prompt06Edge('builder', 'accessibility'),
+      prompt06Edge('accessibility', 'visual-polish'),
     ],
   },
 ];
@@ -2738,6 +2787,14 @@ function buildPrompt06Mission(
         'Keep branch artifacts concise and finish the MCP handoff/completion immediately after the required file and branch checks pass.',
       ]
     : [];
+  const prompt03Instructions = promptNumber === '03'
+    ? [
+        'Prompt 03 UI builder mode requirements: treat frontendMode as Strict UI and use the frontend role responsibilities rather than generic builder/reviewer behavior.',
+        'The deliverable must be a compact operational SaaS dashboard, not a landing page or marketing site.',
+        'The final output must include accepted PRD.md, DESIGN.md, INTERACTION_QA_PLAN.md, runnable static frontend files, interaction QA notes, accessibility review, visual polish review, and README open/run instructions.',
+        'Reviewer roles must judge concrete visible output quality, responsiveness, state behavior, accessibility, and product/spec adherence before completing.',
+      ]
+    : [];
   const nodeTreeInstructions = promptNumber === '04'
     ? [
         `Prompt 04 NodeTree Mission Control operations under test: ${(spec.nodeTreeOperations ?? []).join(', ') || 'graph creation and output linking'}.`,
@@ -2810,6 +2867,7 @@ function buildPrompt06Mission(
     `Create or update only files inside ${outputDir}.`,
     `Expected concrete project files: ${spec.expectedFiles.join(', ')}.`,
     `Runnable verification: ${spec.runInstruction}`,
+    ...prompt03Instructions,
     ...branchMergeInstructions,
     ...nodeTreeInstructions,
     ...prompt07Instructions,
@@ -2848,6 +2906,8 @@ function buildPrompt06Mission(
       authoringMode: 'graph',
       presetId: `live:${suiteSlug}:${spec.name}`,
       runVersion: 1,
+      frontendMode: promptNumber === '03' ? 'strict_ui' : undefined,
+      frontendCategory: promptNumber === '03' ? 'saas_dashboard' : undefined,
     },
     nodes: spec.agents.map((agent, index) => {
       const cli = agent.cli ?? 'codex';
@@ -2863,6 +2923,9 @@ function buildPrompt06Mission(
         'Do not write outside the output directory.',
         promptNumber === '05'
           ? `If you are producing branch work, write a distinct artifact under branch-artifacts/${agent.id}.md or a similarly named source fragment. If you are merging, testing, or reviewing, inspect upstream context and branch-artifacts before completing.`
+          : '',
+        promptNumber === '03'
+          ? `This is a Strict UI builder mode workflow. Use the role ID ${agent.roleId} literally, read upstream PRD/DESIGN/ARCHITECTURE files when available, write branch-artifacts/${agent.id}.md with your evidence, and keep the final dashboard operational, accessible, responsive, and free of marketing-page patterns.`
           : '',
         promptNumber === '07'
           ? `Write or verify an artifact under branch-artifacts/${agent.id}.md, and keep all project outputs inside the configured output directory.`
@@ -3865,6 +3928,19 @@ async function runRuntimeViewLayoutMockHarness(options: LiveWorkflowHarnessOptio
 export async function runLiveWorkflowHarness(options: LiveWorkflowHarnessOptions): Promise<void> {
   if (options.suiteName === 'runtime_view_layout_mock') {
     await runRuntimeViewLayoutMockHarness(options);
+    return;
+  }
+
+  if (options.suiteName === 'prompt03_ui_mode_role_sim') {
+    await runPromptSpecSuiteHarness(
+      { ...options, workflowTimeoutMs: Math.max(options.workflowTimeoutMs, 300_000) },
+      PROMPT_03_UI_MODE_WORKFLOWS,
+      'prompt03_ui_mode_role_sim',
+      '03',
+      'ui-mode-role-sim',
+      'prompt03',
+      'Runs Prompt 03 UI builder mode role simulation through MissionOrchestrator, WorkflowOrchestrator, RuntimeManager, and PTY-backed frontend-role Codex sessions with Strict UI quality targets.',
+    );
     return;
   }
 

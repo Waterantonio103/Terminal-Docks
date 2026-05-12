@@ -77,6 +77,8 @@ export interface CreateRuntimeArgs {
   paneId?: string;
   workspaceDir: string | null;
   goal?: string | null;
+  frontendMode?: import('../../store/workspace.js').FrontendWorkflowMode;
+  frontendCategory?: import('../../store/workspace.js').FrontendSpecCategory;
   instructionOverride?: string | null;
   inputPayload?: unknown;
   legalTargets?: import('../workflow/WorkflowTypes.js').LegalTarget[];
@@ -122,6 +124,8 @@ export interface RuntimeSessionDescriptor {
   lastError?: string;
   activePermission?: RuntimePermissionRequest;
   goal?: string;
+  frontendMode?: import('../../store/workspace.js').FrontendWorkflowMode;
+  frontendCategory?: import('../../store/workspace.js').FrontendSpecCategory;
   legalTargets?: import('../workflow/WorkflowTypes.js').LegalTarget[];
   upstreamPayloads?: import('../workflow/WorkflowRun.js').HandoffRecord[];
 }

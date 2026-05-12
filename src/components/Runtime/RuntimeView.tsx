@@ -3,7 +3,7 @@ import { DotTunnelBackground } from '../shared/DotTunnelBackground';
 import { Bot, Cpu, FileCode2, Focus, Maximize2, RefreshCw, ShieldAlert, Square } from 'lucide-react';
 import { TerminalPane } from '../Terminal/TerminalPane';
 import { useWorkspaceStore, type CompiledMission, type Pane, type WorkflowAgentCli, type WorkflowEdgeCondition } from '../../store/workspace';
-import { workflowStatusLabel, workflowStatusTone } from '../../lib/workflowStatus';
+import { isWorkflowStatusActive, isWorkflowStatusLoading, workflowStatusLabel, workflowStatusTone } from '../../lib/workflowStatus';
 import { useRuntimeSessions, useRuntimeObserver, type EnrichedRuntimeSession } from './useRuntimeSessions';
 import { runtimeObserver } from './RuntimeObserver';
 
@@ -43,12 +43,6 @@ const MIN_NODE_HEIGHT = 220;
 const GRAPH_GAP_X = 72;
 const GRAPH_GAP_Y = 96;
 const GRID_SIZE = 24;
-const ACTIVE_STATUSES = new Set<string>([
-  'launching', 'connecting', 'spawning', 'terminal_started',
-  'adapter_starting', 'mcp_connecting', 'registered', 'ready',
-  'activation_pending', 'activation_acked', 'activated',
-  'running', 'handoff_pending', 'waiting',
-]);
 const WORKING_STATUSES = new Set<string>([
   'activated', 'activation_acked', 'running', 'handoff_pending', 'waiting',
 ]);
@@ -90,6 +84,25 @@ function runtimePaneFor(session: EnrichedRuntimeSession): Pane {
       runtimeManaged: true,
     },
   };
+}
+
+function RuntimeLoadingMarker() {
+  const [dotCount, setDotCount] = useState(1);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      setDotCount(value => value >= 3 ? 1 : value + 1);
+    }, 420);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  return (
+    <div className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center bg-bg-app/70 backdrop-blur-[1px]">
+      <div className="rounded border border-border-panel bg-bg-panel/90 px-3 py-1.5 text-[12px] font-medium text-sky-200 shadow-lg">
+        loading{'.'.repeat(dotCount)}
+      </div>
+    </div>
+  );
 }
 
 function buildVisibleRuntimeEdges(
@@ -274,6 +287,7 @@ export function RuntimeView() {
 
   const [pan, setPan] = useState<Point>(() => ({ ..._sessionPan }));
   const [zoom, setZoom] = useState(() => _sessionZoom);
+  const [showRuntimeGraph, setShowRuntimeGraph] = useState(false);
   const [interaction, setInteraction] = useState<CanvasInteraction>({ kind: 'idle' });
   const [nodeLayouts, setNodeLayouts] = useState<Record<string, RuntimeNodeLayout>>(() => ({ ..._sessionLayouts }));
   const canvasRef = useRef<HTMLDivElement | null>(null);
@@ -479,6 +493,15 @@ export function RuntimeView() {
     () => sessions.map((session, index) => ({ key: layoutKeyFor(session, index), session })),
     [sessions],
   );
+  const focusedSessions = useMemo(() => {
+    const active = sessions.filter(session => isWorkflowStatusActive(session.status ?? 'idle'));
+    return active.length > 0 ? active : sessions;
+  }, [sessions]);
+  const focusedGridClass = focusedSessions.length <= 1
+    ? 'grid-cols-1 grid-rows-1'
+    : focusedSessions.length === 2
+      ? 'grid-cols-2 grid-rows-1'
+      : 'grid-cols-2 grid-rows-2';
 
   const allPanes = useMemo(() => tabs.flatMap(tab => tab.panes), [tabs]);
 
@@ -582,19 +605,33 @@ export function RuntimeView() {
         </div>
         <div className="flex items-center gap-3">
           <div className="text-[11px] text-text-muted">
-            {sessions.length} runtime node{sessions.length === 1 ? '' : 's'} · {runtimeEdges.length} edge{runtimeEdges.length === 1 ? '' : 's'}
+            {showRuntimeGraph
+              ? `${sessions.length} runtime node${sessions.length === 1 ? '' : 's'} · ${runtimeEdges.length} edge${runtimeEdges.length === 1 ? '' : 's'}`
+              : `${focusedSessions.length} focused runtime${focusedSessions.length === 1 ? '' : 's'}`}
           </div>
           <button
             className="px-2 py-1 rounded border border-border-panel text-text-muted hover:text-text-primary hover:background-bg-surface text-[11px] flex items-center gap-1"
-            onClick={resetView}
-            title="Fit all nodes in view"
+            onClick={() => setShowRuntimeGraph(value => !value)}
+            title={showRuntimeGraph ? 'Focus active runtime terminals' : 'Minimize terminals to graph overview'}
           >
             <Maximize2 size={12} />
-            Fit
+            {showRuntimeGraph ? 'Terminals' : 'Graph'}
           </button>
-          <div className="text-[10px] text-text-muted tabular-nums w-16 text-right">
-            {Math.round(zoom * 100)}%
-          </div>
+          {showRuntimeGraph && (
+            <>
+              <button
+                className="px-2 py-1 rounded border border-border-panel text-text-muted hover:text-text-primary hover:background-bg-surface text-[11px] flex items-center gap-1"
+                onClick={resetView}
+                title="Fit all nodes in view"
+              >
+                <Maximize2 size={12} />
+                Fit
+              </button>
+              <div className="text-[10px] text-text-muted tabular-nums w-16 text-right">
+                {Math.round(zoom * 100)}%
+              </div>
+            </>
+          )}
         </div>
       </div>
 
@@ -603,6 +640,78 @@ export function RuntimeView() {
           <Cpu size={34} className="opacity-40" />
           <div className="text-sm text-text-secondary">No active agent sessions.</div>
           <div className="text-[11px] max-w-sm">Run a workflow to populate this view with live runtime nodes and terminal streams.</div>
+        </div>
+      ) : !showRuntimeGraph ? (
+        <div className={`flex-1 min-h-0 grid ${focusedGridClass} gap-2 p-3 background-bg-app`}>
+          {focusedSessions.map((session, index) => {
+            const pane = runtimePaneFor(session);
+            const status = session.status ?? 'idle';
+            const isLoading = isWorkflowStatusLoading(status);
+            const isThreeWideBottom = focusedSessions.length === 3 && index === 2;
+            return (
+              <div
+                key={session.sessionId || session.terminalId || index}
+                className={`min-h-0 overflow-hidden rounded-lg border background-bg-panel flex flex-col shadow-lg ${
+                  isWorkflowStatusActive(status) ? 'border-accent-primary/50' : 'border-border-panel'
+                } ${isThreeWideBottom ? 'col-span-2' : ''}`}
+              >
+                <div className="h-12 px-3 border-b border-border-panel background-bg-titlebar flex items-center justify-between gap-3">
+                  <div className="min-w-0 flex items-center gap-2">
+                    <Bot size={15} className="text-accent-primary shrink-0" />
+                    <div className="min-w-0">
+                      <div className="text-sm font-semibold text-text-primary truncate">{session.roleId || session.title}</div>
+                      <div className="text-[10px] text-text-muted truncate">{session.cli ?? 'CLI unknown'} · {session.terminalId || session.sessionId}</div>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <div className={`text-[10px] uppercase tracking-wide px-2 py-1 rounded border ${workflowStatusTone(status, 'mission')}`}>
+                      {workflowStatusLabel(status)}
+                    </div>
+                    <button className="w-6 h-6 flex items-center justify-center rounded text-text-muted hover:text-text-primary hover:background-bg-surface" title="Focus terminal" onClick={() => focusRuntime(session)} disabled={!session.terminalId}>
+                      <Focus size={13} />
+                    </button>
+                    <button className="w-6 h-6 flex items-center justify-center rounded text-text-muted hover:text-red-300 hover:bg-red-500/10" title="Stop session" onClick={() => stopRuntime(session)} disabled={!session.terminalId}>
+                      <Square size={12} />
+                    </button>
+                    <button className="w-6 h-6 flex items-center justify-center rounded text-text-muted hover:text-text-primary hover:background-bg-surface" title="Retry activation" onClick={() => retryRuntime(session)}>
+                      <RefreshCw size={13} />
+                    </button>
+                  </div>
+                </div>
+                {session.activePermission && (
+                  <div className="m-3 mb-0 rounded border border-amber-400/40 bg-amber-400/10 p-3 text-[11px] text-amber-100">
+                    <div className="flex items-center gap-2 font-semibold">
+                      <ShieldAlert size={13} />
+                      Grant permission for: {session.activePermission.category}?
+                    </div>
+                    <div className="mt-1 text-amber-100/70 line-clamp-2">{session.activePermission.detail}</div>
+                    <div className="mt-2 flex gap-2">
+                      <button
+                        className="px-2 py-1 rounded bg-emerald-500/20 text-emerald-200 border border-emerald-400/30 hover:bg-emerald-500/30 transition-colors"
+                        onClick={() => resolvePermission(session.sessionId, session.activePermission!.permissionId, 'approve')}
+                      >
+                        Approve
+                      </button>
+                      <button
+                        className="px-2 py-1 rounded bg-red-500/20 text-red-200 border border-red-400/30 hover:bg-red-500/30 transition-colors"
+                        onClick={() => resolvePermission(session.sessionId, session.activePermission!.permissionId, 'deny')}
+                      >
+                        Deny
+                      </button>
+                    </div>
+                  </div>
+                )}
+                <div className="relative flex-1 min-h-0 background-bg-app overflow-hidden">
+                  {isLoading && <RuntimeLoadingMarker />}
+                  {pane ? (
+                    <TerminalPane pane={pane} />
+                  ) : (
+                    <div className="h-full flex items-center justify-center text-[12px] text-text-muted">Runtime has no PTY stream.</div>
+                  )}
+                </div>
+              </div>
+            );
+          })}
         </div>
       ) : (
         <div
@@ -656,7 +765,8 @@ export function RuntimeView() {
               const session = runtimeNode.session;
               const pane = runtimePaneFor(session);
               const status = session.status ?? 'idle';
-              const isActive = ACTIVE_STATUSES.has(status);
+              const isActive = isWorkflowStatusActive(status);
+              const isLoading = isWorkflowStatusLoading(status);
               const layout = nodeLayouts[runtimeNode.key] || { x: 0, y: 0, width: DEFAULT_NODE_WIDTH, height: DEFAULT_NODE_HEIGHT };
               const isDragging = interaction.kind === 'dragging_node' && interaction.nodeKey === runtimeNode.key;
 
@@ -767,7 +877,8 @@ export function RuntimeView() {
                     </div>
                   )}
 
-                  <div className="flex-1 min-h-0 background-bg-app overflow-hidden">
+                  <div className="relative flex-1 min-h-0 background-bg-app overflow-hidden">
+                    {isLoading && <RuntimeLoadingMarker />}
                     {pane ? (
                       <TerminalPane pane={pane} />
                     ) : session.executionMode === 'api' || session.executionMode === 'streaming_headless' ? (

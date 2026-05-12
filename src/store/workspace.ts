@@ -42,6 +42,10 @@ export type WorkflowEdgeCondition = 'always' | 'on_success' | 'on_failure';
 export type WorkflowAgentCli = 'claude' | 'gemini' | 'opencode' | 'codex' | 'custom' | 'ollama' | 'lmstudio';
 export type WorkflowExecutionMode = 'api' | 'headless' | 'streaming_headless' | 'interactive_pty' | 'manual';
 export type WorkflowAuthoringMode = 'preset' | 'graph' | 'adaptive';
+export type WorkflowGraphMode = 'standard' | 'ui';
+export type FrontendWorkflowMode = 'off' | 'fast' | 'aligned' | 'strict_ui';
+export type PresetSpecProfile = 'none' | 'frontend_three_file';
+export type FrontendSpecCategory = 'marketing_site' | 'saas_dashboard' | 'admin_internal_tool' | 'docs_portal' | 'consumer_mobile_app';
 export type WorkerCapabilityId = 'planning' | 'coding' | 'testing' | 'review' | 'security' | 'repo_analysis' | 'shell_execution';
 
 export interface WorkerCapability {
@@ -80,6 +84,8 @@ export interface WorkflowNode {
     authoringMode?: WorkflowAuthoringMode;
     presetId?: string | null;
     runVersion?: number;
+    frontendMode?: FrontendWorkflowMode;
+    specProfile?: PresetSpecProfile;
     adaptiveSeed?: boolean;
     profileId?: string;
     capabilities?: WorkerCapability[];
@@ -153,6 +159,9 @@ export interface CompiledMissionMetadata {
   authoringMode?: WorkflowAuthoringMode;
   presetId?: string | null;
   runVersion?: number;
+  frontendMode?: FrontendWorkflowMode;
+  frontendCategory?: FrontendSpecCategory;
+  specProfile?: PresetSpecProfile;
 }
 
 export interface CompiledMission {
@@ -375,26 +384,6 @@ export interface DbTask {
 export type SidebarTabType = 'files' | 'tasks' | 'swarm' | 'agents' | 'nodetree' | 'settings';
 export type LayoutMode = 'grid' | 'tabs';
 
-export interface DebugSessionTab {
-  terminalId: string;
-  missionId: string;
-  nodeId?: string | null;
-  label: string;
-  cli?: WorkflowAgentCli | null;
-}
-
-export interface DebugRunHistoryItem {
-  debugRunId: string;
-  suiteName: string;
-  mode: string;
-  status: string;
-  startedAt: number;
-  updatedAt: number;
-  reportPath?: string;
-  lastMessage?: string;
-  sessions: DebugSessionTab[];
-}
-
 export interface CustomThemeColors {
   // UI Colors
   '--bg-app'?: string;
@@ -419,12 +408,11 @@ interface WorkspaceState {
   layoutMode: LayoutMode;
   sidebarOpen: boolean;
   activeSidebarTab: SidebarTabType;
-  debugSidebarWidth: number;
-  debugRunHistory: DebugRunHistoryItem[];
   appMode: AppMode;
   workspaceDir: string | null;
   theme: ThemeType;
   showSettings: boolean;
+  canvasEffectsEnabled: boolean;
   customTheme: CustomThemeColors;
   savedLayouts: SavedLayout[];
   messages: McpMessage[];
@@ -432,17 +420,21 @@ interface WorkspaceState {
   tasks: DbTask[];
   agentInstructions: Record<string, string>;
   globalGraph: WorkflowGraph;
+  workflowGraphMode: WorkflowGraphMode;
+  workflowGraphs: Record<WorkflowGraphMode, WorkflowGraph | null>;
+  uiFrontendMode: Exclude<FrontendWorkflowMode, 'off'>;
   nodeTerminalBindings: Record<string, string>;
   nodeRuntimeBindings: Record<string, NodeRuntimeBinding>;
   toggleSidebar: () => void;
   setActiveSidebarTab: (tab: SidebarTabType) => void;
-  setDebugSidebarWidth: (width: number) => void;
-  upsertDebugRunHistory: (item: DebugRunHistoryItem) => void;
   setAppMode: (mode: AppMode) => void;
   setLayoutMode: (mode: LayoutMode) => void;
   setActivePaneId: (id: string | null) => void;
   setGlobalGraph: (graph: WorkflowGraph) => void;
+  setWorkflowGraphMode: (mode: WorkflowGraphMode) => void;
+  setUiFrontendMode: (mode: Exclude<FrontendWorkflowMode, 'off'>) => void;
   setShowSettings: (open: boolean) => void;
+  setCanvasEffectsEnabled: (enabled: boolean) => void;
   setTheme: (theme: ThemeType) => void;
   setCustomThemeColor: (key: keyof CustomThemeColors, value: string) => void;
   resetCustomTheme: () => void;
@@ -500,6 +492,57 @@ function findHighestAvailableSpot(panes: Pane[], w: number, h: number, padding =
   return { x: 0, y: 0, w, h };
 }
 
+function cleanWorkflowGraph(graph: WorkflowGraph): WorkflowGraph {
+  return {
+    ...graph,
+    nodes: graph.nodes.map(node => ({
+      ...node,
+      config: node.config ? {
+        ...node.config,
+        workspaceDir: typeof node.config.workspaceDir === 'string' ? node.config.workspaceDir.replace(/\0/g, '').trim() : node.config.workspaceDir,
+        cli: typeof node.config.cli === 'string' ? node.config.cli.replace(/\0/g, '').trim() as WorkflowAgentCli : node.config.cli,
+      } : undefined,
+    })),
+  };
+}
+
+function createEmptyWorkflowGraph(id: string): WorkflowGraph {
+  return {
+    id,
+    nodes: [],
+    edges: [],
+  };
+}
+
+function persistWorkflowGraph(graph: WorkflowGraph) {
+  import('@tauri-apps/api/core').then(({ invoke }) => {
+    invoke('save_workflow_definition', { id: 'global-editor', graphJson: JSON.stringify(graph) }).catch(console.error);
+  });
+}
+
+function stripRuntimeFromGraph(graph: WorkflowGraph | null): WorkflowGraph | null {
+  if (!graph) return null;
+  return {
+    ...graph,
+    nodes: graph.nodes.map(node => {
+      const config = node.config ? { ...node.config } : undefined;
+      if (config) {
+        delete config.terminalId;
+        delete config.paneId;
+        delete (config as any).runtimeSessionId;
+        delete (config as any).currentAttempt;
+        delete (config as any).heartbeat;
+      }
+      return {
+        ...node,
+        status: 'idle',
+        mcpState: undefined,
+        config,
+      };
+    }),
+  };
+}
+
 const _initTabId = generateId();
 
 export const useWorkspaceStore = create<WorkspaceState>()(
@@ -519,12 +562,11 @@ export const useWorkspaceStore = create<WorkspaceState>()(
       layoutMode: 'grid',
       sidebarOpen: true,
       activeSidebarTab: 'files',
-      debugSidebarWidth: 360,
-      debugRunHistory: [],
       appMode: 'workflow',
       workspaceDir: null,
       theme: getInitialTheme(),
       showSettings: false,
+      canvasEffectsEnabled: true,
       customTheme: {},
       savedLayouts: [],
       messages: [],
@@ -532,42 +574,56 @@ export const useWorkspaceStore = create<WorkspaceState>()(
       tasks: [],
       agentInstructions: {},
       globalGraph: { id: 'global-editor', nodes: [], edges: [] },
+      workflowGraphMode: 'standard',
+      workflowGraphs: {
+        standard: { id: 'global-editor', nodes: [], edges: [] },
+        ui: null,
+      },
+      uiFrontendMode: 'strict_ui',
       nodeTerminalBindings: {},
       nodeRuntimeBindings: {},
 
       setActiveSidebarTab: (tab) => set({ activeSidebarTab: tab }),
-      setDebugSidebarWidth: (width) => set({
-        debugSidebarWidth: Math.max(280, Math.min(720, Math.round(width))),
-      }),
-      upsertDebugRunHistory: (item) => set((state) => {
-        const deduped = state.debugRunHistory.filter(run => run.debugRunId !== item.debugRunId);
-        return {
-          debugRunHistory: [item, ...deduped]
-            .sort((a, b) => b.updatedAt - a.updatedAt)
-            .slice(0, 12),
-        };
-      }),
       setAppMode: (mode) => set({ appMode: mode }),
       setLayoutMode: (mode) => set({ layoutMode: mode }),
       setActivePaneId: (id) => set({ activePaneId: id }),
       setGlobalGraph: (graph) => {
-        const cleanGraph = {
-          ...graph,
-          nodes: graph.nodes.map(node => ({
-            ...node,
-            config: node.config ? {
-              ...node.config,
-              workspaceDir: typeof node.config.workspaceDir === 'string' ? node.config.workspaceDir.replace(/\0/g, '').trim() : node.config.workspaceDir,
-              cli: typeof node.config.cli === 'string' ? node.config.cli.replace(/\0/g, '').trim() as WorkflowAgentCli : node.config.cli,
-            } : undefined
-          }))
-        };
-        set({ globalGraph: cleanGraph });
-        import('@tauri-apps/api/core').then(({ invoke }) => {
-          invoke('save_workflow_definition', { id: 'global-editor', graphJson: JSON.stringify(cleanGraph) }).catch(console.error);
-        });
+        const cleanGraph = cleanWorkflowGraph(graph);
+        set((state) => ({
+          globalGraph: cleanGraph,
+          workflowGraphs: {
+            ...state.workflowGraphs,
+            [state.workflowGraphMode]: cleanGraph,
+          },
+        }));
+        persistWorkflowGraph(cleanGraph);
       },
+      setWorkflowGraphMode: (mode) => set((state) => {
+        if (state.workflowGraphMode === mode) return state;
+        const graphs = {
+          ...state.workflowGraphs,
+          [state.workflowGraphMode]: state.globalGraph,
+        };
+        const selectedGraph = graphs[mode] ?? (mode === 'ui'
+          ? createEmptyWorkflowGraph('ui-editor')
+          : createEmptyWorkflowGraph('global-editor'));
+        graphs[mode] = selectedGraph;
+        const cleanGraph = cleanWorkflowGraph(selectedGraph);
+        persistWorkflowGraph(cleanGraph);
+        return {
+          workflowGraphMode: mode,
+          workflowGraphs: {
+            ...graphs,
+            [mode]: cleanGraph,
+          },
+          globalGraph: cleanGraph,
+          nodeTerminalBindings: {},
+          nodeRuntimeBindings: {},
+        };
+      }),
+      setUiFrontendMode: (mode) => set({ uiFrontendMode: mode }),
       setShowSettings: (open) => set({ showSettings: open }),
+      setCanvasEffectsEnabled: (enabled) => set({ canvasEffectsEnabled: enabled }),
       setTheme: (theme) => set({ theme }),
       setCustomThemeColor: (key, value) => set((s) => ({
         customTheme: { ...s.customTheme, [key]: value }
@@ -905,27 +961,22 @@ export const useWorkspaceStore = create<WorkspaceState>()(
       loadPlannedDag: (planned) => {
         import('../lib/workflow/PlanningRouter.js').then(({ convertPlannedDagToWorkflowGraph }) => {
           const graph = convertPlannedDagToWorkflowGraph(planned);
-          const cleanGraph = {
-            ...graph,
-            nodes: graph.nodes.map(node => ({
-              ...node,
-              config: node.config ? {
-                ...node.config,
-                workspaceDir: typeof node.config.workspaceDir === 'string' ? node.config.workspaceDir.replace(/\0/g, '').trim() : node.config.workspaceDir,
-                cli: typeof node.config.cli === 'string' ? node.config.cli.replace(/\0/g, '').trim() as WorkflowAgentCli : node.config.cli,
-              } : undefined
-            }))
-          };
-          set({ globalGraph: cleanGraph, activeSidebarTab: 'nodetree' });
-          import('@tauri-apps/api/core').then(({ invoke }) => {
-            invoke('save_workflow_definition', { id: 'global-editor', graphJson: JSON.stringify(cleanGraph) }).catch(console.error);
-          });
+          const cleanGraph = cleanWorkflowGraph(graph);
+          set((state) => ({
+            globalGraph: cleanGraph,
+            workflowGraphs: {
+              ...state.workflowGraphs,
+              [state.workflowGraphMode]: cleanGraph,
+            },
+            activeSidebarTab: 'nodetree',
+          }));
+          persistWorkflowGraph(cleanGraph);
         });
       },
     }),
     {
       name: 'workspace-storage',
-      version: 12,
+      version: 15,
       migrate: (persistedState: any, version: number) => {
         if (version <= 2) {
           const tabs = (persistedState as any).tabs || [];
@@ -1025,10 +1076,41 @@ export const useWorkspaceStore = create<WorkspaceState>()(
           };
         }
         if (version < 12) {
+          return persistedState;
+        }
+        if (version < 13) {
+          const graph = persistedState?.globalGraph ?? { id: 'global-editor', nodes: [], edges: [] };
           return {
             ...persistedState,
-            debugSidebarWidth: 360,
-            debugRunHistory: [],
+            workflowGraphMode: 'standard',
+            workflowGraphs: {
+              standard: graph,
+              ui: null,
+            },
+          };
+        }
+        if (version < 14) {
+          const activeMode = persistedState?.workflowGraphMode === 'ui' ? 'ui' : 'standard';
+          const graphs = persistedState?.workflowGraphs ?? {};
+          return {
+            ...persistedState,
+            workflowGraphMode: activeMode,
+            workflowGraphs: {
+              standard: activeMode === 'standard'
+                ? (persistedState?.globalGraph ?? graphs.standard ?? createEmptyWorkflowGraph('global-editor'))
+                : (graphs.standard ?? createEmptyWorkflowGraph('global-editor')),
+              ui: null,
+            },
+            globalGraph: activeMode === 'ui'
+              ? createEmptyWorkflowGraph('ui-editor')
+              : (persistedState?.globalGraph ?? graphs.standard ?? createEmptyWorkflowGraph('global-editor')),
+            uiFrontendMode: 'strict_ui',
+          };
+        }
+        if (version < 15) {
+          return {
+            ...persistedState,
+            canvasEffectsEnabled: true,
           };
         }
         return persistedState;
@@ -1058,36 +1140,20 @@ export const useWorkspaceStore = create<WorkspaceState>()(
         activePaneId: state.activePaneId,
         layoutMode: state.layoutMode,
         sidebarOpen: state.sidebarOpen,
-        debugSidebarWidth: state.debugSidebarWidth,
-        debugRunHistory: state.debugRunHistory.slice(0, 12).map(run => ({
-          ...run,
-          sessions: run.sessions.slice(0, 24),
-        })),
         appMode: state.appMode,
         workspaceDir: state.workspaceDir,
         theme: state.theme,
+        canvasEffectsEnabled: state.canvasEffectsEnabled,
         savedLayouts: state.savedLayouts,
         results: state.results.slice(-100),
         agentInstructions: state.agentInstructions,
-        globalGraph: {
-          ...state.globalGraph,
-          nodes: state.globalGraph.nodes.map(node => {
-            const config = node.config ? { ...node.config } : undefined;
-            if (config) {
-              delete config.terminalId;
-              delete config.paneId;
-              delete (config as any).runtimeSessionId;
-              delete (config as any).currentAttempt;
-              delete (config as any).heartbeat;
-            }
-            return {
-              ...node,
-              status: 'idle',
-              mcpState: undefined,
-              config,
-            };
-          })
+        workflowGraphMode: state.workflowGraphMode,
+        uiFrontendMode: state.uiFrontendMode,
+        workflowGraphs: {
+          standard: stripRuntimeFromGraph(state.workflowGraphMode === 'standard' ? state.globalGraph : state.workflowGraphs.standard),
+          ui: stripRuntimeFromGraph(state.workflowGraphMode === 'ui' ? state.globalGraph : state.workflowGraphs.ui),
         },
+        globalGraph: stripRuntimeFromGraph(state.globalGraph)!,
         nodeTerminalBindings: {},
         nodeRuntimeBindings: {},
       }),

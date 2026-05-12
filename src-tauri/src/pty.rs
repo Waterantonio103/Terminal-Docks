@@ -1,7 +1,9 @@
 use portable_pty::{CommandBuilder, MasterPty, NativePtySystem, PtySize, PtySystem};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
+use std::fs;
 use std::io::{Read, Write};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -38,6 +40,143 @@ fn windows_command_candidates(command: &str) -> Vec<String> {
 #[cfg(not(target_os = "windows"))]
 fn windows_command_candidates(command: &str) -> Vec<String> {
     vec![command.to_string()]
+}
+
+fn home_dir() -> Option<PathBuf> {
+    std::env::var("USERPROFILE")
+        .or_else(|_| std::env::var("HOME"))
+        .ok()
+        .map(PathBuf::from)
+}
+
+fn normalize_codex_home_env(command: &str, cwd: Option<&str>, env: &mut HashMap<String, String>) {
+    if !command.eq_ignore_ascii_case("codex") {
+        return;
+    }
+
+    let raw = match env
+        .get("CODEX_HOME")
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+    {
+        Some(value) => value.to_string(),
+        None => return,
+    };
+
+    let home_path = PathBuf::from(&raw);
+    if home_path.is_absolute() {
+        return;
+    }
+
+    let base = match cwd.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(value) => PathBuf::from(value),
+        None => return,
+    };
+
+    env.insert(
+        "CODEX_HOME".to_string(),
+        base.join(home_path).to_string_lossy().to_string(),
+    );
+}
+
+fn seed_codex_auth_if_needed(command: &str, env: &HashMap<String, String>) -> Result<(), String> {
+    if !command.eq_ignore_ascii_case("codex") {
+        return Ok(());
+    }
+
+    let codex_home = match env
+        .get("CODEX_HOME")
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+    {
+        Some(path) => PathBuf::from(path),
+        None => return Ok(()),
+    };
+
+    let auth_dst = codex_home.join("auth.json");
+    if auth_dst.exists() {
+        return Ok(());
+    }
+
+    let source_home = match home_dir() {
+        Some(home) => home.join(".codex"),
+        None => return Ok(()),
+    };
+    let auth_src = source_home.join("auth.json");
+    if !auth_src.exists() {
+        return Ok(());
+    }
+
+    fs::create_dir_all(&codex_home).map_err(|e| e.to_string())?;
+    fs::copy(&auth_src, &auth_dst).map_err(|e| e.to_string())?;
+
+    let cap_src = source_home.join("cap_sid");
+    let cap_dst = codex_home.join("cap_sid");
+    if cap_src.exists() && !cap_dst.exists() {
+        let _ = fs::copy(cap_src, cap_dst);
+    }
+
+    Ok(())
+}
+
+fn find_project_trust_root(cwd: &str) -> PathBuf {
+    let mut current = PathBuf::from(cwd);
+    loop {
+        if current.join(".git").exists() {
+            return current;
+        }
+        if !current.pop() {
+            return PathBuf::from(cwd);
+        }
+    }
+}
+
+fn codex_project_key(path: &std::path::Path) -> String {
+    path.to_string_lossy()
+        .replace('/', "\\")
+        .trim_end_matches('\\')
+        .to_lowercase()
+}
+
+fn seed_codex_trust_if_needed(
+    command: &str,
+    cwd: Option<&str>,
+    env: &HashMap<String, String>,
+) -> Result<(), String> {
+    if !command.eq_ignore_ascii_case("codex") {
+        return Ok(());
+    }
+
+    let codex_home = match env
+        .get("CODEX_HOME")
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+    {
+        Some(path) => PathBuf::from(path),
+        None => return Ok(()),
+    };
+    let cwd = match cwd.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(value) => value,
+        None => return Ok(()),
+    };
+
+    fs::create_dir_all(&codex_home).map_err(|e| e.to_string())?;
+    let config_path = codex_home.join("config.toml");
+    let project_key = codex_project_key(&find_project_trust_root(cwd));
+    let table_header = format!("[projects.'{}']", project_key);
+    let existing = fs::read_to_string(&config_path).unwrap_or_default();
+    if existing.contains(&table_header) {
+        return Ok(());
+    }
+
+    let mut next = existing;
+    if !next.is_empty() && !next.ends_with('\n') {
+        next.push('\n');
+    }
+    next.push('\n');
+    next.push_str(&table_header);
+    next.push_str("\ntrust_level = \"trusted\"\n");
+    fs::write(config_path, next).map_err(|e| e.to_string())
 }
 
 impl PtyState {
@@ -644,6 +783,10 @@ pub fn spawn_pty_with_command(
 
     let mcp_state = app.state::<crate::mcp::McpState>();
     let mcp_url = crate::mcp::get_mcp_url(mcp_state);
+    let mut launch_env = env.unwrap_or_default();
+    normalize_codex_home_env(&command, cwd.as_deref(), &mut launch_env);
+    seed_codex_auth_if_needed(&command, &launch_env)?;
+    seed_codex_trust_if_needed(&command, cwd.as_deref(), &launch_env)?;
     let candidates = windows_command_candidates(&command);
     let mut last_error: Option<String> = None;
     let mut child = None;
@@ -656,10 +799,8 @@ pub fn spawn_pty_with_command(
         for arg in &args {
             cmd.arg(arg);
         }
-        if let Some(ref vars) = env {
-            for (key, value) in vars {
-                cmd.env(key, value);
-            }
+        for (key, value) in &launch_env {
+            cmd.env(key, value);
         }
         if let Some(ref path) = cwd {
             if !path.is_empty() {

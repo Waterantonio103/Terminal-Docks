@@ -85,67 +85,32 @@ function legacyNodeToDocumentNode(node: WorkflowNode, index: number): NodeInstan
       terminalTitle: node.config?.terminalTitle ?? '',
       paneId: node.config?.paneId ?? '',
       cli: node.config?.cli ?? 'claude',
+      model: node.config?.model ?? '',
+      yolo: Boolean(node.config?.yolo),
       executionMode: node.config?.executionMode ?? 'streaming_headless',
       autoLinked: Boolean(node.config?.autoLinked),
       authoringMode: node.config?.authoringMode ?? 'graph',
       presetId: node.config?.presetId ?? '',
       runVersion: node.config?.runVersion ?? 1,
+      frontendMode: node.config?.frontendMode ?? 'off',
       adaptiveSeed: Boolean(node.config?.adaptiveSeed),
       label: node.config?.label ?? '',
     },
   };
 }
 
-function starterGraph(): WorkflowGraph {
-  const taskId = `task-${generateId()}`;
-  const agentId = `agent-${generateId()}`;
-  return {
-    id: 'global-editor',
-    nodes: [
-      {
-        id: taskId,
-        roleId: 'task',
-        status: 'idle',
-        config: {
-          prompt: '',
-          mode: 'build',
-          workspaceDir: '',
-          position: { x: 120, y: 160 },
-        },
-      },
-      {
-        id: agentId,
-        roleId: 'builder',
-        status: 'idle',
-        config: {
-          instructionOverride: '',
-          position: { x: 440, y: 160 },
-        },
-      },
-    ],
-    edges: [
-      {
-        fromNodeId: taskId,
-        toNodeId: agentId,
-        condition: 'always',
-      },
-    ],
-  };
-}
-
 export function legacyGraphToNodeDocument(graph: WorkflowGraph) {
-  const source = graph.nodes.length > 0 ? graph : starterGraph();
   const tree: NodeTreeDefinition = {
-    id: source.id,
+    id: graph.id || 'global-editor',
     name: 'Workflow',
     kind: 'workflow',
     interface: interfaceDefinition(),
-    nodes: Object.fromEntries(source.nodes.map((node, index) => [node.id, legacyNodeToDocumentNode(node, index)])),
+    nodes: Object.fromEntries(graph.nodes.map((node, index) => [node.id, legacyNodeToDocumentNode(node, index)])),
     links: {},
   };
 
   const typeByNode = new Map(Object.values(tree.nodes).map(node => [node.id, node.type]));
-  for (const edge of source.edges) {
+  for (const edge of graph.edges) {
     const fromType = typeByNode.get(edge.fromNodeId) ?? 'workflow.agent';
     const toType = typeByNode.get(edge.toNodeId) ?? 'workflow.agent';
     const link: NodeLink = {
@@ -241,6 +206,12 @@ export function nodeDocumentToWorkflowGraph(
           typeof node.properties.runVersion === 'number' && Number.isFinite(node.properties.runVersion)
             ? Math.max(1, Math.floor(node.properties.runVersion))
             : 1,
+        frontendMode:
+          node.properties.frontendMode === 'fast' ||
+          node.properties.frontendMode === 'aligned' ||
+          node.properties.frontendMode === 'strict_ui'
+            ? node.properties.frontendMode
+            : 'off',
         adaptiveSeed: Boolean(node.properties.adaptiveSeed),
         label: String(node.properties.label ?? node.label ?? ''),
         position: node.location,
@@ -321,6 +292,7 @@ export function nodeDocumentToFlowGraph(
         authoringMode: node.config?.authoringMode ?? 'graph',
         presetId: node.config?.presetId ?? '',
         runVersion: node.config?.runVersion ?? 1,
+        frontendMode: node.config?.frontendMode ?? 'off',
         adaptiveSeed: node.config?.adaptiveSeed ?? false,
         label: node.config?.label ?? '',
       },

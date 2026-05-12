@@ -50,6 +50,7 @@ export interface WorkflowNodeDefinition {
     readonly authoringMode?: AuthoringMode;
     readonly presetId?: string | null;
     readonly runVersion?: number;
+    readonly frontendMode?: import('../../store/workspace.js').FrontendWorkflowMode;
     readonly adaptiveSeed?: boolean;
     readonly profileId?: string;
     readonly capabilities?: CapabilityEntry[];
@@ -184,6 +185,7 @@ export function compiledMissionToDefinition(
         authoringMode: mission.metadata.authoringMode,
         presetId: mission.metadata.presetId ?? undefined,
         runVersion: mission.metadata.runVersion,
+        frontendMode: mission.metadata.frontendMode,
       },
     },
     ...mission.nodes.map(node => ({

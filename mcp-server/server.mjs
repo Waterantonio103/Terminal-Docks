@@ -592,6 +592,7 @@ app.post('/mcp', async (req, res) => {
         let initializedSessionId = null;
         const transport = new StreamableHTTPServerTransport({
           sessionIdGenerator: () => randomUUID(),
+          enableJsonResponse: true,
           onsessioninitialized: (sessionId) => {
             initializedSessionId = sessionId;
             sessions[sessionId] = { transport };
@@ -617,6 +618,12 @@ app.post('/mcp', async (req, res) => {
 app.get('/mcp', async (req, res) => {
   const sid = req.headers['mcp-session-id'];
   if (!sid || !sessions[sid]?.transport) return res.status(400).send('Invalid session');
+  await sessions[sid].transport.handleRequest(req, res);
+});
+
+app.delete('/mcp', async (req, res) => {
+  const sid = normalizeHeaderValue(req.headers['mcp-session-id']);
+  if (!sid || !sessions[sid]?.transport) return res.status(404).send('Invalid session');
   await sessions[sid].transport.handleRequest(req, res);
 });
 

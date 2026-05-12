@@ -29,6 +29,8 @@ export interface WorkflowNodeTriggeredPayload {
   executionMode?: ExecutionMode;
   goal?: string;
   workspaceDir?: string | null;
+  frontendMode?: import('../store/workspace.js').FrontendWorkflowMode;
+  frontendCategory?: import('../store/workspace.js').FrontendSpecCategory;
   assignment?: RuntimeAssignmentPayload;
 }
 
@@ -58,6 +60,8 @@ export interface RuntimeAssignmentPayload {
     nodeId: string;
     runId: string;
     attempt: number;
+    frontendMode?: import('../store/workspace.js').FrontendWorkflowMode;
+    frontendCategory?: import('../store/workspace.js').FrontendSpecCategory;
   };
   expectedDeliverable: {
     schema: 'completion_payload_v1';
@@ -102,6 +106,8 @@ export interface RuntimeActivationPayload {
   attempt: number;
   goal: string;
   workspaceDir?: string | null;
+  frontendMode?: import('../store/workspace.js').FrontendWorkflowMode;
+  frontendCategory?: import('../store/workspace.js').FrontendSpecCategory;
   inputPayload?: string | null;
   assignment?: RuntimeAssignmentPayload;
   expectedNextAction: RuntimeExpectedActionContract;
@@ -128,6 +134,8 @@ export interface NewTaskSignalPayload {
   executionMode?: ExecutionMode;
   goal?: string;
   workspaceDir?: string | null;
+  frontendMode?: import('../store/workspace.js').FrontendWorkflowMode;
+  frontendCategory?: import('../store/workspace.js').FrontendSpecCategory;
   assignment: RuntimeAssignmentPayload;
 }
 
@@ -169,6 +177,8 @@ function defaultAssignment(payload: WorkflowNodeTriggeredPayload): RuntimeAssign
       nodeId: payload.nodeId,
       runId: payload.runId ?? '',
       attempt: payload.attempt,
+      frontendMode: payload.frontendMode ?? 'off',
+      frontendCategory: payload.frontendCategory ?? 'marketing_site',
     },
     expectedDeliverable: {
       schema: 'completion_payload_v1',
@@ -219,6 +229,8 @@ export function buildNewTaskSignal(payload: WorkflowNodeTriggeredPayload, mcpUrl
     executionMode: payload.executionMode,
     goal: payload.goal,
     workspaceDir: payload.workspaceDir ?? null,
+    frontendMode: payload.frontendMode ?? 'off',
+    frontendCategory: payload.frontendCategory ?? 'marketing_site',
     assignment,
   };
 
@@ -228,7 +240,8 @@ export function buildNewTaskSignal(payload: WorkflowNodeTriggeredPayload, mcpUrl
   // We include a clear marker and the JSON envelope.
   return `### MISSION_CONTROL_ACTIVATION_REQUEST ###
 You have been assigned to a mission graph node. 
-Please call 'get_task_details({ missionId: "${payload.missionId}", nodeId: "${payload.nodeId}" })' to retrieve your full context, inbox, and legal next targets.
+Call 'get_task_details({ missionId: "${payload.missionId}", nodeId: "${payload.nodeId}" })' to retrieve your full context, inbox, and legal next targets.
+Then execute the actual task payload and call 'complete_task({ missionId: "${payload.missionId}", nodeId: "${payload.nodeId}", attempt: ${payload.attempt}, outcome, summary })' as your final MCP action. Do not stop after saying the task is ready.
 
 --- ENVELOPE ---
 ${json}

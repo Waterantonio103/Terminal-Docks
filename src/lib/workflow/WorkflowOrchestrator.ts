@@ -56,6 +56,7 @@ import type {
 import { WorkflowEventEmitter } from './WorkflowEvents.js';
 import { validateTransition } from './WorkflowStateMachine.js';
 import { mcpBus } from '../workers/mcpEventBus.js';
+import { resolveFrontendCategory } from '../frontendWorkflow.js';
 
 // ──────────────────────────────────────────────
 // Runtime Manager Port
@@ -491,6 +492,7 @@ export class WorkflowOrchestrator {
       const attempt = run.nodeStates[nodeId]?.attempt || 1;
 
       const workspaceDir = this.resolveWorkspaceDir(run.definition, nodeDef);
+      const taskConfig = run.definition.nodes.find(n => n.kind === 'task')?.config;
 
       // Group 5: Single entry point for runtime readiness.
       // Handles reuse, stale cleanup, and new launch.
@@ -509,7 +511,9 @@ export class WorkflowOrchestrator {
         instructionOverride: nodeDef.config.instructionOverride ?? null,
         modelId: nodeDef.config.model ?? null,
         yolo: nodeDef.config.yolo ?? false,
-        goal: (run.definition.nodes.find(n => n.kind === 'task') as any)?.config?.prompt || '',
+        goal: taskConfig?.prompt || '',
+        frontendMode: taskConfig?.frontendMode,
+        frontendCategory: resolveFrontendCategory(taskConfig?.prompt ?? ''),
         legalTargets: getLegalTargetsForNode(run, nodeId) as any,
         upstreamPayloads: getIncomingHandoffs(run, nodeId),
       });

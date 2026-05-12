@@ -36,6 +36,8 @@ export class RuntimeSession {
   readonly paneId?: string;
   readonly workspaceDir: string | null;
   readonly goal?: string;
+  readonly frontendMode?: import('../../store/workspace.js').FrontendWorkflowMode;
+  readonly frontendCategory?: import('../../store/workspace.js').FrontendSpecCategory;
   readonly instructionOverride?: string;
   readonly legalTargets?: import('../workflow/WorkflowTypes.js').LegalTarget[];
   readonly upstreamPayloads?: import('../workflow/WorkflowRun.js').HandoffRecord[];
@@ -68,6 +70,8 @@ export class RuntimeSession {
       paneId?: string | null;
       workspaceDir?: string | null;
       goal?: string;
+      frontendMode?: import('../../store/workspace.js').FrontendWorkflowMode;
+      frontendCategory?: import('../../store/workspace.js').FrontendSpecCategory;
       instructionOverride?: string | null;
       legalTargets?: import('../workflow/WorkflowTypes.js').LegalTarget[];
       upstreamPayloads?: import('../workflow/WorkflowRun.js').HandoffRecord[];
@@ -89,6 +93,8 @@ export class RuntimeSession {
     this.paneId = args.paneId ?? undefined;
     this.workspaceDir = args.workspaceDir ?? null;
     this.goal = args.goal;
+    this.frontendMode = args.frontendMode;
+    this.frontendCategory = args.frontendCategory;
     this.instructionOverride = args.instructionOverride ?? undefined;
     this.legalTargets = args.legalTargets;
     this.upstreamPayloads = args.upstreamPayloads;
@@ -151,6 +157,8 @@ export class RuntimeSession {
       lastError: this._lastError,
       activePermission: this._activePermission,
       goal: this.goal,
+      frontendMode: this.frontendMode,
+      frontendCategory: this.frontendCategory,
       legalTargets: this.legalTargets,
       upstreamPayloads: this.upstreamPayloads,
     };

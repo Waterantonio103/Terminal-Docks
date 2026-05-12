@@ -39,3 +39,13 @@ run('codex ordinary footer does not imply permission or completion', () => {
   assert.equal(codexAdapter.detectReady(footer).ready, false);
 });
 
+run('codex confirmation prompts require user action', () => {
+  assert.equal(codexAdapter.detectStatus('Proceed? (y)').status, 'waiting_user_answer');
+  assert.equal(codexAdapter.detectStatus('Approve edits manually?\nYes / No').status, 'waiting_user_answer');
+  assert.equal(codexAdapter.detectStatus('Do you trust this folder? (y/n)').status, 'waiting_user_answer');
+  assert.equal(codexAdapter.detectStatus('Do you want to trust the files in this folder?\nYes / No').status, 'waiting_user_answer');
+  assert.equal(codexAdapter.detectStatus('Enable admin sandbox? y/n').status, 'waiting_user_answer');
+  assert.equal(codexAdapter.detectStatus('Allow admin sandbox for this session?\nProceed?').status, 'waiting_user_answer');
+  assert.equal(codexAdapter.detectPermissionRequest('Do you want to trust the files in this folder?\nYes / No')?.request.category, 'file_read');
+  assert.equal(codexAdapter.detectPermissionRequest('Allow admin sandbox for this session?\nProceed?')?.request.category, 'shell_execution');
+});

@@ -6,6 +6,8 @@ import type {
   TaskRequirements,
   WorkerCapability,
   WorkerCapabilityId,
+  FrontendWorkflowMode,
+  PresetSpecProfile,
   WorkflowAuthoringMode,
   WorkflowAgentCli,
   WorkflowEdgeCondition,
@@ -18,6 +20,7 @@ import type {
 import { deriveExecutionLayers } from './graphUtils.js';
 import { normalizeCliId, supportsHeadless } from './cliIdentity.js';
 import agentsConfig from '../config/agents.js';
+import { resolveFrontendCategory } from './frontendWorkflow.js';
 
 type FlowNodeLike = Pick<Node, 'id' | 'type' | 'position' | 'parentId' | 'extent' | 'style'> & {
   data?: Record<string, unknown>;
@@ -181,6 +184,17 @@ function getAuthoringMode(value: unknown): WorkflowAuthoringMode | undefined {
     return value;
   }
   return undefined;
+}
+
+function getFrontendMode(value: unknown): FrontendWorkflowMode | undefined {
+  if (value === 'fast' || value === 'aligned' || value === 'strict_ui' || value === 'off') {
+    return value;
+  }
+  return undefined;
+}
+
+function getSpecProfile(value: unknown): PresetSpecProfile {
+  return value === 'frontend_three_file' ? value : 'none';
 }
 
 function getRunVersion(value: unknown): number | undefined {
@@ -478,6 +492,8 @@ export function serializeWorkflowGraph(
             authoringMode: getAuthoringMode(node.data?.authoringMode),
             presetId: asString(node.data?.presetId) ?? undefined,
             runVersion: getRunVersion(node.data?.runVersion),
+            frontendMode: getFrontendMode(node.data?.frontendMode),
+            specProfile: getSpecProfile(node.data?.specProfile),
             position: node.position,
             parentId: node.parentId,
             extent: node.extent as 'parent' | undefined,
@@ -578,6 +594,8 @@ export interface CompileMissionOptions {
   authoringMode?: WorkflowAuthoringMode;
   presetId?: string | null;
   runVersion?: number;
+  frontendMode?: FrontendWorkflowMode;
+  specProfile?: PresetSpecProfile;
 }
 
 export function compileMission({
@@ -591,6 +609,8 @@ export function compileMission({
   authoringMode,
   presetId,
   runVersion,
+  frontendMode,
+  specProfile,
 }: CompileMissionOptions): CompiledMission {
   const structure = compileMissionStructure(nodes, edges);
   const taskNode = nodes.find(node => node.id === structure.taskNodeId);
@@ -600,6 +620,11 @@ export function compileMission({
   const resolvedAuthoringMode = authoringMode ?? getAuthoringMode(taskNode.data?.authoringMode);
   const resolvedPresetId = presetId ?? trimToUndefined(taskNode.data?.presetId) ?? null;
   const resolvedRunVersion = runVersion ?? getRunVersion(taskNode.data?.runVersion) ?? 1;
+  const taskFrontendMode = getFrontendMode(taskNode.data?.frontendMode);
+  const taskSpecProfile = getSpecProfile(taskNode.data?.specProfile);
+  const resolvedFrontendMode = taskFrontendMode ?? frontendMode ?? 'off';
+  const resolvedSpecProfile = taskSpecProfile ?? specProfile;
+  const resolvedFrontendCategory = resolveFrontendCategory(asString(taskNode.data?.prompt) ?? '');
 
   const compiledNodes: CompiledMissionNode[] = structure.agentNodeIds.map(nodeId => {
     const node = nodes.find(candidate => candidate.id === nodeId);
@@ -663,6 +688,9 @@ export function compileMission({
       authoringMode: resolvedAuthoringMode,
       presetId: resolvedPresetId,
       runVersion: resolvedRunVersion,
+      frontendMode: resolvedFrontendMode,
+      frontendCategory: resolvedFrontendCategory,
+      specProfile: resolvedSpecProfile,
     },
     nodes: compiledNodes,
     edges: structure.compiledEdges,

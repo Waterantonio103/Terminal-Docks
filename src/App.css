@@ -636,6 +636,18 @@
   animation: badge-beam-spin 2s linear infinite;
 }
 
+.badge-beam-loading::before {
+  background: conic-gradient(
+    from var(--badge-beam-angle),
+    transparent 0%,
+    transparent 48%,
+    #38bdf8 62%,
+    color-mix(in srgb, #38bdf8 50%, transparent) 74%,
+    transparent 88%
+  );
+  animation: badge-beam-spin 1.6s linear infinite;
+}
+
 .badge-beam-success::before {
   background: conic-gradient(
     from var(--badge-beam-angle),
@@ -1268,6 +1280,17 @@ body {
   text-transform: uppercase;
 }
 
+.td-mcp-page .td-mcp-call-feed-header select {
+  min-width: 0;
+  margin-left: auto;
+  height: 26px;
+  border: 1px solid var(--border-panel);
+  border-radius: 4px;
+  background: var(--bg-surface);
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
 .td-mcp-page .td-mcp-config-sheet {
   position: absolute;
   inset: 0;
@@ -1377,9 +1400,9 @@ body {
 .td-mcp-page .td-mcp-config-body input[type="text"],
 .td-mcp-page .td-mcp-config-body input:not([type]),
 .td-mcp-page .td-mcp-config-body input[type="url"],
-.td-mcp-page .td-mcp-config-body select {
+.td-mcp-page .td-mcp-config-body select,
+.td-mcp-page .td-mcp-config-body textarea {
   width: 100%;
-  height: 30px;
   min-width: 0;
   padding: 0 8px;
   border: 1px solid var(--border-panel);
@@ -1387,6 +1410,20 @@ body {
   background: var(--bg-surface);
   color: var(--text-primary);
   font-size: 12px;
+}
+
+.td-mcp-page .td-mcp-config-body input[type="text"],
+.td-mcp-page .td-mcp-config-body input:not([type]),
+.td-mcp-page .td-mcp-config-body input[type="url"],
+.td-mcp-page .td-mcp-config-body select {
+  height: 30px;
+}
+
+.td-mcp-page .td-mcp-config-body textarea {
+  min-height: 74px;
+  padding: 8px;
+  resize: vertical;
+  font-family: "Cascadia Mono", Consolas, "Courier New", monospace;
 }
 
 .td-mcp-page .td-mcp-config-body label em {
@@ -1443,6 +1480,79 @@ body {
   border: 1px solid var(--border-panel);
   border-radius: 6px;
   background: var(--bg-surface);
+}
+
+.td-mcp-page .td-mcp-prober {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--border-panel);
+  border-radius: 6px;
+  background: var(--bg-surface);
+}
+
+.td-mcp-page .td-mcp-prober > button {
+  height: 30px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border: 1px solid var(--border-panel);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.td-mcp-page .td-mcp-prober > button:disabled {
+  opacity: 0.5;
+}
+
+.td-mcp-page .td-mcp-probe-results {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.td-mcp-page .td-mcp-probe-result {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 92px minmax(0, 1fr);
+  gap: 4px 8px;
+  padding: 8px;
+  border: 1px solid var(--border-panel);
+  border-radius: 4px;
+  background: var(--bg-panel);
+  color: var(--text-secondary);
+  text-align: left;
+}
+
+.td-mcp-page .td-mcp-probe-result.valid,
+.td-mcp-page .td-mcp-probe-result.possible {
+  border-color: var(--border-divider);
+}
+
+.td-mcp-page .td-mcp-probe-result strong {
+  color: var(--text-primary);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: capitalize;
+}
+
+.td-mcp-page .td-mcp-probe-result span,
+.td-mcp-page .td-mcp-probe-result em {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-style: normal;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.td-mcp-page .td-mcp-probe-result em {
+  grid-column: 2;
 }
 
 .td-mcp-page .td-mcp-inline-check {
@@ -1533,12 +1643,24 @@ body {
 
 .td-mcp-page .td-mcp-call {
   display: grid;
-  grid-template-columns: 72px minmax(0, 1fr);
+  grid-template-columns: 72px minmax(0, 1fr) auto auto;
   gap: 4px 8px;
   padding: 10px 0;
   border-top: 1px solid var(--border-panel);
   animation: td-mcp-call-pulse 4.8s ease-in-out infinite;
   animation-delay: calc(var(--td-call-index, 0) * 0.36s);
+}
+
+.td-mcp-page .td-mcp-call button {
+  width: 24px;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border-panel);
+  border-radius: 4px;
+  background: var(--bg-surface);
+  color: var(--text-secondary);
 }
 
 .td-mcp-page .td-mcp-call-empty {

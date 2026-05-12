@@ -48,9 +48,26 @@ run('permission prompt output maps to waiting_user_answer', () => {
     codexAdapter.detectStatus('Allow the terminal-docks MCP server to run tool "write_file"?\n1. Allow\nenter to submit').status,
     'waiting_user_answer',
   );
+  assert.equal(codexAdapter.detectStatus('Proceed? (y)').status, 'waiting_user_answer');
+  assert.equal(codexAdapter.detectStatus('Approve edits manually?\nYes / No').status, 'waiting_user_answer');
+  assert.equal(codexAdapter.detectStatus('Do you trust this folder? (y/n)').status, 'waiting_user_answer');
+  assert.equal(codexAdapter.detectStatus('Do you want to trust the files in this folder?\nYes / No').status, 'waiting_user_answer');
+  assert.equal(codexAdapter.detectStatus('Enable admin sandbox? y/n').status, 'waiting_user_answer');
+  assert.equal(codexAdapter.detectStatus('Allow admin sandbox for this session?\nProceed?').status, 'waiting_user_answer');
   assert.equal(opencodeAdapter.detectStatus('Approve command? [y/n]').status, 'waiting_user_answer');
   assert.equal(claudeAdapter.detectStatus('Permission request\nAllow Claude to edit this file? [y/n]').status, 'waiting_user_answer');
   assert.equal(geminiAdapter.detectStatus('Trust this folder?').status, 'waiting_user_answer');
+});
+
+run('codex startup permission prompts are categorized', () => {
+  assert.equal(
+    codexAdapter.detectPermissionRequest('Do you want to trust the files in this folder?\nYes / No')?.request.category,
+    'file_read',
+  );
+  assert.equal(
+    codexAdapter.detectPermissionRequest('Allow admin sandbox for this session?\nProceed?')?.request.category,
+    'shell_execution',
+  );
 });
 
 run('ANSI-wrapped permission prompt output maps to waiting_user_answer', () => {

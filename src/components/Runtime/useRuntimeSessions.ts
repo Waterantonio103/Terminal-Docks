@@ -98,8 +98,13 @@ export function useRuntimeObserver(): {
   );
 
   const retryRuntime = useCallback(
-    (session: EnrichedRuntimeSession) => {
-      emit('workflow-runtime-retry-requested', {
+    async (session: EnrichedRuntimeSession) => {
+      if (session.missionId && session.nodeId) {
+        const { missionOrchestrator } = await import('../../lib/workflow/MissionOrchestrator');
+        await missionOrchestrator.retryNode(session.missionId, session.nodeId);
+        return;
+      }
+      await emit('workflow-runtime-retry-requested', {
         nodeId: session.nodeId,
         terminalId: session.terminalId || null,
         runtimeSessionId: session.sessionId || null,

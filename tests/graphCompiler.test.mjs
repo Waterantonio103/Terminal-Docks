@@ -1,6 +1,15 @@
 import assert from 'node:assert/strict';
 import { compileMission, validateGraph } from '../.tmp-tests/lib/graphCompiler.js';
-import { buildPresetFlowGraph, getWorkflowPreset } from '../.tmp-tests/lib/workflowPresets.js';
+import {
+  buildPresetFlowGraph,
+  getPresetSpecMetadata,
+  getRecommendedWorkflowPreset,
+  getWorkflowPreset,
+  groupWorkflowPresetsByMode,
+  groupWorkflowPresetsBySubMode,
+  listWorkflowPresets,
+  sortWorkflowPresets,
+} from '../.tmp-tests/lib/workflowPresets.js';
 
 function taskNode(id = 'task-1') {
   return {
@@ -244,4 +253,196 @@ run('preset-expanded graphs compile to explicit workflow layers', () => {
     ['builder', 'tester', 'security'],
     ['reviewer'],
   ]);
+});
+
+run('workflow presets expose picker metadata and fixed size tiers', () => {
+  const presets = listWorkflowPresets();
+  assert.ok(presets.length >= 21, 'catalog should include curated presets beyond legacy defaults');
+
+  const validModes = new Set(['build', 'research', 'plan', 'review', 'verify', 'secure', 'document']);
+  const validSizes = new Set(['small', 'standard', 'expanded']);
+  for (const preset of presets) {
+    assert.ok(validModes.has(preset.mode), `${preset.id} has valid mode`);
+    assert.ok(preset.subMode.trim(), `${preset.id} has sub-mode`);
+    assert.ok(validSizes.has(preset.size), `${preset.id} has valid size`);
+    assert.equal(preset.agentCount, preset.nodes.length, `${preset.id} agent count matches node count`);
+    assert.ok(preset.agentCount >= 2 && preset.agentCount <= 15, `${preset.id} agent count is in picker range`);
+    assert.ok(Array.isArray(preset.tags), `${preset.id} has tags`);
+  }
+});
+
+run('workflow presets group by mode and sub-mode with standard recommendations', () => {
+  const byMode = groupWorkflowPresetsByMode();
+  assert.deepEqual([...byMode.keys()], ['build', 'research', 'plan', 'review', 'verify', 'secure', 'document']);
+  assert.ok(byMode.get('build')?.some(preset => preset.subMode === 'App / Site'));
+
+  for (const presets of byMode.values()) {
+    const bySubMode = groupWorkflowPresetsBySubMode(presets);
+    for (const values of bySubMode.values()) {
+      assert.deepEqual(values.map(preset => preset.size), ['small', 'standard', 'expanded']);
+      assert.equal(getRecommendedWorkflowPreset(values)?.size, 'standard');
+    }
+  }
+});
+
+run('workflow presets sort size tiers deterministically', () => {
+  const unsorted = ['expanded', 'small', 'standard'].map(size =>
+    listWorkflowPresets().find(preset => preset.subMode === 'Patch / Build' && preset.size === size)
+  );
+  assert.deepEqual(sortWorkflowPresets(unsorted).map(preset => preset.size), ['small', 'standard', 'expanded']);
+});
+
+run('preset-expanded graphs use evenly spaced layer layout', () => {
+  const preset = getWorkflowPreset('scout_build_review');
+  assert.ok(preset, 'scout_build_review preset must exist');
+
+  const flow = buildPresetFlowGraph({
+    preset,
+    missionId: 'layout-mission',
+    prompt: 'Patch and test the feature',
+    mode: 'build',
+    workspaceDir: 'C:/workspace',
+    instructionOverrides: {},
+    bindingsByRole: {},
+  });
+
+  const byId = new Map(flow.nodes.map(node => [node.id, node]));
+  assert.deepEqual(byId.get('scout')?.position, { x: 440, y: 360 });
+  assert.deepEqual(byId.get('builder')?.position, { x: 900, y: 100 });
+  assert.deepEqual(byId.get('tester')?.position, { x: 900, y: 620 });
+  assert.deepEqual(byId.get('reviewer')?.position, { x: 1360, y: 360 });
+});
+
+run('frontend preset compiles with explicit UI roles and metadata', () => {
+  const preset = getWorkflowPreset('frontend_ui_delivery');
+  assert.ok(preset, 'frontend_ui_delivery preset must exist');
+  assert.deepEqual(getPresetSpecMetadata(preset), {
+    specProfile: 'frontend_three_file',
+    frontendMode: 'strict_ui',
+  });
+
+  const flow = buildPresetFlowGraph({
+    preset,
+    missionId: 'frontend-mission',
+    prompt: 'Build a polished docs portal',
+    mode: 'build',
+    workspaceDir: 'C:/workspace',
+    frontendMode: 'strict_ui',
+    instructionOverrides: {},
+    bindingsByRole: {
+      frontend_product: { terminalId: 'term-product', terminalTitle: 'Product Agent' },
+      frontend_designer: { terminalId: 'term-designer', terminalTitle: 'Designer' },
+      frontend_architect: { terminalId: 'term-architect', terminalTitle: 'Architecture Agent' },
+      frontend_builder: { terminalId: 'term-builder', terminalTitle: 'Frontend Builder' },
+      interaction_qa: { terminalId: 'term-qa', terminalTitle: 'Interaction QA' },
+      accessibility_reviewer: { terminalId: 'term-accessibility', terminalTitle: 'Accessibility Reviewer' },
+    },
+  });
+
+  const mission = compileMission({
+    graphId: 'preset:frontend_ui_delivery',
+    missionId: 'frontend-mission',
+    nodes: flow.nodes,
+    edges: flow.edges,
+    workspaceDirFallback: 'C:/workspace',
+    compiledAt: 123,
+    authoringMode: 'preset',
+    presetId: 'frontend_ui_delivery',
+    runVersion: 1,
+  });
+
+  assert.equal(mission.metadata.frontendMode, 'strict_ui');
+  assert.equal(mission.metadata.frontendCategory, 'docs_portal');
+  assert.equal(mission.metadata.specProfile, 'frontend_three_file');
+  assert.deepEqual(mission.nodes.map(node => node.roleId), [
+    'frontend_product',
+    'frontend_designer',
+    'frontend_architect',
+    'frontend_builder',
+    'interaction_qa',
+    'accessibility_reviewer',
+  ]);
+  assert.deepEqual(mission.metadata.executionLayers, [
+    ['frontend_product'],
+    ['frontend_designer', 'frontend_architect'],
+    ['frontend_builder'],
+    ['interaction_qa', 'accessibility_reviewer'],
+  ]);
+});
+
+run('frontend category is inferred from the task prompt without user selection', () => {
+  const preset = getWorkflowPreset('frontend_ui_delivery');
+  assert.ok(preset, 'frontend_ui_delivery preset must exist');
+
+  const flow = buildPresetFlowGraph({
+    preset,
+    missionId: 'frontend-auto',
+    prompt: 'Build a developer documentation portal with API reference, quickstart, migration guides, and changelog',
+    mode: 'build',
+    workspaceDir: 'C:/workspace',
+    frontendMode: 'aligned',
+    instructionOverrides: {},
+    bindingsByRole: {
+      frontend_product: { terminalId: 'term-product', terminalTitle: 'Product Agent' },
+      frontend_designer: { terminalId: 'term-designer', terminalTitle: 'Designer' },
+      frontend_architect: { terminalId: 'term-architect', terminalTitle: 'Architecture Agent' },
+      frontend_builder: { terminalId: 'term-builder', terminalTitle: 'Frontend Builder' },
+      interaction_qa: { terminalId: 'term-qa', terminalTitle: 'Interaction QA' },
+      accessibility_reviewer: { terminalId: 'term-accessibility', terminalTitle: 'Accessibility Reviewer' },
+    },
+  });
+
+  const mission = compileMission({
+    graphId: 'preset:frontend_ui_delivery',
+    missionId: 'frontend-auto',
+    nodes: flow.nodes,
+    edges: flow.edges,
+    workspaceDirFallback: 'C:/workspace',
+    compiledAt: 123,
+    authoringMode: 'preset',
+    presetId: 'frontend_ui_delivery',
+    runVersion: 1,
+  });
+
+  assert.equal(mission.metadata.frontendMode, 'aligned');
+  assert.equal(mission.metadata.frontendCategory, 'docs_portal');
+});
+
+run('task frontend preset metadata wins over stale off compile option', () => {
+  const preset = getWorkflowPreset('frontend_ui_delivery');
+  assert.ok(preset, 'frontend_ui_delivery preset must exist');
+
+  const flow = buildPresetFlowGraph({
+    preset,
+    missionId: 'frontend-stale-ui',
+    prompt: 'Build an internal admin dashboard with queue filters and audit history',
+    mode: 'build',
+    workspaceDir: 'C:/workspace',
+    frontendMode: 'strict_ui',
+    instructionOverrides: {},
+    bindingsByRole: {
+      frontend_product: { terminalId: 'term-product', terminalTitle: 'Product Agent' },
+      frontend_designer: { terminalId: 'term-designer', terminalTitle: 'Designer' },
+      frontend_architect: { terminalId: 'term-architect', terminalTitle: 'Architecture Agent' },
+      frontend_builder: { terminalId: 'term-builder', terminalTitle: 'Frontend Builder' },
+      interaction_qa: { terminalId: 'term-qa', terminalTitle: 'Interaction QA' },
+      accessibility_reviewer: { terminalId: 'term-accessibility', terminalTitle: 'Accessibility Reviewer' },
+    },
+  });
+
+  const mission = compileMission({
+    graphId: 'preset:frontend_ui_delivery',
+    missionId: 'frontend-stale-ui',
+    nodes: flow.nodes,
+    edges: flow.edges,
+    workspaceDirFallback: 'C:/workspace',
+    compiledAt: 123,
+    authoringMode: 'graph',
+    frontendMode: 'off',
+    specProfile: 'none',
+  });
+
+  assert.equal(mission.metadata.frontendMode, 'strict_ui');
+  assert.equal(mission.metadata.frontendCategory, 'admin_internal_tool');
+  assert.equal(mission.metadata.specProfile, 'frontend_three_file');
 });

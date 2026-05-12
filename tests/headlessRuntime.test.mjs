@@ -275,9 +275,9 @@ run('opencode workflow config preserves explicit OPENCODE_CONFIG_CONTENT overrid
   assert.equal(JSON.parse(buildOpenCodeWorkflowConfigContent('http://127.0.0.1:3741')).mcp['terminal-docks'].url, 'http://127.0.0.1:3741/mcp');
 });
 
-run('codex interactive argv places model and yolo before final prompt', () => {
+run('codex interactive argv normalizes model and places yolo before final prompt', () => {
   const args = buildCodexInteractiveLaunchArgs({
-    modelId: 'gpt-5.5',
+    modelId: 'GPT-5.5',
     yolo: true,
     workspaceDir: 'C:/workspace',
     mcpUrl: 'http://127.0.0.1:3741/mcp?token=abc',
@@ -291,6 +291,12 @@ run('codex interactive argv places model and yolo before final prompt', () => {
     'mcp_servers.excalidraw.enabled=false',
     '-c',
     'mcp_servers.terminal-docks.url="http://127.0.0.1:3741/mcp?token=abc"',
+    '-c',
+    'mcp_servers.terminal-docks.enabled=true',
+    '-c',
+    'mcp_servers.terminal-docks.startup_timeout_sec=30',
+    '-c',
+    'mcp_servers.terminal-docks.tool_timeout_sec=120',
     '--model',
     'gpt-5.5',
     '--cd',
@@ -300,6 +306,32 @@ run('codex interactive argv places model and yolo before final prompt', () => {
     'Say "hello"',
   ]);
   assert.equal(args.at(-1), 'Say "hello"');
+});
+
+run('codex interactive argv can omit global MCP disables for isolated CODEX_HOME', () => {
+  const args = buildCodexInteractiveLaunchArgs({
+    yolo: false,
+    mcpUrl: 'http://127.0.0.1:3741/mcp?token=abc',
+    bootstrapPrompt: 'Connect only to terminal docks.',
+    disableKnownGlobalMcps: false,
+  });
+
+  assert.equal(args.includes('mcp_servers.pencil.enabled=false'), false);
+  assert.equal(args.includes('mcp_servers.excalidraw.enabled=false'), false);
+  assert.equal(args.includes('mcp_servers.terminal-docks.enabled=true'), true);
+  assert.equal(args.at(-1), 'Connect only to terminal docks.');
+});
+
+run('codex interactive argv can trust an isolated workflow project', () => {
+  const args = buildCodexInteractiveLaunchArgs({
+    yolo: false,
+    trustedProjectDir: 'C:\\VSCODE\\terminal-docks',
+    bootstrapPrompt: 'Fetch the task.',
+    disableKnownGlobalMcps: false,
+  });
+
+  assert.equal(args.includes('projects."C:\\VSCODE\\terminal-docks".trust_level="trusted"'), true);
+  assert.equal(args.at(-1), 'Fetch the task.');
 });
 
 run('codex interactive argv preserves complex prompt as final argument', () => {
@@ -341,15 +373,15 @@ run('codex shell fallback flattens the bootstrap prompt before shell quoting', (
 run('codex follow-up task signal is tiny and session-aware', () => {
   assert.equal(
     buildCodexFollowupTaskSignal(),
-    'NEW_TASK. call get_current_task(), execute it, then call complete_task as the final MCP action. Do not stop after a normal final answer.',
+    'NEW_TASK. call get_current_task(), execute the active task it returns, then call complete_task as the final MCP action. Do not stop after connecting, after reading task details, or after a normal final answer.',
   );
   assert.equal(
     buildCodexFollowupTaskSignal({ sessionId: 'session-123' }),
-    'NEW_TASK. call get_current_task({ sessionId: "session-123" }), execute it, then call complete_task as the final MCP action. Do not stop after a normal final answer.',
+    'NEW_TASK. call get_current_task({ sessionId: "session-123" }), execute the active task it returns, then call complete_task as the final MCP action. Do not stop after connecting, after reading task details, or after a normal final answer.',
   );
   assert.equal(
     buildCodexFollowupTaskSignal({ sessionId: 'session-123', missionId: 'mission-1', nodeId: 'builder', attempt: 2 }),
-    'NEW_TASK. call get_task_details({ missionId: "mission-1", nodeId: "builder" }), execute it, then call complete_task({ missionId: "mission-1", nodeId: "builder", attempt: 2, outcome: "success" or "failure", summary: "<concise summary>" }) as the final MCP action. Do not stop after a normal final answer.',
+    'NEW_TASK. call get_task_details({ missionId: "mission-1", nodeId: "builder" }), execute the actual task from that payload, then call complete_task({ missionId: "mission-1", nodeId: "builder", attempt: 2, outcome: "success" or "failure", summary: "<concise summary>" }) as the final MCP action. Do not stop after connecting, after reading task details, or after a normal final answer.',
   );
 });
 
