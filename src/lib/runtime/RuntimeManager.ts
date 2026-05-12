@@ -24,6 +24,7 @@ import type {
   RuntimeReuseExpectation,
   RuntimeSessionDescriptor,
   RuntimeSessionState,
+  RuntimePermissionRequest,
   SendTaskArgs,
   SendInputArgs,
   SessionLivenessResult,
@@ -75,6 +76,7 @@ import { useWorkspaceStore } from '../../store/workspace.js';
 import { emit } from '@tauri-apps/api/event';
 import { terminalOutputBus } from './TerminalOutputBus.js';
 import { missionRepository } from '../missionRepository.js';
+import { FINAL_README_INSTRUCTION } from '../workflowReadme.js';
 import {
   assessPostAckTerminalProgress,
   evaluatePostAckWatchdog,
@@ -128,6 +130,7 @@ const CLAUDE_TASK_ACK_TIMEOUT_MS = readRuntimeEnvNumber(
 );
 const BOOTSTRAP_INJECTION_TIMEOUT_MS = 10_000;
 const MISSING_MCP_COMPLETION_RENUDGE_MS = 4_000;
+const PERMISSION_REDETECT_SUPPRESSION_MS = 2_500;
 const MISSING_MCP_COMPLETION_FAIL_MS = 90_000;
 const POST_ACK_NO_PROGRESS_WINDOW_MS = readRuntimeEnvNumber('VITE_RUNTIME_POST_ACK_NO_PROGRESS_WINDOW_MS', 60_000, 1_000);
 const POST_ACK_NO_MCP_COMPLETION_MAX_MS = readRuntimeEnvNumber('VITE_RUNTIME_POST_ACK_NO_MCP_COMPLETION_MAX_MS', 180_000, 30_000);
@@ -363,6 +366,7 @@ class RuntimeManager {
   }>();
   private postAckNoProgressWatchdogs = new Map<string, PostAckNoProgressWatchdogState>();
   private cliReadinessDiagnostics = new Map<string, string>();
+  private recentPermissionSignatures = new Map<string, number>();
   private runtimeCompletionPollers = new Map<string, {
     timer: ReturnType<typeof setInterval>;
     inFlight: boolean;
@@ -583,6 +587,9 @@ class RuntimeManager {
       goal: args.goal ?? undefined,
       frontendMode: args.frontendMode,
       frontendCategory: args.frontendCategory,
+      specProfile: args.specProfile,
+      finalReadmeEnabled: args.finalReadmeEnabled,
+      finalReadmeOwnerNodeId: args.finalReadmeOwnerNodeId,
       instructionOverride: args.instructionOverride ?? undefined,
       legalTargets: args.legalTargets,
       upstreamPayloads: args.upstreamPayloads,
@@ -818,6 +825,7 @@ class RuntimeManager {
       await this.writeToTerminalOrFail(session, response.input);
     }
 
+    this.rememberPermissionSignature(session, perm);
     session.clearPermission();
     this.recordPostAckProgress(session, 'manual_input');
 
@@ -1108,6 +1116,11 @@ class RuntimeManager {
           executionMode: session.executionMode,
           goal: session.goal,
           workspaceDir: session.workspaceDir,
+          frontendMode: session.frontendMode,
+          frontendCategory: session.frontendCategory,
+          specProfile: session.specProfile,
+          finalReadmeEnabled: session.finalReadmeEnabled,
+          finalReadmeOwnerNodeId: session.finalReadmeOwnerNodeId,
           assignment: activationPayload.assignment,
         }, baseUrl);
 
@@ -1382,6 +1395,13 @@ class RuntimeManager {
           nodeId: session.nodeId,
           detectedAt: Date.now(),
         };
+        if (this.shouldSuppressPermissionDetection(session, request)) {
+          return;
+        }
+        if (session.yolo) {
+          void this.autoApproveYoloPermission(session, request);
+          return;
+        }
         session.setPermission(request);
         this.emit({
           type: 'permission_requested',
@@ -2589,6 +2609,11 @@ class RuntimeManager {
       executionMode: session.executionMode,
       goal: activationPayload.goal,
       workspaceDir: session.workspaceDir,
+      frontendMode: activationPayload.frontendMode,
+      frontendCategory: activationPayload.frontendCategory,
+      specProfile: activationPayload.specProfile,
+      finalReadmeEnabled: activationPayload.finalReadmeEnabled,
+      finalReadmeOwnerNodeId: activationPayload.finalReadmeOwnerNodeId,
       assignment: activationPayload.assignment,
     }, baseUrl);
 
@@ -3016,6 +3041,64 @@ class RuntimeManager {
     );
   }
 
+  private permissionSignature(session: RuntimeSession, request: Pick<RuntimePermissionRequest, 'category' | 'rawPrompt' | 'detail'>): string {
+    const prompt = (request.rawPrompt || request.detail || '')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(-400);
+    return `${session.sessionId}:${request.category}:${prompt}`;
+  }
+
+  private rememberPermissionSignature(session: RuntimeSession, request: Pick<RuntimePermissionRequest, 'category' | 'rawPrompt' | 'detail'>): void {
+    const now = Date.now();
+    this.recentPermissionSignatures.set(
+      this.permissionSignature(session, request),
+      now + PERMISSION_REDETECT_SUPPRESSION_MS,
+    );
+
+    for (const [key, expiresAt] of this.recentPermissionSignatures.entries()) {
+      if (expiresAt <= now) this.recentPermissionSignatures.delete(key);
+    }
+  }
+
+  private shouldSuppressPermissionDetection(session: RuntimeSession, request: RuntimePermissionRequest): boolean {
+    const key = this.permissionSignature(session, request);
+    const expiresAt = this.recentPermissionSignatures.get(key) ?? 0;
+    if (expiresAt > Date.now()) return true;
+    this.recentPermissionSignatures.delete(key);
+    return false;
+  }
+
+  private async autoApproveYoloPermission(session: RuntimeSession, request: RuntimePermissionRequest): Promise<void> {
+    this.rememberPermissionSignature(session, request);
+    this.recordPostAckProgress(session, 'manual_input');
+
+    if (!session.isTerminal) return;
+
+    const response = session.adapter.buildPermissionResponse('approve', {
+      permissionId: request.permissionId,
+      category: request.category,
+      rawPrompt: request.rawPrompt,
+      detail: request.detail,
+    });
+
+    try {
+      await this.writeToTerminalOrFail(session, response.input);
+      missionRepository.appendWorkflowEvent({
+        missionId: session.missionId,
+        nodeId: session.nodeId,
+        sessionId: session.sessionId,
+        eventType: 'permission_auto_approved',
+        severity: 'info',
+        message: `YOLO mode auto-approved ${request.category} permission.`,
+        payloadJson: JSON.stringify({ category: request.category, prompt: request.rawPrompt.slice(0, 500) }),
+      }).catch(() => {});
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      console.warn(`[runtime] failed to auto-approve yolo permission session=${session.sessionId}: ${detail}`);
+    }
+  }
+
   private retainSessionForRuntimeView(session: RuntimeSession): void {
     if (session.missionId.startsWith('adhoc-')) return;
     if (MAX_RETAINED_RUNTIME_VIEW_SESSIONS <= 0) return;
@@ -3100,8 +3183,14 @@ class RuntimeManager {
       allowedOutcomes: ['success', 'failure'],
     })) ?? [];
 
+    const isFinalReadmeOwner = Boolean(session.finalReadmeEnabled && session.finalReadmeOwnerNodeId === session.nodeId);
+    const roleInstructions = [
+      session.instructionOverride ?? '',
+      isFinalReadmeOwner ? FINAL_README_INSTRUCTION : '',
+    ].filter(Boolean).join(' ');
+
     const assignment: import('../missionRuntime.js').RuntimeAssignmentPayload = {
-      roleInstructions: session.instructionOverride ?? '',
+      roleInstructions,
       missionGoal: session.goal || '',
       upstreamOutputs,
       workspaceContext: {
@@ -3112,6 +3201,9 @@ class RuntimeManager {
         attempt: session.attempt,
         frontendMode: session.frontendMode ?? 'off',
         frontendCategory: session.frontendCategory ?? 'marketing_site',
+        specProfile: session.specProfile ?? 'none',
+        finalReadmeEnabled: Boolean(session.finalReadmeEnabled),
+        finalReadmeOwnerNodeId: session.finalReadmeOwnerNodeId ?? null,
       },
       expectedDeliverable: {
         schema: 'completion_payload_v1',
@@ -3146,6 +3238,9 @@ class RuntimeManager {
       workspaceDir: session.workspaceDir,
       frontendMode: session.frontendMode ?? 'off',
       frontendCategory: session.frontendCategory ?? 'marketing_site',
+      specProfile: session.specProfile ?? 'none',
+      finalReadmeEnabled: Boolean(session.finalReadmeEnabled),
+      finalReadmeOwnerNodeId: session.finalReadmeOwnerNodeId ?? null,
       assignment,
       expectedNextAction: {
         signal: 'NEW_TASK',

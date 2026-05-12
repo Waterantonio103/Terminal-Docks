@@ -79,6 +79,9 @@ export interface CreateRuntimeArgs {
   goal?: string | null;
   frontendMode?: import('../../store/workspace.js').FrontendWorkflowMode;
   frontendCategory?: import('../../store/workspace.js').FrontendSpecCategory;
+  specProfile?: import('../../store/workspace.js').PresetSpecProfile;
+  finalReadmeEnabled?: boolean;
+  finalReadmeOwnerNodeId?: string | null;
   instructionOverride?: string | null;
   inputPayload?: unknown;
   legalTargets?: import('../workflow/WorkflowTypes.js').LegalTarget[];
@@ -126,6 +129,9 @@ export interface RuntimeSessionDescriptor {
   goal?: string;
   frontendMode?: import('../../store/workspace.js').FrontendWorkflowMode;
   frontendCategory?: import('../../store/workspace.js').FrontendSpecCategory;
+  specProfile?: import('../../store/workspace.js').PresetSpecProfile;
+  finalReadmeEnabled?: boolean;
+  finalReadmeOwnerNodeId?: string | null;
   legalTargets?: import('../workflow/WorkflowTypes.js').LegalTarget[];
   upstreamPayloads?: import('../workflow/WorkflowRun.js').HandoffRecord[];
 }

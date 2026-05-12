@@ -150,6 +150,77 @@ try {
     assert.doesNotMatch(prompt, /get_collaboration_protocol/);
   });
 
+  run('frontend launch prompts apply mode-aware spec strictness', () => {
+    const strictPrompt = buildLaunchPrompt('frontend_builder', {
+      workspaceDir: 'C:/workspace',
+      missionId: 'strict-ui-mission',
+      nodeId: 'frontend_builder',
+      attempt: 1,
+      allowedOutgoingTargets: [],
+      authoringMode: 'preset',
+      presetId: 'frontend_ui_delivery',
+      runVersion: 1,
+      frontendMode: 'strict_ui',
+      specProfile: 'frontend_three_file',
+      task: 'Build an internal admin dashboard',
+      mode: 'build',
+    });
+    assert.match(strictPrompt, /Frontend\/UI workflow mode: strict_ui/);
+    assert.match(strictPrompt, /Spec profile: frontend_three_file/);
+    assert.match(strictPrompt, /missing decisions must be sent back for intake\/alignment/);
+
+    const fastPrompt = buildLaunchPrompt('frontend_builder', {
+      workspaceDir: 'C:/workspace',
+      missionId: 'fast-ui-mission',
+      nodeId: 'frontend_builder',
+      attempt: 1,
+      allowedOutgoingTargets: [],
+      authoringMode: 'graph',
+      runVersion: 1,
+      frontendMode: 'fast',
+      task: 'Build a quick settings panel',
+      mode: 'build',
+    });
+    assert.match(fastPrompt, /Frontend\/UI workflow mode: fast/);
+    assert.match(fastPrompt, /Missing \.md spec files must not block/);
+  });
+
+  run('final README owner receives conservative guidance only when selected', () => {
+    const ownerPrompt = buildLaunchPrompt('interaction_qa', {
+      workspaceDir: 'C:/workspace/app-test',
+      missionId: 'readme-mission',
+      nodeId: 'interaction_qa',
+      attempt: 1,
+      allowedOutgoingTargets: [],
+      authoringMode: 'preset',
+      presetId: 'frontend_ui_delivery',
+      runVersion: 1,
+      finalReadmeEnabled: true,
+      finalReadmeOwnerNodeId: 'interaction_qa',
+      task: 'Build an internal admin dashboard',
+      mode: 'build',
+    });
+    assert.match(ownerPrompt, /Final README instruction/);
+    assert.match(ownerPrompt, /If README\.md already exists/);
+    assert.match(ownerPrompt, /create INSTRUCTIONS\.md instead/);
+
+    const nonOwnerPrompt = buildLaunchPrompt('accessibility_reviewer', {
+      workspaceDir: 'C:/workspace/app-test',
+      missionId: 'readme-mission',
+      nodeId: 'accessibility_reviewer',
+      attempt: 1,
+      allowedOutgoingTargets: [],
+      authoringMode: 'preset',
+      presetId: 'frontend_ui_delivery',
+      runVersion: 1,
+      finalReadmeEnabled: true,
+      finalReadmeOwnerNodeId: 'interaction_qa',
+      task: 'Build an internal admin dashboard',
+      mode: 'build',
+    });
+    assert.doesNotMatch(nonOwnerPrompt, /Final README instruction/);
+  });
+
   run('Mission Control writes a NEW_TASK signal with runtime bootstrap metadata', () => {
     const prompt = buildNewTaskSignal({
       missionId: mission.missionId,

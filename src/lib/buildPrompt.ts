@@ -1,5 +1,6 @@
 import agentsConfig from '../config/agents.js';
-import type { FrontendSpecCategory, FrontendWorkflowMode, WorkflowAuthoringMode } from '../store/workspace.js';
+import type { FrontendSpecCategory, FrontendWorkflowMode, PresetSpecProfile, WorkflowAuthoringMode } from '../store/workspace.js';
+import { FINAL_README_INSTRUCTION } from './workflowReadme.js';
 
 type AgentDef = (typeof agentsConfig.agents)[number];
 
@@ -25,6 +26,9 @@ export interface LaunchContext {
   runVersion?: number;
   frontendMode?: FrontendWorkflowMode;
   frontendCategory?: FrontendSpecCategory;
+  specProfile?: PresetSpecProfile;
+  finalReadmeEnabled?: boolean;
+  finalReadmeOwnerNodeId?: string | null;
   instanceNum?: number;
   totalInstances?: number;
   task: string;
@@ -60,6 +64,20 @@ function formatOutgoingTargets(targets: readonly LaunchOutgoingTarget[]): string
       return `${target.targetNodeId} (${roleLabel}; edge=${target.condition}; outcomes=${allowed})`;
     })
     .join('; ');
+}
+
+function frontendModeGuidance(mode: FrontendWorkflowMode, specProfile?: PresetSpecProfile): string {
+  const profileText = specProfile && specProfile !== 'none' ? ` Spec profile: ${specProfile}.` : '';
+  if (mode === 'strict_ui') {
+    return `Frontend/UI workflow mode: strict_ui.${profileText} Treat frontend specs as binding decisions before implementation or review. Strict mode should produce or accept explicit product, design, and structure sources; aliases are allowed when recorded in workspace context, but missing decisions must be sent back for intake/alignment instead of silently invented by builders.`;
+  }
+  if (mode === 'aligned') {
+    return `Frontend/UI workflow mode: aligned.${profileText} Prefer accepted PRD.md, DESIGN.md, and structure.md/architecture.md sources, including aliases or generated files recorded in workspace context. If files are absent but the prompt and upstream context contain clear product, design, and structure decisions, proceed; request alignment only for material ambiguity.`;
+  }
+  if (mode === 'fast') {
+    return `Frontend/UI workflow mode: fast.${profileText} Missing .md spec files must not block the workflow. Use any available specs or upstream context, but proceed from the task prompt when it is sufficient.`;
+  }
+  return '';
 }
 
 export function buildLaunchPrompt(agentId: string, ctx: LaunchContext, instructionOverride?: string): string {
@@ -100,7 +118,10 @@ export function buildLaunchPrompt(agentId: string, ctx: LaunchContext, instructi
       lines.push(`Graph runVersion: ${ctx.runVersion}.`);
     }
     if (ctx.frontendMode && ctx.frontendMode !== 'off') {
-      lines.push(`Frontend/UI workflow mode: ${ctx.frontendMode}. Infer the product type from the task prompt and supplied specs, then use accepted PRD.md, DESIGN.md, and structure.md/architecture.md specs as binding artifacts before implementation or review.`);
+      lines.push(frontendModeGuidance(ctx.frontendMode, ctx.specProfile));
+    }
+    if (ctx.finalReadmeEnabled && ctx.finalReadmeOwnerNodeId === ctx.nodeId) {
+      lines.push(FINAL_README_INSTRUCTION);
     }
 
     lines.push(`Mission: ${ctx.missionId}. Node: ${ctx.nodeId}. Current attempt: ${ctx.attempt ?? 1}.`);

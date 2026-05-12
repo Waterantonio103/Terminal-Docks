@@ -93,6 +93,8 @@ function legacyNodeToDocumentNode(node: WorkflowNode, index: number): NodeInstan
       presetId: node.config?.presetId ?? '',
       runVersion: node.config?.runVersion ?? 1,
       frontendMode: node.config?.frontendMode ?? 'off',
+      finalReadmeEnabled: Boolean(node.config?.finalReadmeEnabled),
+      finalReadmeOwnerNodeId: node.config?.finalReadmeOwnerNodeId ?? '',
       adaptiveSeed: Boolean(node.config?.adaptiveSeed),
       label: node.config?.label ?? '',
     },
@@ -212,6 +214,8 @@ export function nodeDocumentToWorkflowGraph(
           node.properties.frontendMode === 'strict_ui'
             ? node.properties.frontendMode
             : 'off',
+        finalReadmeEnabled: Boolean(node.properties.finalReadmeEnabled),
+        finalReadmeOwnerNodeId: String(node.properties.finalReadmeOwnerNodeId ?? '') || null,
         adaptiveSeed: Boolean(node.properties.adaptiveSeed),
         label: String(node.properties.label ?? node.label ?? ''),
         position: node.location,
@@ -293,6 +297,8 @@ export function nodeDocumentToFlowGraph(
         presetId: node.config?.presetId ?? '',
         runVersion: node.config?.runVersion ?? 1,
         frontendMode: node.config?.frontendMode ?? 'off',
+        finalReadmeEnabled: node.config?.finalReadmeEnabled ?? false,
+        finalReadmeOwnerNodeId: node.config?.finalReadmeOwnerNodeId ?? null,
         adaptiveSeed: node.config?.adaptiveSeed ?? false,
         label: node.config?.label ?? '',
       },

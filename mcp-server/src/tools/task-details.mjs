@@ -4,6 +4,95 @@ import { getMissionNode, getMissionNodeRuntime, getRuntimeSessionByAttempt, getL
 import { ackTaskPush, emitAgentEvent } from '../state.mjs';
 import { buildFrontendSpecFramework } from '../utils/frontend-spec-framework.mjs';
 
+const FINAL_README_INSTRUCTION =
+  'Final README instruction: before completing, create a very short user guidance file for the work produced by this workflow. Prefer the generated/target folder. If README.md does not exist there, create README.md. If README.md already exists, do not overwrite or append to it by default; create INSTRUCTIONS.md instead. If INSTRUCTIONS.md also exists, use SUMMARY.md, then REVIEW.md as the last fallback. Keep it concise: summarize the files and folders created or changed, note the main entry points, and include only the concrete run/test commands the user needs, such as cd into the created app folder and npm run dev. Do not write a long architecture rundown.';
+
+const GENERIC_README_ROLE_PRIORITY = [
+  'visual_polish_reviewer',
+  'interaction_qa',
+  'accessibility_reviewer',
+  'reviewer',
+  'tester',
+  'security',
+  'builder',
+  'frontend_builder',
+  'frontend_architect',
+  'frontend_designer',
+  'frontend_product',
+  'coordinator',
+  'scout',
+];
+
+const README_ROLE_PRIORITY_BY_PRESET = {
+  app_site_small: [
+    'interaction_qa',
+    'accessibility_reviewer',
+    'reviewer',
+    'frontend_builder',
+    'frontend_architect',
+    'frontend_designer',
+    'frontend_product',
+  ],
+  frontend_ui_delivery: [
+    'interaction_qa',
+    'accessibility_reviewer',
+    'reviewer',
+    'frontend_builder',
+    'frontend_architect',
+    'frontend_designer',
+    'frontend_product',
+  ],
+  app_site_expanded: [
+    'reviewer',
+    'visual_polish_reviewer',
+    'interaction_qa',
+    'accessibility_reviewer',
+    'frontend_builder',
+    'frontend_architect',
+    'frontend_designer',
+    'frontend_product',
+  ],
+};
+
+function joinInstructionParts(...parts) {
+  return parts
+    .map(part => (typeof part === 'string' ? part.trim() : ''))
+    .filter(Boolean)
+    .join('\n\n');
+}
+
+function isFinalReadmeEnabled(mission) {
+  return Boolean(mission?.metadata?.finalReadmeEnabled ?? mission?.task?.finalReadmeEnabled);
+}
+
+function selectFinalReadmeOwner(mission) {
+  const explicitOwner = mission?.metadata?.finalReadmeOwnerNodeId ?? mission?.task?.finalReadmeOwnerNodeId;
+  if (typeof explicitOwner === 'string' && explicitOwner.trim()) return explicitOwner.trim();
+
+  const nodes = Array.isArray(mission?.nodes) ? mission.nodes : [];
+  const outgoing = new Set((mission?.edges ?? []).map(edge => edge?.fromNodeId).filter(Boolean));
+  const finalNodes = nodes.filter(node => node?.id && !outgoing.has(node.id));
+  if (finalNodes.length === 0) return null;
+  if (finalNodes.length === 1) return finalNodes[0].id;
+
+  const presetId = mission?.metadata?.presetId;
+  const priority = README_ROLE_PRIORITY_BY_PRESET[presetId] ?? GENERIC_README_ROLE_PRIORITY;
+  const priorityByRole = new Map(priority.map((roleId, index) => [roleId, index]));
+  const orderByNode = new Map(nodes.map((node, index) => [node.id, index]));
+
+  return [...finalNodes].sort((left, right) => {
+    const leftPriority = priorityByRole.get(left.roleId) ?? Number.MAX_SAFE_INTEGER;
+    const rightPriority = priorityByRole.get(right.roleId) ?? Number.MAX_SAFE_INTEGER;
+    if (leftPriority !== rightPriority) return leftPriority - rightPriority;
+
+    const leftOrder = orderByNode.get(left.id) ?? Number.MAX_SAFE_INTEGER;
+    const rightOrder = orderByNode.get(right.id) ?? Number.MAX_SAFE_INTEGER;
+    if (leftOrder !== rightOrder) return leftOrder - rightOrder;
+
+    return String(left.id).localeCompare(String(right.id));
+  })[0]?.id ?? null;
+}
+
 export function extractUpstreamContext(inboxMessages) {
   const findings = [];
   const summaries = [];
@@ -152,6 +241,13 @@ export function buildTaskDetails(missionId, nodeId) {
   const frontendFramework = frontendMode !== 'off' || specProfile === 'frontend_three_file'
     ? buildFrontendSpecFramework({ categoryId: frontendCategory, mode: frontendMode === 'off' ? 'aligned' : frontendMode })
     : null;
+  const finalReadmeEnabled = isFinalReadmeEnabled(record.mission);
+  const finalReadmeOwnerNodeId = finalReadmeEnabled ? selectFinalReadmeOwner(record.mission) : null;
+  const isFinalReadmeOwner = Boolean(finalReadmeEnabled && finalReadmeOwnerNodeId === nodeId);
+  const nodeInstructionOverride = joinInstructionParts(
+    node.instructionOverride ?? '',
+    isFinalReadmeOwner ? FINAL_README_INSTRUCTION : '',
+  );
 
   return {
     missionId,
@@ -164,9 +260,11 @@ export function buildTaskDetails(missionId, nodeId) {
     frontendMode,
     frontendCategory,
     specProfile,
+    finalReadmeEnabled,
+    finalReadmeOwnerNodeId,
     frontendFramework,
     goal: record.mission.task?.prompt ?? '',
-    objective: node.instructionOverride || record.mission.task?.prompt || '',
+    objective: nodeInstructionOverride || record.mission.task?.prompt || '',
     acceptanceCriteria: node.acceptanceCriteria || [],
     outputContract: node.outputContract || '',
     relevantArtifacts: artifacts,
@@ -175,7 +273,7 @@ export function buildTaskDetails(missionId, nodeId) {
     node: {
       id: node.id,
       roleId: node.roleId,
-      instructionOverride: node.instructionOverride ?? '',
+      instructionOverride: nodeInstructionOverride,
       status: runtime?.status ?? 'idle',
       attempt: runtime?.attempt ?? 0,
       currentWaveId: runtime?.current_wave_id ?? null,
@@ -209,7 +307,8 @@ export function buildTaskDetails(missionId, nodeId) {
       missionId,
       nodeId,
       roleId: node.roleId,
-      instructionOverride: node.instructionOverride ?? '',
+      instructionOverride: nodeInstructionOverride,
+      roleInstructions: nodeInstructionOverride,
       goal: record.mission.task?.prompt ?? '',
       workspaceDir: record.mission.task?.workspaceDir ?? null,
       terminalId: node.terminal?.terminalId ?? runtimeSession?.terminal_id ?? null,
@@ -218,6 +317,8 @@ export function buildTaskDetails(missionId, nodeId) {
       frontendMode,
       frontendCategory,
       specProfile,
+      finalReadmeEnabled,
+      finalReadmeOwnerNodeId,
       frontendFramework,
     },
   };

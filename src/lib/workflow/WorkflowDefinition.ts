@@ -51,6 +51,10 @@ export interface WorkflowNodeDefinition {
     readonly presetId?: string | null;
     readonly runVersion?: number;
     readonly frontendMode?: import('../../store/workspace.js').FrontendWorkflowMode;
+    readonly frontendCategory?: import('../../store/workspace.js').FrontendSpecCategory;
+    readonly specProfile?: import('../../store/workspace.js').PresetSpecProfile;
+    readonly finalReadmeEnabled?: boolean;
+    readonly finalReadmeOwnerNodeId?: string | null;
     readonly adaptiveSeed?: boolean;
     readonly profileId?: string;
     readonly capabilities?: CapabilityEntry[];
@@ -186,6 +190,10 @@ export function compiledMissionToDefinition(
         presetId: mission.metadata.presetId ?? undefined,
         runVersion: mission.metadata.runVersion,
         frontendMode: mission.metadata.frontendMode,
+        frontendCategory: mission.metadata.frontendCategory,
+        specProfile: mission.metadata.specProfile,
+        finalReadmeEnabled: mission.metadata.finalReadmeEnabled,
+        finalReadmeOwnerNodeId: mission.metadata.finalReadmeOwnerNodeId,
       },
     },
     ...mission.nodes.map(node => ({

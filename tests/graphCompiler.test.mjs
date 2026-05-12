@@ -3,6 +3,7 @@ import { compileMission, validateGraph } from '../.tmp-tests/lib/graphCompiler.j
 import {
   buildPresetFlowGraph,
   getPresetSpecMetadata,
+  getPresetReadmeDefault,
   getRecommendedWorkflowPreset,
   getWorkflowPreset,
   groupWorkflowPresetsByMode,
@@ -354,6 +355,13 @@ run('frontend preset compiles with explicit UI roles and metadata', () => {
   assert.equal(mission.metadata.frontendMode, 'strict_ui');
   assert.equal(mission.metadata.frontendCategory, 'docs_portal');
   assert.equal(mission.metadata.specProfile, 'frontend_three_file');
+  assert.equal(getPresetReadmeDefault(preset), true);
+  assert.equal(mission.task.frontendMode, 'strict_ui');
+  assert.equal(mission.task.frontendCategory, 'docs_portal');
+  assert.equal(mission.task.specProfile, 'frontend_three_file');
+  assert.equal(mission.task.finalReadmeEnabled, true);
+  assert.equal(mission.task.finalReadmeOwnerNodeId, 'interaction_qa');
+  assert.equal(mission.metadata.finalReadmeOwnerNodeId, 'interaction_qa');
   assert.deepEqual(mission.nodes.map(node => node.roleId), [
     'frontend_product',
     'frontend_designer',
@@ -368,6 +376,47 @@ run('frontend preset compiles with explicit UI roles and metadata', () => {
     ['frontend_builder'],
     ['interaction_qa', 'accessibility_reviewer'],
   ]);
+});
+
+run('preset final README can be disabled and defaults off for patch presets', () => {
+  const patchPreset = getWorkflowPreset('rapid_patch');
+  assert.ok(patchPreset, 'rapid_patch preset must exist');
+  assert.equal(getPresetReadmeDefault(patchPreset), false);
+
+  const frontendPreset = getWorkflowPreset('frontend_ui_delivery');
+  assert.ok(frontendPreset, 'frontend_ui_delivery preset must exist');
+  const flow = buildPresetFlowGraph({
+    preset: frontendPreset,
+    missionId: 'frontend-no-readme',
+    prompt: 'Build a polished SaaS dashboard',
+    mode: 'build',
+    workspaceDir: 'C:/workspace',
+    finalReadmeEnabled: false,
+    instructionOverrides: {},
+    bindingsByRole: {
+      frontend_product: { terminalId: 'term-product', terminalTitle: 'Product Agent' },
+      frontend_designer: { terminalId: 'term-designer', terminalTitle: 'Designer' },
+      frontend_architect: { terminalId: 'term-architect', terminalTitle: 'Architecture Agent' },
+      frontend_builder: { terminalId: 'term-builder', terminalTitle: 'Frontend Builder' },
+      interaction_qa: { terminalId: 'term-qa', terminalTitle: 'Interaction QA' },
+      accessibility_reviewer: { terminalId: 'term-accessibility', terminalTitle: 'Accessibility Reviewer' },
+    },
+  });
+
+  const mission = compileMission({
+    graphId: 'preset:frontend_ui_delivery',
+    missionId: 'frontend-no-readme',
+    nodes: flow.nodes,
+    edges: flow.edges,
+    workspaceDirFallback: 'C:/workspace',
+    compiledAt: 123,
+    authoringMode: 'preset',
+    presetId: 'frontend_ui_delivery',
+    runVersion: 1,
+  });
+
+  assert.equal(mission.metadata.finalReadmeEnabled, false);
+  assert.equal(mission.metadata.finalReadmeOwnerNodeId, null);
 });
 
 run('frontend category is inferred from the task prompt without user selection', () => {
@@ -445,4 +494,7 @@ run('task frontend preset metadata wins over stale off compile option', () => {
   assert.equal(mission.metadata.frontendMode, 'strict_ui');
   assert.equal(mission.metadata.frontendCategory, 'admin_internal_tool');
   assert.equal(mission.metadata.specProfile, 'frontend_three_file');
+  assert.equal(mission.task.frontendMode, 'strict_ui');
+  assert.equal(mission.task.frontendCategory, 'admin_internal_tool');
+  assert.equal(mission.task.specProfile, 'frontend_three_file');
 });

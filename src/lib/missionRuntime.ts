@@ -31,6 +31,9 @@ export interface WorkflowNodeTriggeredPayload {
   workspaceDir?: string | null;
   frontendMode?: import('../store/workspace.js').FrontendWorkflowMode;
   frontendCategory?: import('../store/workspace.js').FrontendSpecCategory;
+  specProfile?: import('../store/workspace.js').PresetSpecProfile;
+  finalReadmeEnabled?: boolean;
+  finalReadmeOwnerNodeId?: string | null;
   assignment?: RuntimeAssignmentPayload;
 }
 
@@ -62,6 +65,9 @@ export interface RuntimeAssignmentPayload {
     attempt: number;
     frontendMode?: import('../store/workspace.js').FrontendWorkflowMode;
     frontendCategory?: import('../store/workspace.js').FrontendSpecCategory;
+    specProfile?: import('../store/workspace.js').PresetSpecProfile;
+    finalReadmeEnabled?: boolean;
+    finalReadmeOwnerNodeId?: string | null;
   };
   expectedDeliverable: {
     schema: 'completion_payload_v1';
@@ -108,6 +114,9 @@ export interface RuntimeActivationPayload {
   workspaceDir?: string | null;
   frontendMode?: import('../store/workspace.js').FrontendWorkflowMode;
   frontendCategory?: import('../store/workspace.js').FrontendSpecCategory;
+  specProfile?: import('../store/workspace.js').PresetSpecProfile;
+  finalReadmeEnabled?: boolean;
+  finalReadmeOwnerNodeId?: string | null;
   inputPayload?: string | null;
   assignment?: RuntimeAssignmentPayload;
   expectedNextAction: RuntimeExpectedActionContract;
@@ -136,6 +145,9 @@ export interface NewTaskSignalPayload {
   workspaceDir?: string | null;
   frontendMode?: import('../store/workspace.js').FrontendWorkflowMode;
   frontendCategory?: import('../store/workspace.js').FrontendSpecCategory;
+  specProfile?: import('../store/workspace.js').PresetSpecProfile;
+  finalReadmeEnabled?: boolean;
+  finalReadmeOwnerNodeId?: string | null;
   assignment: RuntimeAssignmentPayload;
 }
 
@@ -179,6 +191,9 @@ function defaultAssignment(payload: WorkflowNodeTriggeredPayload): RuntimeAssign
       attempt: payload.attempt,
       frontendMode: payload.frontendMode ?? 'off',
       frontendCategory: payload.frontendCategory ?? 'marketing_site',
+      specProfile: payload.specProfile ?? 'none',
+      finalReadmeEnabled: Boolean(payload.finalReadmeEnabled),
+      finalReadmeOwnerNodeId: payload.finalReadmeOwnerNodeId ?? null,
     },
     expectedDeliverable: {
       schema: 'completion_payload_v1',
@@ -231,6 +246,9 @@ export function buildNewTaskSignal(payload: WorkflowNodeTriggeredPayload, mcpUrl
     workspaceDir: payload.workspaceDir ?? null,
     frontendMode: payload.frontendMode ?? 'off',
     frontendCategory: payload.frontendCategory ?? 'marketing_site',
+    specProfile: payload.specProfile ?? 'none',
+    finalReadmeEnabled: Boolean(payload.finalReadmeEnabled),
+    finalReadmeOwnerNodeId: payload.finalReadmeOwnerNodeId ?? null,
     assignment,
   };
 

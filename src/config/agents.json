@@ -90,7 +90,7 @@
         { "id": "repo_analysis", "level": 2 },
         { "id": "review", "level": 2 }
       ],
-      "coreInstructions": "Call `get_task_details` and `receive_messages({ missionId, nodeId })`. Confirm this is a frontend/UI mission by reading frontendMode from task details. Infer the product/UI category from the task prompt and supplied specs, or call `classify_frontend_spec_request` when the category is ambiguous. Call `get_frontend_spec_framework` with the inferred category and mode. Inspect supplied PRD.md, DESIGN.md, structure.md/architecture.md, screenshots, brand files, and content. Preserve strong user files, patch weak files with provenance, and ask only targeted questions when product type, audience, visual tone, required states, or hard constraints materially affect quality. This node is intake/spec only: do not build the UI implementation, do not create index.html/app files, and do not satisfy the user task directly unless the workflow mode is explicitly off. Create or patch PRD.md, DESIGN.md, and structure.md as needed, then hand off accepted spec paths and unresolved questions through `update_workspace_context` with key=\"frontendSpecs\"."
+      "coreInstructions": "Call `get_task_details` and `receive_messages({ missionId, nodeId })`. Confirm the frontendMode, frontendCategory, and specProfile from task details. Infer the product/UI category from the task prompt and supplied specs, or call `classify_frontend_spec_request` when the category is ambiguous. Call `get_frontend_spec_framework` with the inferred category and mode. Product intake owns PRD coverage: create PRD.md when no strong product spec exists; accept a user-supplied PRD.md or clear alias such as product.md, requirements.md, brief.md, or task prompt only when it already contains enough product decisions; optionally create a short PRD.md bridge that records the accepted alias. Preserve strong user files, patch weak files with provenance, and ask only targeted questions when product type, audience, required states, or hard constraints materially affect quality. In graph mode this node is spec/intake only: do not build UI implementation files such as index.html, app files, or stylesheets. Publish accepted product/design/structure sources, statuses, aliases, unresolved questions, and strictness notes through `update_workspace_context` with key=\"frontendSpecs\"."
     },
     {
       "id": "frontend_designer",
@@ -103,7 +103,7 @@
         { "id": "review", "level": 2 },
         { "id": "repo_analysis", "level": 1 }
       ],
-      "coreInstructions": "Call `receive_messages({ missionId, nodeId })` and `get_workspace_context`. Read accepted PRD.md and DESIGN.md before proposing visual guidance. Infer the UI category from the task prompt/specs and use `get_frontend_spec_framework` to ensure DESIGN.md covers palette, typography, spacing, layout, components, iconography, motion, responsive behavior, accessibility notes, and category-specific rubric items. Patch or create DESIGN.md only when missing or weak; do not replace strong user-provided design files. Handoff concrete visual rules and accepted file paths downstream."
+      "coreInstructions": "Call `receive_messages({ missionId, nodeId })` and `get_workspace_context`. Read accepted product context from frontendSpecs before proposing visual guidance. Designer owns DESIGN.md coverage: create DESIGN.md when no strong design spec exists; accept aliases such as brand.md, style-guide.md, visual.md, screenshots, or design notes only when they contain enough visual decisions; optionally create a short DESIGN.md bridge that records the accepted alias. Infer the UI category from the task prompt/specs and use `get_frontend_spec_framework` to ensure the design source covers palette, typography, spacing, layout, components, iconography, motion, responsive behavior, accessibility notes, and category-specific rubric items. Patch weak design files instead of replacing strong user-provided files. Update `frontendSpecs` with accepted design source/status and hand off concrete visual rules downstream."
     },
     {
       "id": "frontend_architect",
@@ -116,7 +116,7 @@
         { "id": "coding", "level": 2 },
         { "id": "repo_analysis", "level": 3 }
       ],
-      "coreInstructions": "Call `receive_messages({ missionId, nodeId })` and `get_workspace_context`. Read accepted PRD.md, DESIGN.md, and structure.md/architecture.md. Ensure structure covers routes/screens, shared layout, reusable components, data models or mock data, implementation notes, and launch/test checklist. Update `update_workspace_context` with key=\"frontendPlan\" containing file ownership, component map, spec paths, required states, and verification commands. In graph mode route only by exact node IDs."
+      "coreInstructions": "Call `receive_messages({ missionId, nodeId })` and `get_workspace_context`. Read accepted product and design sources from frontendSpecs. Architecture owns structure.md coverage: create structure.md when no strong structure spec exists; accept aliases such as architecture.md, plan.md, file-structure.md, or implementation-plan.md only when they define enough implementation structure; optionally create a short structure.md bridge that records the accepted alias. Ensure the accepted structure source covers routes/screens, shared layout, reusable components, data models or mock data, implementation notes, file ownership, and launch/test checklist. Update `update_workspace_context` with key=\"frontendPlan\" containing file ownership, component map, accepted spec paths/aliases, required states, mode strictness, and verification commands. In graph mode route only by exact node IDs."
     },
     {
       "id": "frontend_builder",
@@ -129,7 +129,7 @@
         { "id": "shell_execution", "level": 3 },
         { "id": "repo_analysis", "level": 2 }
       ],
-      "coreInstructions": "Call `receive_messages({ missionId, nodeId })` and `get_workspace_context`. Read accepted PRD.md, DESIGN.md, and structure.md/architecture.md before editing. Build the actual frontend experience, not a generic landing page, and implement required routes/screens, states, responsive behavior, accessible controls, and task-specific visual details. Request file locks before editing. If you start a dev server, write a URL artifact. Include changed files and spec sections covered in your completion."
+      "coreInstructions": "Call `get_task_details`, `receive_messages({ missionId, nodeId })`, and `get_workspace_context` before editing. Apply frontendMode strictly: in strict_ui mode, implement only after upstream context contains accepted product, design, and structure decisions, accepting aliases recorded in frontendSpecs/frontendPlan; if decisions are missing, request an intake/alignment fix instead of inventing them. In aligned mode, prefer accepted spec files/context but proceed when the prompt and upstream context clearly provide product, visual, and structure decisions. In fast mode, missing .md files must not block; proceed from the task prompt when it is sufficient. Build the actual frontend experience, not a generic landing page, and implement required routes/screens, states, responsive behavior, accessible controls, and task-specific visual details. Request file locks before editing. If you start a dev server, write a URL artifact. Include changed files and spec/context sections covered in your completion."
     },
     {
       "id": "interaction_qa",
@@ -142,7 +142,7 @@
         { "id": "review", "level": 2 },
         { "id": "shell_execution", "level": 2 }
       ],
-      "coreInstructions": "Call `receive_messages({ missionId, nodeId })` and `get_workspace_context`. Verify the built UI against accepted PRD.md, DESIGN.md, structure.md/architecture.md, and the inferred matching rubric. Check navigation, forms, empty/loading/error/success states, responsive layouts, text fit, visual hierarchy, and visible-output screenshots or browser evidence. Submit test results and concrete fix requests for missed spec requirements."
+      "coreInstructions": "Call `get_task_details`, `receive_messages({ missionId, nodeId })`, and `get_workspace_context`. Verify the built UI against the mode: strict_ui must satisfy accepted frontendSpecs/frontendPlan product, design, and structure decisions; aligned mode may use clear prompt/upstream decisions when files are absent; fast mode should not fail solely because .md files are missing. Use the inferred matching rubric. Check navigation, forms, empty/loading/error/success states, responsive layouts, text fit, visual hierarchy, and visible-output screenshots or browser evidence. Submit test results and concrete fix requests for missed requirements."
     },
     {
       "id": "accessibility_reviewer",
@@ -155,7 +155,7 @@
         { "id": "testing", "level": 2 },
         { "id": "security", "level": 1 }
       ],
-      "coreInstructions": "Call `receive_messages({ missionId, nodeId })` and `get_workspace_context`. Review the frontend output against accepted specs and the inferred matching frontend rubric. Check WCAG AA contrast, keyboard accessibility, labels, focus states, non-color status indicators, reduced-motion behavior, responsive text fit, and final visual polish. Block completion when material accessibility or visible-output issues remain; otherwise write a review verdict with evidence."
+      "coreInstructions": "Call `get_task_details`, `receive_messages({ missionId, nodeId })`, and `get_workspace_context`. Review the frontend output against frontendMode: strict_ui must follow accepted frontendSpecs/frontendPlan decisions, aligned mode may use clear prompt/upstream decisions when files are absent, and fast mode should not fail solely because .md specs are missing. Use the inferred matching frontend rubric. Check WCAG AA contrast, keyboard accessibility, labels, focus states, non-color status indicators, reduced-motion behavior, responsive text fit, and final visual polish. Block completion when material accessibility or visible-output issues remain; otherwise write a review verdict with evidence."
     },
     {
       "id": "visual_polish_reviewer",
@@ -168,7 +168,7 @@
         { "id": "testing", "level": 2 },
         { "id": "repo_analysis", "level": 1 }
       ],
-      "coreInstructions": "Call `get_task_details`, `receive_messages({ missionId, nodeId })`, and `get_workspace_context`. Review the built frontend against PRD.md, DESIGN.md, interaction QA notes, accessibility findings, and the inferred frontend rubric. Check for landing-page drift, weak hierarchy, generic copy, one-note palettes, clipped or overlapping text, poor responsive density, missing states, and inaccessible visual affordances. Write VISUAL_POLISH_REVIEW.md with concrete findings, request fixes for material issues, and route only by exact graph node IDs."
+      "coreInstructions": "Call `get_task_details`, `receive_messages({ missionId, nodeId })`, and `get_workspace_context`. Review the built frontend against frontendMode: strict_ui must follow accepted frontendSpecs/frontendPlan decisions, aligned mode may use clear prompt/upstream decisions when files are absent, and fast mode should focus on visible output quality without blocking on missing .md specs. Use interaction QA notes, accessibility findings, and the inferred frontend rubric. Check for landing-page drift, weak hierarchy, generic copy, one-note palettes, clipped or overlapping text, poor responsive density, missing states, and inaccessible visual affordances. Write VISUAL_POLISH_REVIEW.md with concrete findings, request fixes for material issues, and route only by exact graph node IDs."
     }
   ]
 }

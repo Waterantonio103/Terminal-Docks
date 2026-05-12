@@ -16,7 +16,7 @@ import agentsConfig from '../../config/agents';
 import { type LaunchMode } from '../../lib/buildPrompt';
 import { compileMission } from '../../lib/graphCompiler';
 import { generateId } from '../../lib/graphUtils';
-import { buildPresetFlowGraph, getWorkflowPreset, listWorkflowPresets } from '../../lib/workflowPresets';
+import { buildPresetFlowGraph, getPresetReadmeDefault, getWorkflowPreset, listWorkflowPresets } from '../../lib/workflowPresets';
 import { detectCliForPane, detectRoleForPane, type AgentCli } from '../../lib/cliDetection';
 
 const PRESETS = listWorkflowPresets();
@@ -97,6 +97,10 @@ function workflowGraphToFlowGraph(options: {
           prompt: node.config?.prompt ?? '',
           mode: node.config?.mode ?? 'build',
           workspaceDir: node.config?.workspaceDir ?? workspaceDir ?? '',
+          frontendMode: node.config?.frontendMode ?? 'off',
+          specProfile: node.config?.specProfile ?? 'none',
+          finalReadmeEnabled: Boolean(node.config?.finalReadmeEnabled),
+          finalReadmeOwnerNodeId: node.config?.finalReadmeOwnerNodeId ?? null,
         },
       };
     }
@@ -220,6 +224,10 @@ export function LauncherPane() {
   const [mode, setMode] = useState<LaunchMode>('build');
   const [authoringMode, setAuthoringMode] = useState<WorkflowAuthoringMode>('preset');
   const [presetId, setPresetId] = useState<string>(PRESETS[0]?.id ?? '');
+  const [finalReadmeEnabled, setFinalReadmeEnabled] = useState(() => {
+    const preset = getWorkflowPreset(PRESETS[0]?.id);
+    return preset ? getPresetReadmeDefault(preset) : false;
+  });
   const [task, setTask] = useState('');
   const [status, setStatus] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -262,7 +270,12 @@ export function LauncherPane() {
   useEffect(() => {
     setIsConfirming(false);
     setPendingLaunch(null);
-  }, [task, mode, authoringMode, presetId, allPanes]);
+  }, [task, mode, authoringMode, presetId, finalReadmeEnabled, allPanes]);
+
+  useEffect(() => {
+    const preset = getWorkflowPreset(presetId);
+    setFinalReadmeEnabled(preset ? getPresetReadmeDefault(preset) : false);
+  }, [presetId]);
 
   const syncedRows: TerminalRow[] = useMemo(
     () =>
@@ -396,6 +409,7 @@ export function LauncherPane() {
         workspaceDir,
         bindingsByRole: bindingByRole,
         instructionOverrides: agentInstructions,
+        finalReadmeEnabled,
       });
 
       return compileMission({
@@ -628,6 +642,18 @@ export function LauncherPane() {
             {selectedPreset && (
               <p className="text-[10px] text-text-muted leading-relaxed">{selectedPreset.description}</p>
             )}
+            <label className="mt-2 flex items-center justify-between gap-3 rounded-md border border-border-panel bg-bg-surface px-2.5 py-2">
+              <span className="min-w-0">
+                <span className="block text-[11px] font-semibold text-text-secondary">Create README</span>
+                <span className="block text-[10px] leading-relaxed text-text-muted">Final responsible agent writes short usage guidance.</span>
+              </span>
+              <input
+                type="checkbox"
+                checked={finalReadmeEnabled}
+                onChange={event => setFinalReadmeEnabled(event.target.checked)}
+                className="h-4 w-4 accent-accent-primary"
+              />
+            </label>
           </div>
         )}
 

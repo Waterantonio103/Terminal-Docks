@@ -34,6 +34,7 @@ const CODEX_STARTUP_PERMISSION_PROMPT_RE =
 const COMPLETION_RE = /(?:\btask\s+(?:completed|complete)\b|turn\.completed|exit code\s+0|(?:^|\n)\s*[─-]+\s*worked for\b|\bworked for\s+\d+\s*(?:s|m|h))/i;
 const FAILURE_RE =
   /(?:\btask\s+failed\b|\bfatal error\b|\buncaught exception\b|\bMCP error\b|exit code\s+[1-9]|\bfailed process\b|\bcommand not found\b|\bnot recognized as\b|\bunknown option\b|\bunexpected argument\b|\binvalid flag\b|(?:^|\n)\s*(?:error|fatal):)/i;
+const MCP_TOOL_NAME_RE = /run\s+tool\s+"([^"]+)"/i;
 
 function stripTerminalControls(output: string): string {
   return output
@@ -196,8 +197,12 @@ export const codexAdapter: CliAdapter = {
     const lines = clean.split('\n').filter(l => l.trim());
     const promptLine = lines.slice(-12).join('\n');
 
+    const mcpTool = MCP_TOOL_NAME_RE.exec(promptLine)?.[1]?.toLowerCase() ?? '';
     let category: PermissionRequest['category'] = 'unknown';
-    if (/admin\s+sandbox|bash|command|shell|exec|run\s/i.test(promptLine)) category = 'shell_execution';
+    if (mcpTool && /(?:read|get|list|search|find|stat|metadata)/i.test(mcpTool)) category = 'file_read';
+    else if (mcpTool && /(?:write|edit|patch|replace|move|delete|create|mkdir|touch)/i.test(mcpTool)) category = 'file_edit';
+    else if (mcpTool && /(?:shell|exec|run|command|terminal|spawn|process)/i.test(mcpTool)) category = 'shell_execution';
+    else if (/admin\s+sandbox|bash|command|shell|exec|run\s/i.test(promptLine)) category = 'shell_execution';
     else if (/trust\s+(?:the\s+)?(?:files\s+in\s+)?(?:this\s+)?folder/i.test(promptLine)) category = 'file_read';
     else if (/edit|write|create|modify|delete.*file/i.test(promptLine)) category = 'file_edit';
     else if (/read|cat|open.*file/i.test(promptLine)) category = 'file_read';
@@ -216,6 +221,9 @@ export const codexAdapter: CliAdapter = {
   },
 
   buildPermissionResponse(decision: PermissionDecision, _request: PermissionRequest): PermissionResponse {
+    if (decision === 'approve' && /\b1\.\s*Allow\b|enter\s+to\s+submit/i.test(_request.rawPrompt ?? '')) {
+      return { input: '\r' };
+    }
     return { input: decision === 'approve' ? 'y\r' : 'n\r' };
   },
 

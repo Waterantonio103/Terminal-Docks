@@ -513,7 +513,10 @@ export class WorkflowOrchestrator {
         yolo: nodeDef.config.yolo ?? false,
         goal: taskConfig?.prompt || '',
         frontendMode: taskConfig?.frontendMode,
-        frontendCategory: resolveFrontendCategory(taskConfig?.prompt ?? ''),
+        frontendCategory: taskConfig?.frontendCategory ?? resolveFrontendCategory(taskConfig?.prompt ?? ''),
+        specProfile: taskConfig?.specProfile,
+        finalReadmeEnabled: Boolean(taskConfig?.finalReadmeEnabled),
+        finalReadmeOwnerNodeId: taskConfig?.finalReadmeOwnerNodeId ?? null,
         legalTargets: getLegalTargetsForNode(run, nodeId) as any,
         upstreamPayloads: getIncomingHandoffs(run, nodeId),
       });

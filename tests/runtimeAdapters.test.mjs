@@ -68,6 +68,25 @@ run('codex startup permission prompts are categorized', () => {
     codexAdapter.detectPermissionRequest('Allow admin sandbox for this session?\nProceed?')?.request.category,
     'shell_execution',
   );
+  assert.equal(
+    codexAdapter.detectPermissionRequest('Allow the terminal-docks MCP server to run tool "read_file"?\n1. Allow\nenter to submit')?.request.category,
+    'file_read',
+  );
+});
+
+run('codex numbered approval prompts submit selected allow option', () => {
+  const request = codexAdapter.detectPermissionRequest(
+    'Allow the terminal-docks MCP server to run tool "read_file"?\n' +
+      '  1. Allow\n' +
+      '  2. Allow for this session\n' +
+      'enter to submit | esc to cancel',
+  );
+
+  assert.equal(request?.detected, true);
+  assert.equal(
+    codexAdapter.buildPermissionResponse('approve', request.request).input,
+    '\r',
+  );
 });
 
 run('ANSI-wrapped permission prompt output maps to waiting_user_answer', () => {

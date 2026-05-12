@@ -21,6 +21,8 @@ import { deriveExecutionLayers } from './graphUtils.js';
 import { normalizeCliId, supportsHeadless } from './cliIdentity.js';
 import agentsConfig from '../config/agents.js';
 import { resolveFrontendCategory } from './frontendWorkflow.js';
+import { getWorkflowPreset } from './workflowPresets.js';
+import { selectFinalReadmeOwner } from './workflowReadme.js';
 
 type FlowNodeLike = Pick<Node, 'id' | 'type' | 'position' | 'parentId' | 'extent' | 'style'> & {
   data?: Record<string, unknown>;
@@ -195,6 +197,10 @@ function getFrontendMode(value: unknown): FrontendWorkflowMode | undefined {
 
 function getSpecProfile(value: unknown): PresetSpecProfile {
   return value === 'frontend_three_file' ? value : 'none';
+}
+
+function getOptionalBoolean(value: unknown): boolean | undefined {
+  return typeof value === 'boolean' ? value : undefined;
 }
 
 function getRunVersion(value: unknown): number | undefined {
@@ -494,6 +500,8 @@ export function serializeWorkflowGraph(
             runVersion: getRunVersion(node.data?.runVersion),
             frontendMode: getFrontendMode(node.data?.frontendMode),
             specProfile: getSpecProfile(node.data?.specProfile),
+            finalReadmeEnabled: getOptionalBoolean(node.data?.finalReadmeEnabled),
+            finalReadmeOwnerNodeId: asString(node.data?.finalReadmeOwnerNodeId) ?? undefined,
             position: node.position,
             parentId: node.parentId,
             extent: node.extent as 'parent' | undefined,
@@ -596,6 +604,7 @@ export interface CompileMissionOptions {
   runVersion?: number;
   frontendMode?: FrontendWorkflowMode;
   specProfile?: PresetSpecProfile;
+  finalReadmeEnabled?: boolean;
 }
 
 export function compileMission({
@@ -611,6 +620,7 @@ export function compileMission({
   runVersion,
   frontendMode,
   specProfile,
+  finalReadmeEnabled,
 }: CompileMissionOptions): CompiledMission {
   const structure = compileMissionStructure(nodes, edges);
   const taskNode = nodes.find(node => node.id === structure.taskNodeId);
@@ -625,6 +635,8 @@ export function compileMission({
   const resolvedFrontendMode = taskFrontendMode ?? frontendMode ?? 'off';
   const resolvedSpecProfile = taskSpecProfile ?? specProfile;
   const resolvedFrontendCategory = resolveFrontendCategory(asString(taskNode.data?.prompt) ?? '');
+  const preset = getWorkflowPreset(resolvedPresetId);
+  const resolvedFinalReadmeEnabled = getOptionalBoolean(taskNode.data?.finalReadmeEnabled) ?? finalReadmeEnabled ?? false;
 
   const compiledNodes: CompiledMissionNode[] = structure.agentNodeIds.map(nodeId => {
     const node = nodes.find(candidate => candidate.id === nodeId);
@@ -670,6 +682,19 @@ export function compileMission({
       },
     };
   });
+  const outgoingFrom = new Set(structure.compiledEdges.map(edge => edge.fromNodeId));
+  const finalAgentNodes = compiledNodes.filter(node => !outgoingFrom.has(node.id));
+  const taskReadmeOwner = trimToUndefined(taskNode.data?.finalReadmeOwnerNodeId);
+  const resolvedFinalReadmeOwnerNodeId = resolvedFinalReadmeEnabled
+    ? (
+      taskReadmeOwner && compiledNodes.some(node => node.id === taskReadmeOwner)
+        ? taskReadmeOwner
+        : selectFinalReadmeOwner(finalAgentNodes, compiledNodes, {
+          mode: preset?.mode,
+          subMode: preset?.subMode,
+        })
+    )
+    : null;
 
   return {
     missionId,
@@ -679,6 +704,11 @@ export function compileMission({
       prompt: asString(taskNode.data?.prompt)?.trim() ?? '',
       mode: getWorkflowMode(taskNode),
       workspaceDir: trimToUndefined(taskNode.data?.workspaceDir) ?? workspaceDirFallback,
+      frontendMode: resolvedFrontendMode,
+      frontendCategory: resolvedFrontendCategory,
+      specProfile: resolvedSpecProfile,
+      finalReadmeEnabled: resolvedFinalReadmeEnabled,
+      finalReadmeOwnerNodeId: resolvedFinalReadmeOwnerNodeId,
     },
     metadata: {
       compiledAt,
@@ -691,6 +721,8 @@ export function compileMission({
       frontendMode: resolvedFrontendMode,
       frontendCategory: resolvedFrontendCategory,
       specProfile: resolvedSpecProfile,
+      finalReadmeEnabled: resolvedFinalReadmeEnabled,
+      finalReadmeOwnerNodeId: resolvedFinalReadmeOwnerNodeId,
     },
     nodes: compiledNodes,
     edges: structure.compiledEdges,

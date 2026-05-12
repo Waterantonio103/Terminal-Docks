@@ -141,6 +141,8 @@ export function createWorkflowNodeRegistry() {
       presetId: '',
       runVersion: 1,
       frontendMode: 'off',
+      finalReadmeEnabled: false,
+      finalReadmeOwnerNodeId: '',
     }),
     declare: (_context, builder) => {
       builder.addOutput('start', 'Start', 'flow');

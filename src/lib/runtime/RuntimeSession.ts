@@ -38,6 +38,9 @@ export class RuntimeSession {
   readonly goal?: string;
   readonly frontendMode?: import('../../store/workspace.js').FrontendWorkflowMode;
   readonly frontendCategory?: import('../../store/workspace.js').FrontendSpecCategory;
+  readonly specProfile?: import('../../store/workspace.js').PresetSpecProfile;
+  readonly finalReadmeEnabled?: boolean;
+  readonly finalReadmeOwnerNodeId?: string | null;
   readonly instructionOverride?: string;
   readonly legalTargets?: import('../workflow/WorkflowTypes.js').LegalTarget[];
   readonly upstreamPayloads?: import('../workflow/WorkflowRun.js').HandoffRecord[];
@@ -72,6 +75,9 @@ export class RuntimeSession {
       goal?: string;
       frontendMode?: import('../../store/workspace.js').FrontendWorkflowMode;
       frontendCategory?: import('../../store/workspace.js').FrontendSpecCategory;
+      specProfile?: import('../../store/workspace.js').PresetSpecProfile;
+      finalReadmeEnabled?: boolean;
+      finalReadmeOwnerNodeId?: string | null;
       instructionOverride?: string | null;
       legalTargets?: import('../workflow/WorkflowTypes.js').LegalTarget[];
       upstreamPayloads?: import('../workflow/WorkflowRun.js').HandoffRecord[];
@@ -95,6 +101,9 @@ export class RuntimeSession {
     this.goal = args.goal;
     this.frontendMode = args.frontendMode;
     this.frontendCategory = args.frontendCategory;
+    this.specProfile = args.specProfile;
+    this.finalReadmeEnabled = args.finalReadmeEnabled;
+    this.finalReadmeOwnerNodeId = args.finalReadmeOwnerNodeId ?? null;
     this.instructionOverride = args.instructionOverride ?? undefined;
     this.legalTargets = args.legalTargets;
     this.upstreamPayloads = args.upstreamPayloads;
@@ -159,6 +168,9 @@ export class RuntimeSession {
       goal: this.goal,
       frontendMode: this.frontendMode,
       frontendCategory: this.frontendCategory,
+      specProfile: this.specProfile,
+      finalReadmeEnabled: this.finalReadmeEnabled,
+      finalReadmeOwnerNodeId: this.finalReadmeOwnerNodeId,
       legalTargets: this.legalTargets,
       upstreamPayloads: this.upstreamPayloads,
     };

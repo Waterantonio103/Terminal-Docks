@@ -25,6 +25,7 @@ import {
 import agentsConfig from '../../config/agents';
 import {
   getRecommendedWorkflowPreset,
+  getPresetReadmeDefault,
   groupWorkflowPresetsBySubMode,
   listWorkflowPresetModes,
   listWorkflowPresetsByMode,
@@ -37,7 +38,7 @@ interface WorkflowPresetPickerProps {
   open: boolean;
   initialMode?: WorkflowPresetMode;
   onClose: () => void;
-  onApply: (preset: PresetDefinition) => void;
+  onApply: (preset: PresetDefinition, options: { finalReadmeEnabled: boolean }) => void;
 }
 
 const MODE_ICONS: Record<WorkflowPresetMode, LucideIcon> = {
@@ -266,6 +267,7 @@ export function WorkflowPresetPicker({ open, initialMode = 'build', onClose, onA
   const modes = useMemo(() => listWorkflowPresetModes(), []);
   const [activeMode, setActiveMode] = useState<WorkflowPresetMode>(initialMode);
   const [selectedPresetId, setSelectedPresetId] = useState<string | null>(null);
+  const [finalReadmeEnabled, setFinalReadmeEnabled] = useState(false);
 
   const presets = useMemo(() => listWorkflowPresetsByMode(activeMode), [activeMode]);
   const grouped = useMemo(() => Array.from(groupWorkflowPresetsBySubMode(presets).entries()), [presets]);
@@ -285,6 +287,11 @@ export function WorkflowPresetPicker({ open, initialMode = 'build', onClose, onA
       return nextPreset?.id ?? null;
     });
   }, [grouped, presets]);
+
+  useEffect(() => {
+    if (!selectedPreset) return;
+    setFinalReadmeEnabled(getPresetReadmeDefault(selectedPreset));
+  }, [selectedPreset?.id]);
 
   if (!open) return null;
 
@@ -366,7 +373,20 @@ export function WorkflowPresetPicker({ open, initialMode = 'build', onClose, onA
           })}
         </div>
 
-        <div className="flex items-center justify-end gap-3 border-t border-border-panel bg-bg-titlebar px-4 py-3">
+        <div className="flex items-center justify-between gap-3 border-t border-border-panel bg-bg-titlebar px-4 py-3">
+          <label className="flex max-w-[320px] items-center gap-2 text-left">
+            <input
+              type="checkbox"
+              checked={finalReadmeEnabled}
+              onChange={event => setFinalReadmeEnabled(event.target.checked)}
+              className="h-4 w-4 shrink-0 accent-accent-primary"
+            />
+            <span className="min-w-0">
+              <span className="block text-[11px] font-semibold text-text-secondary">Create README</span>
+              <span className="block truncate text-[10px] text-text-muted">Final responsible agent writes short usage guidance.</span>
+            </span>
+          </label>
+          <div className="flex min-w-0 items-center justify-end gap-3">
           {selectedPreset && (
             <div className="min-w-0 truncate text-right text-[11px] text-text-muted">
               <span className="text-text-secondary">{selectedPreset.subMode}</span>
@@ -378,12 +398,13 @@ export function WorkflowPresetPicker({ open, initialMode = 'build', onClose, onA
           )}
           <button
             type="button"
-            onClick={() => selectedPreset && onApply(selectedPreset)}
+            onClick={() => selectedPreset && onApply(selectedPreset, { finalReadmeEnabled })}
             disabled={!selectedPreset}
             className="rounded border border-accent-primary bg-accent-primary px-3 py-1.5 text-[12px] font-semibold text-accent-text transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
           >
             Apply
           </button>
+          </div>
         </div>
       </div>
     </div>

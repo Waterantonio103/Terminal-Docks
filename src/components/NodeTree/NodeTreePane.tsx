@@ -1348,7 +1348,7 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
     }
   }, [registry, state.document, workspaceDir, frontendMode]);
 
-  const importPresetGraph = useCallback((preset: PresetDefinition) => {
+  const importPresetGraph = useCallback((preset: PresetDefinition, options: { finalReadmeEnabled: boolean }) => {
     const missionId = generateId();
     const bindingsByRole: Record<string, { terminalId: string; terminalTitle: string; paneId?: string }> = {};
     for (const terminal of openTerminals) {
@@ -1375,6 +1375,7 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
       bindingsByRole,
       instructionOverrides: {},
       frontendMode: presetFrontendMode,
+      finalReadmeEnabled: options.finalReadmeEnabled,
     });
 
     const workflowGraph: WorkflowGraph = {
@@ -1392,6 +1393,7 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
               workspaceDir: String(data.workspaceDir ?? ''),
               frontendMode: data.frontendMode as FrontendWorkflowMode,
               specProfile: data.specProfile === 'frontend_three_file' ? 'frontend_three_file' : 'none',
+              finalReadmeEnabled: Boolean(data.finalReadmeEnabled),
               authoringMode: 'preset',
               presetId: preset.id,
               runVersion: 1,

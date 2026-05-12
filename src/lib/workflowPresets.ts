@@ -1,4 +1,5 @@
 import type { FrontendWorkflowMode, WorkflowAgentCli, WorkflowEdgeCondition, WorkflowExecutionMode, WorkflowMode } from '../store/workspace.js';
+import { defaultPresetReadmeEnabled } from './workflowReadme.js';
 
 export type WorkflowPresetMode =
   | 'build'
@@ -53,6 +54,7 @@ export interface PresetDefinition {
   previewShape: PresetPreviewShape;
   specProfile?: PresetSpecProfile;
   frontendMode?: FrontendWorkflowMode;
+  finalReadmeDefault?: boolean;
   nodes: PresetNodeDefinition[];
   edges: PresetEdgeDefinition[];
 }
@@ -236,6 +238,7 @@ export const WORKFLOW_PRESETS: PresetDefinition[] = [
     previewShape: 'chain',
     specProfile: 'frontend_three_file',
     frontendMode: 'aligned',
+    finalReadmeDefault: true,
     nodes: [
       node('frontend_architect', 'frontend_architect'),
       node('frontend_builder', 'frontend_builder'),
@@ -255,6 +258,7 @@ export const WORKFLOW_PRESETS: PresetDefinition[] = [
     previewShape: 'fanout',
     specProfile: 'frontend_three_file',
     frontendMode: 'strict_ui',
+    finalReadmeDefault: true,
     nodes: [
       node('frontend_product', 'frontend_product'),
       node('frontend_designer', 'frontend_designer'),
@@ -284,6 +288,7 @@ export const WORKFLOW_PRESETS: PresetDefinition[] = [
     previewShape: 'gate',
     specProfile: 'frontend_three_file',
     frontendMode: 'strict_ui',
+    finalReadmeDefault: true,
     nodes: [
       node('frontend_product', 'frontend_product'),
       node('frontend_designer', 'frontend_designer'),
@@ -799,6 +804,14 @@ export function getPresetSpecMetadata(preset: PresetDefinition): {
   };
 }
 
+export function getPresetReadmeDefault(preset: PresetDefinition): boolean {
+  return preset.finalReadmeDefault ?? defaultPresetReadmeEnabled({
+    mode: preset.mode,
+    subMode: preset.subMode,
+    specProfile: preset.specProfile,
+  });
+}
+
 export function getPresetStartNodeIds(preset: PresetDefinition): string[] {
   const hasIncoming = new Set(preset.edges.map(edge => edge.toNodeId));
   return preset.nodes
@@ -884,6 +897,7 @@ export function buildPresetFlowGraph(options: {
   bindingsByRole: Record<string, TerminalBindingLike>;
   instructionOverrides?: Record<string, string>;
   frontendMode?: FrontendWorkflowMode;
+  finalReadmeEnabled?: boolean;
 }) {
   const {
     preset,
@@ -896,6 +910,7 @@ export function buildPresetFlowGraph(options: {
   } = options;
 
   const frontendMode = options.frontendMode ?? preset.frontendMode ?? 'off';
+  const finalReadmeEnabled = options.finalReadmeEnabled ?? getPresetReadmeDefault(preset);
   const taskNodeId = `task-${missionId}`;
   const startNodeIds = getPresetStartNodeIds(preset);
   const agentPositions = getPresetNodePositions(preset);
@@ -912,6 +927,7 @@ export function buildPresetFlowGraph(options: {
         workspaceDir: workspaceDir ?? '',
         frontendMode,
         specProfile: preset.specProfile ?? 'none',
+        finalReadmeEnabled,
         authoringMode: 'preset',
         presetId: preset.id,
         runVersion: 1,

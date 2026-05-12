@@ -86,6 +86,8 @@ export interface WorkflowNode {
     runVersion?: number;
     frontendMode?: FrontendWorkflowMode;
     specProfile?: PresetSpecProfile;
+    finalReadmeEnabled?: boolean;
+    finalReadmeOwnerNodeId?: string | null;
     adaptiveSeed?: boolean;
     profileId?: string;
     capabilities?: WorkerCapability[];
@@ -119,6 +121,11 @@ export interface CompiledMissionTaskContext {
   prompt: string;
   mode: WorkflowMode;
   workspaceDir: string | null;
+  frontendMode?: FrontendWorkflowMode;
+  frontendCategory?: FrontendSpecCategory;
+  specProfile?: PresetSpecProfile;
+  finalReadmeEnabled?: boolean;
+  finalReadmeOwnerNodeId?: string | null;
 }
 
 export interface CompiledMissionTerminalBinding {
@@ -162,6 +169,8 @@ export interface CompiledMissionMetadata {
   frontendMode?: FrontendWorkflowMode;
   frontendCategory?: FrontendSpecCategory;
   specProfile?: PresetSpecProfile;
+  finalReadmeEnabled?: boolean;
+  finalReadmeOwnerNodeId?: string | null;
 }
 
 export interface CompiledMission {

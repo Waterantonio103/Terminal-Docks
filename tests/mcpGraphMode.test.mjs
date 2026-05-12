@@ -179,6 +179,45 @@ try {
     assert.equal(details.assignment.frontendFramework.categoryId, 'admin_internal_tool');
   });
 
+  await run('get_task_details includes final README guidance only for selected owner', async () => {
+    resetStarlinkState();
+    const mission = demoMission();
+    mission.metadata.presetId = 'frontend_ui_delivery';
+    mission.metadata.finalReadmeEnabled = true;
+    mission.metadata.finalReadmeOwnerNodeId = 'reviewer-a';
+    mission.task.finalReadmeEnabled = true;
+    mission.task.finalReadmeOwnerNodeId = 'reviewer-a';
+    seedCompiledMission(mission);
+    seedMissionNodeRuntime({
+      missionId: 'mission-graph',
+      nodeId: 'reviewer-a',
+      roleId: 'reviewer',
+      status: 'running',
+      attempt: 1,
+      currentWaveId: 'wave:review',
+    });
+    seedMissionNodeRuntime({
+      missionId: 'mission-graph',
+      nodeId: 'reviewer-b',
+      roleId: 'reviewer',
+      status: 'running',
+      attempt: 1,
+      currentWaveId: 'wave:review',
+    });
+
+    const ownerDetails = buildTaskDetails('mission-graph', 'reviewer-a');
+    assert.equal(ownerDetails.finalReadmeEnabled, true);
+    assert.equal(ownerDetails.finalReadmeOwnerNodeId, 'reviewer-a');
+    assert.match(ownerDetails.assignment.roleInstructions, /Final README instruction/);
+    assert.match(ownerDetails.node.instructionOverride, /create INSTRUCTIONS\.md instead/);
+
+    const otherDetails = buildTaskDetails('mission-graph', 'reviewer-b');
+    assert.equal(otherDetails.finalReadmeEnabled, true);
+    assert.equal(otherDetails.finalReadmeOwnerNodeId, 'reviewer-a');
+    assert.doesNotMatch(otherDetails.assignment.roleInstructions, /Final README instruction/);
+    assert.doesNotMatch(otherDetails.node.instructionOverride, /Final README instruction/);
+  });
+
   await run('get_current_task resolves the bound runtime session', async () => {
     resetStarlinkState();
     seedCompiledMission(demoMission());
