@@ -2,6 +2,7 @@ use serde::Serialize;
 use std::fs;
 use std::path::Path;
 use tauri::command;
+use base64::Engine as _;
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -134,6 +135,15 @@ pub async fn workspace_read_text_file(path: String) -> Result<String, String> {
         return Err("Invalid path".to_string());
     }
     fs::read_to_string(path).map_err(|e| e.to_string())
+}
+
+#[command]
+pub async fn workspace_read_binary_file_base64(path: String) -> Result<String, String> {
+    if !is_safe_path(&path) {
+        return Err("Invalid path".to_string());
+    }
+    let bytes = fs::read(path).map_err(|e| e.to_string())?;
+    Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
 }
 
 #[command]

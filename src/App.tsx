@@ -9,7 +9,7 @@ import { listen } from '@tauri-apps/api/event';
 import { defaultWindowIcon } from '@tauri-apps/api/app';
 import { homeDir } from '@tauri-apps/api/path';
 import { Window } from '@tauri-apps/api/window';
-import { TerminalSquare, FileCode2, KanbanSquare, Activity, Plus, Rocket, Monitor, Minus, Square, X, Network, FolderTree, LayoutGrid, Maximize, Settings, Bell, Toolbox } from 'lucide-react';
+import { TerminalSquare, FileCode2, KanbanSquare, Activity, Rocket, Monitor, Minus, Square, X, Network, FolderTree, Settings, Bell, Toolbox } from 'lucide-react';
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { detectRoleFromText, normalizeCli } from './lib/cliDetection';
 import { refreshCliDetectionForTerminals } from './lib/terminalCliRuntime';
@@ -25,8 +25,9 @@ import { missionOrchestrator } from './lib/workflow/MissionOrchestrator';
 import type { ActionCenterActionId, ActionCenterItem } from './lib/actionCenter';
 import './App.css';
 
-// Safe access to window
-const appWindow = typeof window !== 'undefined' ? Window.getCurrent() : null;
+// Safe access to the Tauri window. Plain browser automation does not expose
+// Tauri internals, so avoid resolving the current window outside that runtime.
+const appWindow = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window ? Window.getCurrent() : null;
 
 // Helper to inject custom theme CSS
 function CustomThemeInjector() {
@@ -106,11 +107,6 @@ function MainApp() {
   const appMode       = useWorkspaceStore((s) => s.appMode);
   const theme        = useWorkspaceStore((s) => s.theme);
   const tabs         = useWorkspaceStore((s) => s.tabs);
-  const activeTabId  = useWorkspaceStore((s) => s.activeTabId);
-  const addTab       = useWorkspaceStore((s) => s.addTab);
-  const removeTab    = useWorkspaceStore((s) => s.removeTab);
-  const switchTab    = useWorkspaceStore((s) => s.switchTab);
-  const renameTab    = useWorkspaceStore((s) => s.renameTab);
   const addMessage      = useWorkspaceStore((s) => s.addMessage);
   const addResult       = useWorkspaceStore((s) => s.addResult);
   const setTasks        = useWorkspaceStore((s) => s.setTasks);
@@ -120,8 +116,6 @@ function MainApp() {
   const globalGraph     = useWorkspaceStore((s) => s.globalGraph);
   const setGlobalGraph  = useWorkspaceStore((s) => s.setGlobalGraph);
 
-  const layoutMode   = useWorkspaceStore((s) => s.layoutMode);
-  const setLayoutMode = useWorkspaceStore((s) => s.setLayoutMode);
    const showSettings = useWorkspaceStore((s) => s.showSettings);
    const modeLabel = MODE_OPTIONS.find(mode => mode.id === appMode)?.label ?? 'Workflow';
 
@@ -222,9 +216,6 @@ function MainApp() {
   }, []);
 
   const [showQuickOpen, setShowQuickOpen] = useState(false);
-  const [editingTabId, setEditingTabId] = useState<string | null>(null);
-  const [editingTabName, setEditingTabName] = useState('');
-  const tabInputRef = useRef<HTMLInputElement>(null);
   const [fatalReport, setFatalReport] = useState<FatalErrorReport | null>(() => readLastFatalReport());
 
   useEffect(() => {
@@ -251,17 +242,10 @@ function MainApp() {
         </div>
 
         <div className="flex-1 flex justify-center items-center gap-1 h-full relative z-10" data-tauri-drag-region>
-          {appMode === 'workspace' ? (
-            <div className="flex items-center gap-1 bg-bg-surface border border-border-panel rounded-lg px-1 py-0.5" data-tauri-no-drag>
-              <button onClick={() => setLayoutMode('grid')} className={`flex items-center gap-1.5 text-[10px] uppercase font-bold px-2.5 py-1 rounded-md transition-all ${layoutMode === 'grid' ? 'bg-accent-primary text-white shadow-sm' : 'text-text-muted hover:text-text-primary hover:bg-bg-surface-hover'}`}><LayoutGrid size={12} /><span>Panels</span></button>
-              <button onClick={() => setLayoutMode('tabs')} className={`flex items-center gap-1.5 text-[10px] uppercase font-bold px-2.5 py-1 rounded-md transition-all ${layoutMode === 'tabs' ? 'bg-accent-primary text-white shadow-sm' : 'text-text-muted hover:text-text-primary hover:bg-bg-surface-hover'}`}><Maximize size={12} /><span>Tabs</span></button>
-            </div>
-          ) : (
-            <div className="flex items-center gap-2 text-xs font-bold text-accent-primary uppercase tracking-widest">
-               {appMode === 'runtime' ? <Monitor size={14} /> : appMode === 'actioncenter' ? <Bell size={14} /> : appMode === 'mcptoolbox' ? <Toolbox size={14} /> : <Network size={14} />}
-               <span>{modeLabel}</span>
-            </div>
-          )}
+          <div className="flex items-center gap-2 text-xs font-bold text-accent-primary uppercase tracking-widest">
+             {appMode === 'runtime' ? <Monitor size={14} /> : appMode === 'workspace' ? <FolderTree size={14} /> : appMode === 'actioncenter' ? <Bell size={14} /> : appMode === 'mcptoolbox' ? <Toolbox size={14} /> : <Network size={14} />}
+             <span>{modeLabel}</span>
+          </div>
         </div>
 
         <div className="flex items-center gap-3 shrink-0 relative z-10" data-tauri-drag-region>
@@ -285,18 +269,6 @@ function MainApp() {
             </div>
           ) : appMode === 'runtime' ? <RuntimeView /> : appMode === 'actioncenter' ? <ActionCenterPane /> : appMode === 'mcptoolbox' ? <McpToolboxPage /> : (
             <>
-              {layoutMode === 'grid' && (
-                <div className="flex items-center h-8 bg-bg-titlebar border-b border-border-panel px-2 gap-0.5 overflow-x-auto shrink-0 select-none relative" data-tauri-drag-region>
-                  {tabs.map((tab) => (
-                    <div key={tab.id} onClick={() => switchTab(tab.id)} onDoubleClick={() => { setEditingTabId(tab.id); setEditingTabName(tab.name); }} className={`group flex items-center h-6 px-3 gap-2 rounded-t-md text-[11px] font-medium transition-all cursor-pointer min-w-[80px] max-w-[160px] border-x border-t relative ${activeTabId === tab.id ? 'bg-bg-panel text-text-primary border-border-panel z-10 -mb-[1px]' : 'bg-transparent text-text-muted border-transparent hover:bg-bg-surface/50'}`}>
-                      <div className="w-1.5 h-1.5 rounded-full shrink-0" style={{ backgroundColor: tab.color }} />
-                      {editingTabId === tab.id ? <input ref={tabInputRef} value={editingTabName} onChange={(e) => setEditingTabName(e.target.value)} onBlur={() => { if (editingTabName.trim()) renameTab(tab.id, editingTabName.trim()); setEditingTabId(null); }} onKeyDown={(e) => { if (e.key === 'Enter') { if (editingTabName.trim()) renameTab(tab.id, editingTabName.trim()); setEditingTabId(null); } if (e.key === 'Escape') setEditingTabId(null); }} className="bg-transparent border-none outline-none text-xs w-[100px] text-text-primary" autoFocus /> : <span className="truncate max-w-[100px]">{tab.name}</span>}
-                      {tabs.length > 1 && <button onClick={(e) => { e.stopPropagation(); removeTab(tab.id); }} className="ml-0.5 opacity-0 group-hover:opacity-60 hover:!opacity-100 text-text-muted hover:text-red-400 transition-all leading-none text-base shrink-0"><X size={10} /></button>}
-                    </div>
-                  ))}
-                  <button onClick={addTab} className="w-6 h-6 flex items-center justify-center text-text-muted hover:text-text-primary hover:bg-bg-surface rounded transition-colors ml-1"><Plus size={14} /></button>
-                </div>
-              )}
               <div className="flex-1 flex flex-col overflow-hidden"><WorkspaceGrid /></div>
             </>
           )}

@@ -8,6 +8,7 @@ import { ActivityFeedPane } from '../ActivityFeed/ActivityFeedPane';
 import { LauncherPane } from '../Launcher/LauncherPane';
 import { MissionControlPane } from '../MissionControl/MissionControlPane';
 import { ActionCenterPane } from '../ActionCenter/ActionCenterPane';
+import { FileTypeIcon } from '../../lib/fileIcons';
 
 const PANE_ICONS: Record<PaneType, React.ReactNode> = {
   terminal:       <TerminalSquare size={13} />,
@@ -19,6 +20,13 @@ const PANE_ICONS: Record<PaneType, React.ReactNode> = {
   nodetree:       <Network size={13} />,
   inbox:          <Bell size={13} />,
 };
+
+function getPaneIcon(pane: Pane, size = 13) {
+  if (pane.type === 'editor') {
+    return <FileTypeIcon fileName={(pane.data?.filePath as string | undefined) ?? pane.title} size={size} />;
+  }
+  return PANE_ICONS[pane.type];
+}
 
 const CELL_HEIGHT = 4;
 const GRID_COLUMNS = 100;
@@ -86,7 +94,7 @@ const DashboardPanel = React.memo(function DashboardPanel({ pane, onDragStart, o
           className="flex items-center bg-bg-titlebar border-b border-border-panel shrink-0 h-8 px-2 gap-2 cursor-grab active:cursor-grabbing select-none"
           onMouseDown={(e) => onDragStart(pane.id, e)}
         >
-          <span className="text-text-muted">{PANE_ICONS[pane.type]}</span>
+          <span className="text-text-muted">{getPaneIcon(pane)}</span>
           {editing ? (
             <input
               ref={inputRef}
@@ -170,7 +178,7 @@ function TabsView({ panes }: { panes: Pane[] }) {
             `}
           >
             <span className={activePaneId === pane.id ? 'text-accent-primary' : 'text-text-muted opacity-60'}>
-              {PANE_ICONS[pane.type]}
+              {getPaneIcon(pane)}
             </span>
             <span className={`text-[11px] font-medium truncate flex-1 ${activePaneId === pane.id ? 'text-text-primary' : ''}`}>
               {pane.title}

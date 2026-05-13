@@ -228,7 +228,7 @@ export function classifyFrontendCategory(input = '') {
   const text = String(input).toLowerCase();
   let best = { id: 'marketing_site', score: 0 };
   for (const [id, overlay] of Object.entries(FRONTEND_CATEGORY_OVERLAYS)) {
-    const score = overlay.cues.filter(cue => text.includes(cue)).length;
+    const score = overlay.cues.filter(cue => matchesCue(text, cue)).length;
     if (score > best.score) best = { id, score };
   }
   return {
@@ -236,6 +236,22 @@ export function classifyFrontendCategory(input = '') {
     category: FRONTEND_CATEGORY_OVERLAYS[best.id],
     confidence: best.score > 0 ? 'medium' : 'low',
   };
+}
+
+function isNegatedCue(text, cue) {
+  let index = text.indexOf(cue);
+  while (index >= 0) {
+    const before = text.slice(Math.max(0, index - 32), index);
+    if (/(?:\bnot\b|\bavoid\b|\bno\b|\bwithout\b|instead of)\W+(?:\w+\W+){0,3}$/.test(before)) {
+      return true;
+    }
+    index = text.indexOf(cue, index + cue.length);
+  }
+  return false;
+}
+
+function matchesCue(text, cue) {
+  return text.includes(cue) && !isNegatedCue(text, cue);
 }
 
 export function buildFrontendSpecFramework({ categoryId, mode = 'aligned' } = {}) {

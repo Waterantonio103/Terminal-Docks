@@ -60,6 +60,16 @@ pub struct CompiledMissionTaskContext {
     pub prompt: String,
     pub mode: WorkflowMode,
     pub workspace_dir: Option<String>,
+    #[serde(default)]
+    pub frontend_mode: Option<String>,
+    #[serde(default)]
+    pub frontend_category: Option<String>,
+    #[serde(default)]
+    pub spec_profile: Option<String>,
+    #[serde(default)]
+    pub final_readme_enabled: Option<bool>,
+    #[serde(default)]
+    pub final_readme_owner_node_id: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -120,6 +130,16 @@ pub struct CompiledMissionMetadata {
     pub authoring_mode: Option<WorkflowAuthoringMode>,
     pub preset_id: Option<String>,
     pub run_version: Option<u32>,
+    #[serde(default)]
+    pub frontend_mode: Option<String>,
+    #[serde(default)]
+    pub frontend_category: Option<String>,
+    #[serde(default)]
+    pub spec_profile: Option<String>,
+    #[serde(default)]
+    pub final_readme_enabled: Option<bool>,
+    #[serde(default)]
+    pub final_readme_owner_node_id: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]

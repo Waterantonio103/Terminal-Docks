@@ -42,6 +42,7 @@ export interface WorkflowNodeDefinition {
     readonly prompt?: string;
     readonly mode?: LaunchMode;
     readonly workspaceDir?: string;
+    readonly attachments?: import('../../store/workspace.js').TaskAttachment[];
     readonly instructionOverride?: string;
     readonly cli?: CliId;
     readonly model?: string;
@@ -186,6 +187,7 @@ export function compiledMissionToDefinition(
         prompt: mission.task.prompt,
         mode: mission.task.mode,
         workspaceDir: mission.task.workspaceDir ?? undefined,
+        attachments: mission.task.attachments,
         authoringMode: mission.metadata.authoringMode,
         presetId: mission.metadata.presetId ?? undefined,
         runVersion: mission.metadata.runVersion,

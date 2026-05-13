@@ -42,11 +42,19 @@ export type WorkflowEdgeCondition = 'always' | 'on_success' | 'on_failure';
 export type WorkflowAgentCli = 'claude' | 'gemini' | 'opencode' | 'codex' | 'custom' | 'ollama' | 'lmstudio';
 export type WorkflowExecutionMode = 'api' | 'headless' | 'streaming_headless' | 'interactive_pty' | 'manual';
 export type WorkflowAuthoringMode = 'preset' | 'graph' | 'adaptive';
-export type WorkflowGraphMode = 'standard' | 'ui';
+export type WorkflowGraphMode = 'standard' | 'research' | 'plan' | 'review' | 'verify' | 'secure' | 'document' | 'ui';
 export type FrontendWorkflowMode = 'off' | 'fast' | 'aligned' | 'strict_ui';
 export type PresetSpecProfile = 'none' | 'frontend_three_file';
 export type FrontendSpecCategory = 'marketing_site' | 'saas_dashboard' | 'admin_internal_tool' | 'docs_portal' | 'consumer_mobile_app';
 export type WorkerCapabilityId = 'planning' | 'coding' | 'testing' | 'review' | 'security' | 'repo_analysis' | 'shell_execution';
+export interface TaskAttachment {
+  id: string;
+  kind: 'file' | 'image';
+  name: string;
+  path?: string;
+  mime?: string;
+  source?: 'dialog' | 'clipboard';
+}
 
 export interface WorkerCapability {
   id: WorkerCapabilityId;
@@ -72,6 +80,7 @@ export interface WorkflowNode {
     prompt?: string;
     mode?: WorkflowMode;
     workspaceDir?: string;
+    attachments?: TaskAttachment[];
     instructionOverride?: string;
     terminalId?: string;
     terminalTitle?: string;
@@ -101,6 +110,10 @@ export interface WorkflowNode {
     height?: number;
     label?: string;
     position?: { x: number; y: number };
+    workflowId?: string;
+    workflowName?: string;
+    workflowSubMode?: string;
+    workflowMode?: string;
   };
 }
 
@@ -121,6 +134,7 @@ export interface CompiledMissionTaskContext {
   prompt: string;
   mode: WorkflowMode;
   workspaceDir: string | null;
+  attachments?: TaskAttachment[];
   frontendMode?: FrontendWorkflowMode;
   frontendCategory?: FrontendSpecCategory;
   specProfile?: PresetSpecProfile;
@@ -331,6 +345,21 @@ export interface WorkspaceTab {
   name: string;
   color: string;
   panes: Pane[];
+  workspaceDir?: string | null;
+  workflowRunId?: string;
+  workflowName?: string;
+}
+
+export interface LaunchedWorkflow {
+  missionId: string;
+  workflowId: string;
+  name: string;
+  subMode: string;
+  mode?: string;
+  size?: string;
+  agentCount: number;
+  workspaceDir: string | null;
+  launchedAt: number;
 }
 
 export interface SavedLayout {
@@ -432,6 +461,7 @@ interface WorkspaceState {
   workflowGraphMode: WorkflowGraphMode;
   workflowGraphs: Record<WorkflowGraphMode, WorkflowGraph | null>;
   uiFrontendMode: Exclude<FrontendWorkflowMode, 'off'>;
+  launchedWorkflows: LaunchedWorkflow[];
   nodeTerminalBindings: Record<string, string>;
   nodeRuntimeBindings: Record<string, NodeRuntimeBinding>;
   toggleSidebar: () => void;
@@ -441,7 +471,10 @@ interface WorkspaceState {
   setActivePaneId: (id: string | null) => void;
   setGlobalGraph: (graph: WorkflowGraph) => void;
   setWorkflowGraphMode: (mode: WorkflowGraphMode) => void;
+  setWorkflowGraphForMode: (mode: WorkflowGraphMode, graph: WorkflowGraph) => void;
   setUiFrontendMode: (mode: Exclude<FrontendWorkflowMode, 'off'>) => void;
+  addLaunchedWorkflow: (workflow: LaunchedWorkflow) => void;
+  ensureWorkflowWorkspace: (workflow: LaunchedWorkflow) => void;
   setShowSettings: (open: boolean) => void;
   setCanvasEffectsEnabled: (enabled: boolean) => void;
   setTheme: (theme: ThemeType) => void;
@@ -499,6 +532,19 @@ function findHighestAvailableSpot(panes: Pane[], w: number, h: number, padding =
     y += 1;
   }
   return { x: 0, y: 0, w, h };
+}
+
+function clearEditorPanesForWorkspaceChange(state: WorkspaceState): Pick<WorkspaceState, 'tabs' | 'activePaneId'> {
+  const tabs = state.tabs.map(tab => ({
+    ...tab,
+    panes: tab.panes.filter(pane => pane.type !== 'editor'),
+  }));
+  const activePaneStillExists = tabs.some(tab => tab.panes.some(pane => pane.id === state.activePaneId));
+  const activeTab = tabs.find(tab => tab.id === state.activeTabId) ?? tabs[0];
+  return {
+    tabs,
+    activePaneId: activePaneStillExists ? state.activePaneId : (activeTab?.panes[0]?.id ?? null),
+  };
 }
 
 function cleanWorkflowGraph(graph: WorkflowGraph): WorkflowGraph {
@@ -568,7 +614,7 @@ export const useWorkspaceStore = create<WorkspaceState>()(
       }],
       activeTabId: _initTabId,
       activePaneId: null,
-      layoutMode: 'grid',
+      layoutMode: 'tabs',
       sidebarOpen: true,
       activeSidebarTab: 'files',
       appMode: 'workflow',
@@ -586,15 +632,22 @@ export const useWorkspaceStore = create<WorkspaceState>()(
       workflowGraphMode: 'standard',
       workflowGraphs: {
         standard: { id: 'global-editor', nodes: [], edges: [] },
+        research: null,
+        plan: null,
+        review: null,
+        verify: null,
+        secure: null,
+        document: null,
         ui: null,
       },
       uiFrontendMode: 'strict_ui',
+      launchedWorkflows: [],
       nodeTerminalBindings: {},
       nodeRuntimeBindings: {},
 
       setActiveSidebarTab: (tab) => set({ activeSidebarTab: tab }),
       setAppMode: (mode) => set({ appMode: mode }),
-      setLayoutMode: (mode) => set({ layoutMode: mode }),
+      setLayoutMode: () => set({ layoutMode: 'tabs' }),
       setActivePaneId: (id) => set({ activePaneId: id }),
       setGlobalGraph: (graph) => {
         const cleanGraph = cleanWorkflowGraph(graph);
@@ -630,7 +683,64 @@ export const useWorkspaceStore = create<WorkspaceState>()(
           nodeRuntimeBindings: {},
         };
       }),
+      setWorkflowGraphForMode: (mode, graph) => {
+        const cleanGraph = cleanWorkflowGraph(graph);
+        set((state) => ({
+          workflowGraphs: {
+            ...state.workflowGraphs,
+            [mode]: cleanGraph,
+          },
+          ...(state.workflowGraphMode === mode ? { globalGraph: cleanGraph } : {}),
+        }));
+        persistWorkflowGraph(cleanGraph);
+      },
       setUiFrontendMode: (mode) => set({ uiFrontendMode: mode }),
+      addLaunchedWorkflow: (workflow) => set((state) => ({
+        launchedWorkflows: [
+          workflow,
+          ...state.launchedWorkflows.filter(item => item.missionId !== workflow.missionId),
+        ].slice(0, 24),
+      })),
+      ensureWorkflowWorkspace: (workflow) => set((state) => {
+        const tabId = `workflow-workspace:${workflow.missionId}`;
+        const existing = state.tabs.find(tab => tab.id === tabId);
+        if (existing) {
+          return {
+            activeTabId: existing.id,
+            activePaneId: existing.panes[0]?.id ?? state.activePaneId,
+            workspaceDir: workflow.workspaceDir ?? state.workspaceDir,
+          };
+        }
+
+        const color = TAB_COLORS[state.tabs.length % TAB_COLORS.length];
+        const editorPaneId = generateId();
+        const newTab: WorkspaceTab = {
+          id: tabId,
+          name: workflow.name,
+          color,
+          workspaceDir: workflow.workspaceDir,
+          workflowRunId: workflow.missionId,
+          workflowName: workflow.name,
+          panes: [{
+            id: editorPaneId,
+            type: 'editor',
+            title: workflow.workspaceDir
+              ? workflow.workspaceDir.split(/[\\/]/).filter(Boolean).pop() || workflow.name
+              : workflow.name,
+            gridPos: { x: 0, y: 0, w: 100, h: 100 },
+            data: {
+              workspaceDir: workflow.workspaceDir,
+              initialContent: `// ${workflow.name}\n// Workspace: ${workflow.workspaceDir ?? 'No directory selected'}\n`,
+            },
+          }],
+        };
+        return {
+          tabs: [...state.tabs, newTab],
+          activeTabId: tabId,
+          activePaneId: editorPaneId,
+          workspaceDir: workflow.workspaceDir ?? state.workspaceDir,
+        };
+      }),
       setShowSettings: (open) => set({ showSettings: open }),
       setCanvasEffectsEnabled: (enabled) => set({ canvasEffectsEnabled: enabled }),
       setTheme: (theme) => set({ theme }),
@@ -893,7 +1003,14 @@ export const useWorkspaceStore = create<WorkspaceState>()(
 
       clearPanes: () => set((state) => withActivePanes(state, () => [])),
 
-      setWorkspaceDir: (dir) => set({ workspaceDir: typeof dir === 'string' ? dir.replace(/\0/g, '').trim() : dir }),
+      setWorkspaceDir: (dir) => set((state) => {
+        const nextDir = typeof dir === 'string' ? dir.replace(/\0/g, '').trim() : dir;
+        if ((state.workspaceDir ?? null) === (nextDir ?? null)) return state;
+        return {
+          workspaceDir: nextDir,
+          ...clearEditorPanesForWorkspaceChange(state),
+        };
+      }),
 
       saveLayout: (name) => set((state) => {
         const panes = selectActivePanes(state);
@@ -985,8 +1102,24 @@ export const useWorkspaceStore = create<WorkspaceState>()(
     }),
     {
       name: 'workspace-storage',
-      version: 15,
+      version: 17,
       migrate: (persistedState: any, version: number) => {
+        if (version < 17) {
+          persistedState = {
+            ...persistedState,
+            launchedWorkflows: [],
+            tabs: (persistedState?.tabs ?? []).map((tab: any) => ({
+              ...tab,
+              workspaceDir: tab.workspaceDir ?? null,
+            })),
+          };
+        }
+        if (version < 16) {
+          persistedState = {
+            ...persistedState,
+            layoutMode: 'tabs',
+          };
+        }
         if (version <= 2) {
           const tabs = (persistedState as any).tabs || [];
           const updatedTabs = tabs.map((tab: any) => ({
@@ -1080,7 +1213,7 @@ export const useWorkspaceStore = create<WorkspaceState>()(
         if (version < 11) {
           return {
             ...persistedState,
-            layoutMode: 'grid',
+            layoutMode: 'tabs',
             activePaneId: null,
           };
         }
@@ -1094,6 +1227,12 @@ export const useWorkspaceStore = create<WorkspaceState>()(
             workflowGraphMode: 'standard',
             workflowGraphs: {
               standard: graph,
+              research: null,
+              plan: null,
+              review: null,
+              verify: null,
+              secure: null,
+              document: null,
               ui: null,
             },
           };
@@ -1108,6 +1247,12 @@ export const useWorkspaceStore = create<WorkspaceState>()(
               standard: activeMode === 'standard'
                 ? (persistedState?.globalGraph ?? graphs.standard ?? createEmptyWorkflowGraph('global-editor'))
                 : (graphs.standard ?? createEmptyWorkflowGraph('global-editor')),
+              research: graphs.research ?? null,
+              plan: graphs.plan ?? null,
+              review: graphs.review ?? null,
+              verify: graphs.verify ?? null,
+              secure: graphs.secure ?? null,
+              document: graphs.document ?? null,
               ui: null,
             },
             globalGraph: activeMode === 'ui'
@@ -1122,6 +1267,16 @@ export const useWorkspaceStore = create<WorkspaceState>()(
             canvasEffectsEnabled: true,
           };
         }
+        persistedState.workflowGraphs = {
+          standard: persistedState?.workflowGraphs?.standard ?? persistedState?.globalGraph ?? createEmptyWorkflowGraph('global-editor'),
+          research: persistedState?.workflowGraphs?.research ?? null,
+          plan: persistedState?.workflowGraphs?.plan ?? null,
+          review: persistedState?.workflowGraphs?.review ?? null,
+          verify: persistedState?.workflowGraphs?.verify ?? null,
+          secure: persistedState?.workflowGraphs?.secure ?? null,
+          document: persistedState?.workflowGraphs?.document ?? null,
+          ui: persistedState?.workflowGraphs?.ui ?? null,
+        };
         return persistedState;
       },
       partialize: (state) => ({
@@ -1147,7 +1302,7 @@ export const useWorkspaceStore = create<WorkspaceState>()(
         })),
         activeTabId: state.activeTabId,
         activePaneId: state.activePaneId,
-        layoutMode: state.layoutMode,
+        layoutMode: 'tabs',
         sidebarOpen: state.sidebarOpen,
         appMode: state.appMode,
         workspaceDir: state.workspaceDir,
@@ -1158,8 +1313,15 @@ export const useWorkspaceStore = create<WorkspaceState>()(
         agentInstructions: state.agentInstructions,
         workflowGraphMode: state.workflowGraphMode,
         uiFrontendMode: state.uiFrontendMode,
+        launchedWorkflows: state.launchedWorkflows.slice(0, 24),
         workflowGraphs: {
           standard: stripRuntimeFromGraph(state.workflowGraphMode === 'standard' ? state.globalGraph : state.workflowGraphs.standard),
+          research: stripRuntimeFromGraph(state.workflowGraphMode === 'research' ? state.globalGraph : state.workflowGraphs.research),
+          plan: stripRuntimeFromGraph(state.workflowGraphMode === 'plan' ? state.globalGraph : state.workflowGraphs.plan),
+          review: stripRuntimeFromGraph(state.workflowGraphMode === 'review' ? state.globalGraph : state.workflowGraphs.review),
+          verify: stripRuntimeFromGraph(state.workflowGraphMode === 'verify' ? state.globalGraph : state.workflowGraphs.verify),
+          secure: stripRuntimeFromGraph(state.workflowGraphMode === 'secure' ? state.globalGraph : state.workflowGraphs.secure),
+          document: stripRuntimeFromGraph(state.workflowGraphMode === 'document' ? state.globalGraph : state.workflowGraphs.document),
           ui: stripRuntimeFromGraph(state.workflowGraphMode === 'ui' ? state.globalGraph : state.workflowGraphs.ui),
         },
         globalGraph: stripRuntimeFromGraph(state.globalGraph)!,

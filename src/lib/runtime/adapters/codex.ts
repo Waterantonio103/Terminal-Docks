@@ -23,6 +23,7 @@ const CODEX_FOOTER_RE = /(?:\bgpt-[\w.-]+(?:\s+\w+)?\b[\s\S]{0,120}\bContext\s+\
 const CODEX_UI_RE = /(?:\bcodex\b|\bgpt-[\w.-]+\b|\bContext\s+\d+%\s+(?:left|used)\b|\bFast\s+(?:on|off)\b|›)/i;
 const ACTIVE_WORK_RE =
   /(?:\bWorking\b|\bBooting MCP server\b|\bStarting MCP servers\b|\bqueued message\b|\btab to queue message\b|\bPasted Content\b|\besc to interrupt\b|\bctrl-c to interrupt\b|\boperation in progress\b)/i;
+const INTERRUPTED_IDLE_RE = /\bConversation interrupted\b|\btell the model what to do differently\b/i;
 const MCP_PERMISSION_PROMPT_RE =
   /Allow\s+the\s+.+?\s+MCP\s+server\s+to\s+run\s+tool\s+"[^"]+"\?\s*[\s\S]*(?:\b1\.\s*Allow\b|\bAlways\s+allow\b|\benter\s+to\s+submit\b)/i;
 const GENERIC_PERMISSION_PROMPT_RE =
@@ -146,26 +147,32 @@ export const codexAdapter: CliAdapter = {
 
   detectStatus(output: string): StatusDetectionResult {
     const clean = stripTerminalControls(output);
+    const recent = lastNonEmptyLines(clean, 24);
     const hasCodexUi = CODEX_UI_RE.test(clean);
-    const lastLine = lastNonEmptyLines(clean, 1);
+    const lastLine = lastNonEmptyLines(recent || clean, 1);
 
-    if (this.detectPermissionRequest(output)) {
+    if (this.detectPermissionRequest(recent || clean)) {
       return { status: 'waiting_user_answer', confidence: 'high', detail: 'Codex permission prompt detected' };
     }
 
-    if (FAILURE_RE.test(clean)) {
+    if (FAILURE_RE.test(recent || clean)) {
       return { status: 'error', confidence: 'high', detail: 'Codex failure output detected' };
     }
 
-    if (COMPLETION_RE.test(clean)) {
+    if (COMPLETION_RE.test(recent || clean)) {
       return { status: 'completed', confidence: 'high', detail: 'Codex completion marker detected' };
     }
 
-    if (ACTIVE_WORK_RE.test(clean)) {
+    const hasIdlePrompt = hasCodexUi && PROMPT_RE.test(recent || clean) && CODEX_FOOTER_RE.test(recent || clean);
+    if (hasIdlePrompt && INTERRUPTED_IDLE_RE.test(recent || clean)) {
+      return { status: 'idle', confidence: 'high', detail: 'Codex input prompt and footer detected' };
+    }
+
+    if (ACTIVE_WORK_RE.test(recent || clean)) {
       return { status: 'processing', confidence: 'high', detail: 'Codex active work indicator detected' };
     }
 
-    if (hasCodexUi && PROMPT_RE.test(clean) && CODEX_FOOTER_RE.test(clean)) {
+    if (hasIdlePrompt) {
       return { status: 'idle', confidence: 'high', detail: 'Codex input prompt and footer detected' };
     }
 
@@ -177,7 +184,7 @@ export const codexAdapter: CliAdapter = {
       return { status: 'processing', confidence: 'low', detail: 'Codex UI detected, waiting for idle prompt' };
     }
 
-    if (PROMPT_RE.test(clean)) {
+    if (PROMPT_RE.test(recent || clean)) {
       return { status: 'processing', confidence: 'low', detail: 'Prompt-like output without Codex footer - waiting' };
     }
 

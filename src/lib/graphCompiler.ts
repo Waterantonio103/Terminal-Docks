@@ -4,6 +4,7 @@ import type {
   CompiledMissionEdge,
   CompiledMissionNode,
   TaskRequirements,
+  TaskAttachment,
   WorkerCapability,
   WorkerCapabilityId,
   FrontendWorkflowMode,
@@ -21,7 +22,7 @@ import { deriveExecutionLayers } from './graphUtils.js';
 import { normalizeCliId, supportsHeadless } from './cliIdentity.js';
 import agentsConfig from '../config/agents.js';
 import { resolveFrontendCategory } from './frontendWorkflow.js';
-import { getWorkflowPreset } from './workflowPresets.js';
+import { getPresetReadmeDefault, getWorkflowPreset } from './workflowPresets.js';
 import { selectFinalReadmeOwner } from './workflowReadme.js';
 
 type FlowNodeLike = Pick<Node, 'id' | 'type' | 'position' | 'parentId' | 'extent' | 'style'> & {
@@ -199,6 +200,11 @@ function getSpecProfile(value: unknown): PresetSpecProfile {
   return value === 'frontend_three_file' ? value : 'none';
 }
 
+function getOptionalSpecProfile(value: unknown): PresetSpecProfile | undefined {
+  if (value === 'frontend_three_file' || value === 'none') return value;
+  return undefined;
+}
+
 function getOptionalBoolean(value: unknown): boolean | undefined {
   return typeof value === 'boolean' ? value : undefined;
 }
@@ -207,6 +213,57 @@ function getRunVersion(value: unknown): number | undefined {
   if (typeof value !== 'number' || !Number.isFinite(value)) return undefined;
   const normalized = Math.floor(value);
   return normalized > 0 ? normalized : undefined;
+}
+
+function fileLabel(value: string | null | undefined): string {
+  const trimmed = String(value ?? '').trim();
+  if (!trimmed) return 'Untitled';
+  const normalized = trimmed.replace(/[\\/]+$/, '');
+  return normalized.split(/[\\/]/).filter(Boolean).pop() || normalized;
+}
+
+function attachmentKindForName(name: string, mime?: string): TaskAttachment['kind'] {
+  if (mime?.startsWith('image/')) return 'image';
+  return /\.(?:avif|bmp|gif|jpe?g|png|svg|webp)$/i.test(name) ? 'image' : 'file';
+}
+
+function normalizeTaskAttachments(value: unknown): TaskAttachment[] {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set<string>();
+  const attachments: TaskAttachment[] = [];
+  for (const item of value) {
+    if (!item || typeof item !== 'object') continue;
+    const record = item as Record<string, unknown>;
+    const path = typeof record.path === 'string' ? record.path.trim() : '';
+    const name = typeof record.name === 'string' && record.name.trim()
+      ? record.name.trim()
+      : fileLabel(path);
+    const mime = typeof record.mime === 'string' ? record.mime : undefined;
+    const kind = record.kind === 'image' ? 'image' : attachmentKindForName(name, mime);
+    const source = record.source === 'clipboard' ? 'clipboard' : 'dialog';
+    const key = `${path || name}:${mime || ''}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    attachments.push({
+      id: typeof record.id === 'string' && record.id ? record.id : `att-${attachments.length + 1}`,
+      kind,
+      name,
+      path: path || undefined,
+      mime,
+      source,
+    });
+  }
+  return attachments;
+}
+
+function promptWithAttachments(prompt: string, attachments: readonly TaskAttachment[]): string {
+  if (attachments.length === 0) return prompt;
+  const lines = attachments.map(attachment => {
+    const target = attachment.path?.trim() || attachment.name;
+    const label = attachment.kind === 'image' ? 'image' : 'file';
+    return `- ${label}: ${target}`;
+  });
+  return `${prompt.trim()}\n\nAttached items:\n${lines.join('\n')}`.trim();
 }
 
 export function normalizeEdgeCondition(value: unknown): WorkflowEdgeCondition {
@@ -487,6 +544,7 @@ export function serializeWorkflowGraph(
       const status = getNodeStatus(node);
 
       if (kind === 'task') {
+        const attachments = normalizeTaskAttachments(node.data?.attachments);
         return {
           id: node.id,
           roleId: 'task',
@@ -495,6 +553,7 @@ export function serializeWorkflowGraph(
             prompt: asString(node.data?.prompt) ?? '',
             mode: getWorkflowMode(node),
             workspaceDir: asString(node.data?.workspaceDir) ?? '',
+            attachments,
             authoringMode: getAuthoringMode(node.data?.authoringMode),
             presetId: asString(node.data?.presetId) ?? undefined,
             runVersion: getRunVersion(node.data?.runVersion),
@@ -629,14 +688,20 @@ export function compileMission({
   }
   const resolvedAuthoringMode = authoringMode ?? getAuthoringMode(taskNode.data?.authoringMode);
   const resolvedPresetId = presetId ?? trimToUndefined(taskNode.data?.presetId) ?? null;
+  const preset = getWorkflowPreset(resolvedPresetId);
   const resolvedRunVersion = runVersion ?? getRunVersion(taskNode.data?.runVersion) ?? 1;
   const taskFrontendMode = getFrontendMode(taskNode.data?.frontendMode);
-  const taskSpecProfile = getSpecProfile(taskNode.data?.specProfile);
-  const resolvedFrontendMode = taskFrontendMode ?? frontendMode ?? 'off';
-  const resolvedSpecProfile = taskSpecProfile ?? specProfile;
+  const taskSpecProfile = getOptionalSpecProfile(taskNode.data?.specProfile);
+  const resolvedFrontendMode = taskFrontendMode && taskFrontendMode !== 'off'
+    ? taskFrontendMode
+    : frontendMode ?? preset?.frontendMode ?? taskFrontendMode ?? 'off';
+  const resolvedSpecProfile = taskSpecProfile && taskSpecProfile !== 'none'
+    ? taskSpecProfile
+    : specProfile ?? preset?.specProfile ?? taskSpecProfile ?? 'none';
   const resolvedFrontendCategory = resolveFrontendCategory(asString(taskNode.data?.prompt) ?? '');
-  const preset = getWorkflowPreset(resolvedPresetId);
-  const resolvedFinalReadmeEnabled = getOptionalBoolean(taskNode.data?.finalReadmeEnabled) ?? finalReadmeEnabled ?? false;
+  const resolvedFinalReadmeEnabled = getOptionalBoolean(taskNode.data?.finalReadmeEnabled)
+    ?? finalReadmeEnabled
+    ?? (preset ? getPresetReadmeDefault(preset) : false);
 
   const compiledNodes: CompiledMissionNode[] = structure.agentNodeIds.map(nodeId => {
     const node = nodes.find(candidate => candidate.id === nodeId);
@@ -696,14 +761,18 @@ export function compileMission({
     )
     : null;
 
+  const taskPrompt = asString(taskNode.data?.prompt)?.trim() ?? '';
+  const taskAttachments = normalizeTaskAttachments(taskNode.data?.attachments);
+
   return {
     missionId,
     graphId,
     task: {
       nodeId: taskNode.id,
-      prompt: asString(taskNode.data?.prompt)?.trim() ?? '',
+      prompt: promptWithAttachments(taskPrompt, taskAttachments),
       mode: getWorkflowMode(taskNode),
       workspaceDir: trimToUndefined(taskNode.data?.workspaceDir) ?? workspaceDirFallback,
+      attachments: taskAttachments,
       frontendMode: resolvedFrontendMode,
       frontendCategory: resolvedFrontendCategory,
       specProfile: resolvedSpecProfile,

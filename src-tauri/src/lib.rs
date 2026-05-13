@@ -101,6 +101,7 @@ pub fn run() {
             workspace::workspace_rename,
             workspace::workspace_delete,
             workspace::workspace_read_text_file,
+            workspace::workspace_read_binary_file_base64,
             workspace::workspace_write_text_file,
             workspace::workspace_copy,
             workspace::workspace_move,

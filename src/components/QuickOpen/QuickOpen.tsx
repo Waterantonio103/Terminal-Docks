@@ -1,7 +1,8 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { Search, FileCode2, X } from 'lucide-react';
+import { Search, X } from 'lucide-react';
 import { useWorkspaceStore } from '../../store/workspace';
 import { invoke } from '@tauri-apps/api/core';
+import { FileTypeIcon } from '../../lib/fileIcons';
 
 interface DirEntry {
   name: string;
@@ -144,7 +145,7 @@ export function QuickOpen({ onClose }: QuickOpenProps) {
                   i === selected ? 'bg-accent-primary/15 text-text-primary' : 'text-text-secondary hover:background-bg-surface'
                 }`}
               >
-                <FileCode2 size={13} className="shrink-0 text-text-muted" />
+                <FileTypeIcon fileName={file.name} size={13} className="shrink-0" />
                 <div className="flex flex-col min-w-0">
                   <span className="text-xs font-medium truncate">{file.name}</span>
                   <span className="text-[10px] text-text-muted truncate">{displayPath}</span>

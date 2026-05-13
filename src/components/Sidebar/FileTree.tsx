@@ -4,6 +4,7 @@ import { open } from '@tauri-apps/plugin-dialog';
 import { Folder, File as FileIcon, ChevronRight, ChevronDown, Lock, FilePlus, FolderPlus, Trash2, Edit2, Copy, Scissors, Clipboard, ExternalLink, Search, FileText } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
 import { writeText } from '@tauri-apps/plugin-clipboard-manager';
+import { FileTypeIcon } from '../../lib/fileIcons';
 
 interface DirEntry {
   name: string;
@@ -87,7 +88,7 @@ function TreeNode({ file, parentPath, locks, refreshSignal, onContextMenu }: { f
         ) : (
           <>
             <span className="w-3 shrink-0" />
-            <FileIcon size={13} className="text-text-muted shrink-0 opacity-60" />
+            <FileTypeIcon fileName={file.name} size={13} className="shrink-0 opacity-80" />
           </>
         )}
         <span className="truncate text-text-secondary flex-1" title={file.name}>{file.name}</span>
@@ -105,7 +106,9 @@ function TreeNode({ file, parentPath, locks, refreshSignal, onContextMenu }: { f
 }
 
 export function FileTree() {
-  const workspaceDir = useWorkspaceStore(s => s.workspaceDir);
+  const activeTabWorkspaceDir = useWorkspaceStore(s => s.tabs.find(tab => tab.id === s.activeTabId)?.workspaceDir ?? null);
+  const globalWorkspaceDir = useWorkspaceStore(s => s.workspaceDir);
+  const workspaceDir = activeTabWorkspaceDir || globalWorkspaceDir;
   const setWorkspaceDir = useWorkspaceStore(s => s.setWorkspaceDir);
   const addPane = useWorkspaceStore(s => s.addPane);
   const [files, setFiles] = useState<DirEntry[]>([]);

@@ -63,6 +63,10 @@ run('classifier selects category-specific overlays from frontend prompts', () =>
     classifyFrontendCategory('Design a consumer mobile app onboarding flow with progress and account privacy controls').categoryId,
     'consumer_mobile_app',
   );
+  assert.equal(
+    classifyFrontendCategory('Create a space video game landing page, not a generic dashboard or placeholder').categoryId,
+    'marketing_site',
+  );
 });
 
 run('intake gate preserves user files and reports missing sections instead of overwriting', () => {

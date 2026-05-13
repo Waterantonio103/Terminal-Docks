@@ -1681,7 +1681,7 @@ class RuntimeManager {
   }
 
   private async maybeRecordManagedCliActiveWorkProgress(session: RuntimeSession): Promise<boolean> {
-    if (!new Set(['gemini', 'opencode']).has(session.cliId) || !session.terminalId) return false;
+    if (!new Set(['codex', 'gemini', 'opencode']).has(session.cliId) || !session.terminalId) return false;
 
     let recentOutput = '';
     try {

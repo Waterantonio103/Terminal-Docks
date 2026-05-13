@@ -27,6 +27,7 @@ import {
   getRecommendedWorkflowPreset,
   getPresetReadmeDefault,
   groupWorkflowPresetsBySubMode,
+  listWorkflowPresets,
   listWorkflowPresetModes,
   listWorkflowPresetsByMode,
   type PresetDefinition,
@@ -38,7 +39,7 @@ interface WorkflowPresetPickerProps {
   open: boolean;
   initialMode?: WorkflowPresetMode;
   onClose: () => void;
-  onApply: (preset: PresetDefinition, options: { finalReadmeEnabled: boolean }) => void;
+  onApply: (presets: PresetDefinition[], options: { finalReadmeEnabled: boolean }) => void;
 }
 
 const MODE_ICONS: Record<WorkflowPresetMode, LucideIcon> = {
@@ -266,32 +267,36 @@ function PresetCard({
 export function WorkflowPresetPicker({ open, initialMode = 'build', onClose, onApply }: WorkflowPresetPickerProps) {
   const modes = useMemo(() => listWorkflowPresetModes(), []);
   const [activeMode, setActiveMode] = useState<WorkflowPresetMode>(initialMode);
-  const [selectedPresetId, setSelectedPresetId] = useState<string | null>(null);
+  const [selectedPresetIds, setSelectedPresetIds] = useState<Set<string>>(new Set());
   const [finalReadmeEnabled, setFinalReadmeEnabled] = useState(false);
 
+  const allPresets = useMemo(() => listWorkflowPresets(), []);
   const presets = useMemo(() => listWorkflowPresetsByMode(activeMode), [activeMode]);
   const grouped = useMemo(() => Array.from(groupWorkflowPresetsBySubMode(presets).entries()), [presets]);
-  const selectedPreset = presets.find(preset => preset.id === selectedPresetId) ?? null;
+  const selectedPresets = allPresets.filter(preset => selectedPresetIds.has(preset.id));
+  const primarySelectedPreset = selectedPresets[0] ?? null;
+  const selectedCountByMode = useMemo(() => {
+    const counts = new Map<WorkflowPresetMode, number>();
+    for (const preset of selectedPresets) {
+      counts.set(preset.mode, (counts.get(preset.mode) ?? 0) + 1);
+    }
+    return counts;
+  }, [selectedPresets]);
 
   useEffect(() => {
     if (!open) return;
     setActiveMode(initialMode);
+    setSelectedPresetIds(current => {
+      if (current.size > 0) return current;
+      const nextPreset = getRecommendedWorkflowPreset(listWorkflowPresetsByMode(initialMode));
+      return nextPreset ? new Set([nextPreset.id]) : new Set();
+    });
   }, [initialMode, open]);
 
   useEffect(() => {
-    const nextPreset = grouped
-      .map(([, values]) => getRecommendedWorkflowPreset(values))
-      .find((preset): preset is PresetDefinition => Boolean(preset));
-    setSelectedPresetId(current => {
-      if (current && presets.some(preset => preset.id === current)) return current;
-      return nextPreset?.id ?? null;
-    });
-  }, [grouped, presets]);
-
-  useEffect(() => {
-    if (!selectedPreset) return;
-    setFinalReadmeEnabled(getPresetReadmeDefault(selectedPreset));
-  }, [selectedPreset?.id]);
+    if (!primarySelectedPreset) return;
+    setFinalReadmeEnabled(getPresetReadmeDefault(primarySelectedPreset));
+  }, [primarySelectedPreset?.id]);
 
   if (!open) return null;
 
@@ -321,6 +326,7 @@ export function WorkflowPresetPicker({ open, initialMode = 'build', onClose, onA
             {modes.map(mode => {
               const Icon = MODE_ICONS[mode.value];
               const active = mode.value === activeMode;
+              const selectedCount = selectedCountByMode.get(mode.value) ?? 0;
               return (
                 <button
                   key={mode.value}
@@ -335,6 +341,11 @@ export function WorkflowPresetPicker({ open, initialMode = 'build', onClose, onA
                 >
                   <Icon size={12} />
                   {mode.label}
+                  {selectedCount > 0 && (
+                    <span className={`ml-0.5 rounded px-1 text-[9px] ${active ? 'bg-accent-text/20 text-accent-text' : 'bg-accent-primary/15 text-accent-primary'}`}>
+                      {selectedCount}
+                    </span>
+                  )}
                 </button>
               );
             })}
@@ -362,9 +373,14 @@ export function WorkflowPresetPicker({ open, initialMode = 'build', onClose, onA
                     <PresetCard
                       key={preset.id}
                       preset={preset}
-                      selected={preset.id === selectedPresetId}
+                      selected={selectedPresetIds.has(preset.id)}
                       recommended={preset.id === recommended?.id}
-                      onSelect={() => setSelectedPresetId(preset.id)}
+                      onSelect={() => setSelectedPresetIds(current => {
+                        const next = new Set(current);
+                        if (next.has(preset.id)) next.delete(preset.id);
+                        else next.add(preset.id);
+                        return next;
+                      })}
                     />
                   ))}
                 </div>
@@ -387,22 +403,20 @@ export function WorkflowPresetPicker({ open, initialMode = 'build', onClose, onA
             </span>
           </label>
           <div className="flex min-w-0 items-center justify-end gap-3">
-          {selectedPreset && (
+          {selectedPresets.length > 0 && (
             <div className="min-w-0 truncate text-right text-[11px] text-text-muted">
-              <span className="text-text-secondary">{selectedPreset.subMode}</span>
+              <span className="text-text-secondary">{selectedPresets.length} selected</span>
               <span className="px-1.5">/</span>
-              <span>{SIZE_LABELS[selectedPreset.size]}</span>
-              <span className="px-1.5">/</span>
-              <span>{selectedPreset.agentCount} agents</span>
+              <span>{selectedPresets.reduce((total, preset) => total + preset.agentCount, 0)} agents</span>
             </div>
           )}
           <button
             type="button"
-            onClick={() => selectedPreset && onApply(selectedPreset, { finalReadmeEnabled })}
-            disabled={!selectedPreset}
+            onClick={() => selectedPresets.length > 0 && onApply(selectedPresets, { finalReadmeEnabled })}
+            disabled={selectedPresets.length === 0}
             className="rounded border border-accent-primary bg-accent-primary px-3 py-1.5 text-[12px] font-semibold text-accent-text transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
           >
-            Apply
+            Apply {selectedPresets.length > 1 ? selectedPresets.length : ''}
           </button>
           </div>
         </div>

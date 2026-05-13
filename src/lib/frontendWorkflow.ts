@@ -30,11 +30,27 @@ const CATEGORY_CUES: Array<{ category: FrontendSpecCategory; cues: string[] }> =
   },
 ];
 
+function isNegatedCue(text: string, cue: string): boolean {
+  let index = text.indexOf(cue);
+  while (index >= 0) {
+    const before = text.slice(Math.max(0, index - 32), index);
+    if (/(?:\bnot\b|\bavoid\b|\bno\b|\bwithout\b|instead of)\W+(?:\w+\W+){0,3}$/.test(before)) {
+      return true;
+    }
+    index = text.indexOf(cue, index + cue.length);
+  }
+  return false;
+}
+
+function matchesCue(text: string, cue: string): boolean {
+  return text.includes(cue) && !isNegatedCue(text, cue);
+}
+
 export function inferFrontendCategory(prompt: string): FrontendSpecCategory {
   const text = prompt.toLowerCase();
   let best: { category: FrontendSpecCategory; score: number } = { category: 'marketing_site', score: 0 };
   for (const entry of CATEGORY_CUES) {
-    const score = entry.cues.filter(cue => text.includes(cue)).length;
+    const score = entry.cues.filter(cue => matchesCue(text, cue)).length;
     if (score > best.score) best = { category: entry.category, score };
   }
   return best.category;

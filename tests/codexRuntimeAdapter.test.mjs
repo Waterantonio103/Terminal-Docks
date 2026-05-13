@@ -39,6 +39,25 @@ run('codex ordinary footer does not imply permission or completion', () => {
   assert.equal(codexAdapter.detectReady(footer).ready, false);
 });
 
+run('codex stale active work does not hide visible idle prompt', () => {
+  const staleActive = [
+    '• Pasted Content',
+    'Working (esc to interrupt)',
+    'calling tool "apply_patch"',
+    'updated PRD.md',
+  ].join('\n');
+  const idleTail = [
+    '■ Conversation interrupted - tell the model what to do differently.',
+    '',
+    '› Implement {feature}',
+    '',
+    '  gpt-5.4 default · C:\\VSCODE\\docks-testing\\app-test2 · Context 86% left',
+  ].join('\n');
+  const status = codexAdapter.detectStatus(`${staleActive}\n${'\n'.repeat(30)}${idleTail}`);
+  assert.equal(status.status, 'idle', status.detail);
+  assert.equal(codexAdapter.detectReady(`${staleActive}\n${'\n'.repeat(30)}${idleTail}`).ready, true);
+});
+
 run('codex confirmation prompts require user action', () => {
   assert.equal(codexAdapter.detectStatus('Proceed? (y)').status, 'waiting_user_answer');
   assert.equal(codexAdapter.detectStatus('Approve edits manually?\nYes / No').status, 'waiting_user_answer');

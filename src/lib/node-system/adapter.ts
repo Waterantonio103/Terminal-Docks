@@ -17,6 +17,47 @@ interface FlowGraphLike {
   edges: Array<Record<string, unknown>>;
 }
 
+function fileLabel(value: string | null | undefined): string {
+  const trimmed = String(value ?? '').trim();
+  if (!trimmed) return 'Untitled';
+  const normalized = trimmed.replace(/[\\/]+$/, '');
+  return normalized.split(/[\\/]/).filter(Boolean).pop() || normalized;
+}
+
+function attachmentKindForName(name: string, mime?: string): 'file' | 'image' {
+  if (mime?.startsWith('image/')) return 'image';
+  return /\.(?:avif|bmp|gif|jpe?g|png|svg|webp)$/i.test(name) ? 'image' : 'file';
+}
+
+function normalizeTaskAttachments(value: unknown): NonNullable<WorkflowNode['config']>['attachments'] {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set<string>();
+  const attachments: NonNullable<WorkflowNode['config']>['attachments'] = [];
+  for (const item of value) {
+    if (!item || typeof item !== 'object') continue;
+    const record = item as Record<string, unknown>;
+    const path = typeof record.path === 'string' ? record.path.trim() : '';
+    const name = typeof record.name === 'string' && record.name.trim()
+      ? record.name.trim()
+      : fileLabel(path);
+    const mime = typeof record.mime === 'string' ? record.mime : undefined;
+    const kind = record.kind === 'image' ? 'image' : attachmentKindForName(name, mime);
+    const source = record.source === 'clipboard' ? 'clipboard' : 'dialog';
+    const key = `${path || name}:${mime || ''}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    attachments.push({
+      id: typeof record.id === 'string' && record.id ? record.id : `att-${generateId()}`,
+      kind,
+      name,
+      path: path || undefined,
+      mime,
+      source,
+    });
+  }
+  return attachments;
+}
+
 function interfaceDefinition(): NodeTreeInterface {
   return { sockets: [], panels: [] };
 }
@@ -80,6 +121,7 @@ function legacyNodeToDocumentNode(node: WorkflowNode, index: number): NodeInstan
       prompt: node.config?.prompt ?? '',
       mode: node.config?.mode ?? 'build',
       workspaceDir: node.config?.workspaceDir ?? '',
+      attachments: normalizeTaskAttachments(node.config?.attachments),
       instructionOverride: node.config?.instructionOverride ?? '',
       terminalId: node.config?.terminalId ?? '',
       terminalTitle: node.config?.terminalTitle ?? '',
@@ -96,6 +138,10 @@ function legacyNodeToDocumentNode(node: WorkflowNode, index: number): NodeInstan
       finalReadmeEnabled: Boolean(node.config?.finalReadmeEnabled),
       finalReadmeOwnerNodeId: node.config?.finalReadmeOwnerNodeId ?? '',
       adaptiveSeed: Boolean(node.config?.adaptiveSeed),
+      workflowId: node.config?.workflowId ?? '',
+      workflowName: node.config?.workflowName ?? '',
+      workflowSubMode: node.config?.workflowSubMode ?? '',
+      workflowMode: node.config?.workflowMode ?? '',
       label: node.config?.label ?? '',
     },
   };
@@ -185,6 +231,7 @@ export function nodeDocumentToWorkflowGraph(
         prompt: String(node.properties.prompt ?? ''),
         mode: node.properties.mode === 'edit' ? 'edit' : 'build',
         workspaceDir: String(node.properties.workspaceDir ?? ''),
+        attachments: normalizeTaskAttachments(node.properties.attachments),
         instructionOverride: String(node.properties.instructionOverride ?? ''),
         terminalId: String(node.properties.terminalId ?? ''),
         terminalTitle: String(node.properties.terminalTitle ?? ''),
@@ -217,6 +264,10 @@ export function nodeDocumentToWorkflowGraph(
         finalReadmeEnabled: Boolean(node.properties.finalReadmeEnabled),
         finalReadmeOwnerNodeId: String(node.properties.finalReadmeOwnerNodeId ?? '') || null,
         adaptiveSeed: Boolean(node.properties.adaptiveSeed),
+        workflowId: String(node.properties.workflowId ?? ''),
+        workflowName: String(node.properties.workflowName ?? ''),
+        workflowSubMode: String(node.properties.workflowSubMode ?? ''),
+        workflowMode: String(node.properties.workflowMode ?? ''),
         label: String(node.properties.label ?? node.label ?? ''),
         position: node.location,
         width: node.size?.width,
@@ -228,6 +279,7 @@ export function nodeDocumentToWorkflowGraph(
       delete workflowNode.config?.mode;
       delete workflowNode.config?.workspaceDir;
       delete workflowNode.config?.prompt;
+      delete workflowNode.config?.attachments;
     }
     if (workflowNode.roleId === 'frame' || workflowNode.roleId === 'reroute' || workflowNode.roleId === 'barrier') {
       delete workflowNode.config?.instructionOverride;
@@ -283,6 +335,7 @@ export function nodeDocumentToFlowGraph(
         prompt: node.config?.prompt ?? '',
         mode: node.config?.mode ?? 'build',
         workspaceDir: node.config?.workspaceDir ?? '',
+        attachments: normalizeTaskAttachments(node.config?.attachments),
 
         instructionOverride: node.config?.instructionOverride ?? '',
         terminalId: node.config?.terminalId,
@@ -300,6 +353,10 @@ export function nodeDocumentToFlowGraph(
         finalReadmeEnabled: node.config?.finalReadmeEnabled ?? false,
         finalReadmeOwnerNodeId: node.config?.finalReadmeOwnerNodeId ?? null,
         adaptiveSeed: node.config?.adaptiveSeed ?? false,
+        workflowId: node.config?.workflowId ?? '',
+        workflowName: node.config?.workflowName ?? '',
+        workflowSubMode: node.config?.workflowSubMode ?? '',
+        workflowMode: node.config?.workflowMode ?? '',
         label: node.config?.label ?? '',
       },
     })),

@@ -308,10 +308,10 @@ run('preset-expanded graphs use evenly spaced layer layout', () => {
   });
 
   const byId = new Map(flow.nodes.map(node => [node.id, node]));
-  assert.deepEqual(byId.get('scout')?.position, { x: 440, y: 360 });
-  assert.deepEqual(byId.get('builder')?.position, { x: 900, y: 100 });
-  assert.deepEqual(byId.get('tester')?.position, { x: 900, y: 620 });
-  assert.deepEqual(byId.get('reviewer')?.position, { x: 1360, y: 360 });
+  assert.deepEqual(byId.get('scout')?.position, { x: 1120, y: 360 });
+  assert.deepEqual(byId.get('builder')?.position, { x: 1680, y: 100 });
+  assert.deepEqual(byId.get('tester')?.position, { x: 1680, y: 620 });
+  assert.deepEqual(byId.get('reviewer')?.position, { x: 2240, y: 360 });
 });
 
 run('frontend preset compiles with explicit UI roles and metadata', () => {
@@ -497,4 +497,96 @@ run('task frontend preset metadata wins over stale off compile option', () => {
   assert.equal(mission.task.frontendMode, 'strict_ui');
   assert.equal(mission.task.frontendCategory, 'admin_internal_tool');
   assert.equal(mission.task.specProfile, 'frontend_three_file');
+});
+
+run('preset compile options repair stale task off and none metadata', () => {
+  const preset = getWorkflowPreset('frontend_ui_delivery');
+  assert.ok(preset, 'frontend_ui_delivery preset must exist');
+
+  const flow = buildPresetFlowGraph({
+    preset,
+    missionId: 'frontend-stale-task',
+    prompt: 'Build a cinematic space video game landing page with stars',
+    mode: 'build',
+    workspaceDir: 'C:/workspace',
+    frontendMode: 'strict_ui',
+    instructionOverrides: {},
+    bindingsByRole: {
+      frontend_product: { terminalId: 'term-product', terminalTitle: 'Product Agent' },
+      frontend_designer: { terminalId: 'term-designer', terminalTitle: 'Designer' },
+      frontend_architect: { terminalId: 'term-architect', terminalTitle: 'Architecture Agent' },
+      frontend_builder: { terminalId: 'term-builder', terminalTitle: 'Frontend Builder' },
+      interaction_qa: { terminalId: 'term-qa', terminalTitle: 'Interaction QA' },
+      accessibility_reviewer: { terminalId: 'term-accessibility', terminalTitle: 'Accessibility Reviewer' },
+    },
+  });
+  const staleTask = flow.nodes.find(node => node.type === 'workflow.task' || node.data?.roleId === 'task');
+  assert.ok(staleTask, 'preset flow should contain a task node');
+  staleTask.data = {
+    ...staleTask.data,
+    frontendMode: 'off',
+    specProfile: 'none',
+    finalReadmeEnabled: undefined,
+  };
+
+  const mission = compileMission({
+    graphId: 'preset:frontend_ui_delivery',
+    missionId: 'frontend-stale-task',
+    nodes: flow.nodes,
+    edges: flow.edges,
+    workspaceDirFallback: 'C:/workspace',
+    compiledAt: 123,
+    authoringMode: 'preset',
+    presetId: 'frontend_ui_delivery',
+    runVersion: 1,
+    frontendMode: 'strict_ui',
+    specProfile: 'frontend_three_file',
+  });
+
+  assert.equal(mission.metadata.frontendMode, 'strict_ui');
+  assert.equal(mission.metadata.specProfile, 'frontend_three_file');
+  assert.equal(mission.metadata.finalReadmeEnabled, true);
+  assert.equal(mission.task.frontendMode, 'strict_ui');
+  assert.equal(mission.task.specProfile, 'frontend_three_file');
+  assert.equal(mission.task.finalReadmeEnabled, true);
+});
+
+run('negated dashboard cue does not override landing page category', () => {
+  const preset = getWorkflowPreset('frontend_ui_delivery');
+  assert.ok(preset, 'frontend_ui_delivery preset must exist');
+
+  const flow = buildPresetFlowGraph({
+    preset,
+    missionId: 'space-game-category',
+    prompt: 'Create a space video game landing page, not a generic dashboard or placeholder.',
+    mode: 'build',
+    workspaceDir: 'C:/workspace',
+    frontendMode: 'strict_ui',
+    instructionOverrides: {},
+    bindingsByRole: {
+      frontend_product: { terminalId: 'term-product', terminalTitle: 'Product Agent' },
+      frontend_designer: { terminalId: 'term-designer', terminalTitle: 'Designer' },
+      frontend_architect: { terminalId: 'term-architect', terminalTitle: 'Architecture Agent' },
+      frontend_builder: { terminalId: 'term-builder', terminalTitle: 'Frontend Builder' },
+      interaction_qa: { terminalId: 'term-qa', terminalTitle: 'Interaction QA' },
+      accessibility_reviewer: { terminalId: 'term-accessibility', terminalTitle: 'Accessibility Reviewer' },
+    },
+  });
+
+  const mission = compileMission({
+    graphId: 'preset:frontend_ui_delivery',
+    missionId: 'space-game-category',
+    nodes: flow.nodes,
+    edges: flow.edges,
+    workspaceDirFallback: 'C:/workspace',
+    compiledAt: 123,
+    authoringMode: 'preset',
+    presetId: 'frontend_ui_delivery',
+    runVersion: 1,
+    frontendMode: 'strict_ui',
+    specProfile: 'frontend_three_file',
+  });
+
+  assert.equal(mission.metadata.frontendCategory, 'marketing_site');
+  assert.equal(mission.task.frontendCategory, 'marketing_site');
 });

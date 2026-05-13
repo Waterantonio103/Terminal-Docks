@@ -1,18 +1,18 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { DotTunnelBackground } from '../shared/DotTunnelBackground';
-import { UiGraphShaderBackground } from './UiGraphShaderBackground';
 import { WorkflowPresetPicker } from './WorkflowPresetPicker';
 import { ModelDiscoveryLoading } from '../models/ModelDiscoveryLoading';
 import { AgentActionBadge } from '../models/AgentActionBadge';
-import { AlignJustify, ArrowUpRight, ChevronDown, ChevronLeft, FolderOpen, Play, Plus, RefreshCw, ScanSearch, ShieldCheck, Sparkles, Square, Terminal, Trash2, UserCheck, Workflow, X, Zap } from 'lucide-react';
+import { AlignJustify, ArrowUpRight, Check, ChevronDown, ChevronLeft, ClipboardPaste, FileText, FolderOpen, Image as ImageIcon, Paperclip, Play, Plus, RefreshCw, ScanSearch, ShieldCheck, Sparkles, Square, Terminal, Trash2, UserCheck, Workflow, X, Zap } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
 import { openUrl } from '@tauri-apps/plugin-opener';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
+import { readImage } from '@tauri-apps/plugin-clipboard-manager';
 import { emit, listen } from '@tauri-apps/api/event';
 import agentsConfig from '../../config/agents';
 import { compileMission, validateGraph } from '../../lib/graphCompiler';
 import { generateId } from '../../lib/graphUtils';
-import { buildPresetFlowGraph, type PresetDefinition } from '../../lib/workflowPresets';
+import { buildPresetFlowGraph, getPresetReadmeDefault, getWorkflowPreset, listWorkflowPresetModes, type PresetDefinition, type WorkflowPresetMode } from '../../lib/workflowPresets';
 import { isWorkflowStatusActive, workflowStatusLabel, workflowStatusTone } from '../../lib/workflowStatus';
 import {
   legacyGraphToNodeDocument,
@@ -30,7 +30,7 @@ import { runtimeExecutor } from '../../lib/runtime/RuntimeExecutor';
 import { missionOrchestrator } from '../../lib/workflow/MissionOrchestrator';
 import { terminalOutputBus } from '../../lib/runtime/TerminalOutputBus';
 import { supportsHeadless } from '../../lib/cliIdentity';
-import { useWorkspaceStore, type FrontendWorkflowMode, type MissionAgent, type Pane, type ResultEntry, type WorkflowAgentCli, type WorkflowExecutionMode, type WorkflowGraph } from '../../store/workspace';
+import { useWorkspaceStore, type FrontendWorkflowMode, type LaunchedWorkflow, type MissionAgent, type Pane, type ResultEntry, type WorkflowAgentCli, type WorkflowAuthoringMode, type WorkflowExecutionMode, type WorkflowGraph, type WorkflowGraphMode } from '../../store/workspace';
 import { discoverModelsForCli, supportsModelDiscovery } from '../../lib/models/modelDiscoveryService';
 import type { CliId, CliModel, ModelDiscoveryResult } from '../../lib/models/modelTypes';
 import { useMissionSnapshot } from '../../hooks/useMissionSnapshot';
@@ -41,6 +41,16 @@ type ValidationTone = 'idle' | 'ok' | 'error';
 type ResizeEdge = 'n' | 's' | 'e' | 'w' | 'ne' | 'nw' | 'se' | 'sw';
 type LinkHoverTarget = { nodeId: string; socketId: string } | null;
 type MenuMode = 'canvas' | 'node' | 'link_insert';
+type TaskAttachmentKind = 'file' | 'image';
+
+interface TaskAttachment {
+  id: string;
+  kind: TaskAttachmentKind;
+  name: string;
+  path?: string;
+  mime?: string;
+  source?: 'dialog' | 'clipboard';
+}
 
 type CanvasInteraction =
   | { kind: 'idle' }
@@ -70,7 +80,19 @@ const LINK_CANVAS_SIZE = 16384;
 const LINK_CANVAS_HALF = LINK_CANVAS_SIZE / 2;
 const FRAME_MIN_WIDTH = 160;
 const FRAME_MIN_HEIGHT = 100;
+const NODE_HEADER_HEIGHT = 44;
+const NODE_ACTION_TOOLBAR_HEIGHT = 33;
+const SOCKET_TOP_OFFSET = 18;
+const SOCKET_RADIUS = 8;
+const SOCKET_ROW_GAP = 24;
 const SOCKET_SNAP_RADIUS = 48;
+const TASK_NODE_ESTIMATED_WIDTH = 640;
+const TASK_NODE_ESTIMATED_HEIGHT = 460;
+const AGENT_NODE_ESTIMATED_WIDTH = 260;
+const AGENT_NODE_ESTIMATED_HEIGHT = 330;
+const CANVAS_CULL_PADDING = 900;
+const ALIGN_SNAP_THRESHOLD = 12;
+const ALIGN_GUIDE_MARGIN = 32;
 const SUPPORTED_WORKFLOW_CLIS = new Set(['claude', 'gemini', 'opencode', 'codex', 'custom', 'ollama', 'lmstudio']);
 const SELECTABLE_WORKFLOW_CLIS: WorkflowAgentCli[] = ['claude', 'codex', 'gemini', 'opencode', 'custom', 'ollama', 'lmstudio'];
 const SELECTABLE_EXECUTION_MODES: WorkflowExecutionMode[] = ['api', 'streaming_headless', 'headless', 'interactive_pty', 'manual'];
@@ -79,6 +101,37 @@ const UI_FRONTEND_WORKFLOW_MODES: Array<{ value: Exclude<FrontendWorkflowMode, '
   { value: 'aligned', label: 'UI Aligned', icon: AlignJustify },
   { value: 'strict_ui', label: 'Strict UI', icon: ShieldCheck },
 ];
+const PRESET_MODE_TO_GRAPH_MODE: Record<WorkflowPresetMode, WorkflowGraphMode> = {
+  build: 'standard',
+  research: 'research',
+  plan: 'plan',
+  review: 'review',
+  verify: 'verify',
+  secure: 'secure',
+  document: 'document',
+};
+const GRAPH_MODE_LABELS: Record<WorkflowGraphMode, string> = {
+  standard: 'Build',
+  research: 'Research',
+  plan: 'Plan',
+  review: 'Review',
+  verify: 'Verify',
+  secure: 'Secure',
+  document: 'Docs',
+  ui: 'UI',
+};
+const GRAPH_MODE_ICONS: Record<WorkflowGraphMode, typeof Workflow> = {
+  standard: Workflow,
+  research: ScanSearch,
+  plan: AlignJustify,
+  review: UserCheck,
+  verify: Check,
+  secure: ShieldCheck,
+  document: FileText,
+  ui: Sparkles,
+};
+const PRESET_WORKFLOW_BASE_X = 0;
+const PRESET_WORKFLOW_STACK_Y = 1520;
 const STANDARD_AGENT_ROLE_IDS = new Set(['scout', 'coordinator', 'builder', 'tester', 'security', 'reviewer']);
 const UI_AGENT_ROLE_IDS = new Set([
   'frontend_product',
@@ -88,6 +141,7 @@ const UI_AGENT_ROLE_IDS = new Set([
   'interaction_qa',
   'accessibility_reviewer',
   'visual_polish_reviewer',
+  'reviewer',
 ]);
 const MAX_RUNTIME_SNIPPET_BYTES = 3072;
 const MODEL_DOC_URLS: Record<string, string | null> = {
@@ -106,7 +160,7 @@ function worldRect(node: MaterializedNode) {
   const rows = Math.max(node.inputs.length, node.outputs.length);
   const controlsHeight =
     node.node.type === 'workflow.task'
-      ? 128
+      ? TASK_NODE_ESTIMATED_HEIGHT - 44 - rows * 24
       : node.node.type === 'workflow.agent'
         ? 250
         : node.node.type === 'workflow.frame'
@@ -116,7 +170,7 @@ function worldRect(node: MaterializedNode) {
   return {
     x: node.node.location.x,
     y: node.node.location.y,
-    width: node.node.size?.width ?? node.width,
+    width: node.node.size?.width ?? (node.node.type === 'workflow.task' ? TASK_NODE_ESTIMATED_WIDTH : node.width),
     height,
   };
 }
@@ -125,16 +179,28 @@ function socketPosition(node: MaterializedNode, socketId: string, direction: 'in
   const sockets = direction === 'input' ? node.inputs : node.outputs;
   const rect = worldRect(node);
   const rowIndex = Math.max(0, sockets.findIndex(socket => socket.id === socketId));
+  const contentTop = rect.y + NODE_HEADER_HEIGHT + (node.node.type === 'workflow.frame' ? 0 : NODE_ACTION_TOOLBAR_HEIGHT);
   return {
     x: direction === 'input' ? rect.x : rect.x + rect.width,
-    y: rect.y + 64 + rowIndex * 24,
+    y: contentTop + SOCKET_TOP_OFFSET + SOCKET_RADIUS + rowIndex * SOCKET_ROW_GAP,
   };
 }
 
-function bezierPath(from: Point2D, to: Point2D) {
-  const delta = Math.max(40, Math.abs(to.x - from.x) * 0.4);
-  return `M ${from.x} ${from.y} C ${from.x + delta} ${from.y}, ${to.x - delta} ${to.y}, ${to.x} ${to.y}`;
+function linkPath(from: Point2D, to: Point2D) {
+  if (Math.abs(from.y - to.y) < 0.5) {
+    return `M ${from.x} ${from.y} L ${to.x} ${to.y}`;
+  }
+
+  const direction = to.x >= from.x ? 1 : -1;
+  const horizontalRoom = Math.abs(to.x - from.x);
+  const stub = Math.max(18, Math.min(56, horizontalRoom / 3));
+  const fromStub = { x: from.x + stub * direction, y: from.y };
+  const toStub = { x: to.x - stub * direction, y: to.y };
+
+  return `M ${from.x} ${from.y} L ${fromStub.x} ${fromStub.y} L ${toStub.x} ${toStub.y} L ${to.x} ${to.y}`;
 }
+
+const bezierPath = linkPath;
 
 function pointFromMouse(clientX: number, clientY: number, rect: DOMRect) {
   return {
@@ -164,6 +230,107 @@ function selectionRect(origin: Point2D, current: Point2D) {
     y: Math.min(origin.y, current.y),
     width: Math.abs(current.x - origin.x),
     height: Math.abs(current.y - origin.y),
+  };
+}
+
+type NodeRect = ReturnType<typeof worldRect>;
+type AlignmentOrientation = 'vertical' | 'horizontal';
+
+interface AlignmentGuide {
+  orientation: AlignmentOrientation;
+  position: number;
+  from: number;
+  to: number;
+}
+
+interface AlignmentSuggestion {
+  offset: Point2D;
+  guides: AlignmentGuide[];
+  dropRect: NodeRect;
+}
+
+function rectBounds(rects: NodeRect[]): NodeRect {
+  const minX = Math.min(...rects.map(rect => rect.x));
+  const minY = Math.min(...rects.map(rect => rect.y));
+  const maxX = Math.max(...rects.map(rect => rect.x + rect.width));
+  const maxY = Math.max(...rects.map(rect => rect.y + rect.height));
+  return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
+}
+
+function shiftedRect(rect: NodeRect, offset: Point2D): NodeRect {
+  return { ...rect, x: rect.x + offset.x, y: rect.y + offset.y };
+}
+
+function rectAnchor(rect: NodeRect, axis: 'x' | 'y', anchor: 'start' | 'center' | 'end') {
+  if (axis === 'x') {
+    if (anchor === 'start') return rect.x;
+    if (anchor === 'center') return rect.x + rect.width / 2;
+    return rect.x + rect.width;
+  }
+  if (anchor === 'start') return rect.y;
+  if (anchor === 'center') return rect.y + rect.height / 2;
+  return rect.y + rect.height;
+}
+
+function guideForAlignment(orientation: AlignmentOrientation, position: number, left: NodeRect, right: NodeRect): AlignmentGuide {
+  if (orientation === 'vertical') {
+    return {
+      orientation,
+      position,
+      from: Math.min(left.y, right.y) - ALIGN_GUIDE_MARGIN,
+      to: Math.max(left.y + left.height, right.y + right.height) + ALIGN_GUIDE_MARGIN,
+    };
+  }
+  return {
+    orientation,
+    position,
+    from: Math.min(left.x, right.x) - ALIGN_GUIDE_MARGIN,
+    to: Math.max(left.x + left.width, right.x + right.width) + ALIGN_GUIDE_MARGIN,
+  };
+}
+
+function alignmentSuggestion(draggedRects: NodeRect[], targetRects: NodeRect[]): AlignmentSuggestion | null {
+  if (draggedRects.length === 0 || targetRects.length === 0) {
+    return null;
+  }
+
+  const anchors: Array<'start' | 'center' | 'end'> = ['start', 'center', 'end'];
+  let bestX: { delta: number; guide: AlignmentGuide } | null = null;
+  let bestY: { delta: number; guide: AlignmentGuide } | null = null;
+
+  for (const dragged of draggedRects) {
+    for (const target of targetRects) {
+      for (const draggedAnchor of anchors) {
+        for (const targetAnchor of anchors) {
+          const dx = rectAnchor(target, 'x', targetAnchor) - rectAnchor(dragged, 'x', draggedAnchor);
+          if (Math.abs(dx) <= ALIGN_SNAP_THRESHOLD && (!bestX || Math.abs(dx) < Math.abs(bestX.delta))) {
+            bestX = {
+              delta: dx,
+              guide: guideForAlignment('vertical', rectAnchor(target, 'x', targetAnchor), shiftedRect(dragged, { x: dx, y: 0 }), target),
+            };
+          }
+
+          const dy = rectAnchor(target, 'y', targetAnchor) - rectAnchor(dragged, 'y', draggedAnchor);
+          if (Math.abs(dy) <= ALIGN_SNAP_THRESHOLD && (!bestY || Math.abs(dy) < Math.abs(bestY.delta))) {
+            bestY = {
+              delta: dy,
+              guide: guideForAlignment('horizontal', rectAnchor(target, 'y', targetAnchor), shiftedRect(dragged, { x: 0, y: dy }), target),
+            };
+          }
+        }
+      }
+    }
+  }
+
+  if (!bestX && !bestY) {
+    return null;
+  }
+
+  const offset = { x: bestX?.delta ?? 0, y: bestY?.delta ?? 0 };
+  return {
+    offset,
+    guides: [bestX?.guide, bestY?.guide].filter((guide): guide is AlignmentGuide => Boolean(guide)),
+    dropRect: rectBounds(draggedRects.map(rect => shiftedRect(rect, offset))),
   };
 }
 
@@ -231,7 +398,80 @@ function folderLabel(value: string | null | undefined): string {
   return normalized.split(/[\\/]/).filter(Boolean).pop() || normalized;
 }
 
+function fileLabel(value: string | null | undefined): string {
+  const trimmed = String(value ?? '').trim();
+  if (!trimmed) return 'Untitled';
+  const normalized = trimmed.replace(/[\\/]+$/, '');
+  return normalized.split(/[\\/]/).filter(Boolean).pop() || normalized;
+}
 
+function attachmentKindForName(name: string, mime?: string): TaskAttachmentKind {
+  if (mime?.startsWith('image/')) return 'image';
+  return /\.(?:avif|bmp|gif|jpe?g|png|svg|webp)$/i.test(name) ? 'image' : 'file';
+}
+
+function normalizeTaskAttachments(value: unknown): TaskAttachment[] {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set<string>();
+  const attachments: TaskAttachment[] = [];
+  for (const item of value) {
+    if (!item || typeof item !== 'object') continue;
+    const record = item as Record<string, unknown>;
+    const path = typeof record.path === 'string' ? record.path.trim() : '';
+    const name = typeof record.name === 'string' && record.name.trim()
+      ? record.name.trim()
+      : fileLabel(path);
+    const mime = typeof record.mime === 'string' ? record.mime : undefined;
+    const kind = record.kind === 'image' ? 'image' : attachmentKindForName(name, mime);
+    const source = record.source === 'clipboard' ? 'clipboard' : 'dialog';
+    const key = `${path || name}:${mime || ''}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    attachments.push({
+      id: typeof record.id === 'string' && record.id ? record.id : `att-${generateId()}`,
+      kind,
+      name,
+      path: path || undefined,
+      mime,
+      source,
+    });
+  }
+  return attachments;
+}
+
+function taskAttachmentFromPath(path: string): TaskAttachment {
+  const name = fileLabel(path);
+  return {
+    id: `att-${generateId()}`,
+    kind: attachmentKindForName(name),
+    name,
+    path,
+    source: 'dialog',
+  };
+}
+
+function clipboardPathAttachments(data: DataTransfer): TaskAttachment[] {
+  const raw = [data.getData('text/uri-list'), data.getData('text/plain')]
+    .filter(Boolean)
+    .join('\n');
+  if (!raw.trim()) return [];
+  return raw
+    .split(/\r?\n/)
+    .map(line => line.trim())
+    .filter(line => line && !line.startsWith('#'))
+    .map(line => {
+      if (/^file:\/\//i.test(line)) {
+        try {
+          return decodeURIComponent(new URL(line).pathname).replace(/^\/([A-Za-z]:)/, '$1');
+        } catch {
+          return '';
+        }
+      }
+      return /^[A-Za-z]:[\\/]/.test(line) || /^\\\\/.test(line) ? line : '';
+    })
+    .filter(Boolean)
+    .map(path => ({ ...taskAttachmentFromPath(path), source: 'clipboard' }));
+}
 
 function groupModelsByProvider(models: CliModel[]): Array<{ provider: string; models: CliModel[] }> {
   const groups = new Map<string, CliModel[]>();
@@ -286,9 +526,129 @@ function segmentsIntersect(a: Point2D, b: Point2D, c: Point2D, d: Point2D) {
   return ccw(a, c, d) !== ccw(b, c, d) && ccw(a, b, c) !== ccw(a, b, d);
 }
 
+interface WorkflowGroup {
+  id: string;
+  graphMode: WorkflowGraphMode;
+  taskNode: NodeInstance;
+  name: string;
+  subMode: string;
+  mode?: string;
+  preset?: PresetDefinition | null;
+  nodeIds: Set<string>;
+  agentCount: number;
+}
+
+function workflowGroupsForTree(tree: NodeDocumentState['document']['trees'][string], graphMode: WorkflowGraphMode): WorkflowGroup[] {
+  const nodes = Object.values(tree.nodes);
+  const taskNodes = nodes
+    .filter(node => node.type === 'workflow.task')
+    .sort((left, right) => left.location.x - right.location.x || left.location.y - right.location.y);
+  const links = Object.values(tree.links);
+  const outgoing = new Map<string, string[]>();
+  for (const link of links) {
+    outgoing.set(link.from.nodeId, [...(outgoing.get(link.from.nodeId) ?? []), link.to.nodeId]);
+  }
+
+  return taskNodes.map((task, index) => {
+    const preset = getWorkflowPreset(String(task.properties.presetId ?? '').trim());
+    const visited = new Set<string>([task.id]);
+    const queue = [...(outgoing.get(task.id) ?? [])];
+    while (queue.length > 0) {
+      const nodeId = queue.shift();
+      if (!nodeId || visited.has(nodeId)) continue;
+      const node = tree.nodes[nodeId];
+      if (!node || (node.type === 'workflow.task' && node.id !== task.id)) continue;
+      visited.add(nodeId);
+      for (const nextId of outgoing.get(nodeId) ?? []) queue.push(nextId);
+    }
+    const id = String(task.properties.workflowId ?? '').trim() || task.id;
+    const name = workflowLabelFromTask(task, index);
+    const subMode = String(task.properties.workflowSubMode ?? '').trim() || preset?.subMode || 'Custom';
+    const mode = String(task.properties.workflowMode ?? '').trim() || preset?.mode;
+    return {
+      id,
+      graphMode,
+      taskNode: task,
+      name,
+      subMode,
+      mode,
+      preset,
+      nodeIds: visited,
+      agentCount: [...visited].filter(nodeId => tree.nodes[nodeId]?.type === 'workflow.agent').length,
+    };
+  });
+}
+
+function workflowLabelFromTask(taskNode: NodeInstance, index: number) {
+  const preset = getWorkflowPreset(String(taskNode.properties.presetId ?? '').trim());
+  const explicitName = String(taskNode.properties.workflowName ?? '').trim();
+  if (explicitName) return explicitName;
+  if (preset) return preset.name;
+  const prompt = String(taskNode.properties.prompt ?? '').trim();
+  return prompt ? prompt.slice(0, 34) : `Workflow ${index + 1}`;
+}
+
+function workflowModeDisplay(mode: string | undefined) {
+  const presetMode = listWorkflowPresetModes().find(option => option.value === mode);
+  if (!presetMode) return { label: 'Custom', graphMode: 'standard' as WorkflowGraphMode };
+  const graphMode = PRESET_MODE_TO_GRAPH_MODE[presetMode.value];
+  return { label: GRAPH_MODE_LABELS[graphMode] ?? presetMode.label, graphMode };
+}
+
+function flowNodeKind(node: Record<string, unknown>) {
+  const type = String(node.type ?? '');
+  const roleId = String((node.data as Record<string, unknown> | undefined)?.roleId ?? '');
+  if (type === 'workflow.task' || type === 'task' || roleId === 'task') return 'task';
+  if (type === 'workflow.agent' || type === 'agent') return 'agent';
+  return 'other';
+}
+
+function subgraphForWorkflow(flow: { nodes: Array<Record<string, unknown>>; edges: Array<Record<string, unknown>> }, workflow: WorkflowGroup) {
+  const nodeIds = workflow.nodeIds;
+  return {
+    nodes: flow.nodes.filter(node => nodeIds.has(String(node.id))),
+    edges: flow.edges.filter(edge => nodeIds.has(String(edge.source)) && nodeIds.has(String(edge.target))),
+  };
+}
+
+function fitDocumentStateToGraph(documentState: NodeDocumentState, canvasRect: DOMRect | undefined | null): NodeDocumentState {
+  const tree = documentState.document.trees[documentState.document.rootTreeId];
+  const nodes = Object.values(tree.nodes);
+  if (nodes.length === 0) return documentState;
+
+  const minX = Math.min(...nodes.map(node => node.location.x));
+  const minY = Math.min(...nodes.map(node => node.location.y));
+  const maxX = Math.max(...nodes.map(node => node.location.x + (node.size?.width ?? (node.type === 'workflow.task' ? TASK_NODE_ESTIMATED_WIDTH : AGENT_NODE_ESTIMATED_WIDTH))));
+  const maxY = Math.max(...nodes.map(node => node.location.y + (node.size?.height ?? (node.type === 'workflow.task' ? TASK_NODE_ESTIMATED_HEIGHT : AGENT_NODE_ESTIMATED_HEIGHT))));
+  const viewportWidth = Math.max(640, canvasRect?.width ?? 1280);
+  const viewportHeight = Math.max(420, canvasRect?.height ?? 760);
+  const paddedWidth = maxX - minX + 240;
+  const paddedHeight = maxY - minY + 240;
+  const zoom = Math.max(0.35, Math.min(0.9, viewportWidth / paddedWidth, viewportHeight / paddedHeight));
+  const pan = {
+    x: (viewportWidth - (maxX - minX) * zoom) / 2 - minX * zoom,
+    y: (viewportHeight - (maxY - minY) * zoom) / 2 - minY * zoom,
+  };
+
+  return {
+    ...documentState,
+    editor: {
+      ...documentState.editor,
+      viewByTree: {
+        ...documentState.editor.viewByTree,
+        [documentState.document.rootTreeId]: { pan, zoom },
+      },
+    },
+  };
+}
+
 export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (graph: WorkflowGraph) => void }) {
   const { graph, onGraphChange } = props;
   const workspaceDir = useWorkspaceStore(state => state.workspaceDir);
+  const workflowGraphMode = useWorkspaceStore(state => state.workflowGraphMode);
+  const workflowGraphs = useWorkspaceStore(state => state.workflowGraphs);
+  const setWorkflowGraphMode = useWorkspaceStore(state => state.setWorkflowGraphMode);
+  const setWorkflowGraphForMode = useWorkspaceStore(state => state.setWorkflowGraphForMode);
   const activeTabId = useWorkspaceStore(state => state.activeTabId);
   const tabs = useWorkspaceStore(state => state.tabs);
   const results = useWorkspaceStore(state => state.results);
@@ -297,6 +657,8 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
   const uiFrontendMode = useWorkspaceStore(state => state.uiFrontendMode);
   const setUiFrontendMode = useWorkspaceStore(state => state.setUiFrontendMode);
   const setWorkspaceDir = useWorkspaceStore(state => state.setWorkspaceDir);
+  const addLaunchedWorkflow = useWorkspaceStore(state => state.addLaunchedWorkflow);
+  const ensureWorkflowWorkspace = useWorkspaceStore(state => state.ensureWorkflowWorkspace);
   const canvasEffectsEnabled = useWorkspaceStore(state => state.canvasEffectsEnabled);
   const updatePaneDataByTerminalId = useWorkspaceStore(state => state.updatePaneDataByTerminalId);
   const setNodeTerminalBinding = useWorkspaceStore(state => state.setNodeTerminalBinding);
@@ -312,6 +674,15 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
     }
     return terminals;
   }, [tabs]);
+  const graphModeOptions = useMemo(() => {
+    const presetModes = listWorkflowPresetModes().map(mode => PRESET_MODE_TO_GRAPH_MODE[mode.value]);
+    return [...new Set(presetModes)];
+  }, []);
+  useEffect(() => {
+    if (workflowGraphMode === 'ui') {
+      setWorkflowGraphMode('standard');
+    }
+  }, [setWorkflowGraphMode, workflowGraphMode]);
   const [inspectorNodeId, setInspectorNodeId] = useState<string | null>(null);
   const [lastAddedNodeId, setLastAddedNodeId] = useState<string | null>(null);
   const [inspectorCommand, setInspectorCommand] = useState('');
@@ -323,7 +694,11 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
   const [customModelNodeIds, setCustomModelNodeIds] = useState<Set<string>>(new Set());
   const [modelDropdownOpenNodeId, setModelDropdownOpenNodeId] = useState<string | null>(null);
   const [presetPickerOpen, setPresetPickerOpen] = useState(false);
+  const [runMenuOpen, setRunMenuOpen] = useState(false);
+  const [selectedRunWorkflowIds, setSelectedRunWorkflowIds] = useState<Set<string>>(new Set());
+  const [expandedRunModeIds, setExpandedRunModeIds] = useState<Set<string>>(new Set());
   const modelDropdownRef = useRef<HTMLDivElement>(null);
+  const runMenuRef = useRef<HTMLDivElement>(null);
 
   const registry = useMemo(() => createWorkflowNodeRegistry(), []);
   const [state, setState] = useState<NodeDocumentState>(() => legacyGraphToNodeDocument(graph));
@@ -338,6 +713,7 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
   const canvasRef = useRef<HTMLDivElement | null>(null);
   const suppressContextMenuRef = useRef(false);
   const lastGraphSnapshotRef = useRef(JSON.stringify(graph));
+  const pendingFitGraphRef = useRef<string | null>(null);
   const isUserChangeRef = useRef(false);
   const missionSnapshot = useMissionSnapshot(activeMissionId);
   const workflowEvents = useWorkflowEvents(activeMissionId);
@@ -396,6 +772,10 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
             if (dirty) newTree.nodes[nodeId] = patched;
           }
         }
+        if (pendingFitGraphRef.current === incoming) {
+          pendingFitGraphRef.current = null;
+          return fitDocumentStateToGraph(newState, canvasRef.current?.getBoundingClientRect());
+        }
         return newState;
       });
       lastGraphSnapshotRef.current = incoming;
@@ -428,6 +808,57 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
     () => Object.values(activeTree.nodes).find(node => node.type === 'workflow.task') ?? null,
     [activeTree.nodes]
   );
+  const workflowGroups = useMemo<WorkflowGroup[]>(() => {
+    return workflowGroupsForTree(activeTree, workflowGraphMode);
+  }, [activeTree, workflowGraphMode]);
+  const allWorkflowGroups = useMemo<WorkflowGroup[]>(() => {
+    const groups: WorkflowGroup[] = [...workflowGroups];
+    for (const mode of graphModeOptions) {
+      if (mode === workflowGraphMode) continue;
+      const modeGraph = workflowGraphs[mode];
+      if (!modeGraph || modeGraph.nodes.length === 0) continue;
+      const documentState = legacyGraphToNodeDocument(modeGraph);
+      const tree = documentState.document.trees[documentState.document.rootTreeId];
+      groups.push(...workflowGroupsForTree(tree, mode));
+    }
+    return groups;
+  }, [graphModeOptions, workflowGraphMode, workflowGraphs, workflowGroups]);
+  const selectedWorkflowGroup = useMemo(() => {
+    const activeNodeId = state.editor.activeNodeId ?? state.editor.selection.nodeIds[0] ?? null;
+    if (!activeNodeId) return null;
+    return workflowGroups.find(group => group.taskNode.id === activeNodeId || group.nodeIds.has(activeNodeId)) ?? null;
+  }, [state.editor.activeNodeId, state.editor.selection.nodeIds, workflowGroups]);
+  useEffect(() => {
+    setSelectedRunWorkflowIds(current => {
+      const available = new Set(allWorkflowGroups.map(group => group.id));
+      return new Set([...current].filter(id => available.has(id)));
+    });
+  }, [allWorkflowGroups]);
+  const runWorkflowModeGroups = useMemo(() => {
+    const grouped = new Map<string, { id: string; label: string; icon: typeof Workflow; workflows: WorkflowGroup[] }>();
+    for (const group of allWorkflowGroups) {
+      const mode = String(group.mode ?? 'custom');
+      const { label, graphMode } = workflowModeDisplay(group.mode);
+      const existing = grouped.get(mode) ?? {
+        id: mode,
+        label,
+        icon: GRAPH_MODE_ICONS[graphMode] ?? Workflow,
+        workflows: [],
+      };
+      existing.workflows.push(group);
+      grouped.set(mode, existing);
+    }
+    return [...grouped.values()];
+  }, [allWorkflowGroups]);
+  const activePreset = useMemo(() => {
+    const presetId = String(taskNode?.properties.presetId ?? '').trim();
+    return getWorkflowPreset(presetId);
+  }, [taskNode?.properties.presetId]);
+  const activePresetLabel = activePreset
+    ? activePreset.size === 'expanded'
+      ? `Expanded ${activePreset.subMode.replace(/\s*\/\s*/g, '/')}`
+      : activePreset.name
+    : null;
   const nodeFrontendMode = (taskNode?.properties.frontendMode === 'fast' ||
     taskNode?.properties.frontendMode === 'aligned' ||
     taskNode?.properties.frontendMode === 'strict_ui')
@@ -452,6 +883,59 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
     [activeTree, registry, state.document]
   );
   const materializedById = useMemo(() => new Map(materializedNodes.map(node => [node.node.id, node])), [materializedNodes]);
+  const canvasBounds = canvasRef.current?.getBoundingClientRect();
+  const visibleWorldRect = useMemo(() => {
+    const width = canvasBounds?.width ?? 1280;
+    const height = canvasBounds?.height ?? 760;
+    return {
+      x: (-view.pan.x / view.zoom) - CANVAS_CULL_PADDING,
+      y: (-view.pan.y / view.zoom) - CANVAS_CULL_PADDING,
+      width: (width / view.zoom) + CANVAS_CULL_PADDING * 2,
+      height: (height / view.zoom) + CANVAS_CULL_PADDING * 2,
+    };
+  }, [canvasBounds?.height, canvasBounds?.width, view.pan.x, view.pan.y, view.zoom]);
+  const visibleMaterializedNodes = useMemo(
+    () => materializedNodes.filter(node => rectsIntersect(worldRect(node), visibleWorldRect)),
+    [materializedNodes, visibleWorldRect],
+  );
+  const visibleNodeIds = useMemo(
+    () => new Set(visibleMaterializedNodes.map(node => node.node.id)),
+    [visibleMaterializedNodes],
+  );
+  const connectedInputKeys = useMemo(
+    () => new Set(Object.values(activeTree.links).map(link => `${link.to.nodeId}:${link.to.socketId}`)),
+    [activeTree.links],
+  );
+  const connectedOutputKeys = useMemo(
+    () => new Set(Object.values(activeTree.links).map(link => `${link.from.nodeId}:${link.from.socketId}`)),
+    [activeTree.links],
+  );
+  const terminalById = useMemo(() => new Map(openTerminals.map(entry => [entry.id, entry])), [openTerminals]);
+  const snapshotNodeById = useMemo(
+    () => new Map((missionSnapshot?.nodes ?? []).map(node => [node.nodeId, node])),
+    [missionSnapshot?.nodes],
+  );
+  const latestEventByNodeId = useMemo(() => {
+    const byNode = new Map<string, (typeof workflowEvents)[number]>();
+    for (const event of workflowEvents) {
+      if (!event.nodeId) continue;
+      if (!byNode.has(event.nodeId)) byNode.set(event.nodeId, event);
+    }
+    return byNode;
+  }, [workflowEvents]);
+  const dragAlignment = useMemo(() => {
+    if (interaction.kind !== 'dragging_nodes') {
+      return null;
+    }
+    const draggedIds = new Set(Object.keys(interaction.nodeOrigins));
+    const draggedRects = materializedNodes
+      .filter(node => draggedIds.has(node.node.id))
+      .map(worldRect);
+    const targetRects = materializedNodes
+      .filter(node => !draggedIds.has(node.node.id))
+      .map(worldRect);
+    return alignmentSuggestion(draggedRects, targetRects);
+  }, [interaction, materializedNodes]);
   const missionAgents = useMemo(() => {
     const activeTab = tabs.find(tab => tab.id === activeTabId);
     const findMissionPane = (targetTabs: typeof tabs, missionId: string | null) => {
@@ -1102,6 +1586,15 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
   const validateCurrentGraph = useCallback(() => {
     try {
       const flow = nodeDocumentToFlowGraph(state.document, registry);
+      if (workflowGroups.length > 1) {
+        for (const group of workflowGroups) {
+          const subgraph = subgraphForWorkflow(flow, group);
+          validateGraph(subgraph.nodes as never[], subgraph.edges as never[]);
+        }
+        setValidationTone('ok');
+        setValidationMessage(`${workflowGroups.length} workflows validated.`);
+        return;
+      }
       const result = validateGraph(flow.nodes as never[], flow.edges as never[]);
       setValidationTone('ok');
       setValidationMessage(`Graph validated. Task node ${result.taskNodeId} routes into ${result.agentNodeIds.length} executable node(s).`);
@@ -1109,20 +1602,47 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
       setValidationTone('error');
       setValidationMessage(error instanceof Error ? error.message : String(error));
     }
-  }, [registry, state.document]);
+  }, [registry, state.document, workflowGroups]);
 
   const runWorkflow = useCallback(async () => {
     try {
-      const flow = nodeDocumentToFlowGraph(state.document, registry);
-      validateGraph(flow.nodes as never[], flow.edges as never[]);
+      const flowByMode = new Map<WorkflowGraphMode, ReturnType<typeof nodeDocumentToFlowGraph>>();
+      flowByMode.set(workflowGraphMode, nodeDocumentToFlowGraph(state.document, registry));
+      for (const group of allWorkflowGroups) {
+        if (flowByMode.has(group.graphMode)) continue;
+        const modeGraph = workflowGraphs[group.graphMode];
+        if (!modeGraph) continue;
+        flowByMode.set(group.graphMode, nodeDocumentToFlowGraph(legacyGraphToNodeDocument(modeGraph).document, registry));
+      }
+      const selectedWorkflowGroups = allWorkflowGroups.filter(group => selectedRunWorkflowIds.has(group.id));
+      const groupsToRun = selectedWorkflowGroups;
+      if (groupsToRun.length === 0) {
+        throw new Error('Select at least one workflow before running.');
+      }
+      for (const group of groupsToRun) {
+        const flow = flowByMode.get(group.graphMode);
+        if (!flow) throw new Error(`Workflow "${group.name}" is not available on its canvas.`);
+        const subgraph = subgraphForWorkflow(flow, group);
+        validateGraph(subgraph.nodes as never[], subgraph.edges as never[]);
+      }
+      const selectedNodeIdsByMode = new Map<WorkflowGraphMode, Set<string>>();
+      for (const group of groupsToRun) {
+        const selected = selectedNodeIdsByMode.get(group.graphMode) ?? new Set<string>();
+        for (const nodeId of group.nodeIds) selected.add(nodeId);
+        selectedNodeIdsByMode.set(group.graphMode, selected);
+      }
 
       // Phase 1 runtime adapter: every agent node owns a REAL terminal (PTY),
       // regardless of the node's selected executionMode. This keeps Run on a
       // direct graph -> PTY path and avoids the MCP-session dependency.
       const freshBindings = new Map<string, { id: string; title: string; paneId: string; cli: WorkflowAgentCli }>();
       const storedBindings = useWorkspaceStore.getState().nodeTerminalBindings;
-      for (const node of flow.nodes) {
-        if (node.type !== 'workflow.agent' && node.type !== 'agent') continue;
+      for (const [mode, flow] of flowByMode) {
+        const selectedNodeIds = selectedNodeIdsByMode.get(mode);
+        if (!selectedNodeIds) continue;
+        for (const node of flow.nodes) {
+          if (node.type !== 'workflow.agent' && node.type !== 'agent') continue;
+          if (!selectedNodeIds.has(String(node.id))) continue;
         const nodeId = String(node.id);
         const data = node.data as Record<string, unknown>;
         const selectedCli: WorkflowAgentCli = SELECTABLE_WORKFLOW_CLIS.includes(data.cli as WorkflowAgentCli)
@@ -1131,7 +1651,9 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
         const role = String(data.roleId ?? 'agent');
 
         // Force interactive PTY so each agent node owns a real terminal.
-        applyOperator({ type: 'set_node_property', nodeId, key: 'executionMode', value: 'interactive_pty' });
+        if (mode === workflowGraphMode) {
+          applyOperator({ type: 'set_node_property', nodeId, key: 'executionMode', value: 'interactive_pty' });
+        }
         data.executionMode = 'interactive_pty';
 
         // If a real terminal is already bound and still open, reuse it.
@@ -1149,9 +1671,11 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
         const canReuseResolvedTerminal = openResolvedTerminal && openResolvedTerminal.cli === selectedCli;
         if (canReuseResolvedTerminal) {
           if (!currentTerminalId && storedTerminalId) {
-            applyOperator({ type: 'set_node_property', nodeId, key: 'terminalId', value: storedTerminalId });
+            if (mode === workflowGraphMode) {
+              applyOperator({ type: 'set_node_property', nodeId, key: 'terminalId', value: storedTerminalId });
+            }
             const existing = openTerminals.find(t => t.id === storedTerminalId);
-            if (existing) {
+            if (existing && mode === workflowGraphMode) {
               applyOperator({ type: 'set_node_property', nodeId, key: 'terminalTitle', value: existing.title });
               applyOperator({ type: 'set_node_property', nodeId, key: 'paneId', value: existing.paneId });
             }
@@ -1176,9 +1700,11 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
         if (persistedId) {
           const existing = openTerminals.find(t => t.id === persistedId);
           if (existing && existing.cli === selectedCli) {
-            applyOperator({ type: 'set_node_property', nodeId, key: 'terminalId', value: persistedId });
-            applyOperator({ type: 'set_node_property', nodeId, key: 'terminalTitle', value: existing.title });
-            applyOperator({ type: 'set_node_property', nodeId, key: 'paneId', value: existing.paneId });
+            if (mode === workflowGraphMode) {
+              applyOperator({ type: 'set_node_property', nodeId, key: 'terminalId', value: persistedId });
+              applyOperator({ type: 'set_node_property', nodeId, key: 'terminalTitle', value: existing.title });
+              applyOperator({ type: 'set_node_property', nodeId, key: 'paneId', value: existing.paneId });
+            }
             freshBindings.set(nodeId, { id: persistedId, title: existing.title, paneId: existing.paneId, cli: selectedCli });
             continue;
           }
@@ -1208,31 +1734,21 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
         });
 
         const created = { id: terminalId, paneId, title: paneTitle, cli: selectedCli };
-        applyOperator({ type: 'set_node_property', nodeId, key: 'terminalId', value: created.id });
-        applyOperator({ type: 'set_node_property', nodeId, key: 'terminalTitle', value: created.title });
-        applyOperator({ type: 'set_node_property', nodeId, key: 'paneId', value: created.paneId });
-        applyOperator({ type: 'set_node_property', nodeId, key: 'cli', value: selectedCli });
+        if (mode === workflowGraphMode) {
+          applyOperator({ type: 'set_node_property', nodeId, key: 'terminalId', value: created.id });
+          applyOperator({ type: 'set_node_property', nodeId, key: 'terminalTitle', value: created.title });
+          applyOperator({ type: 'set_node_property', nodeId, key: 'paneId', value: created.paneId });
+          applyOperator({ type: 'set_node_property', nodeId, key: 'cli', value: selectedCli });
+        }
+        data.terminalId = created.id;
+        data.terminalTitle = created.title;
+        data.paneId = created.paneId;
+        data.cli = selectedCli;
         setNodeTerminalBinding(nodeId, created.id);
         freshBindings.set(nodeId, created);
       }
+      }
 
-      const hydratedNodes = flow.nodes.map(node => {
-        if (node.type !== 'workflow.agent' && node.type !== 'agent') return node;
-        const nodeId = String(node.id);
-        const data: Record<string, unknown> = { ...((node.data ?? {}) as Record<string, unknown>) };
-        const fresh = freshBindings.get(nodeId);
-        if (fresh) {
-          data.terminalId = fresh.id;
-          data.terminalTitle = fresh.title;
-          data.paneId = fresh.paneId;
-          data.cli = fresh.cli;
-        }
-        if (!data.terminalId) throw new Error(`Agent node ${nodeId}: failed to create or find terminal binding.`);
-        if (!data.terminalTitle) data.terminalTitle = `Terminal ${data.roleId ?? nodeId}`;
-        return { ...node, data };
-      });
-
-      const missionId = generateId();
       const terminalClis = Object.fromEntries(
         openTerminals
           .filter(terminal => terminal.cli && SUPPORTED_WORKFLOW_CLIS.has(terminal.cli))
@@ -1242,76 +1758,132 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
       for (const [, binding] of freshBindings) {
         terminalClis[binding.id] = binding.cli;
       }
-      const mission = compileMission({
-        missionId,
-        graphId: graph.id || 'graph',
-        nodes: hydratedNodes as never[],
-        edges: flow.edges as never[],
-        workspaceDirFallback: workspaceDir,
-        terminalClis,
-        authoringMode: 'graph',
-        runVersion: 1,
-        frontendMode,
-      });
-
-      const nodeById = new Map(mission.nodes.map(node => [node.id, node]));
-      const startNodes = mission.metadata.startNodeIds
-        .map(nodeId => nodeById.get(nodeId))
-        .filter((node): node is NonNullable<typeof node> => Boolean(node));
-      if (startNodes.length === 0) {
-        throw new Error('Compiled mission has no start nodes with terminal bindings.');
-      }
       // Build a lookup that includes freshly spawned terminals not yet in the openTerminals memo
       const allKnownTerminals = new Map([
         ...openTerminals.map(t => [t.id, t] as const),
         ...[...freshBindings.entries()].map(([, b]) => [b.id, { id: b.id, title: b.title, paneId: b.paneId, cli: null }] as const),
       ]);
-      for (const startNode of startNodes) {
-        const terminal = allKnownTerminals.get(startNode.terminal.terminalId);
-        if (!terminal) {
-          throw new Error(`No terminal bound for start node ${startNode.id}.`);
+
+      const launched: LaunchedWorkflow[] = [];
+      for (const group of groupsToRun) {
+        const flow = flowByMode.get(group.graphMode);
+        if (!flow) throw new Error(`Workflow "${group.name}" is not available on its canvas.`);
+        const groupSubgraph = subgraphForWorkflow(flow, group);
+        const hydratedNodes = groupSubgraph.nodes.map(node => {
+          const data: Record<string, unknown> = { ...((node.data ?? {}) as Record<string, unknown>) };
+          if (flowNodeKind(node) === 'task') {
+            const preset = group.preset;
+            data.frontendMode = preset?.frontendMode ?? data.frontendMode ?? frontendMode;
+            data.workflowId = group.id;
+            data.workflowName = group.name;
+            data.workflowSubMode = group.subMode;
+            data.workflowMode = group.mode ?? '';
+            if (preset) {
+              data.authoringMode = 'preset';
+              data.presetId = preset.id;
+              data.specProfile = preset.specProfile ?? 'none';
+              data.finalReadmeEnabled = Boolean(data.finalReadmeEnabled ?? getPresetReadmeDefault(preset));
+            }
+            return { ...node, data };
+          }
+          if (flowNodeKind(node) !== 'agent') return { ...node, data };
+          const nodeId = String(node.id);
+          const fresh = freshBindings.get(nodeId);
+          if (fresh) {
+            data.terminalId = fresh.id;
+            data.terminalTitle = fresh.title;
+            data.paneId = fresh.paneId;
+            data.cli = fresh.cli;
+          }
+          if (!data.terminalId) throw new Error(`Agent node ${nodeId}: failed to create or find terminal binding.`);
+          if (!data.terminalTitle) data.terminalTitle = `Terminal ${data.roleId ?? nodeId}`;
+          return { ...node, data };
+        });
+
+        const missionId = generateId();
+        const taskAuthoringMode = (
+          group.preset ? 'preset' : group.taskNode.properties.authoringMode === 'preset' || group.taskNode.properties.authoringMode === 'adaptive'
+            ? group.taskNode.properties.authoringMode
+            : 'graph'
+        ) as WorkflowAuthoringMode;
+        const taskPresetId = group.preset?.id ?? (String(group.taskNode.properties.presetId ?? '').trim() || null);
+        const mission = compileMission({
+          missionId,
+          graphId: `${(group.graphMode === workflowGraphMode ? graph.id : workflowGraphs[group.graphMode]?.id) || group.graphMode}:${group.id}`,
+          nodes: hydratedNodes as never[],
+          edges: groupSubgraph.edges as never[],
+          workspaceDirFallback: workspaceDir,
+          terminalClis,
+          authoringMode: taskAuthoringMode,
+          presetId: taskPresetId,
+          runVersion: 1,
+          frontendMode: group.preset?.frontendMode ?? frontendMode,
+          specProfile: group.preset?.specProfile,
+          finalReadmeEnabled: group.preset ? getPresetReadmeDefault(group.preset) : undefined,
+        });
+
+        const nodeById = new Map(mission.nodes.map(node => [node.id, node]));
+        const startNodes = mission.metadata.startNodeIds
+          .map(nodeId => nodeById.get(nodeId))
+          .filter((node): node is NonNullable<typeof node> => Boolean(node));
+        if (startNodes.length === 0) {
+          throw new Error(`Workflow "${group.name}" has no start nodes with terminal bindings.`);
         }
-        // Skip CLI check for freshly spawned terminals — CLI is detected after first output
-        if (terminal.cli !== null) {
-          const cli = String(terminal.cli ?? '').trim().toLowerCase();
-          if (!SUPPORTED_WORKFLOW_CLIS.has(cli)) {
-            throw new Error(
-              `CLI not detected or unsupported for ${startNode.terminal.terminalTitle} (${startNode.id}).`
-            );
+        for (const startNode of startNodes) {
+          const terminal = allKnownTerminals.get(startNode.terminal.terminalId);
+          if (!terminal) {
+            throw new Error(`No terminal bound for start node ${startNode.id}.`);
+          }
+          if (terminal.cli !== null) {
+            const cli = String(terminal.cli ?? '').trim().toLowerCase();
+            if (!SUPPORTED_WORKFLOW_CLIS.has(cli)) {
+              throw new Error(`CLI not detected or unsupported for ${startNode.terminal.terminalTitle} (${startNode.id}).`);
+            }
           }
         }
+
+        setActiveMissionId(missionId);
+        activeMissionRef.current = mission;
+        await invoke('seed_mission_to_db', { missionId, graph: mission });
+        await missionOrchestrator.launchMission(mission);
+
+        const descriptor: LaunchedWorkflow = {
+          missionId,
+          workflowId: group.id,
+          name: group.name,
+          subMode: group.subMode,
+          mode: group.mode,
+          size: group.preset?.size,
+          agentCount: mission.nodes.length,
+          workspaceDir: mission.task.workspaceDir,
+          launchedAt: Date.now(),
+        };
+        addLaunchedWorkflow(descriptor);
+        ensureWorkflowWorkspace(descriptor);
+        launched.push(descriptor);
       }
-
-      setActiveMissionId(missionId);
-      activeMissionRef.current = mission;
-
-      // Persist mission to shared SQLite so MCP tools (complete_task, get_task_details, etc.) can find it.
-      // Uses seed_mission_to_db (not start_mission_graph) to avoid the Rust engine emitting
-      // workflow-runtime-activation-requested, which would double-activate nodes alongside the TS orchestrator.
-      await invoke('seed_mission_to_db', { missionId, graph: mission });
-
-      // TS Orchestrator is the canonical runtime brain.
-      const { missionOrchestrator } = await import('../../lib/workflow/MissionOrchestrator');
-      await missionOrchestrator.launchMission(mission);
       setAppMode('runtime');
 
-      const unsubFailures = (await import('../../lib/workflow/WorkflowOrchestrator')).workflowOrchestrator.subscribeForRun(missionId, (event) => {
-        if (event.type !== 'node_failed') return;
-        setValidationTone('error');
-        setValidationMessage(`Node ${event.nodeId} failed: ${event.error ?? 'activation pipeline error'}`);
-        unsubFailures.unsubscribe();
-      });
+      const { workflowOrchestrator } = await import('../../lib/workflow/WorkflowOrchestrator');
+      for (const launchedWorkflow of launched) {
+        const unsubFailures = workflowOrchestrator.subscribeForRun(launchedWorkflow.missionId, (event) => {
+          if (event.type !== 'node_failed') return;
+          setValidationTone('error');
+          setValidationMessage(`${launchedWorkflow.name}: node ${event.nodeId} failed: ${event.error ?? 'activation pipeline error'}`);
+          unsubFailures.unsubscribe();
+        });
+      }
 
       setValidationTone('ok');
       setValidationMessage(
-        `Mission ${missionId.substring(0, 8)} registered. Activating nodes…`
+        `${launched.length} workflow${launched.length === 1 ? '' : 's'} registered. Activating nodes…`
       );
     } catch (error) {
       setActiveMissionId(null);
       setValidationTone('error');
       setValidationMessage(error instanceof Error ? error.message : String(error));
     }
-  }, [registry, state.document, workspaceDir, graph.id, openTerminals, tabs, addPane, setAppMode, applyOperator, setNodeTerminalBinding, frontendMode]);
+  }, [addLaunchedWorkflow, allWorkflowGroups, ensureWorkflowWorkspace, registry, state.document, workspaceDir, graph.id, openTerminals, setAppMode, applyOperator, setNodeTerminalBinding, frontendMode, selectedRunWorkflowIds, workflowGraphMode, workflowGraphs]);
 
   const viewRuntimeMapping = useCallback(() => {
     try {
@@ -1348,8 +1920,8 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
     }
   }, [registry, state.document, workspaceDir, frontendMode]);
 
-  const importPresetGraph = useCallback((preset: PresetDefinition, options: { finalReadmeEnabled: boolean }) => {
-    const missionId = generateId();
+  const importPresetGraph = useCallback((presets: PresetDefinition[], options: { finalReadmeEnabled: boolean }) => {
+    if (presets.length === 0) return;
     const bindingsByRole: Record<string, { terminalId: string; terminalTitle: string; paneId?: string }> = {};
     for (const terminal of openTerminals) {
       const role = detectRoleForPane({ title: terminal.title, data: {} });
@@ -1364,79 +1936,131 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
     const currentPrompt = String(taskNode?.properties.prompt ?? '').trim();
     const currentWorkspaceDir = String(taskNode?.properties.workspaceDir ?? workspaceDir ?? '').trim();
     const taskMode = taskNode?.properties.mode === 'edit' ? 'edit' : 'build';
-    const presetFrontendMode = preset.frontendMode ?? 'off';
+    const currentGraph = nodeDocumentToWorkflowGraph(state.document, registry);
+    const presetsByMode = new Map<WorkflowGraphMode, PresetDefinition[]>();
+    for (const preset of presets) {
+      const mode = PRESET_MODE_TO_GRAPH_MODE[preset.mode];
+      presetsByMode.set(mode, [...(presetsByMode.get(mode) ?? []), preset]);
+    }
+    const firstMode = PRESET_MODE_TO_GRAPH_MODE[presets[0].mode];
+    let firstModeGraph: WorkflowGraph | null = null;
 
-    const flow = buildPresetFlowGraph({
-      preset,
-      missionId,
-      prompt: currentPrompt || 'Imported preset objective',
-      mode: taskMode,
-      workspaceDir: currentWorkspaceDir || workspaceDir,
-      bindingsByRole,
-      instructionOverrides: {},
-      frontendMode: presetFrontendMode,
-      finalReadmeEnabled: options.finalReadmeEnabled,
-    });
+    for (const [targetMode, modePresets] of presetsByMode) {
+      const previousGraph = targetMode === workflowGraphMode
+        ? currentGraph
+        : (workflowGraphs[targetMode] ?? { id: `${targetMode}-editor`, nodes: [], edges: [] });
+      const importedNodes: WorkflowGraph['nodes'] = [];
+      const importedEdges: WorkflowGraph['edges'] = [];
 
-    const workflowGraph: WorkflowGraph = {
-      id: `preset:${preset.id}`,
-      nodes: flow.nodes.map(node => {
-        const data = node.data as Record<string, unknown>;
-        if (node.type === 'task') {
-          return {
-            id: node.id,
-            roleId: 'task',
+      for (const [presetIndex, preset] of modePresets.entries()) {
+        const missionId = generateId();
+        const workflowId = `wf-${preset.id}-${missionId.slice(0, 6)}`;
+        const xOffset = PRESET_WORKFLOW_BASE_X;
+        const yOffset = presetIndex * PRESET_WORKFLOW_STACK_Y;
+        const idMap = new Map<string, string>();
+        const presetFrontendMode = preset.frontendMode ?? 'off';
+
+        const flow = buildPresetFlowGraph({
+          preset,
+          missionId,
+          prompt: currentPrompt || 'Imported preset objective',
+          mode: taskMode,
+          workspaceDir: currentWorkspaceDir || workspaceDir,
+          bindingsByRole,
+          instructionOverrides: {},
+          frontendMode: presetFrontendMode,
+          finalReadmeEnabled: options.finalReadmeEnabled,
+        });
+        for (const node of flow.nodes) {
+          idMap.set(node.id, node.type === 'task' ? node.id : `${workflowId}-${node.id}`);
+        }
+
+        for (const node of flow.nodes) {
+          const data = node.data as Record<string, unknown>;
+          const nodeId = idMap.get(node.id) ?? node.id;
+          const position = { x: node.position.x + xOffset, y: node.position.y + yOffset };
+          if (node.type === 'task') {
+            importedNodes.push({
+              id: nodeId,
+              roleId: 'task',
+              status: 'idle',
+              config: {
+                prompt: String(data.prompt ?? ''),
+                mode: data.mode === 'edit' ? 'edit' : 'build',
+                workspaceDir: String(data.workspaceDir ?? ''),
+                frontendMode: data.frontendMode as FrontendWorkflowMode,
+                specProfile: data.specProfile === 'frontend_three_file' ? 'frontend_three_file' : 'none',
+                finalReadmeEnabled: Boolean(data.finalReadmeEnabled),
+                authoringMode: 'preset',
+                presetId: preset.id,
+                runVersion: 1,
+                workflowId,
+                workflowName: preset.name,
+                workflowSubMode: preset.subMode,
+                workflowMode: preset.mode,
+                label: preset.name,
+                position,
+              },
+            });
+            continue;
+          }
+
+          importedNodes.push({
+            id: nodeId,
+            roleId: String(data.roleId ?? 'agent'),
             status: 'idle',
             config: {
-              prompt: String(data.prompt ?? ''),
-              mode: data.mode === 'edit' ? 'edit' : 'build',
-              workspaceDir: String(data.workspaceDir ?? ''),
-              frontendMode: data.frontendMode as FrontendWorkflowMode,
-              specProfile: data.specProfile === 'frontend_three_file' ? 'frontend_three_file' : 'none',
-              finalReadmeEnabled: Boolean(data.finalReadmeEnabled),
+              instructionOverride: String(data.instructionOverride ?? ''),
+              terminalId: String(data.terminalId ?? ''),
+              terminalTitle: String(data.terminalTitle ?? ''),
+              paneId: String(data.paneId ?? ''),
+              cli: data.cli as WorkflowAgentCli,
+              model: String(data.model ?? ''),
+              executionMode: data.executionMode as WorkflowExecutionMode,
+              autoLinked: Boolean(data.autoLinked),
+              position,
               authoringMode: 'preset',
               presetId: preset.id,
               runVersion: 1,
-              position: node.position,
+              workflowId,
+              workflowName: preset.name,
+              workflowSubMode: preset.subMode,
+              workflowMode: preset.mode,
             },
-          };
+          });
         }
+        importedEdges.push(...flow.edges.map(edge => ({
+          fromNodeId: idMap.get(edge.source) ?? edge.source,
+          toNodeId: idMap.get(edge.target) ?? edge.target,
+          condition: edge.data.condition,
+        })));
+      }
 
-        return {
-          id: node.id,
-          roleId: String(data.roleId ?? 'agent'),
-          status: 'idle',
-          config: {
-            instructionOverride: String(data.instructionOverride ?? ''),
-            terminalId: String(data.terminalId ?? ''),
-            terminalTitle: String(data.terminalTitle ?? ''),
-            paneId: String(data.paneId ?? ''),
-            cli: data.cli as WorkflowAgentCli,
-            model: String(data.model ?? ''),
-            executionMode: data.executionMode as WorkflowExecutionMode,
-            autoLinked: Boolean(data.autoLinked),
-            position: node.position,
-            authoringMode: 'preset',
-            presetId: preset.id,
-            runVersion: 1,
-          },
-        };
-      }),
-      edges: flow.edges.map(edge => ({
-        fromNodeId: edge.source,
-        toNodeId: edge.target,
-        condition: edge.data.condition,
-      })),
-    };
+      const workflowGraph: WorkflowGraph = {
+        id: previousGraph.id || `${targetMode}-editor`,
+        nodes: importedNodes,
+        edges: importedEdges,
+      };
 
-    const snapshot = JSON.stringify(workflowGraph);
-    lastGraphSnapshotRef.current = snapshot;
-    setState(legacyGraphToNodeDocument(workflowGraph));
-    onGraphChange?.(workflowGraph);
+      setWorkflowGraphForMode(targetMode, workflowGraph);
+      if (targetMode === firstMode) firstModeGraph = workflowGraph;
+      if (targetMode === workflowGraphMode) {
+        const snapshot = JSON.stringify(workflowGraph);
+        lastGraphSnapshotRef.current = snapshot;
+        const nextState = fitDocumentStateToGraph(legacyGraphToNodeDocument(workflowGraph), canvasRef.current?.getBoundingClientRect());
+        setState(nextState);
+        onGraphChange?.(workflowGraph);
+      }
+    }
+
+    if (firstMode !== workflowGraphMode && firstModeGraph) {
+      pendingFitGraphRef.current = JSON.stringify(firstModeGraph);
+      setWorkflowGraphMode(firstMode);
+    }
     setPresetPickerOpen(false);
     setValidationTone('ok');
-    setValidationMessage(`Applied preset "${preset.name}" into the graph editor.`);
-  }, [frontendMode, onGraphChange, openTerminals, taskNode?.properties.mode, taskNode?.properties.prompt, taskNode?.properties.workspaceDir, workspaceDir]);
+    setValidationMessage(`Applied ${presets.length} preset workflow${presets.length === 1 ? '' : 's'} across ${presetsByMode.size} canvas${presetsByMode.size === 1 ? '' : 'es'}.`);
+  }, [onGraphChange, openTerminals, registry, setWorkflowGraphForMode, setWorkflowGraphMode, state.document, taskNode?.properties.mode, taskNode?.properties.prompt, taskNode?.properties.workspaceDir, workflowGraphMode, workflowGraphs, workspaceDir]);
 
   useEffect(() => {
     if (!lastAddedNodeId) return;
@@ -1658,13 +2282,36 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
       }
 
       if (interaction.kind === 'dragging_nodes') {
-        for (const [nodeId, origin] of Object.entries(interaction.nodeOrigins)) {
+        const rawLocations = Object.fromEntries(
+          Object.entries(interaction.nodeOrigins).map(([nodeId, origin]) => [
+            nodeId,
+            {
+              x: origin.x + (screenPoint.x - interaction.pointerOrigin.x) / view.zoom,
+              y: origin.y + (screenPoint.y - interaction.pointerOrigin.y) / view.zoom,
+            },
+          ])
+        );
+        const draggedRects = Object.entries(rawLocations)
+          .map(([nodeId, location]) => {
+            const materialized = materializedById.get(nodeId);
+            if (!materialized) return null;
+            const rect = worldRect(materialized);
+            return { ...rect, x: location.x, y: location.y };
+          })
+          .filter((rect): rect is NodeRect => Boolean(rect));
+        const draggedIds = new Set(Object.keys(rawLocations));
+        const targetRects = materializedNodes
+          .filter(node => !draggedIds.has(node.node.id))
+          .map(worldRect);
+        const snap = alignmentSuggestion(draggedRects, targetRects);
+
+        for (const [nodeId, location] of Object.entries(rawLocations)) {
           applyOperator({
             type: 'set_node_location',
             nodeId,
             location: {
-              x: origin.x + (screenPoint.x - interaction.pointerOrigin.x) / view.zoom,
-              y: origin.y + (screenPoint.y - interaction.pointerOrigin.y) / view.zoom,
+              x: location.x + (snap?.offset.x ?? 0),
+              y: location.y + (snap?.offset.y ?? 0),
             },
           });
         }
@@ -1803,7 +2450,7 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
       window.removeEventListener('mousemove', onWindowMouseMove);
       window.removeEventListener('mouseup', onWindowMouseUp);
     };
-  }, [applyOperator, cutLinksByKnife, hoveredInput, interaction, materializedNodes, view.pan, view.zoom]);
+  }, [applyOperator, cutLinksByKnife, hoveredInput, interaction, materializedById, materializedNodes, view.pan, view.zoom]);
 
   useEffect(() => {
     function onWindowKeyDown(event: KeyboardEvent) {
@@ -1828,6 +2475,10 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
 
   const handleCanvasWheel = useCallback(
     (event: WheelEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (target?.closest('textarea, input, select, [data-canvas-wheel-lock="true"]')) {
+        return;
+      }
       event.preventDefault();
       if (!canvasRef.current) {
         return;
@@ -1955,15 +2606,20 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
     ? String(inspectedNode?.properties.cli ?? 'claude')
     : 'claude') as WorkflowAgentCli;
 
-  const agentCliValues = useMemo(() => {
+  const globalAgentCliNodes = useMemo(() => {
     return Object.values(activeTree.nodes)
       .filter(node => node.type === 'workflow.agent')
+      .filter(node => !selectedWorkflowGroup || selectedWorkflowGroup.nodeIds.has(node.id));
+  }, [activeTree.nodes, selectedWorkflowGroup]);
+
+  const agentCliValues = useMemo(() => {
+    return globalAgentCliNodes
       .map(node => (
         SELECTABLE_WORKFLOW_CLIS.includes(String(node.properties.cli ?? '') as WorkflowAgentCli)
           ? String(node.properties.cli)
           : 'claude'
       ) as WorkflowAgentCli);
-  }, [activeTree.nodes]);
+  }, [globalAgentCliNodes]);
 
   const globalAgentCli = useMemo(() => {
     if (agentCliValues.length === 0) return '';
@@ -1972,8 +2628,7 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
   }, [agentCliValues]);
 
   const applyGlobalAgentCli = useCallback((cli: WorkflowAgentCli) => {
-    for (const node of Object.values(activeTree.nodes)) {
-      if (node.type !== 'workflow.agent') continue;
+    for (const node of globalAgentCliNodes) {
       applyOperator({ type: 'set_node_property', nodeId: node.id, key: 'cli', value: cli });
       applyOperator({ type: 'set_node_property', nodeId: node.id, key: 'model', value: '' });
       if (!supportsHeadless(cli)) {
@@ -1982,8 +2637,9 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
     }
     setCustomModelNodeIds(new Set());
     setValidationTone('ok');
-    setValidationMessage(`Set ${agentCliValues.length} agent node${agentCliValues.length === 1 ? '' : 's'} to ${cli.toUpperCase()}.`);
-  }, [activeTree.nodes, agentCliValues.length, applyOperator]);
+    const targetLabel = selectedWorkflowGroup ? selectedWorkflowGroup.name : 'current canvas';
+    setValidationMessage(`Set ${globalAgentCliNodes.length} ${targetLabel} agent node${globalAgentCliNodes.length === 1 ? '' : 's'} to ${cli.toUpperCase()}.`);
+  }, [applyOperator, globalAgentCliNodes, selectedWorkflowGroup]);
 
   const selectTaskWorkspaceDir = useCallback(async (nodeId: string, currentValue: unknown) => {
     const current = String(currentValue ?? workspaceDir ?? '').trim();
@@ -1997,6 +2653,57 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
     applyOperator({ type: 'set_node_property', nodeId, key: 'workspaceDir', value: nextDir });
     setWorkspaceDir(nextDir);
   }, [applyOperator, setWorkspaceDir, workspaceDir]);
+
+  const setTaskAttachments = useCallback((nodeId: string, currentValue: unknown, additions: TaskAttachment[]) => {
+    if (additions.length === 0) return;
+    const current = normalizeTaskAttachments(currentValue);
+    applyOperator({
+      type: 'set_node_property',
+      nodeId,
+      key: 'attachments',
+      value: normalizeTaskAttachments([...current, ...additions]),
+    });
+  }, [applyOperator]);
+
+  const attachTaskFiles = useCallback(async (nodeId: string, currentValue: unknown) => {
+    const selected = await openDialog({
+      directory: false,
+      multiple: true,
+      defaultPath: workspaceDir || undefined,
+    });
+    const paths = Array.isArray(selected) ? selected : typeof selected === 'string' ? [selected] : [];
+    setTaskAttachments(
+      nodeId,
+      currentValue,
+      paths.filter(path => path.trim()).map(path => taskAttachmentFromPath(path.trim())),
+    );
+  }, [setTaskAttachments, workspaceDir]);
+
+  const pasteTaskClipboardImage = useCallback(async (nodeId: string, currentValue: unknown) => {
+    try {
+      await readImage();
+      const stamp = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      setTaskAttachments(nodeId, currentValue, [{
+        id: `att-${generateId()}`,
+        kind: 'image',
+        name: `Clipboard image ${stamp}`,
+        mime: 'image/*',
+        source: 'clipboard',
+      }]);
+    } catch {
+      setValidationTone('error');
+      setValidationMessage('No clipboard image was available to attach.');
+    }
+  }, [setTaskAttachments]);
+
+  const removeTaskAttachment = useCallback((nodeId: string, currentValue: unknown, attachmentId: string) => {
+    applyOperator({
+      type: 'set_node_property',
+      nodeId,
+      key: 'attachments',
+      value: normalizeTaskAttachments(currentValue).filter(attachment => attachment.id !== attachmentId),
+    });
+  }, [applyOperator]);
 
   useEffect(() => {
     if (!inspectorNodeId) return;
@@ -2016,12 +2723,61 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
     return () => document.removeEventListener('mousedown', handler);
   }, [modelDropdownOpenNodeId]);
 
+  useEffect(() => {
+    if (!runMenuOpen) return;
+    const handler = (e: MouseEvent) => {
+      if (runMenuRef.current && !runMenuRef.current.contains(e.target as Node)) {
+        setRunMenuOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [runMenuOpen]);
+
   return (
     <div className="h-full w-full background-bg-app text-text-primary flex flex-col">
       <div className="h-12 shrink-0 border-b border-border-panel px-3 flex items-center justify-between background-bg-titlebar">
         <div className="flex items-center gap-2 text-[11px] uppercase tracking-[0.24em] text-accent-primary">
           <Workflow size={14} />
           <span>Node Graph Architecture</span>
+          <div className="ml-3 flex items-center gap-1 rounded-lg border border-border-panel bg-bg-panel p-1 normal-case tracking-normal">
+            {graphModeOptions.map(mode => {
+              const Icon = GRAPH_MODE_ICONS[mode];
+              const active = workflowGraphMode === mode;
+              const count = mode === workflowGraphMode
+                ? graph.nodes.length
+                : (workflowGraphs[mode]?.nodes.length ?? 0);
+              return (
+                <button
+                  key={mode}
+                  type="button"
+                  onClick={() => setWorkflowGraphMode(mode)}
+                  className={`flex h-7 items-center gap-1.5 rounded px-2 text-[10px] font-semibold transition-colors ${
+                    active
+                      ? 'bg-accent-primary text-accent-text'
+                      : 'text-text-muted hover:bg-bg-surface hover:text-text-primary'
+                  }`}
+                  title={`${GRAPH_MODE_LABELS[mode]} canvas`}
+                >
+                  <Icon size={11} />
+                  <span>{GRAPH_MODE_LABELS[mode]}</span>
+                  {count > 0 && (
+                    <span className={`rounded px-1 text-[9px] ${active ? 'bg-accent-text/20' : 'bg-accent-primary/15 text-accent-primary'}`}>
+                      {count}
+                    </span>
+                  )}
+                </button>
+              );
+            })}
+          </div>
+          {activePresetLabel && (
+            <span
+              className="ml-2 max-w-[220px] truncate rounded border border-accent-primary/40 bg-accent-primary/10 px-2 py-0.5 text-[10px] font-semibold normal-case tracking-normal text-accent-primary"
+              title={`Active workflow preset: ${activePresetLabel}`}
+            >
+              Active: {activePresetLabel}
+            </span>
+          )}
         </div>
         <div className="flex items-center gap-2 text-[11px]">
           <select
@@ -2032,7 +2788,7 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
             }}
             disabled={agentCliValues.length === 0}
             className="background-bg-surface border border-border-panel rounded px-2 py-1 text-[11px] text-text-secondary disabled:opacity-40"
-            title="Set runtime CLI for every agent node in this graph"
+            title={selectedWorkflowGroup ? `Set runtime CLI for ${selectedWorkflowGroup.name}` : 'Set runtime CLI for every workflow on this canvas'}
           >
             <option value="">{agentCliValues.length === 0 ? 'No agents' : 'Mixed CLI'}</option>
             {SELECTABLE_WORKFLOW_CLIS.map(cli => (
@@ -2048,10 +2804,118 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
               Back
             </button>
           )}
-          <button onClick={runWorkflow} className="px-2.5 py-1 rounded border border-accent-primary text-accent-primary hover:bg-accent-primary/10">
-            <Play size={12} className="inline mr-1" />
-            Run
-          </button>
+          <div className="relative" ref={runMenuRef}>
+            <button onClick={() => setRunMenuOpen(open => !open)} className="px-2.5 py-1 rounded border border-accent-primary text-accent-primary hover:bg-accent-primary/10">
+              <Play size={12} className="inline mr-1" />
+              Run
+              <ChevronDown size={12} className="inline ml-1" />
+            </button>
+            {runMenuOpen && (
+              <div className="absolute right-0 top-full z-50 mt-1 w-80 rounded-lg border border-border-panel bg-bg-panel p-2 shadow-xl">
+                <div className="max-h-64 overflow-y-auto custom-scrollbar">
+                  {runWorkflowModeGroups.map(modeGroup => {
+                    const ModeIcon = modeGroup.icon;
+                    const expanded = expandedRunModeIds.has(modeGroup.id);
+                    const selectedCount = modeGroup.workflows.filter(group => selectedRunWorkflowIds.has(group.id)).length;
+                    const allChecked = selectedCount === modeGroup.workflows.length && modeGroup.workflows.length > 0;
+                    const partiallyChecked = selectedCount > 0 && !allChecked;
+                    return (
+                      <div key={modeGroup.id} className="mb-1 last:mb-0">
+                        <button
+                          type="button"
+                          onClick={() => setExpandedRunModeIds(current => {
+                            const next = new Set(current);
+                            if (next.has(modeGroup.id)) next.delete(modeGroup.id);
+                            else next.add(modeGroup.id);
+                            return next;
+                          })}
+                          className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left hover:bg-bg-surface"
+                        >
+                          <span
+                            role="checkbox"
+                            aria-checked={allChecked}
+                            tabIndex={0}
+                            onClick={event => {
+                              event.stopPropagation();
+                              setSelectedRunWorkflowIds(current => {
+                                const next = new Set(current);
+                                if (allChecked) {
+                                  for (const workflow of modeGroup.workflows) next.delete(workflow.id);
+                                } else {
+                                  for (const workflow of modeGroup.workflows) next.add(workflow.id);
+                                }
+                                return next;
+                              });
+                            }}
+                            onKeyDown={event => {
+                              if (event.key !== 'Enter' && event.key !== ' ') return;
+                              event.preventDefault();
+                              event.currentTarget.click();
+                            }}
+                            className={`flex h-4 w-4 shrink-0 items-center justify-center rounded border ${
+                              allChecked
+                                ? 'border-accent-primary bg-accent-primary text-accent-text'
+                                : partiallyChecked
+                                  ? 'border-accent-primary bg-accent-primary/20 text-accent-primary'
+                                  : 'border-border-panel'
+                            }`}
+                          >
+                            {allChecked && <Check size={11} />}
+                            {partiallyChecked && <span className="h-1.5 w-1.5 rounded-sm bg-accent-primary" />}
+                          </span>
+                          <ModeIcon size={13} className="shrink-0 text-accent-primary" />
+                          <span className="min-w-0 flex-1">
+                            <span className="block truncate text-[11px] font-semibold text-text-secondary">{modeGroup.label}</span>
+                            <span className="block truncate text-[10px] text-text-muted">{selectedCount}/{modeGroup.workflows.length} selected</span>
+                          </span>
+                          <ChevronDown size={13} className={`shrink-0 text-text-muted transition-transform ${expanded ? 'rotate-180' : ''}`} />
+                        </button>
+                        {expanded && (
+                          <div className="ml-6 mt-1 space-y-1 border-l border-border-panel pl-2">
+                            {modeGroup.workflows.map(group => {
+                              const checked = selectedRunWorkflowIds.has(group.id);
+                              return (
+                                <button
+                                  key={group.id}
+                                  type="button"
+                                  onClick={() => setSelectedRunWorkflowIds(current => {
+                                    const next = new Set(current);
+                                    if (next.has(group.id)) next.delete(group.id);
+                                    else next.add(group.id);
+                                    return next;
+                                  })}
+                                  className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left hover:bg-bg-surface"
+                                >
+                                  <span className={`flex h-4 w-4 shrink-0 items-center justify-center rounded border ${checked ? 'border-accent-primary bg-accent-primary text-accent-text' : 'border-border-panel'}`}>
+                                    {checked && <Check size={11} />}
+                                  </span>
+                                  <span className="min-w-0 flex-1">
+                                    <span className="block truncate text-[11px] font-semibold text-text-secondary">{group.name}</span>
+                                    <span className="block truncate text-[10px] text-text-muted">{group.subMode} · {group.agentCount} agents</span>
+                                  </span>
+                                </button>
+                              );
+                            })}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setRunMenuOpen(false);
+                    void runWorkflow();
+                  }}
+                  disabled={allWorkflowGroups.length === 0 || selectedRunWorkflowIds.size === 0}
+                  className="mt-2 w-full rounded border border-accent-primary bg-accent-primary px-2 py-1.5 text-[12px] font-semibold text-accent-text disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  Run selected
+                </button>
+              </div>
+            )}
+          </div>
           <button onClick={validateCurrentGraph} className="px-2.5 py-1 rounded border border-border-panel text-accent-primary hover:background-bg-panel">
             <ScanSearch size={12} className="inline mr-1" />
             Validate
@@ -2085,16 +2949,36 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
               {index < state.editor.treePath.length - 1 ? ' / ' : ''}
             </span>
           ))}
+          {workflowGroups.length > 1 && (
+            <div className="ml-3 flex max-w-[52vw] items-center gap-1 overflow-x-auto">
+              {workflowGroups.map(group => {
+                const active = selectedWorkflowGroup?.id === group.id;
+                return (
+                  <button
+                    key={group.id}
+                    type="button"
+                    onClick={() => applyOperator({ type: 'set_selection', nodeIds: [group.taskNode.id], activeNodeId: group.taskNode.id })}
+                    className={`flex h-6 shrink-0 items-center gap-1 rounded border px-2 text-[10px] ${
+                      active
+                        ? 'border-accent-primary bg-accent-primary/15 text-text-primary'
+                        : 'border-border-panel bg-bg-panel text-text-muted hover:border-accent-primary/50 hover:text-text-primary'
+                    }`}
+                    title={`${group.name} · ${group.subMode}`}
+                  >
+                    <Workflow size={11} className="text-accent-primary" />
+                    <span className="max-w-28 truncate">{group.subMode}</span>
+                    <span className="text-text-muted/70">{group.agentCount}</span>
+                  </button>
+                );
+              })}
+            </div>
+          )}
         </div>
         <div className={validationTone === 'error' ? 'text-red-300' : validationTone === 'ok' ? 'text-emerald-300' : 'text-text-muted'}>{validationMessage}</div>
       </div>
 
       <div ref={canvasRef} className="relative flex-1 overflow-hidden" onMouseDown={onCanvasMouseDown} onContextMenu={onCanvasContextMenu}>
-        {canvasEffectsEnabled && (
-          graphUsesUiBackground
-            ? <UiGraphShaderBackground />
-            : <DotTunnelBackground />
-        )}
+        {canvasEffectsEnabled && workflowGraphMode === 'standard' && <DotTunnelBackground />}
         <div
           className="absolute inset-0 opacity-60"
           style={{
@@ -2110,7 +2994,52 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
             className="absolute pointer-events-none overflow-visible"
             style={{ left: -LINK_CANVAS_HALF, top: -LINK_CANVAS_HALF, width: LINK_CANVAS_SIZE, height: LINK_CANVAS_SIZE }}
           >
+            {dragAlignment && (
+              <>
+                <rect
+                  x={toLinkCanvas({ x: dragAlignment.dropRect.x, y: dragAlignment.dropRect.y }).x}
+                  y={toLinkCanvas({ x: dragAlignment.dropRect.x, y: dragAlignment.dropRect.y }).y}
+                  width={dragAlignment.dropRect.width}
+                  height={dragAlignment.dropRect.height}
+                  rx={10}
+                  stroke="var(--accent-primary)"
+                  strokeWidth={1.5}
+                  strokeDasharray="6 5"
+                  fill="color-mix(in srgb, var(--color-accent-primary) 9%, transparent)"
+                />
+                {dragAlignment.guides.map((guide, index) => (
+                  guide.orientation === 'vertical'
+                    ? (
+                      <line
+                        key={`${guide.orientation}-${index}`}
+                        x1={toLinkCanvas({ x: guide.position, y: 0 }).x}
+                        y1={toLinkCanvas({ x: 0, y: guide.from }).y}
+                        x2={toLinkCanvas({ x: guide.position, y: 0 }).x}
+                        y2={toLinkCanvas({ x: 0, y: guide.to }).y}
+                        stroke="var(--accent-primary)"
+                        strokeWidth={1.25}
+                        strokeDasharray="5 5"
+                      />
+                    )
+                    : (
+                      <line
+                        key={`${guide.orientation}-${index}`}
+                        x1={toLinkCanvas({ x: guide.from, y: 0 }).x}
+                        y1={toLinkCanvas({ x: 0, y: guide.position }).y}
+                        x2={toLinkCanvas({ x: guide.to, y: 0 }).x}
+                        y2={toLinkCanvas({ x: 0, y: guide.position }).y}
+                        stroke="var(--accent-primary)"
+                        strokeWidth={1.25}
+                        strokeDasharray="5 5"
+                      />
+                    )
+                ))}
+              </>
+            )}
             {Object.values(activeTree.links).map(link => {
+              if (!visibleNodeIds.has(link.from.nodeId) && !visibleNodeIds.has(link.to.nodeId)) {
+                return null;
+              }
               const fromNode = materializedById.get(link.from.nodeId);
               const toNode = materializedById.get(link.to.nodeId);
               if (!fromNode || !toNode) {
@@ -2151,15 +3080,14 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
           </svg>
 
           {(() => {
-            const connectedInputKeys = new Set(Object.values(activeTree.links).map(link => `${link.to.nodeId}:${link.to.socketId}`));
-            return materializedNodes.map(materializedNode => {
+            return visibleMaterializedNodes.map(materializedNode => {
             const rect = worldRect(materializedNode);
             const isSelected = selectedNodeIds.has(materializedNode.node.id);
             const isFrame = materializedNode.node.type === 'workflow.frame';
             const runtimeAgent = missionAgentByNodeId.get(materializedNode.node.id);
             const runtimeBinding = nodeRuntimeBindings[materializedNode.node.id];
             
-            const snapshotNode = missionSnapshot?.nodes.find(n => n.nodeId === materializedNode.node.id);
+            const snapshotNode = snapshotNodeById.get(materializedNode.node.id);
             
             const runtimeStatus = String(
               snapshotNode?.status ??
@@ -2183,7 +3111,7 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
             
             const attemptCount = snapshotNode?.attempt ?? Number(materializedNode.node.properties.attempt ?? 0);
             
-            const terminal = openTerminals.find(entry => entry.id === terminalId);
+            const terminal = terminalById.get(terminalId);
             const runtimeCli = String(
               materializedNode.node.properties.cli ??
               terminal?.cli ??
@@ -2193,8 +3121,7 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
             ).trim();
             const runtimeSessionId = String(runtimeAgent?.runtimeSessionId ?? runtimeBinding?.runtimeSessionId ?? '').trim();
             const artifactHints = artifactHintsByNodeId.get(materializedNode.node.id) ?? [];
-            const nodeEvents = workflowEvents.filter(e => e.nodeId === materializedNode.node.id);
-            const latestNodeEvent = nodeEvents[0];
+            const latestNodeEvent = latestEventByNodeId.get(materializedNode.node.id);
             const isActiveAgent = materializedNode.node.type === 'workflow.agent' && isWorkflowStatusActive(runtimeStatus);
 
             return (
@@ -2287,7 +3214,7 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
                       <button
                         key={socket.id}
                         className={`absolute left-0 w-4 h-4 -translate-x-1/2 rounded-full border border-accent-primary transition-all duration-75 ${isFilled ? 'bg-accent-primary' : 'background-bg-app'}`}
-                        style={{ top: 12 + index * 24, ...(isSnapTarget ? { boxShadow: '0 0 4px var(--accent-primary), 0 0 10px var(--accent-primary), 0 0 22px var(--accent-primary)' } : {}) }}
+                        style={{ top: SOCKET_TOP_OFFSET + index * SOCKET_ROW_GAP, ...(isSnapTarget ? { boxShadow: '0 0 4px var(--accent-primary), 0 0 10px var(--accent-primary), 0 0 22px var(--accent-primary)' } : {}) }}
                         onMouseEnter={() => { if (interaction.kind !== 'dragging_link') setHoveredInput({ nodeId: materializedNode.node.id, socketId: socket.id }); }}
                         onMouseLeave={() => { if (interaction.kind !== 'dragging_link') setHoveredInput(current => (current?.nodeId === materializedNode.node.id && current?.socketId === socket.id ? null : current)); }}
                         title={`${socket.name} (${socket.dataType})`}
@@ -2295,12 +3222,18 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
                     );
                   })}
                   {materializedNode.outputs.map((socket, index) => {
-                    const isConnectedOutput = Object.values(activeTree.links).some(link => link.from.nodeId === materializedNode.node.id && link.from.socketId === socket.id);
+                    const isConnectedOutput = connectedOutputKeys.has(`${materializedNode.node.id}:${socket.id}`);
+                    const isHiddenFailureOutput =
+                      socket.id === 'failure' &&
+                      !isConnectedOutput &&
+                      !isSelected &&
+                      interaction.kind !== 'dragging_link';
+                    if (isHiddenFailureOutput) return null;
                     return (
                       <button
                         key={socket.id}
                         className={`absolute right-0 w-4 h-4 translate-x-1/2 rounded-full border border-accent-primary ${isConnectedOutput ? 'bg-accent-primary' : 'background-bg-app'}`}
-                        style={{ top: 12 + index * 24 }}
+                        style={{ top: SOCKET_TOP_OFFSET + index * SOCKET_ROW_GAP }}
                         onMouseDown={event => beginLinkDrag(event, materializedNode.node.id, socket.id)}
                         title={`${socket.name} (${socket.dataType})`}
                       />
@@ -2308,9 +3241,36 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
                   })}
 
                   <div className="grid grid-cols-[1fr_auto_1fr] gap-3 text-[11px] text-text-muted mb-4">
-                    <div className="space-y-2">{materializedNode.inputs.map(socket => <div key={socket.id}>{socket.name}</div>)}</div>
+                    <div className={materializedNode.node.type === 'workflow.task' ? 'flex min-w-0 items-center justify-start gap-2' : 'space-y-0'}>
+                      {materializedNode.node.type === 'workflow.task' && (() => {
+                        const taskDir = String(materializedNode.node.properties.workspaceDir ?? workspaceDir ?? '').trim();
+                        return (
+                          <button
+                            type="button"
+                            onClick={() => void selectTaskWorkspaceDir(materializedNode.node.id, materializedNode.node.properties.workspaceDir)}
+                            title={taskDir || 'Select workspace directory'}
+                            className="h-7 max-w-[180px] min-w-[116px] background-bg-surface border border-border-panel rounded-md px-2 text-[11px] text-text-secondary hover:text-text-primary hover:border-accent-primary/40 flex items-center gap-1.5"
+                          >
+                            <FolderOpen size={12} className="shrink-0 text-accent-primary" />
+                            <span className="truncate">{folderLabel(taskDir)}</span>
+                          </button>
+                        );
+                      })()}
+                      {materializedNode.inputs.map(socket => <div key={socket.id} className="h-6 flex items-center">{socket.name}</div>)}
+                    </div>
                     <div />
-                    <div className="space-y-2 text-right">{materializedNode.outputs.map(socket => <div key={socket.id}>{socket.name}</div>)}</div>
+                    <div className={materializedNode.node.type === 'workflow.task' ? 'flex min-w-0 items-center justify-end text-right' : 'space-y-0 text-right'}>
+                      {materializedNode.outputs.map(socket => {
+                        const isConnectedOutput = connectedOutputKeys.has(`${materializedNode.node.id}:${socket.id}`);
+                        const isHiddenFailureOutput =
+                          socket.id === 'failure' &&
+                          !isConnectedOutput &&
+                          !isSelected &&
+                          interaction.kind !== 'dragging_link';
+                        if (isHiddenFailureOutput) return null;
+                        return <div key={socket.id} className="h-6 flex items-center justify-end">{socket.name}</div>;
+                      })}
+                    </div>
                   </div>
 
                   {runtimeReason && (
@@ -2321,38 +3281,92 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
 
                   {materializedNode.node.type === 'workflow.task' && (
                     <div className="space-y-2">
-                      <textarea
-                        rows={5}
-                        value={String(materializedNode.node.properties.prompt ?? '')}
-                        onChange={event => applyOperator({ type: 'set_node_property', nodeId: materializedNode.node.id, key: 'prompt', value: event.target.value })}
-                        onWheel={event => event.stopPropagation()}
-                        placeholder="Task prompt"
-                        className="w-full background-bg-surface border border-border-panel rounded-lg px-2 py-2 text-[11px] text-text-primary resize-none"
-                      />
-                      <div className="grid grid-cols-2 gap-2">
-                        <select
-                          value={String(materializedNode.node.properties.mode ?? 'build')}
-                          onChange={event => applyOperator({ type: 'set_node_property', nodeId: materializedNode.node.id, key: 'mode', value: event.target.value })}
-                          className="background-bg-surface border border-border-panel rounded-lg px-2 py-1.5 text-[11px]"
-                        >
-                          <option value="build">Build</option>
-                          <option value="edit">Edit</option>
-                        </select>
-                        {(() => {
-                          const taskDir = String(materializedNode.node.properties.workspaceDir ?? workspaceDir ?? '').trim();
-                          return (
-                            <button
-                              type="button"
-                              onClick={() => void selectTaskWorkspaceDir(materializedNode.node.id, materializedNode.node.properties.workspaceDir)}
-                              title={taskDir || 'Select workspace directory'}
-                              className="min-w-0 background-bg-surface border border-border-panel rounded-lg px-2 py-1.5 text-[11px] text-text-secondary hover:text-text-primary hover:border-accent-primary/40 flex items-center gap-1.5"
-                            >
-                              <FolderOpen size={12} className="shrink-0 text-accent-primary" />
-                              <span className="truncate">{folderLabel(taskDir)}</span>
-                            </button>
-                          );
-                        })()}
-                      </div>
+                      {(() => {
+                        const attachments = normalizeTaskAttachments(materializedNode.node.properties.attachments);
+                        return (
+                          <>
+                            <div className="background-bg-surface border border-border-panel rounded-lg overflow-hidden">
+                              <textarea
+                                rows={10}
+                                value={String(materializedNode.node.properties.prompt ?? '')}
+                                onChange={event => applyOperator({ type: 'set_node_property', nodeId: materializedNode.node.id, key: 'prompt', value: event.target.value })}
+                                onWheel={event => event.stopPropagation()}
+                                onPaste={event => {
+                                  const files = Array.from(event.clipboardData.files ?? []);
+                                  const pathAttachments = clipboardPathAttachments(event.clipboardData);
+                                  const fileAttachments = files.map(file => {
+                                    const path = String((file as File & { path?: string }).path ?? '').trim();
+                                    const name = path ? fileLabel(path) : file.name || 'Clipboard item';
+                                    return {
+                                      id: `att-${generateId()}`,
+                                      kind: attachmentKindForName(name, file.type),
+                                      name,
+                                      path: path || undefined,
+                                      mime: file.type || undefined,
+                                      source: 'clipboard' as const,
+                                    };
+                                  });
+                                  const attachmentsToAdd = [...pathAttachments, ...fileAttachments];
+                                  if (attachmentsToAdd.length === 0) return;
+                                  event.preventDefault();
+                                  setTaskAttachments(materializedNode.node.id, materializedNode.node.properties.attachments, attachmentsToAdd);
+                                }}
+                                placeholder="Task prompt"
+                                data-canvas-wheel-lock="true"
+                                className="w-full min-h-[252px] background-bg-surface px-3 py-3 text-[12px] leading-5 text-text-primary resize-none outline-none overflow-y-auto overscroll-contain"
+                              />
+                              <div className="border-t border-border-panel px-2 py-1.5">
+                                <div className="flex flex-wrap items-center gap-1.5">
+                                  <button
+                                    type="button"
+                                    onClick={() => void attachTaskFiles(materializedNode.node.id, materializedNode.node.properties.attachments)}
+                                    title="Attach files"
+                                    className="h-6 w-6 rounded border border-border-panel text-text-secondary hover:text-text-primary hover:border-accent-primary/40 flex items-center justify-center"
+                                    aria-label="Attach files"
+                                  >
+                                    <Paperclip size={12} />
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => void pasteTaskClipboardImage(materializedNode.node.id, materializedNode.node.properties.attachments)}
+                                    title="Paste clipboard image"
+                                    className="h-6 w-6 rounded border border-border-panel text-text-secondary hover:text-text-primary hover:border-accent-primary/40 flex items-center justify-center"
+                                    aria-label="Paste clipboard image"
+                                  >
+                                    <ClipboardPaste size={12} />
+                                  </button>
+                                  {attachments.length > 0 && (
+                                    <>
+                                    {attachments.map(attachment => {
+                                      const AttachmentIcon = attachment.kind === 'image' ? ImageIcon : FileText;
+                                      return (
+                                        <span
+                                          key={attachment.id}
+                                          title={attachment.path ?? attachment.name}
+                                          className="max-w-full min-w-0 rounded border border-border-panel bg-black/10 px-1.5 py-1 text-[10px] text-text-secondary flex items-center gap-1.5"
+                                        >
+                                          <AttachmentIcon size={11} className="shrink-0 text-accent-primary" />
+                                          <span className="truncate max-w-[210px]">{attachment.name}</span>
+                                          <button
+                                            type="button"
+                                            onClick={() => removeTaskAttachment(materializedNode.node.id, materializedNode.node.properties.attachments, attachment.id)}
+                                            className="shrink-0 text-text-muted hover:text-red-300"
+                                            title="Remove attachment"
+                                            aria-label={`Remove ${attachment.name}`}
+                                          >
+                                            <X size={10} />
+                                          </button>
+                                        </span>
+                                      );
+                                    })}
+                                    </>
+                                  )}
+                                </div>
+                              </div>
+                            </div>
+                          </>
+                        );
+                      })()}
                       {graphUsesUiBackground && (
                       <div className="flex gap-1 rounded-lg border border-border-panel background-bg-surface p-1">
                         {UI_FRONTEND_WORKFLOW_MODES.map(mode => {

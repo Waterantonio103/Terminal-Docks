@@ -2543,6 +2543,11 @@ mod tests {
                 prompt: "Ship it".to_string(),
                 mode: WorkflowMode::Build,
                 workspace_dir: Some("C:/workspace".to_string()),
+                frontend_mode: None,
+                frontend_category: None,
+                spec_profile: None,
+                final_readme_enabled: None,
+                final_readme_owner_node_id: None,
             },
             metadata: CompiledMissionMetadata {
                 compiled_at: 1,
@@ -2563,6 +2568,11 @@ mod tests {
                 authoring_mode: Some(crate::workflow::WorkflowAuthoringMode::Preset),
                 preset_id: Some("parallel_delivery".to_string()),
                 run_version: Some(1),
+                frontend_mode: None,
+                frontend_category: None,
+                spec_profile: None,
+                final_readme_enabled: None,
+                final_readme_owner_node_id: None,
             },
             nodes: vec![
                 CompiledMissionNode {
@@ -2652,6 +2662,11 @@ mod tests {
                 prompt: "Route by outcome".to_string(),
                 mode: WorkflowMode::Build,
                 workspace_dir: None,
+                frontend_mode: None,
+                frontend_category: None,
+                spec_profile: None,
+                final_readme_enabled: None,
+                final_readme_owner_node_id: None,
             },
             metadata: CompiledMissionMetadata {
                 compiled_at: 1,
@@ -2664,6 +2679,11 @@ mod tests {
                 authoring_mode: Some(crate::workflow::WorkflowAuthoringMode::Graph),
                 preset_id: None,
                 run_version: Some(1),
+                frontend_mode: None,
+                frontend_category: None,
+                spec_profile: None,
+                final_readme_enabled: None,
+                final_readme_owner_node_id: None,
             },
             nodes: vec![
                 CompiledMissionNode {

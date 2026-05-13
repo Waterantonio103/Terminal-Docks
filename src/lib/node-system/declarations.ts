@@ -132,11 +132,12 @@ export function createWorkflowNodeRegistry() {
     type: 'workflow.task',
     label: 'Task',
     category: 'Input',
-    width: 280,
+    width: 420,
     createProperties: () => ({
       prompt: '',
       mode: 'build',
       workspaceDir: '',
+      attachments: [],
       authoringMode: 'graph',
       presetId: '',
       runVersion: 1,

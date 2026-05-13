@@ -31,4 +31,4 @@ tauri-plugin-dialog = "2"
 ureq = { version = "2", features = ["json"] }
 uuid = { version = "1.23.1", features = ["v4"] }
 notify = "6"
-
+base64 = "0.22"

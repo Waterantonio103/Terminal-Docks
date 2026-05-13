@@ -278,7 +278,7 @@ export const WORKFLOW_PRESETS: PresetDefinition[] = [
   },
   {
     id: 'app_site_expanded',
-    name: 'App Site Expanded',
+    name: 'Expanded App/Site',
     description: 'Full frontend delivery with product, design, architecture, parallel builders, QA, accessibility, and polish review.',
     mode: 'build',
     subMode: 'App / Site',
@@ -870,8 +870,8 @@ function getPresetExecutionLayers(preset: PresetDefinition): string[][] {
 function getPresetNodePositions(preset: PresetDefinition): Map<string, { x: number; y: number }> {
   const layers = getPresetExecutionLayers(preset);
   const baseY = 360;
-  const agentStartX = 440;
-  const layerSpacingX = 460;
+  const agentStartX = 1120;
+  const layerSpacingX = 560;
   const branchSpacingY = 520;
   const positions = new Map<string, { x: number; y: number }>();
 
@@ -938,7 +938,7 @@ export function buildPresetFlowGraph(options: {
       return {
         id: presetNode.id,
         type: 'agent',
-        position: agentPositions.get(presetNode.id) ?? { x: 440 + index * 360, y: 360 },
+        position: agentPositions.get(presetNode.id) ?? { x: 1120 + index * 560, y: 360 },
         data: {
           roleId: presetNode.roleId,
           instructionOverride: instructionOverrides[presetNode.roleId] ?? '',

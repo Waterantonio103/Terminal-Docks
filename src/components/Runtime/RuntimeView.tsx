@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { DotTunnelBackground } from '../shared/DotTunnelBackground';
-import { Bot, Cpu, FileCode2, Focus, Maximize2, RefreshCw, ShieldAlert, Square } from 'lucide-react';
+import { Bot, Check, ChevronDown, Cpu, FileCode2, Focus, Maximize2, RefreshCw, ShieldAlert, Square, Workflow } from 'lucide-react';
 import { TerminalPane } from '../Terminal/TerminalPane';
 import { useWorkspaceStore, type CompiledMission, type Pane, type WorkflowAgentCli, type WorkflowEdgeCondition } from '../../store/workspace';
 import { isWorkflowStatusActive, isWorkflowStatusLoading, workflowStatusLabel, workflowStatusTone } from '../../lib/workflowStatus';
@@ -273,6 +273,7 @@ export function RuntimeView() {
   const addPane = useWorkspaceStore(state => state.addPane);
   const globalGraph = useWorkspaceStore(state => state.globalGraph ?? EMPTY_RUNTIME_GRAPH);
   const tabs = useWorkspaceStore(state => state.tabs ?? []);
+  const launchedWorkflows = useWorkspaceStore(state => state.launchedWorkflows ?? []);
 
   const sessions = useRuntimeSessions();
   const { 
@@ -288,9 +289,12 @@ export function RuntimeView() {
   const [pan, setPan] = useState<Point>(() => ({ ..._sessionPan }));
   const [zoom, setZoom] = useState(() => _sessionZoom);
   const [showRuntimeGraph, setShowRuntimeGraph] = useState(false);
+  const [workflowMenuOpen, setWorkflowMenuOpen] = useState(false);
+  const [selectedMissionId, setSelectedMissionId] = useState<string | 'all'>('all');
   const [interaction, setInteraction] = useState<CanvasInteraction>({ kind: 'idle' });
   const [nodeLayouts, setNodeLayouts] = useState<Record<string, RuntimeNodeLayout>>(() => ({ ..._sessionLayouts }));
   const canvasRef = useRef<HTMLDivElement | null>(null);
+  const workflowMenuRef = useRef<HTMLDivElement | null>(null);
   const autoFitSignatureRef = useRef<string>('');
 
   useEffect(() => {
@@ -299,6 +303,17 @@ export function RuntimeView() {
       runtimeObserver.stop();
     };
   }, []);
+
+  useEffect(() => {
+    if (!workflowMenuOpen) return;
+    const handler = (event: MouseEvent) => {
+      if (workflowMenuRef.current && !workflowMenuRef.current.contains(event.target as Node)) {
+        setWorkflowMenuOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [workflowMenuOpen]);
 
   const persistPan = useCallback((next: Point) => {
     _sessionPan.x = next.x;
@@ -489,14 +504,52 @@ export function RuntimeView() {
     };
   }, [interaction, zoom, persistPan, persistLayouts]);
 
+  const runtimeWorkflowOptions = useMemo(() => {
+    const activeMissionIds = new Set(sessions.map(session => session.missionId).filter(Boolean));
+    const known = launchedWorkflows
+      .filter(workflow => activeMissionIds.has(workflow.missionId))
+      .sort((left, right) => {
+        const subMode = left.subMode.localeCompare(right.subMode);
+        if (subMode !== 0) return subMode;
+        return left.name.localeCompare(right.name);
+      });
+    const knownIds = new Set(known.map(workflow => workflow.missionId));
+    const unknown = [...activeMissionIds]
+      .filter(missionId => !knownIds.has(missionId))
+      .map(missionId => ({
+        missionId,
+        workflowId: missionId,
+        name: `Workflow ${missionId.slice(0, 8)}`,
+        subMode: 'Custom',
+        agentCount: sessions.filter(session => session.missionId === missionId).length,
+        workspaceDir: null,
+        launchedAt: 0,
+      }));
+    return [...known, ...unknown];
+  }, [launchedWorkflows, sessions]);
+
+  useEffect(() => {
+    if (selectedMissionId === 'all') return;
+    if (!runtimeWorkflowOptions.some(workflow => workflow.missionId === selectedMissionId)) {
+      setSelectedMissionId('all');
+    }
+  }, [runtimeWorkflowOptions, selectedMissionId]);
+
+  const visibleSessions = useMemo(
+    () => selectedMissionId === 'all'
+      ? sessions
+      : sessions.filter(session => session.missionId === selectedMissionId),
+    [selectedMissionId, sessions],
+  );
+
   const runtimeNodes = useMemo(
-    () => sessions.map((session, index) => ({ key: layoutKeyFor(session, index), session })),
-    [sessions],
+    () => visibleSessions.map((session, index) => ({ key: layoutKeyFor(session, index), session })),
+    [visibleSessions],
   );
   const focusedSessions = useMemo(() => {
-    const active = sessions.filter(session => isWorkflowStatusActive(session.status ?? 'idle'));
-    return active.length > 0 ? active : sessions;
-  }, [sessions]);
+    const active = visibleSessions.filter(session => isWorkflowStatusActive(session.status ?? 'idle'));
+    return active.length > 0 ? active : visibleSessions;
+  }, [visibleSessions]);
   const focusedGridClass = focusedSessions.length <= 1
     ? 'grid-cols-1 grid-rows-1'
     : focusedSessions.length === 2
@@ -506,7 +559,7 @@ export function RuntimeView() {
   const allPanes = useMemo(() => tabs.flatMap(tab => tab.panes), [tabs]);
 
   const missionGraph = useMemo(() => {
-    const missionIds = new Set(sessions.map(session => session.missionId).filter(Boolean));
+    const missionIds = new Set(visibleSessions.map(session => session.missionId).filter(Boolean));
     const missionPanes = allPanes
       .map((pane: Pane) => pane.data?.mission as CompiledMission | undefined)
       .filter((mission): mission is CompiledMission => Boolean(mission && missionIds.has(mission.missionId)));
@@ -515,7 +568,7 @@ export function RuntimeView() {
       edges: latestMission?.edges ?? globalGraph.edges,
       executionLayers: latestMission?.metadata?.executionLayers ?? [],
     };
-  }, [allPanes, globalGraph.edges, sessions]);
+  }, [allPanes, globalGraph.edges, visibleSessions]);
 
   const runtimeEdges = useMemo<RuntimeEdge[]>(
     () => buildVisibleRuntimeEdges(runtimeNodes, missionGraph.edges),
@@ -604,9 +657,59 @@ export function RuntimeView() {
           <div className="text-lg font-semibold text-text-primary">Runtime Execution</div>
         </div>
         <div className="flex items-center gap-3">
+          <div className="relative" ref={workflowMenuRef}>
+            <button
+              type="button"
+              onClick={() => setWorkflowMenuOpen(open => !open)}
+              className="flex items-center gap-1 rounded border border-border-panel px-2 py-1 text-[11px] text-text-muted hover:bg-bg-surface hover:text-text-primary"
+            >
+              <Workflow size={12} />
+              <span className="max-w-36 truncate">
+                {selectedMissionId === 'all'
+                  ? 'All workflows'
+                  : runtimeWorkflowOptions.find(workflow => workflow.missionId === selectedMissionId)?.name ?? 'Workflow'}
+              </span>
+              <ChevronDown size={12} />
+            </button>
+            {workflowMenuOpen && (
+              <div className="absolute right-0 top-full z-50 mt-1 w-80 rounded-lg border border-border-panel bg-bg-panel p-2 shadow-xl">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSelectedMissionId('all');
+                    setWorkflowMenuOpen(false);
+                  }}
+                  className="mb-1 flex w-full items-center justify-between rounded px-2 py-1.5 text-left text-[11px] text-text-secondary hover:bg-bg-surface"
+                >
+                  <span>All workflows</span>
+                  {selectedMissionId === 'all' && <Check size={13} className="text-accent-primary" />}
+                </button>
+                <div className="max-h-72 overflow-y-auto custom-scrollbar">
+                  {runtimeWorkflowOptions.map(workflow => (
+                    <button
+                      key={workflow.missionId}
+                      type="button"
+                      onClick={() => {
+                        setSelectedMissionId(workflow.missionId);
+                        setWorkflowMenuOpen(false);
+                      }}
+                      className="flex w-full items-center gap-2 rounded px-2 py-2 text-left hover:bg-bg-surface"
+                    >
+                      <Workflow size={13} className="shrink-0 text-accent-primary" />
+                      <span className="min-w-0 flex-1">
+                        <span className="block truncate text-[11px] font-semibold text-text-secondary">{workflow.name}</span>
+                        <span className="block truncate text-[10px] text-text-muted">{workflow.subMode} · {workflow.agentCount} agents</span>
+                      </span>
+                      {selectedMissionId === workflow.missionId && <Check size={13} className="shrink-0 text-accent-primary" />}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
           <div className="text-[11px] text-text-muted">
             {showRuntimeGraph
-              ? `${sessions.length} runtime node${sessions.length === 1 ? '' : 's'} · ${runtimeEdges.length} edge${runtimeEdges.length === 1 ? '' : 's'}`
+              ? `${visibleSessions.length} runtime node${visibleSessions.length === 1 ? '' : 's'} · ${runtimeEdges.length} edge${runtimeEdges.length === 1 ? '' : 's'}`
               : `${focusedSessions.length} focused runtime${focusedSessions.length === 1 ? '' : 's'}`}
           </div>
           <button
