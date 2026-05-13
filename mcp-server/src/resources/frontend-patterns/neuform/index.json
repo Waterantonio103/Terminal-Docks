@@ -1,0 +1,3521 @@
+{
+  "version": "2026-05-13",
+  "provider": "neuform",
+  "source": "https://neuform.ai/skills",
+  "purpose": "Optional frontend pattern library for visual effects, layout systems, motion treatments, surface styles, and future theme-picker Effects options.",
+  "usagePolicy": {
+    "recommendationStrength": "heavy_recommend_optional",
+    "mandatory": false,
+    "maxPatternsPerTask": 3,
+    "sourceOfTruth": "Accepted PRD.md, DESIGN.md, structure.md, screenshots, and explicit user instructions override these patterns.",
+    "futurePickerSurface": "Effects"
+  },
+  "entries": [
+    {
+      "id": "neuform_css-border-gradient",
+      "title": "Border Gradients",
+      "provider": "neuform",
+      "path": "effects/border-gradients.md",
+      "patternKind": "surface_style",
+      "pickerGroup": "Surface and Material Effects",
+      "intensity": "restrained",
+      "technicalComplexity": "low_medium",
+      "recommendationStrength": "heavy_recommend_optional",
+      "themePickerReady": true,
+      "roles": [
+        "frontend_designer",
+        "frontend_builder",
+        "visual_polish_reviewer"
+      ],
+      "categories": [
+        "marketing_site",
+        "consumer_mobile_app"
+      ],
+      "appliesTo": [
+        "DESIGN.md",
+        "implementation",
+        "visual_review"
+      ],
+      "tags": [
+        "style"
+      ],
+      "keywords": [
+        "style",
+        "surface_style",
+        "border",
+        "gradients"
+      ],
+      "source": {
+        "name": "Neuform prompt skill catalog",
+        "url": "https://neuform.ai/skill/css-border-gradient",
+        "originId": "css-border-gradient",
+        "license": "unknown-public-web-catalog"
+      },
+      "effectPicker": {
+        "group": "Surface and Material Effects",
+        "intensity": "restrained",
+        "technicalComplexity": "low_medium",
+        "requiresVisualQA": true
+      }
+    },
+    {
+      "id": "neuform_masked-reveal",
+      "title": "Masked Reveal",
+      "provider": "neuform",
+      "path": "effects/masked-reveal.md",
+      "patternKind": "motion_effect",
+      "pickerGroup": "Motion Effects",
+      "intensity": "balanced",
+      "technicalComplexity": "medium_high",
+      "recommendationStrength": "heavy_recommend_optional",
+      "themePickerReady": true,
+      "roles": [
+        "frontend_designer",
+        "frontend_builder",
+        "visual_polish_reviewer"
+      ],
+      "categories": [
+        "marketing_site"
+      ],
+      "appliesTo": [
+        "DESIGN.md",
+        "implementation",
+        "visual_review"
+      ],
+      "tags": [
+        "animation"
+      ],
+      "keywords": [
+        "animation",
+        "motion_effect",
+        "masked",
+        "reveal"
+      ],
+      "source": {
+        "name": "Neuform prompt skill catalog",
+        "url": "https://neuform.ai/skill/masked-reveal",
+        "originId": "masked-reveal",
+        "license": "unknown-public-web-catalog"
+      },
+      "effectPicker": {
+        "group": "Motion Effects",
+        "intensity": "balanced",
+        "technicalComplexity": "medium_high",
+        "requiresVisualQA": true
+      }
+    },
+    {
+      "id": "neuform_aura-asset-images",
+      "title": "Aura Asset Images",
+      "provider": "neuform",
+      "path": "effects/aura-asset-images.md",
+      "patternKind": "layout_system",
+      "pickerGroup": "Layout Systems",
+      "intensity": "expressive",
+      "technicalComplexity": "medium_high",
+      "recommendationStrength": "heavy_recommend_optional",
+      "themePickerReady": true,
+      "roles": [
+        "frontend_designer",
+        "frontend_builder",
+        "visual_polish_reviewer"
+      ],
+      "categories": [
+        "marketing_site"
+      ],
+      "appliesTo": [
+        "DESIGN.md",
+        "implementation",
+        "visual_review"
+      ],
+      "tags": [
+        "asset"
+      ],
+      "keywords": [
+        "asset",
+        "layout_system",
+        "aura",
+        "images"
+      ],
+      "source": {
+        "name": "Neuform prompt skill catalog",
+        "url": "https://neuform.ai/skill/aura-asset-images",
+        "originId": "aura-asset-images",
+        "license": "unknown-public-web-catalog"
+      },
+      "effectPicker": {
+        "group": "Layout Systems",
+        "intensity": "expressive",
+        "technicalComplexity": "medium_high",
+        "requiresVisualQA": true
+      }
+    },
+    {
+      "id": "neuform_framed-grid-layout",
+      "title": "Framed Grid Layout",
+      "provider": "neuform",
+      "path": "effects/framed-grid-layout.md",
+      "patternKind": "layout_system",
+      "pickerGroup": "Layout Systems",
+      "intensity": "restrained",
+      "technicalComplexity": "low_medium",
+      "recommendationStrength": "heavy_recommend_optional",
+      "themePickerReady": true,
+      "roles": [
+        "frontend_designer",
+        "frontend_builder",
+        "visual_polish_reviewer"
+      ],
+      "categories": [
+        "marketing_site",
+        "saas_dashboard",
+        "admin_internal_tool"
+      ],
+      "appliesTo": [
+        "DESIGN.md",
+        "implementation",
+        "visual_review"
+      ],
+      "tags": [
+        "layout",
+        "design system"
+      ],
+      "keywords": [
+        "layout",
+        "design system",
+        "layout_system",
+        "framed",
+        "grid"
+      ],
+      "source": {
+        "name": "Neuform prompt skill catalog",
+        "url": "https://neuform.ai/skill/framed-grid-layout",
+        "originId": "framed-grid-layout",
+        "license": "unknown-public-web-catalog"
+      },
+      "effectPicker": {
+        "group": "Layout Systems",
+        "intensity": "restrained",
+        "technicalComplexity": "low_medium",
+        "requiresVisualQA": true
+      }
+    },
+    {
+      "id": "neuform_container-lines",
+      "title": "Container Lines",
+      "provider": "neuform",
+      "path": "effects/container-lines.md",
+      "patternKind": "layout_system",
+      "pickerGroup": "Layout Systems",
+      "intensity": "balanced",
+      "technicalComplexity": "low_medium",
+      "recommendationStrength": "heavy_recommend_optional",
+      "themePickerReady": true,
+      "roles": [
+        "frontend_designer",
+        "frontend_builder",
+        "visual_polish_reviewer"
+      ],
+      "categories": [
+        "marketing_site",
+        "saas_dashboard",
+        "admin_internal_tool"
+      ],
+      "appliesTo": [
+        "DESIGN.md",
+        "implementation",
+        "visual_review"
+      ],
+      "tags": [
+        "layout",
+        "style"
+      ],
+      "keywords": [
+        "layout",
+        "style",
+        "layout_system",
+        "container",
+        "lines"
+      ],
+      "source": {
+        "name": "Neuform prompt skill catalog",
+        "url": "https://neuform.ai/skill/container-lines",
+        "originId": "container-lines",
+        "license": "unknown-public-web-catalog"
+      },
+      "effectPicker": {
+        "group": "Layout Systems",
+        "intensity": "balanced",
+        "technicalComplexity": "low_medium",
+        "requiresVisualQA": true
+      }
+    },
+    {
+      "id": "neuform_gsap",
+      "title": "GSAP Motion",
+      "provider": "neuform",
+      "path": "effects/gsap-motion.md",
+      "patternKind": "motion_effect",
+      "pickerGroup": "Motion Effects",
+      "intensity": "balanced",
+      "technicalComplexity": "medium_high",
+      "recommendationStrength": "heavy_recommend_optional",
+      "themePickerReady": true,
+      "roles": [
+        "frontend_designer",
+        "frontend_builder",
+        "visual_polish_reviewer"
+      ],
+      "categories": [
+        "marketing_site"
+      ],
+      "appliesTo": [
+        "DESIGN.md",
+        "implementation",
+        "visual_review"
+      ],
+      "tags": [
+        "animation"
+      ],
+      "keywords": [
+        "animation",
+        "motion_effect",
+        "gsap",
+        "motion"
+      ],
+      "source": {
+        "name": "Neuform prompt skill catalog",
+        "url": "https://neuform.ai/skill/gsap",
+        "originId": "gsap",
+        "license": "unknown-public-web-catalog"
+      },
+      "effectPicker": {
+        "group": "Motion Effects",
+        "intensity": "balanced",
+        "technicalComplexity": "medium_high",
+        "requiresVisualQA": true
+      }
+    },
+    {
+      "id": "neuform_skeuomorphic-ui",
+      "title": "Skeuomorphic UI",
+      "provider": "neuform",
+      "path": "effects/skeuomorphic-ui.md",
+      "patternKind": "surface_style",
+      "pickerGroup": "Surface and Material Effects",
+      "intensity": "restrained",
+      "technicalComplexity": "low_medium",
+      "recommendationStrength": "heavy_recommend_optional",
+      "themePickerReady": true,
+      "roles": [
+        "frontend_designer",
+        "frontend_builder",
+        "visual_polish_reviewer"
+      ],
+      "categories": [
+        "marketing_site",
+        "consumer_mobile_app"
+      ],
+      "appliesTo": [
+        "DESIGN.md",
+        "implementation",
+        "visual_review"
+      ],
+      "tags": [
+        "style",
+        "shadow"
+      ],
+      "keywords": [
+        "style",
+        "shadow",
+        "surface_style",
+        "skeuomorphic",
+        "ui"
+      ],
+      "source": {
+        "name": "Neuform prompt skill catalog",
+        "url": "https://neuform.ai/skill/skeuomorphic-ui",
+        "originId": "skeuomorphic-ui",
+        "license": "unknown-public-web-catalog"
+      },
+      "effectPicker": {
+        "group": "Surface and Material Effects",
+        "intensity": "restrained",
+        "technicalComplexity": "low_medium",
+        "requiresVisualQA": true
+      }
+    },
+    {
+      "id": "neuform_dither-background",
+      "title": "Dither Background",
+      "provider": "neuform",
+      "path": "effects/dither-background.md",
+      "patternKind": "webgl_background",
+      "pickerGroup": "Background Effects",
+      "intensity": "expressive",
+      "technicalComplexity": "high",
+      "recommendationStrength": "heavy_recommend_optional",
+      "themePickerReady": true,
+      "roles": [
+        "frontend_designer",
+        "frontend_builder",
+        "visual_polish_reviewer"
+      ],
+      "categories": [
+        "marketing_site"
+      ],
+      "appliesTo": [
+        "DESIGN.md",
+        "implementation",
+        "visual_review"
+      ],
+      "tags": [
+        "style"
+      ],
+      "keywords": [
+        "style",
+        "webgl_background",
+        "dither",
+        "background"
+      ],
+      "source": {
+        "name": "Neuform prompt skill catalog",
+        "url": "https://neuform.ai/skill/dither-background",
+        "originId": "dither-background",
+        "license": "unknown-public-web-catalog"
+      },
+      "effectPicker": {
+        "group": "Background Effects",
+        "intensity": "expressive",
+        "technicalComplexity": "high",
+        "requiresVisualQA": true
+      }
+    },
+    {
+      "id": "neuform_beautiful-shadows",
+      "title": "Beautiful Shadows",
+      "provider": "neuform",
+      "path": "effects/beautiful-shadows.md",
+      "patternKind": "surface_style",
+      "pickerGroup": "Surface and Material Effects",
+      "intensity": "restrained",
+      "technicalComplexity": "low_medium",
+      "recommendationStrength": "heavy_recommend_optional",
+      "themePickerReady": true,
+      "roles": [
+        "frontend_designer",
+        "frontend_builder",
+        "visual_polish_reviewer"
+      ],
+      "categories": [
+        "marketing_site"
+      ],
+      "appliesTo": [
+        "DESIGN.md",
+        "implementation",
+        "visual_review"
+      ],
+      "tags": [
+        "shadow",
+        "style"
+      ],
+      "keywords": [
+        "shadow",
+        "style",
+        "surface_style",
+        "beautiful",
+        "shadows"
+      ],
+      "source": {
+        "name": "Neuform prompt skill catalog",
+        "url": "https://neuform.ai/skill/beautiful-shadows",
+        "originId": "beautiful-shadows",
+        "license": "unknown-public-web-catalog"
+      },
+      "effectPicker": {
+        "group": "Surface and Material Effects",
+        "intensity": "restrained",
+        "technicalComplexity": "low_medium",
+        "requiresVisualQA": true
+      }
+    },
+    {
+      "id": "neuform_webgl-laser",
+      "title": "WebGL Laser",
+      "provider": "neuform",
+      "path": "effects/webgl-laser.md",
+      "patternKind": "webgl_background",
+      "pickerGroup": "Background Effects",
+      "intensity": "expressive",
+      "technicalComplexity": "high",
+      "recommendationStrength": "heavy_recommend_optional",
+      "themePickerReady": true,
+      "roles": [
+        "frontend_designer",
+        "frontend_builder",
+        "visual_polish_reviewer"
+      ],
+      "categories": [
+        "marketing_site"
+      ],
+      "appliesTo": [
+        "DESIGN.md",
+        "implementation",
+        "visual_review"
+      ],
+      "tags": [
+        "webgl",
+        "animation"
+      ],
+      "keywords": [
+        "webgl",
+        "animation",
+        "webgl_background",
+        "laser"
+      ],
+      "source": {
+        "name": "Neuform prompt skill catalog",
+        "url": "https://neuform.ai/skill/webgl-laser",
+        "originId": "webgl-laser",
+        "license": "unknown-public-web-catalog"
+      },
+      "effectPicker": {
+        "group": "Background Effects",
+        "intensity": "expressive",
+        "technicalComplexity": "high",
+        "requiresVisualQA": true
+      }
+    },
+    {
+      "id": "neuform_mesh-gradient-dark-blue-clean",
+      "title": "Mesh Gradient Dark Blue Clean",
+      "provider": "neuform",
+      "path": "effects/mesh-gradient-dark-blue-clean.md",
+      "patternKind": "webgl_background",
+      "pickerGroup": "Background Effects",
+      "intensity": "expressive",
+      "technicalComplexity": "high",
+      "recommendationStrength": "heavy_recommend_optional",
+      "themePickerReady": true,
+      "roles": [
+        "frontend_designer",
+        "frontend_builder",
+        "visual_polish_reviewer"
+      ],
+      "categories": [
+        "marketing_site"
+      ],
+      "appliesTo": [
+        "DESIGN.md",
+        "implementation",
+        "visual_review"
+      ],
+      "tags": [
+        "design system",
+        "style",
+        "webgl"
+      ],
+      "keywords": [
+        "design system",
+        "style",
+        "webgl",
+        "webgl_background",
+        "mesh",
+        "gradient",
+        "dark",
+        "blue",
+        "clean"
+      ],
+      "source": {
+        "name": "Neuform prompt skill catalog",
+        "url": "https://neuform.ai/skill/mesh-gradient-dark-blue-clean",
+        "originId": "mesh-gradient-dark-blue-clean",
+        "license": "unknown-public-web-catalog"
+      },
+      "effectPicker": {
+        "group": "Background Effects",
+        "intensity": "expressive",
+        "technicalComplexity": "high",
+        "requiresVisualQA": true
+      }
+    },
+    {
+      "id": "neuform_clean-minimal-beige-light-mode",
+      "title": "Clean Minimal Beige Light Mode",
+      "provider": "neuform",
+      "path": "effects/clean-minimal-beige-light-mode.md",
+      "patternKind": "motion_effect",
+      "pickerGroup": "Motion Effects",
+      "intensity": "restrained",
+      "technicalComplexity": "medium",
+      "recommendationStrength": "heavy_recommend_optional",
+      "themePickerReady": true,
+      "roles": [
+        "frontend_designer",
+        "frontend_builder",
+        "visual_polish_reviewer"
+      ],
+      "categories": [
+        "marketing_site",
+        "saas_dashboard"
+      ],
+      "appliesTo": [
+        "DESIGN.md",
+        "implementation",
+        "visual_review"
+      ],
+      "tags": [
+        "design system",
+        "layout",
+        "style"
+      ],
+      "keywords": [
+        "design system",
+        "layout",
+        "style",
+        "motion_effect",
+        "clean",
+        "minimal",
+        "beige",
+        "light",
+        "mode"
+      ],
+      "source": {
+        "name": "Neuform prompt skill catalog",
+        "url": "https://neuform.ai/skill/clean-minimal-beige-light-mode",
+        "originId": "clean-minimal-beige-light-mode",
+        "license": "unknown-public-web-catalog"
+      },
+      "effectPicker": {
+        "group": "Motion Effects",
+        "intensity": "restrained",
+        "technicalComplexity": "medium",
+        "requiresVisualQA": true
+      }
+    },
+    {
+      "id": "neuform_glass-dark-mode-clock",
+      "title": "Glass Dark Mode Clock",
+      "provider": "neuform",
+      "path": "effects/glass-dark-mode-clock.md",
+      "patternKind": "motion_effect",
+      "pickerGroup": "Motion Effects",
+      "intensity": "expressive",
+      "technicalComplexity": "medium",
+      "recommendationStrength": "heavy_recommend_optional",
+      "themePickerReady": true,
+      "roles": [
+        "frontend_designer",
+        "frontend_builder",
+        "visual_polish_reviewer"
+      ],
+      "categories": [
+        "marketing_site"
+      ],
+      "appliesTo": [
+        "DESIGN.md",
+        "implementation",
+        "visual_review"
+      ],
+      "tags": [
+        "design system",
+        "style"
+      ],
+      "keywords": [
+        "design system",
+        "style",
+        "motion_effect",
+        "glass",
+        "dark",
+        "mode",
+        "clock"
+      ],
+      "source": {
+        "name": "Neuform prompt skill catalog",
+        "url": "https://neuform.ai/skill/glass-dark-mode-clock",
+        "originId": "glass-dark-mode-clock",
+        "license": "unknown-public-web-catalog"
+      },
+      "effectPicker": {
+        "group": "Motion Effects",
+        "intensity": "expressive",
+        "technicalComplexity": "medium",
+        "requiresVisualQA": true
+      }
+    },
+    {
+      "id": "neuform_agency-grid-layout-minimal",
+      "title": "Agency Grid Layout Minimal",
+      "provider": "neuform",
+      "path": "effects/agency-grid-layout-minimal.md",
+      "patternKind": "motion_effect",
+      "pickerGroup": "Motion Effects",
+      "intensity": "expressive",
+      "technicalComplexity": "medium",
+      "recommendationStrength": "heavy_recommend_optional",
+      "themePickerReady": true,
+      "roles": [
+        "frontend_designer",
+        "frontend_builder",
+        "visual_polish_reviewer"
+      ],
+      "categories": [
+        "marketing_site",
+        "saas_dashboard",
+        "docs_portal"
+      ],
+      "appliesTo": [
+        "DESIGN.md",
+        "implementation",
+        "visual_review"
+      ],
+      "tags": [
+        "design system",
+        "layout"
+      ],
+      "keywords": [
+        "design system",
+        "layout",
+        "motion_effect",
+        "agency",
+        "grid",
+        "minimal"
+      ],
+      "source": {
+        "name": "Neuform prompt skill catalog",
+        "url": "https://neuform.ai/skill/agency-grid-layout-minimal",
+        "originId": "agency-grid-layout-minimal",
+        "license": "unknown-public-web-catalog"
+      },
+      "effectPicker": {
+        "group": "Motion Effects",
+        "intensity": "expressive",
+        "technicalComplexity": "medium",
+        "requiresVisualQA": true
+      }
+    },
+    {
+      "id": "neuform_webgl-3d-object",
+      "title": "WebGL 3D Object",
+      "provider": "neuform",
+      "path": "effects/webgl-3d-object.md",
+      "patternKind": "webgl_background",
+      "pickerGroup": "Background Effects",
+      "intensity": "expressive",
+      "technicalComplexity": "high",
+      "recommendationStrength": "heavy_recommend_optional",
+      "themePickerReady": true,
+      "roles": [
+        "frontend_designer",
+        "frontend_builder",
+        "visual_polish_reviewer"
+      ],
+      "categories": [
+        "marketing_site"
+      ],
+      "appliesTo": [
+        "DESIGN.md",
+        "implementation",
+        "visual_review"
+      ],
+      "tags": [
+        "3d",
+        "webgl",
+        "threejs"
+      ],
+      "keywords": [
+        "3d",
+        "webgl",
+        "threejs",
+        "webgl_background",
+        "object"
+      ],
+      "source": {
+        "name": "Neuform prompt skill catalog",
+        "url": "https://neuform.ai/skill/webgl-3d-object",
+        "originId": "webgl-3d-object",
+        "license": "unknown-public-web-catalog"
+      },
+      "effectPicker": {
+        "group": "Background Effects",
+        "intensity": "expressive",
+        "technicalComplexity": "high",
+        "requiresVisualQA": true
+      }
+    },
+    {
+      "id": "neuform_background-grid-webgl",
+      "title": "Background Grid WebGL",
+      "provider": "neuform",
+      "path": "effects/background-grid-webgl.md",
+      "patternKind": "webgl_background",
+      "pickerGroup": "Background Effects",
+      "intensity": "expressive",
+      "technicalComplexity": "high",
+      "recommendationStrength": "heavy_recommend_optional",
+      "themePickerReady": true,
+      "roles": [
+        "frontend_designer",
+        "frontend_builder",
+        "visual_polish_reviewer"
+      ],
+      "categories": [
+        "marketing_site",
+        "saas_dashboard"
+      ],
+      "appliesTo": [
+        "DESIGN.md",
+        "implementation",
+        "visual_review"
+      ],
+      "tags": [
+        "layout",
+        "webgl",
+        "threejs"
+      ],
+      "keywords": [
+        "layout",
+        "webgl",
+        "threejs",
+        "webgl_background",
+        "background",
+        "grid"
+      ],
+      "source": {
+        "name": "Neuform prompt skill catalog",
+        "url": "https://neuform.ai/skill/background-grid-webgl",
+        "originId": "background-grid-webgl",
+        "license": "unknown-public-web-catalog"
+      },
+      "effectPicker": {
+        "group": "Background Effects",
+        "intensity": "expressive",
+        "technicalComplexity": "high",
+        "requiresVisualQA": true
+      }
+    },
+    {
+      "id": "neuform_high-contrast-skeuomorphic-clean",
+      "title": "High Contrast Skeuomorphic Clean",
+      "provider": "neuform",
+      "path": "effects/high-contrast-skeuomorphic-clean.md",
+      "patternKind": "webgl_background",
+      "pickerGroup": "Background Effects",
+      "intensity": "expressive",
+      "technicalComplexity": "high",
+      "recommendationStrength": "heavy_recommend_optional",
+      "themePickerReady": true,
+      "roles": [
+        "frontend_designer",
+        "frontend_builder",
+        "visual_polish_reviewer"
+      ],
+      "categories": [
+        "marketing_site"
+      ],
+      "appliesTo": [
+        "DESIGN.md",
+        "implementation",
+        "visual_review"
+      ],
+      "tags": [
+        "design system",
+        "style",
+        "shadow"
+      ],
+      "keywords": [
+        "design system",
+        "style",
+        "shadow",
+        "webgl_background",
+        "high",
+        "contrast",
+        "skeuomorphic",
+        "clean"
+      ],
+      "source": {
+        "name": "Neuform prompt skill catalog",
+        "url": "https://neuform.ai/skill/high-contrast-skeuomorphic-clean",
+        "originId": "high-contrast-skeuomorphic-clean",
+        "license": "unknown-public-web-catalog"
+      },
+      "effectPicker": {
+        "group": "Background Effects",
+        "intensity": "expressive",
+        "technicalComplexity": "high",
+        "requiresVisualQA": true
+      }
+    },
+    {
+      "id": "neuform_orange-clean-paper-saas",
+      "title": "Orange Clean Paper SaaS",
+      "provider": "neuform",
+      "path": "effects/orange-clean-paper-saas.md",
+      "patternKind": "motion_effect",
+      "pickerGroup": "Motion Effects",
+      "intensity": "expressive",
+      "technicalComplexity": "medium_high",
+      "recommendationStrength": "heavy_recommend_optional",
+      "themePickerReady": true,
+      "roles": [
+        "frontend_designer",
+        "frontend_builder",
+        "visual_polish_reviewer"
+      ],
+      "categories": [
+        "marketing_site",
+        "saas_dashboard"
+      ],
+      "appliesTo": [
+        "DESIGN.md",
+        "implementation",
+        "visual_review"
+      ],
+      "tags": [
+        "design system",
+        "layout",
+        "style"
+      ],
+      "keywords": [
+        "design system",
+        "layout",
+        "style",
+        "motion_effect",
+        "orange",
+        "clean",
+        "paper",
+        "saas"
+      ],
+      "source": {
+        "name": "Neuform prompt skill catalog",
+        "url": "https://neuform.ai/skill/orange-clean-paper-saas",
+        "originId": "orange-clean-paper-saas",
+        "license": "unknown-public-web-catalog"
+      },
+      "effectPicker": {
+        "group": "Motion Effects",
+        "intensity": "expressive",
+        "technicalComplexity": "medium_high",
+        "requiresVisualQA": true
+      }
+    },
+    {
+      "id": "neuform_light-mode-paper-technical",
+      "title": "Light Mode Paper Technical",
+      "provider": "neuform",
+      "path": "effects/light-mode-paper-technical.md",
+      "patternKind": "motion_effect",
+      "pickerGroup": "Motion Effects",
+      "intensity": "restrained",
+      "technicalComplexity": "medium",
+      "recommendationStrength": "heavy_recommend_optional",
+      "themePickerReady": true,
+      "roles": [
+        "frontend_designer",
+        "frontend_builder",
+        "visual_polish_reviewer"
+      ],
+      "categories": [
+        "marketing_site",
+        "saas_dashboard"
+      ],
+      "appliesTo": [
+        "DESIGN.md",
+        "implementation",
+        "visual_review"
+      ],
+      "tags": [
+        "design system",
+        "layout",
+        "style"
+      ],
+      "keywords": [
+        "design system",
+        "layout",
+        "style",
+        "motion_effect",
+        "light",
+        "mode",
+        "paper",
+        "technical"
+      ],
+      "source": {
+        "name": "Neuform prompt skill catalog",
+        "url": "https://neuform.ai/skill/light-mode-paper-technical",
+        "originId": "light-mode-paper-technical",
+        "license": "unknown-public-web-catalog"
+      },
+      "effectPicker": {
+        "group": "Motion Effects",
+        "intensity": "restrained",
+        "technicalComplexity": "medium",
+        "requiresVisualQA": true
+      }
+    },
+    {
+      "id": "neuform_corner-diagonals",
+      "title": "Corner Diagonals",
+      "provider": "neuform",
+      "path": "effects/corner-diagonals.md",
+      "patternKind": "motion_effect",
+      "pickerGroup": "Motion Effects",
+      "intensity": "restrained",
+      "technicalComplexity": "medium",
+      "recommendationStrength": "heavy_recommend_optional",
+      "themePickerReady": true,
+      "roles": [
+        "frontend_designer",
+        "frontend_builder",
+        "visual_polish_reviewer"
+      ],
+      "categories": [
+        "marketing_site",
+        "saas_dashboard"
+      ],
+      "appliesTo": [
+        "DESIGN.md",
+        "implementation",
+        "visual_review"
+      ],
+      "tags": [
+        "layout",
+        "style"
+      ],
+      "keywords": [
+        "layout",
+        "style",
+        "motion_effect",
+        "corner",
+        "diagonals"
+      ],
+      "source": {
+        "name": "Neuform prompt skill catalog",
+        "url": "https://neuform.ai/skill/corner-diagonals",
+        "originId": "corner-diagonals",
+        "license": "unknown-public-web-catalog"
+      },
+      "effectPicker": {
+        "group": "Motion Effects",
+        "intensity": "restrained",
+        "technicalComplexity": "medium",
+        "requiresVisualQA": true
+      }
+    },
+    {
+      "id": "neuform_nested-container-clean-agency",
+      "title": "Nested Container Clean Agency",
+      "provider": "neuform",
+      "path": "effects/nested-container-clean-agency.md",
+      "patternKind": "motion_effect",
+      "pickerGroup": "Motion Effects",
+      "intensity": "restrained",
+      "technicalComplexity": "medium",
+      "recommendationStrength": "heavy_recommend_optional",
+      "themePickerReady": true,
+      "roles": [
+        "frontend_designer",
+        "frontend_builder",
+        "visual_polish_reviewer"
+      ],
+      "categories": [
+        "marketing_site",
+        "saas_dashboard",
+        "docs_portal"
+      ],
+      "appliesTo": [
+        "DESIGN.md",
+        "implementation",
+        "visual_review"
+      ],
+      "tags": [
+        "design system",
+        "layout",
+        "style"
+      ],
+      "keywords": [
+        "design system",
+        "layout",
+        "style",
+        "motion_effect",
+        "nested",
+        "container",
+        "clean",
+        "agency"
+      ],
+      "source": {
+        "name": "Neuform prompt skill catalog",
+        "url": "https://neuform.ai/skill/nested-container-clean-agency",
+        "originId": "nested-container-clean-agency",
+        "license": "unknown-public-web-catalog"
+      },
+      "effectPicker": {
+        "group": "Motion Effects",
+        "intensity": "restrained",
+        "technicalComplexity": "medium",
+        "requiresVisualQA": true
+      }
+    },
+    {
+      "id": "neuform_technical-terminal-and-webgl-grid-system-v9lmbm",
+      "title": "Technical Terminal & WebGL Grid System",
+      "provider": "neuform",
+      "path": "effects/technical-terminal-and-webgl-grid-system.md",
+      "patternKind": "webgl_background",
+      "pickerGroup": "Background Effects",
+      "intensity": "expressive",
+      "technicalComplexity": "high",
+      "recommendationStrength": "heavy_recommend_optional",
+      "themePickerReady": true,
+      "roles": [
+        "frontend_designer",
+        "frontend_builder",
+        "visual_polish_reviewer"
+      ],
+      "categories": [
+        "marketing_site",
+        "saas_dashboard"
+      ],
+      "appliesTo": [
+        "DESIGN.md",
+        "implementation",
+        "visual_review"
+      ],
+      "tags": [
+        "design system",
+        "layout",
+        "webgl"
+      ],
+      "keywords": [
+        "design system",
+        "layout",
+        "webgl",
+        "webgl_background",
+        "technical",
+        "terminal",
+        "grid",
+        "system"
+      ],
+      "source": {
+        "name": "Neuform prompt skill catalog",
+        "url": "https://neuform.ai/skill/technical-terminal-and-webgl-grid-system-v9lmbm",
+        "originId": "technical-terminal-and-webgl-grid-system-v9lmbm",
+        "license": "unknown-public-web-catalog"
+      },
+      "effectPicker": {
+        "group": "Background Effects",
+        "intensity": "expressive",
+        "technicalComplexity": "high",
+        "requiresVisualQA": true
+      }
+    },
+    {
+      "id": "neuform_editorial-tech",
+      "title": "Editorial Tech",
+      "provider": "neuform",
+      "path": "effects/editorial-tech.md",
+      "patternKind": "motion_effect",
+      "pickerGroup": "Motion Effects",
+      "intensity": "expressive",
+      "technicalComplexity": "medium_high",
+      "recommendationStrength": "heavy_recommend_optional",
+      "themePickerReady": true,
+      "roles": [
+        "frontend_designer",
+        "frontend_builder",
+        "visual_polish_reviewer"
+      ],
+      "categories": [
+        "marketing_site",
+        "saas_dashboard",
+        "docs_portal"
+      ],
+      "appliesTo": [
+        "DESIGN.md",
+        "implementation",
+        "visual_review"
+      ],
+      "tags": [
+        "design system",
+        "layout",
+        "style"
+      ],
+      "keywords": [
+        "design system",
+        "layout",
+        "style",
+        "motion_effect",
+        "editorial",
+        "tech"
+      ],
+      "source": {
+        "name": "Neuform prompt skill catalog",
+        "url": "https://neuform.ai/skill/editorial-tech",
+        "originId": "editorial-tech",
+        "license": "unknown-public-web-catalog"
+      },
+      "effectPicker": {
+        "group": "Motion Effects",
+        "intensity": "expressive",
+        "technicalComplexity": "medium_high",
+        "requiresVisualQA": true
+      }
+    },
+    {
+      "id": "neuform_image-first-grid-layout",
+      "title": "Image First Grid Layout",
+      "provider": "neuform",
+      "path": "effects/image-first-grid-layout.md",
+      "patternKind": "webgl_background",
+      "pickerGroup": "Background Effects",
+      "intensity": "expressive",
+      "technicalComplexity": "high",
+      "recommendationStrength": "heavy_recommend_optional",
+      "themePickerReady": true,
+      "roles": [
+        "frontend_designer",
+        "frontend_builder",
+        "visual_polish_reviewer"
+      ],
+      "categories": [
+        "marketing_site",
+        "saas_dashboard"
+      ],
+      "appliesTo": [
+        "DESIGN.md",
+        "implementation",
+        "visual_review"
+      ],
+      "tags": [
+        "design system",
+        "layout",
+        "asset"
+      ],
+      "keywords": [
+        "design system",
+        "layout",
+        "asset",
+        "webgl_background",
+        "image",
+        "first",
+        "grid"
+      ],
+      "source": {
+        "name": "Neuform prompt skill catalog",
+        "url": "https://neuform.ai/skill/image-first-grid-layout",
+        "originId": "image-first-grid-layout",
+        "license": "unknown-public-web-catalog"
+      },
+      "effectPicker": {
+        "group": "Background Effects",
+        "intensity": "expressive",
+        "technicalComplexity": "high",
+        "requiresVisualQA": true
+      }
+    },
+    {
+      "id": "neuform_company-logos",
+      "title": "Company Logos",
+      "provider": "neuform",
+      "path": "effects/company-logos.md",
+      "patternKind": "typography_system",
+      "pickerGroup": "Typography Effects",
+      "intensity": "balanced",
+      "technicalComplexity": "low_medium",
+      "recommendationStrength": "heavy_recommend_optional",
+      "themePickerReady": true,
+      "roles": [
+        "frontend_designer",
+        "visual_polish_reviewer"
+      ],
+      "categories": [
+        "marketing_site"
+      ],
+      "appliesTo": [
+        "DESIGN.md",
+        "visual_review"
+      ],
+      "tags": [
+        "icon",
+        "asset"
+      ],
+      "keywords": [
+        "icon",
+        "asset",
+        "typography_system",
+        "company",
+        "logos"
+      ],
+      "source": {
+        "name": "Neuform prompt skill catalog",
+        "url": "https://neuform.ai/skill/company-logos",
+        "originId": "company-logos",
+        "license": "unknown-public-web-catalog"
+      },
+      "effectPicker": {
+        "group": "Typography Effects",
+        "intensity": "balanced",
+        "technicalComplexity": "low_medium",
+        "requiresVisualQA": true
+      }
+    },
+    {
+      "id": "neuform_globe-particles",
+      "title": "Globe Particles",
+      "provider": "neuform",
+      "path": "effects/globe-particles.md",
+      "patternKind": "webgl_background",
+      "pickerGroup": "Background Effects",
+      "intensity": "expressive",
+      "technicalComplexity": "high",
+      "recommendationStrength": "heavy_recommend_optional",
+      "themePickerReady": true,
+      "roles": [
+        "frontend_designer",
+        "frontend_builder",
+        "visual_polish_reviewer"
+      ],
+      "categories": [
+        "marketing_site"
+      ],
+      "appliesTo": [
+        "DESIGN.md",
+        "implementation",
+        "visual_review"
+      ],
+      "tags": [
+        "3d",
+        "webgl",
+        "threejs"
+      ],
+      "keywords": [
+        "3d",
+        "webgl",
+        "threejs",
+        "webgl_background",
+        "globe",
+        "particles"
+      ],
+      "source": {
+        "name": "Neuform prompt skill catalog",
+        "url": "https://neuform.ai/skill/globe-particles",
+        "originId": "globe-particles",
+        "license": "unknown-public-web-catalog"
+      },
+      "effectPicker": {
+        "group": "Background Effects",
+        "intensity": "expressive",
+        "technicalComplexity": "high",
+        "requiresVisualQA": true
+      }
+    },
+    {
+      "id": "neuform_split-layout-technical",
+      "title": "Split Layout Technical",
+      "provider": "neuform",
+      "path": "effects/split-layout-technical.md",
+      "patternKind": "webgl_background",
+      "pickerGroup": "Background Effects",
+      "intensity": "expressive",
+      "technicalComplexity": "high",
+      "recommendationStrength": "heavy_recommend_optional",
+      "themePickerReady": true,
+      "roles": [
+        "frontend_designer",
+        "frontend_builder",
+        "visual_polish_reviewer"
+      ],
+      "categories": [
+        "marketing_site",
+        "saas_dashboard",
+        "docs_portal"
+      ],
+      "appliesTo": [
+        "DESIGN.md",
+        "implementation",
+        "visual_review"
+      ],
+      "tags": [
+        "design system",
+        "layout"
+      ],
+      "keywords": [
+        "design system",
+        "layout",
+        "webgl_background",
+        "split",
+        "technical"
+      ],
+      "source": {
+        "name": "Neuform prompt skill catalog",
+        "url": "https://neuform.ai/skill/split-layout-technical",
+        "originId": "split-layout-technical",
+        "license": "unknown-public-web-catalog"
+      },
+      "effectPicker": {
+        "group": "Background Effects",
+        "intensity": "expressive",
+        "technicalComplexity": "high",
+        "requiresVisualQA": true
+      }
+    },
+    {
+      "id": "neuform_solar-duotone-bold",
+      "title": "Solar Duotone Bold",
+      "provider": "neuform",
+      "path": "effects/solar-duotone-bold.md",
+      "patternKind": "surface_style",
+      "pickerGroup": "Surface and Material Effects",
+      "intensity": "balanced",
+      "technicalComplexity": "low_medium",
+      "recommendationStrength": "heavy_recommend_optional",
+      "themePickerReady": true,
+      "roles": [
+        "frontend_designer",
+        "frontend_builder",
+        "visual_polish_reviewer"
+      ],
+      "categories": [
+        "marketing_site"
+      ],
+      "appliesTo": [
+        "DESIGN.md",
+        "implementation",
+        "visual_review"
+      ],
+      "tags": [
+        "icon"
+      ],
+      "keywords": [
+        "icon",
+        "surface_style",
+        "solar",
+        "duotone",
+        "bold"
+      ],
+      "source": {
+        "name": "Neuform prompt skill catalog",
+        "url": "https://neuform.ai/skill/solar-duotone-bold",
+        "originId": "solar-duotone-bold",
+        "license": "unknown-public-web-catalog"
+      },
+      "effectPicker": {
+        "group": "Surface and Material Effects",
+        "intensity": "balanced",
+        "technicalComplexity": "low_medium",
+        "requiresVisualQA": true
+      }
+    },
+    {
+      "id": "neuform_technical-framed-grid-design-system-tzckhr",
+      "title": "Technical Framed Grid Design System",
+      "provider": "neuform",
+      "path": "effects/technical-framed-grid-design-system.md",
+      "patternKind": "webgl_background",
+      "pickerGroup": "Background Effects",
+      "intensity": "expressive",
+      "technicalComplexity": "high",
+      "recommendationStrength": "heavy_recommend_optional",
+      "themePickerReady": true,
+      "roles": [
+        "frontend_designer",
+        "frontend_builder",
+        "visual_polish_reviewer"
+      ],
+      "categories": [
+        "marketing_site",
+        "saas_dashboard"
+      ],
+      "appliesTo": [
+        "DESIGN.md",
+        "implementation",
+        "visual_review"
+      ],
+      "tags": [
+        "design system",
+        "webgl",
+        "layout"
+      ],
+      "keywords": [
+        "design system",
+        "webgl",
+        "layout",
+        "webgl_background",
+        "technical",
+        "framed",
+        "grid",
+        "design",
+        "system"
+      ],
+      "source": {
+        "name": "Neuform prompt skill catalog",
+        "url": "https://neuform.ai/skill/technical-framed-grid-design-system-tzckhr",
+        "originId": "technical-framed-grid-design-system-tzckhr",
+        "license": "unknown-public-web-catalog"
+      },
+      "effectPicker": {
+        "group": "Background Effects",
+        "intensity": "expressive",
+        "technicalComplexity": "high",
+        "requiresVisualQA": true
+      }
+    },
+    {
+      "id": "neuform_stepped-neon-v-curve-glass-system-xy0g97",
+      "title": "Stepped Neon V-Curve Glass System",
+      "provider": "neuform",
+      "path": "effects/stepped-neon-v-curve-glass-system.md",
+      "patternKind": "motion_effect",
+      "pickerGroup": "Motion Effects",
+      "intensity": "expressive",
+      "technicalComplexity": "high",
+      "recommendationStrength": "heavy_recommend_optional",
+      "themePickerReady": true,
+      "roles": [
+        "frontend_designer",
+        "frontend_builder",
+        "visual_polish_reviewer"
+      ],
+      "categories": [
+        "marketing_site",
+        "saas_dashboard"
+      ],
+      "appliesTo": [
+        "DESIGN.md",
+        "implementation",
+        "visual_review"
+      ],
+      "tags": [
+        "design system",
+        "style",
+        "animation"
+      ],
+      "keywords": [
+        "design system",
+        "style",
+        "animation",
+        "motion_effect",
+        "stepped",
+        "neon",
+        "v",
+        "curve",
+        "glass",
+        "system"
+      ],
+      "source": {
+        "name": "Neuform prompt skill catalog",
+        "url": "https://neuform.ai/skill/stepped-neon-v-curve-glass-system-xy0g97",
+        "originId": "stepped-neon-v-curve-glass-system-xy0g97",
+        "license": "unknown-public-web-catalog"
+      },
+      "effectPicker": {
+        "group": "Motion Effects",
+        "intensity": "expressive",
+        "technicalComplexity": "high",
+        "requiresVisualQA": true
+      }
+    },
+    {
+      "id": "neuform_blue-cloudy-clean-modern",
+      "title": "Blue Cloudy Clean Modern",
+      "provider": "neuform",
+      "path": "effects/blue-cloudy-clean-modern.md",
+      "patternKind": "webgl_background",
+      "pickerGroup": "Background Effects",
+      "intensity": "expressive",
+      "technicalComplexity": "high",
+      "recommendationStrength": "heavy_recommend_optional",
+      "themePickerReady": true,
+      "roles": [
+        "frontend_designer",
+        "frontend_builder",
+        "visual_polish_reviewer"
+      ],
+      "categories": [
+        "marketing_site"
+      ],
+      "appliesTo": [
+        "DESIGN.md",
+        "implementation",
+        "visual_review"
+      ],
+      "tags": [
+        "design system",
+        "style"
+      ],
+      "keywords": [
+        "design system",
+        "style",
+        "webgl_background",
+        "blue",
+        "cloudy",
+        "clean",
+        "modern"
+      ],
+      "source": {
+        "name": "Neuform prompt skill catalog",
+        "url": "https://neuform.ai/skill/blue-cloudy-clean-modern",
+        "originId": "blue-cloudy-clean-modern",
+        "license": "unknown-public-web-catalog"
+      },
+      "effectPicker": {
+        "group": "Background Effects",
+        "intensity": "expressive",
+        "technicalComplexity": "high",
+        "requiresVisualQA": true
+      }
+    },
+    {
+      "id": "neuform_magic-rings-telemetry-aesthetic-1nwy1l",
+      "title": "Magic Rings Telemetry Aesthetic",
+      "provider": "neuform",
+      "path": "effects/magic-rings-telemetry-aesthetic.md",
+      "patternKind": "webgl_background",
+      "pickerGroup": "Background Effects",
+      "intensity": "expressive",
+      "technicalComplexity": "high",
+      "recommendationStrength": "heavy_recommend_optional",
+      "themePickerReady": true,
+      "roles": [
+        "frontend_designer",
+        "frontend_builder",
+        "visual_polish_reviewer"
+      ],
+      "categories": [
+        "marketing_site",
+        "saas_dashboard"
+      ],
+      "appliesTo": [
+        "DESIGN.md",
+        "implementation",
+        "visual_review"
+      ],
+      "tags": [
+        "webgl",
+        "design system",
+        "layout"
+      ],
+      "keywords": [
+        "webgl",
+        "design system",
+        "layout",
+        "webgl_background",
+        "magic",
+        "rings",
+        "telemetry",
+        "aesthetic"
+      ],
+      "source": {
+        "name": "Neuform prompt skill catalog",
+        "url": "https://neuform.ai/skill/magic-rings-telemetry-aesthetic-1nwy1l",
+        "originId": "magic-rings-telemetry-aesthetic-1nwy1l",
+        "license": "unknown-public-web-catalog"
+      },
+      "effectPicker": {
+        "group": "Background Effects",
+        "intensity": "expressive",
+        "technicalComplexity": "high",
+        "requiresVisualQA": true
+      }
+    },
+    {
+      "id": "neuform_nested-container-frames",
+      "title": "Nested Container Frames",
+      "provider": "neuform",
+      "path": "effects/nested-container-frames.md",
+      "patternKind": "layout_system",
+      "pickerGroup": "Layout Systems",
+      "intensity": "balanced",
+      "technicalComplexity": "low_medium",
+      "recommendationStrength": "heavy_recommend_optional",
+      "themePickerReady": true,
+      "roles": [
+        "frontend_designer",
+        "frontend_builder",
+        "visual_polish_reviewer"
+      ],
+      "categories": [
+        "marketing_site",
+        "saas_dashboard",
+        "admin_internal_tool"
+      ],
+      "appliesTo": [
+        "DESIGN.md",
+        "implementation",
+        "visual_review"
+      ],
+      "tags": [
+        "layout",
+        "design system"
+      ],
+      "keywords": [
+        "layout",
+        "design system",
+        "layout_system",
+        "nested",
+        "container",
+        "frames"
+      ],
+      "source": {
+        "name": "Neuform prompt skill catalog",
+        "url": "https://neuform.ai/skill/nested-container-frames",
+        "originId": "nested-container-frames",
+        "license": "unknown-public-web-catalog"
+      },
+      "effectPicker": {
+        "group": "Layout Systems",
+        "intensity": "balanced",
+        "technicalComplexity": "low_medium",
+        "requiresVisualQA": true
+      }
+    },
+    {
+      "id": "neuform_industrial-webgl-minimalist-system-v9b1kp",
+      "title": "Industrial WebGL Minimalist System",
+      "provider": "neuform",
+      "path": "effects/industrial-webgl-minimalist-system.md",
+      "patternKind": "webgl_background",
+      "pickerGroup": "Background Effects",
+      "intensity": "expressive",
+      "technicalComplexity": "high",
+      "recommendationStrength": "heavy_recommend_optional",
+      "themePickerReady": true,
+      "roles": [
+        "frontend_designer",
+        "frontend_builder",
+        "visual_polish_reviewer"
+      ],
+      "categories": [
+        "marketing_site"
+      ],
+      "appliesTo": [
+        "DESIGN.md",
+        "implementation",
+        "visual_review"
+      ],
+      "tags": [
+        "design system",
+        "webgl",
+        "threejs"
+      ],
+      "keywords": [
+        "design system",
+        "webgl",
+        "threejs",
+        "webgl_background",
+        "industrial",
+        "minimalist",
+        "system"
+      ],
+      "source": {
+        "name": "Neuform prompt skill catalog",
+        "url": "https://neuform.ai/skill/industrial-webgl-minimalist-system-v9b1kp",
+        "originId": "industrial-webgl-minimalist-system-v9b1kp",
+        "license": "unknown-public-web-catalog"
+      },
+      "effectPicker": {
+        "group": "Background Effects",
+        "intensity": "expressive",
+        "technicalComplexity": "high",
+        "requiresVisualQA": true
+      }
+    },
+    {
+      "id": "neuform_corner-lasers",
+      "title": "Corner Lasers",
+      "provider": "neuform",
+      "path": "effects/corner-lasers.md",
+      "patternKind": "webgl_background",
+      "pickerGroup": "Background Effects",
+      "intensity": "expressive",
+      "technicalComplexity": "high",
+      "recommendationStrength": "heavy_recommend_optional",
+      "themePickerReady": true,
+      "roles": [
+        "frontend_designer",
+        "frontend_builder",
+        "visual_polish_reviewer"
+      ],
+      "categories": [
+        "marketing_site"
+      ],
+      "appliesTo": [
+        "DESIGN.md",
+        "implementation",
+        "visual_review"
+      ],
+      "tags": [
+        "webgl",
+        "animation",
+        "style"
+      ],
+      "keywords": [
+        "webgl",
+        "animation",
+        "style",
+        "webgl_background",
+        "corner",
+        "lasers"
+      ],
+      "source": {
+        "name": "Neuform prompt skill catalog",
+        "url": "https://neuform.ai/skill/corner-lasers",
+        "originId": "corner-lasers",
+        "license": "unknown-public-web-catalog"
+      },
+      "effectPicker": {
+        "group": "Background Effects",
+        "intensity": "expressive",
+        "technicalComplexity": "high",
+        "requiresVisualQA": true
+      }
+    },
+    {
+      "id": "neuform_technical-wireframe-info-layout",
+      "title": "Technical Wireframe Info Layout",
+      "provider": "neuform",
+      "path": "effects/technical-wireframe-info-layout.md",
+      "patternKind": "webgl_background",
+      "pickerGroup": "Background Effects",
+      "intensity": "expressive",
+      "technicalComplexity": "high",
+      "recommendationStrength": "heavy_recommend_optional",
+      "themePickerReady": true,
+      "roles": [
+        "frontend_designer",
+        "frontend_builder",
+        "visual_polish_reviewer"
+      ],
+      "categories": [
+        "marketing_site",
+        "saas_dashboard"
+      ],
+      "appliesTo": [
+        "DESIGN.md",
+        "implementation",
+        "visual_review"
+      ],
+      "tags": [
+        "design system",
+        "layout",
+        "3d"
+      ],
+      "keywords": [
+        "design system",
+        "layout",
+        "3d",
+        "webgl_background",
+        "technical",
+        "wireframe",
+        "info"
+      ],
+      "source": {
+        "name": "Neuform prompt skill catalog",
+        "url": "https://neuform.ai/skill/technical-wireframe-info-layout",
+        "originId": "technical-wireframe-info-layout",
+        "license": "unknown-public-web-catalog"
+      },
+      "effectPicker": {
+        "group": "Background Effects",
+        "intensity": "expressive",
+        "technicalComplexity": "high",
+        "requiresVisualQA": true
+      }
+    },
+    {
+      "id": "neuform_progressive-blur",
+      "title": "Progressive Blur",
+      "provider": "neuform",
+      "path": "effects/progressive-blur.md",
+      "patternKind": "surface_style",
+      "pickerGroup": "Surface and Material Effects",
+      "intensity": "balanced",
+      "technicalComplexity": "low_medium",
+      "recommendationStrength": "heavy_recommend_optional",
+      "themePickerReady": true,
+      "roles": [
+        "frontend_designer",
+        "frontend_builder",
+        "visual_polish_reviewer"
+      ],
+      "categories": [
+        "marketing_site"
+      ],
+      "appliesTo": [
+        "DESIGN.md",
+        "implementation",
+        "visual_review"
+      ],
+      "tags": [
+        "style"
+      ],
+      "keywords": [
+        "style",
+        "surface_style",
+        "progressive",
+        "blur"
+      ],
+      "source": {
+        "name": "Neuform prompt skill catalog",
+        "url": "https://neuform.ai/skill/progressive-blur",
+        "originId": "progressive-blur",
+        "license": "unknown-public-web-catalog"
+      },
+      "effectPicker": {
+        "group": "Surface and Material Effects",
+        "intensity": "balanced",
+        "technicalComplexity": "low_medium",
+        "requiresVisualQA": true
+      }
+    },
+    {
+      "id": "neuform_cursor-reactive-flashlight-glow-border-xa9a9z",
+      "title": "Cursor-Reactive Flashlight Glow Border",
+      "provider": "neuform",
+      "path": "effects/cursor-reactive-flashlight-glow-border.md",
+      "patternKind": "motion_effect",
+      "pickerGroup": "Motion Effects",
+      "intensity": "expressive",
+      "technicalComplexity": "medium",
+      "recommendationStrength": "heavy_recommend_optional",
+      "themePickerReady": true,
+      "roles": [
+        "frontend_designer",
+        "frontend_builder",
+        "visual_polish_reviewer"
+      ],
+      "categories": [
+        "marketing_site",
+        "saas_dashboard"
+      ],
+      "appliesTo": [
+        "DESIGN.md",
+        "implementation",
+        "visual_review"
+      ],
+      "tags": [
+        "design system",
+        "style",
+        "animation"
+      ],
+      "keywords": [
+        "design system",
+        "style",
+        "animation",
+        "motion_effect",
+        "cursor",
+        "reactive",
+        "flashlight",
+        "glow",
+        "border"
+      ],
+      "source": {
+        "name": "Neuform prompt skill catalog",
+        "url": "https://neuform.ai/skill/cursor-reactive-flashlight-glow-border-xa9a9z",
+        "originId": "cursor-reactive-flashlight-glow-border-xa9a9z",
+        "license": "unknown-public-web-catalog"
+      },
+      "effectPicker": {
+        "group": "Motion Effects",
+        "intensity": "expressive",
+        "technicalComplexity": "medium",
+        "requiresVisualQA": true
+      }
+    },
+    {
+      "id": "neuform_atmospheric-grain-webgl-background-y6jnkl",
+      "title": "Atmospheric Grain WebGL Background",
+      "provider": "neuform",
+      "path": "effects/atmospheric-grain-webgl-background.md",
+      "patternKind": "webgl_background",
+      "pickerGroup": "Background Effects",
+      "intensity": "expressive",
+      "technicalComplexity": "high",
+      "recommendationStrength": "heavy_recommend_optional",
+      "themePickerReady": true,
+      "roles": [
+        "frontend_designer",
+        "frontend_builder",
+        "visual_polish_reviewer"
+      ],
+      "categories": [
+        "marketing_site"
+      ],
+      "appliesTo": [
+        "DESIGN.md",
+        "implementation",
+        "visual_review"
+      ],
+      "tags": [
+        "webgl",
+        "animation",
+        "design system"
+      ],
+      "keywords": [
+        "webgl",
+        "animation",
+        "design system",
+        "webgl_background",
+        "atmospheric",
+        "grain",
+        "background"
+      ],
+      "source": {
+        "name": "Neuform prompt skill catalog",
+        "url": "https://neuform.ai/skill/atmospheric-grain-webgl-background-y6jnkl",
+        "originId": "atmospheric-grain-webgl-background-y6jnkl",
+        "license": "unknown-public-web-catalog"
+      },
+      "effectPicker": {
+        "group": "Background Effects",
+        "intensity": "expressive",
+        "technicalComplexity": "high",
+        "requiresVisualQA": true
+      }
+    },
+    {
+      "id": "neuform_technical-ascii-particle-field-2zi2vw",
+      "title": "Technical ASCII Particle Field",
+      "provider": "neuform",
+      "path": "effects/technical-ascii-particle-field.md",
+      "patternKind": "webgl_background",
+      "pickerGroup": "Background Effects",
+      "intensity": "expressive",
+      "technicalComplexity": "high",
+      "recommendationStrength": "heavy_recommend_optional",
+      "themePickerReady": true,
+      "roles": [
+        "frontend_designer",
+        "frontend_builder",
+        "visual_polish_reviewer"
+      ],
+      "categories": [
+        "marketing_site"
+      ],
+      "appliesTo": [
+        "DESIGN.md",
+        "implementation",
+        "visual_review"
+      ],
+      "tags": [
+        "webgl",
+        "animation",
+        "style"
+      ],
+      "keywords": [
+        "webgl",
+        "animation",
+        "style",
+        "webgl_background",
+        "technical",
+        "ascii",
+        "particle",
+        "field"
+      ],
+      "source": {
+        "name": "Neuform prompt skill catalog",
+        "url": "https://neuform.ai/skill/technical-ascii-particle-field-2zi2vw",
+        "originId": "technical-ascii-particle-field-2zi2vw",
+        "license": "unknown-public-web-catalog"
+      },
+      "effectPicker": {
+        "group": "Background Effects",
+        "intensity": "expressive",
+        "technicalComplexity": "high",
+        "requiresVisualQA": true
+      }
+    },
+    {
+      "id": "neuform_marquee-loop",
+      "title": "Marquee",
+      "provider": "neuform",
+      "path": "effects/marquee.md",
+      "patternKind": "motion_effect",
+      "pickerGroup": "Motion Effects",
+      "intensity": "balanced",
+      "technicalComplexity": "low_medium",
+      "recommendationStrength": "heavy_recommend_optional",
+      "themePickerReady": true,
+      "roles": [
+        "frontend_designer",
+        "frontend_builder",
+        "visual_polish_reviewer"
+      ],
+      "categories": [
+        "marketing_site",
+        "consumer_mobile_app"
+      ],
+      "appliesTo": [
+        "DESIGN.md",
+        "implementation",
+        "visual_review"
+      ],
+      "tags": [
+        "animation"
+      ],
+      "keywords": [
+        "animation",
+        "motion_effect",
+        "marquee"
+      ],
+      "source": {
+        "name": "Neuform prompt skill catalog",
+        "url": "https://neuform.ai/skill/marquee-loop",
+        "originId": "marquee-loop",
+        "license": "unknown-public-web-catalog"
+      },
+      "effectPicker": {
+        "group": "Motion Effects",
+        "intensity": "balanced",
+        "technicalComplexity": "low_medium",
+        "requiresVisualQA": true
+      }
+    },
+    {
+      "id": "neuform_procedural-mesh-network-background-txudfu",
+      "title": "Procedural Mesh Network Background",
+      "provider": "neuform",
+      "path": "effects/procedural-mesh-network-background.md",
+      "patternKind": "webgl_background",
+      "pickerGroup": "Background Effects",
+      "intensity": "expressive",
+      "technicalComplexity": "high",
+      "recommendationStrength": "heavy_recommend_optional",
+      "themePickerReady": true,
+      "roles": [
+        "frontend_designer",
+        "frontend_builder",
+        "visual_polish_reviewer"
+      ],
+      "categories": [
+        "marketing_site"
+      ],
+      "appliesTo": [
+        "DESIGN.md",
+        "implementation",
+        "visual_review"
+      ],
+      "tags": [
+        "webgl",
+        "threejs",
+        "animation"
+      ],
+      "keywords": [
+        "webgl",
+        "threejs",
+        "animation",
+        "webgl_background",
+        "procedural",
+        "mesh",
+        "network",
+        "background"
+      ],
+      "source": {
+        "name": "Neuform prompt skill catalog",
+        "url": "https://neuform.ai/skill/procedural-mesh-network-background-txudfu",
+        "originId": "procedural-mesh-network-background-txudfu",
+        "license": "unknown-public-web-catalog"
+      },
+      "effectPicker": {
+        "group": "Background Effects",
+        "intensity": "expressive",
+        "technicalComplexity": "high",
+        "requiresVisualQA": true
+      }
+    },
+    {
+      "id": "neuform_dither-laser-dark-mode",
+      "title": "Dither Laser Dark Mode",
+      "provider": "neuform",
+      "path": "effects/dither-laser-dark-mode.md",
+      "patternKind": "webgl_background",
+      "pickerGroup": "Background Effects",
+      "intensity": "expressive",
+      "technicalComplexity": "high",
+      "recommendationStrength": "heavy_recommend_optional",
+      "themePickerReady": true,
+      "roles": [
+        "frontend_designer",
+        "frontend_builder",
+        "visual_polish_reviewer"
+      ],
+      "categories": [
+        "marketing_site"
+      ],
+      "appliesTo": [
+        "DESIGN.md",
+        "implementation",
+        "visual_review"
+      ],
+      "tags": [
+        "design system",
+        "style",
+        "webgl"
+      ],
+      "keywords": [
+        "design system",
+        "style",
+        "webgl",
+        "webgl_background",
+        "dither",
+        "laser",
+        "dark",
+        "mode"
+      ],
+      "source": {
+        "name": "Neuform prompt skill catalog",
+        "url": "https://neuform.ai/skill/dither-laser-dark-mode",
+        "originId": "dither-laser-dark-mode",
+        "license": "unknown-public-web-catalog"
+      },
+      "effectPicker": {
+        "group": "Background Effects",
+        "intensity": "expressive",
+        "technicalComplexity": "high",
+        "requiresVisualQA": true
+      }
+    },
+    {
+      "id": "neuform_3d-perspective-scroll-dashboard-0hq031",
+      "title": "3D Perspective Scroll Dashboard",
+      "provider": "neuform",
+      "path": "effects/3d-perspective-scroll-dashboard.md",
+      "patternKind": "webgl_background",
+      "pickerGroup": "Background Effects",
+      "intensity": "expressive",
+      "technicalComplexity": "high",
+      "recommendationStrength": "heavy_recommend_optional",
+      "themePickerReady": true,
+      "roles": [
+        "frontend_designer",
+        "frontend_builder",
+        "visual_polish_reviewer"
+      ],
+      "categories": [
+        "marketing_site",
+        "saas_dashboard"
+      ],
+      "appliesTo": [
+        "DESIGN.md",
+        "implementation",
+        "visual_review"
+      ],
+      "tags": [
+        "design system",
+        "3d",
+        "animation"
+      ],
+      "keywords": [
+        "design system",
+        "3d",
+        "animation",
+        "webgl_background",
+        "perspective",
+        "scroll",
+        "dashboard"
+      ],
+      "source": {
+        "name": "Neuform prompt skill catalog",
+        "url": "https://neuform.ai/skill/3d-perspective-scroll-dashboard-0hq031",
+        "originId": "3d-perspective-scroll-dashboard-0hq031",
+        "license": "unknown-public-web-catalog"
+      },
+      "effectPicker": {
+        "group": "Background Effects",
+        "intensity": "expressive",
+        "technicalComplexity": "high",
+        "requiresVisualQA": true
+      }
+    },
+    {
+      "id": "neuform_atmospheric-procedural-webgl-background-2zumzs",
+      "title": "Atmospheric Procedural WebGL Background",
+      "provider": "neuform",
+      "path": "effects/atmospheric-procedural-webgl-background.md",
+      "patternKind": "webgl_background",
+      "pickerGroup": "Background Effects",
+      "intensity": "expressive",
+      "technicalComplexity": "high",
+      "recommendationStrength": "heavy_recommend_optional",
+      "themePickerReady": true,
+      "roles": [
+        "frontend_designer",
+        "frontend_builder",
+        "visual_polish_reviewer"
+      ],
+      "categories": [
+        "marketing_site"
+      ],
+      "appliesTo": [
+        "DESIGN.md",
+        "implementation",
+        "visual_review"
+      ],
+      "tags": [
+        "webgl",
+        "threejs",
+        "animation"
+      ],
+      "keywords": [
+        "webgl",
+        "threejs",
+        "animation",
+        "webgl_background",
+        "atmospheric",
+        "procedural",
+        "background"
+      ],
+      "source": {
+        "name": "Neuform prompt skill catalog",
+        "url": "https://neuform.ai/skill/atmospheric-procedural-webgl-background-2zumzs",
+        "originId": "atmospheric-procedural-webgl-background-2zumzs",
+        "license": "unknown-public-web-catalog"
+      },
+      "effectPicker": {
+        "group": "Background Effects",
+        "intensity": "expressive",
+        "technicalComplexity": "high",
+        "requiresVisualQA": true
+      }
+    },
+    {
+      "id": "neuform_book-serif-index",
+      "title": "Book Serif Index",
+      "provider": "neuform",
+      "path": "effects/book-serif-index.md",
+      "patternKind": "motion_effect",
+      "pickerGroup": "Motion Effects",
+      "intensity": "expressive",
+      "technicalComplexity": "medium",
+      "recommendationStrength": "heavy_recommend_optional",
+      "themePickerReady": true,
+      "roles": [
+        "frontend_designer",
+        "frontend_builder",
+        "visual_polish_reviewer"
+      ],
+      "categories": [
+        "marketing_site",
+        "saas_dashboard",
+        "docs_portal"
+      ],
+      "appliesTo": [
+        "DESIGN.md",
+        "implementation",
+        "visual_review"
+      ],
+      "tags": [
+        "design system",
+        "layout",
+        "style"
+      ],
+      "keywords": [
+        "design system",
+        "layout",
+        "style",
+        "motion_effect",
+        "book",
+        "serif",
+        "index"
+      ],
+      "source": {
+        "name": "Neuform prompt skill catalog",
+        "url": "https://neuform.ai/skill/book-serif-index",
+        "originId": "book-serif-index",
+        "license": "unknown-public-web-catalog"
+      },
+      "effectPicker": {
+        "group": "Motion Effects",
+        "intensity": "expressive",
+        "technicalComplexity": "medium",
+        "requiresVisualQA": true
+      }
+    },
+    {
+      "id": "neuform_interactive-border-gradient-glow-wnu6m4",
+      "title": "Interactive Border Gradient Glow",
+      "provider": "neuform",
+      "path": "effects/interactive-border-gradient-glow.md",
+      "patternKind": "motion_effect",
+      "pickerGroup": "Motion Effects",
+      "intensity": "restrained",
+      "technicalComplexity": "low_medium",
+      "recommendationStrength": "heavy_recommend_optional",
+      "themePickerReady": true,
+      "roles": [
+        "frontend_designer",
+        "frontend_builder",
+        "visual_polish_reviewer"
+      ],
+      "categories": [
+        "marketing_site"
+      ],
+      "appliesTo": [
+        "DESIGN.md",
+        "implementation",
+        "visual_review"
+      ],
+      "tags": [
+        "design system",
+        "style",
+        "animation"
+      ],
+      "keywords": [
+        "design system",
+        "style",
+        "animation",
+        "motion_effect",
+        "interactive",
+        "border",
+        "gradient",
+        "glow"
+      ],
+      "source": {
+        "name": "Neuform prompt skill catalog",
+        "url": "https://neuform.ai/skill/interactive-border-gradient-glow-wnu6m4",
+        "originId": "interactive-border-gradient-glow-wnu6m4",
+        "license": "unknown-public-web-catalog"
+      },
+      "effectPicker": {
+        "group": "Motion Effects",
+        "intensity": "restrained",
+        "technicalComplexity": "low_medium",
+        "requiresVisualQA": true
+      }
+    },
+    {
+      "id": "neuform_atmospheric-meditative-dark-system-wr0bj8",
+      "title": "Atmospheric Meditative Dark System",
+      "provider": "neuform",
+      "path": "effects/atmospheric-meditative-dark-system.md",
+      "patternKind": "motion_effect",
+      "pickerGroup": "Motion Effects",
+      "intensity": "expressive",
+      "technicalComplexity": "medium_high",
+      "recommendationStrength": "heavy_recommend_optional",
+      "themePickerReady": true,
+      "roles": [
+        "frontend_designer",
+        "frontend_builder",
+        "visual_polish_reviewer"
+      ],
+      "categories": [
+        "marketing_site"
+      ],
+      "appliesTo": [
+        "DESIGN.md",
+        "implementation",
+        "visual_review"
+      ],
+      "tags": [
+        "design system",
+        "animation",
+        "style"
+      ],
+      "keywords": [
+        "design system",
+        "animation",
+        "style",
+        "motion_effect",
+        "atmospheric",
+        "meditative",
+        "dark",
+        "system"
+      ],
+      "source": {
+        "name": "Neuform prompt skill catalog",
+        "url": "https://neuform.ai/skill/atmospheric-meditative-dark-system-wr0bj8",
+        "originId": "atmospheric-meditative-dark-system-wr0bj8",
+        "license": "unknown-public-web-catalog"
+      },
+      "effectPicker": {
+        "group": "Motion Effects",
+        "intensity": "expressive",
+        "technicalComplexity": "medium_high",
+        "requiresVisualQA": true
+      }
+    },
+    {
+      "id": "neuform_organic-aetherial-webgl-background-316jwq",
+      "title": "Organic Aetherial WebGL Background",
+      "provider": "neuform",
+      "path": "effects/organic-aetherial-webgl-background.md",
+      "patternKind": "webgl_background",
+      "pickerGroup": "Background Effects",
+      "intensity": "expressive",
+      "technicalComplexity": "high",
+      "recommendationStrength": "heavy_recommend_optional",
+      "themePickerReady": true,
+      "roles": [
+        "frontend_designer",
+        "frontend_builder",
+        "visual_polish_reviewer"
+      ],
+      "categories": [
+        "marketing_site"
+      ],
+      "appliesTo": [
+        "DESIGN.md",
+        "implementation",
+        "visual_review"
+      ],
+      "tags": [
+        "webgl",
+        "threejs",
+        "animation"
+      ],
+      "keywords": [
+        "webgl",
+        "threejs",
+        "animation",
+        "webgl_background",
+        "organic",
+        "aetherial",
+        "background"
+      ],
+      "source": {
+        "name": "Neuform prompt skill catalog",
+        "url": "https://neuform.ai/skill/organic-aetherial-webgl-background-316jwq",
+        "originId": "organic-aetherial-webgl-background-316jwq",
+        "license": "unknown-public-web-catalog"
+      },
+      "effectPicker": {
+        "group": "Background Effects",
+        "intensity": "expressive",
+        "technicalComplexity": "high",
+        "requiresVisualQA": true
+      }
+    },
+    {
+      "id": "neuform_gooey-blob-system",
+      "title": "Gooey Blob System",
+      "provider": "neuform",
+      "path": "effects/gooey-blob-system.md",
+      "patternKind": "motion_effect",
+      "pickerGroup": "Motion Effects",
+      "intensity": "restrained",
+      "technicalComplexity": "medium",
+      "recommendationStrength": "heavy_recommend_optional",
+      "themePickerReady": true,
+      "roles": [
+        "frontend_designer",
+        "frontend_builder",
+        "visual_polish_reviewer"
+      ],
+      "categories": [
+        "marketing_site",
+        "consumer_mobile_app"
+      ],
+      "appliesTo": [
+        "DESIGN.md",
+        "implementation",
+        "visual_review"
+      ],
+      "tags": [
+        "style",
+        "animation"
+      ],
+      "keywords": [
+        "style",
+        "animation",
+        "motion_effect",
+        "gooey",
+        "blob",
+        "system"
+      ],
+      "source": {
+        "name": "Neuform prompt skill catalog",
+        "url": "https://neuform.ai/skill/gooey-blob-system",
+        "originId": "gooey-blob-system",
+        "license": "unknown-public-web-catalog"
+      },
+      "effectPicker": {
+        "group": "Motion Effects",
+        "intensity": "restrained",
+        "technicalComplexity": "medium",
+        "requiresVisualQA": true
+      }
+    },
+    {
+      "id": "neuform_technical-shader-surface-webgl-2zrur1",
+      "title": "Technical Shader Surface (WebGL)",
+      "provider": "neuform",
+      "path": "effects/technical-shader-surface-webgl.md",
+      "patternKind": "webgl_background",
+      "pickerGroup": "Background Effects",
+      "intensity": "expressive",
+      "technicalComplexity": "high",
+      "recommendationStrength": "heavy_recommend_optional",
+      "themePickerReady": true,
+      "roles": [
+        "frontend_designer",
+        "frontend_builder",
+        "visual_polish_reviewer"
+      ],
+      "categories": [
+        "marketing_site"
+      ],
+      "appliesTo": [
+        "DESIGN.md",
+        "implementation",
+        "visual_review"
+      ],
+      "tags": [
+        "webgl",
+        "threejs",
+        "animation"
+      ],
+      "keywords": [
+        "webgl",
+        "threejs",
+        "animation",
+        "webgl_background",
+        "technical",
+        "shader",
+        "surface"
+      ],
+      "source": {
+        "name": "Neuform prompt skill catalog",
+        "url": "https://neuform.ai/skill/technical-shader-surface-webgl-2zrur1",
+        "originId": "technical-shader-surface-webgl-2zrur1",
+        "license": "unknown-public-web-catalog"
+      },
+      "effectPicker": {
+        "group": "Background Effects",
+        "intensity": "expressive",
+        "technicalComplexity": "high",
+        "requiresVisualQA": true
+      }
+    },
+    {
+      "id": "neuform_number-details",
+      "title": "Number Details",
+      "provider": "neuform",
+      "path": "effects/number-details.md",
+      "patternKind": "surface_style",
+      "pickerGroup": "Surface and Material Effects",
+      "intensity": "balanced",
+      "technicalComplexity": "low_medium",
+      "recommendationStrength": "heavy_recommend_optional",
+      "themePickerReady": true,
+      "roles": [
+        "frontend_designer",
+        "frontend_builder",
+        "visual_polish_reviewer"
+      ],
+      "categories": [
+        "marketing_site"
+      ],
+      "appliesTo": [
+        "DESIGN.md",
+        "implementation",
+        "visual_review"
+      ],
+      "tags": [
+        "style"
+      ],
+      "keywords": [
+        "style",
+        "surface_style",
+        "number",
+        "details"
+      ],
+      "source": {
+        "name": "Neuform prompt skill catalog",
+        "url": "https://neuform.ai/skill/number-details",
+        "originId": "number-details",
+        "license": "unknown-public-web-catalog"
+      },
+      "effectPicker": {
+        "group": "Surface and Material Effects",
+        "intensity": "balanced",
+        "technicalComplexity": "low_medium",
+        "requiresVisualQA": true
+      }
+    },
+    {
+      "id": "neuform_cyber-kinetic-background-field-3yguj9",
+      "title": "Cyber Kinetic Background Field",
+      "provider": "neuform",
+      "path": "effects/cyber-kinetic-background-field.md",
+      "patternKind": "webgl_background",
+      "pickerGroup": "Background Effects",
+      "intensity": "expressive",
+      "technicalComplexity": "high",
+      "recommendationStrength": "heavy_recommend_optional",
+      "themePickerReady": true,
+      "roles": [
+        "frontend_designer",
+        "frontend_builder",
+        "visual_polish_reviewer"
+      ],
+      "categories": [
+        "marketing_site"
+      ],
+      "appliesTo": [
+        "DESIGN.md",
+        "implementation",
+        "visual_review"
+      ],
+      "tags": [
+        "design system",
+        "animation",
+        "webgl"
+      ],
+      "keywords": [
+        "design system",
+        "animation",
+        "webgl",
+        "webgl_background",
+        "cyber",
+        "kinetic",
+        "background",
+        "field"
+      ],
+      "source": {
+        "name": "Neuform prompt skill catalog",
+        "url": "https://neuform.ai/skill/cyber-kinetic-background-field-3yguj9",
+        "originId": "cyber-kinetic-background-field-3yguj9",
+        "license": "unknown-public-web-catalog"
+      },
+      "effectPicker": {
+        "group": "Background Effects",
+        "intensity": "expressive",
+        "technicalComplexity": "high",
+        "requiresVisualQA": true
+      }
+    },
+    {
+      "id": "neuform_atmospheric-technical-design-system-u1ciwi",
+      "title": "Atmospheric Technical Design System",
+      "provider": "neuform",
+      "path": "effects/atmospheric-technical-design-system.md",
+      "patternKind": "webgl_background",
+      "pickerGroup": "Background Effects",
+      "intensity": "expressive",
+      "technicalComplexity": "high",
+      "recommendationStrength": "heavy_recommend_optional",
+      "themePickerReady": true,
+      "roles": [
+        "frontend_designer",
+        "frontend_builder",
+        "visual_polish_reviewer"
+      ],
+      "categories": [
+        "marketing_site",
+        "saas_dashboard"
+      ],
+      "appliesTo": [
+        "DESIGN.md",
+        "implementation",
+        "visual_review"
+      ],
+      "tags": [
+        "design system",
+        "webgl",
+        "layout"
+      ],
+      "keywords": [
+        "design system",
+        "webgl",
+        "layout",
+        "webgl_background",
+        "atmospheric",
+        "technical",
+        "design",
+        "system"
+      ],
+      "source": {
+        "name": "Neuform prompt skill catalog",
+        "url": "https://neuform.ai/skill/atmospheric-technical-design-system-u1ciwi",
+        "originId": "atmospheric-technical-design-system-u1ciwi",
+        "license": "unknown-public-web-catalog"
+      },
+      "effectPicker": {
+        "group": "Background Effects",
+        "intensity": "expressive",
+        "technicalComplexity": "high",
+        "requiresVisualQA": true
+      }
+    },
+    {
+      "id": "neuform_technical-webgl-fluid-nebula-background-2zdue1",
+      "title": "Technical WebGL Fluid Nebula Background",
+      "provider": "neuform",
+      "path": "effects/technical-webgl-fluid-nebula-background.md",
+      "patternKind": "webgl_background",
+      "pickerGroup": "Background Effects",
+      "intensity": "expressive",
+      "technicalComplexity": "high",
+      "recommendationStrength": "heavy_recommend_optional",
+      "themePickerReady": true,
+      "roles": [
+        "frontend_designer",
+        "frontend_builder",
+        "visual_polish_reviewer"
+      ],
+      "categories": [
+        "marketing_site"
+      ],
+      "appliesTo": [
+        "DESIGN.md",
+        "implementation",
+        "visual_review"
+      ],
+      "tags": [
+        "webgl",
+        "threejs",
+        "animation"
+      ],
+      "keywords": [
+        "webgl",
+        "threejs",
+        "animation",
+        "webgl_background",
+        "technical",
+        "fluid",
+        "nebula",
+        "background"
+      ],
+      "source": {
+        "name": "Neuform prompt skill catalog",
+        "url": "https://neuform.ai/skill/technical-webgl-fluid-nebula-background-2zdue1",
+        "originId": "technical-webgl-fluid-nebula-background-2zdue1",
+        "license": "unknown-public-web-catalog"
+      },
+      "effectPicker": {
+        "group": "Background Effects",
+        "intensity": "expressive",
+        "technicalComplexity": "high",
+        "requiresVisualQA": true
+      }
+    },
+    {
+      "id": "neuform_aura-isometric-3d-visualization-system-i4nez9",
+      "title": "Aura Isometric 3D Visualization System",
+      "provider": "neuform",
+      "path": "effects/aura-isometric-3d-visualization-system.md",
+      "patternKind": "webgl_background",
+      "pickerGroup": "Background Effects",
+      "intensity": "expressive",
+      "technicalComplexity": "high",
+      "recommendationStrength": "heavy_recommend_optional",
+      "themePickerReady": true,
+      "roles": [
+        "frontend_designer",
+        "frontend_builder",
+        "visual_polish_reviewer"
+      ],
+      "categories": [
+        "marketing_site",
+        "saas_dashboard"
+      ],
+      "appliesTo": [
+        "DESIGN.md",
+        "implementation",
+        "visual_review"
+      ],
+      "tags": [
+        "threejs",
+        "3d",
+        "animation"
+      ],
+      "keywords": [
+        "threejs",
+        "3d",
+        "animation",
+        "webgl_background",
+        "aura",
+        "isometric",
+        "visualization",
+        "system"
+      ],
+      "source": {
+        "name": "Neuform prompt skill catalog",
+        "url": "https://neuform.ai/skill/aura-isometric-3d-visualization-system-i4nez9",
+        "originId": "aura-isometric-3d-visualization-system-i4nez9",
+        "license": "unknown-public-web-catalog"
+      },
+      "effectPicker": {
+        "group": "Background Effects",
+        "intensity": "expressive",
+        "technicalComplexity": "high",
+        "requiresVisualQA": true
+      }
+    },
+    {
+      "id": "neuform_kinetic-radial-sculpture-system-0gv4e7",
+      "title": "Kinetic Radial Sculpture System",
+      "provider": "neuform",
+      "path": "effects/kinetic-radial-sculpture-system.md",
+      "patternKind": "motion_effect",
+      "pickerGroup": "Motion Effects",
+      "intensity": "expressive",
+      "technicalComplexity": "medium_high",
+      "recommendationStrength": "heavy_recommend_optional",
+      "themePickerReady": true,
+      "roles": [
+        "frontend_designer",
+        "frontend_builder",
+        "visual_polish_reviewer"
+      ],
+      "categories": [
+        "marketing_site"
+      ],
+      "appliesTo": [
+        "DESIGN.md",
+        "implementation",
+        "visual_review"
+      ],
+      "tags": [
+        "design system",
+        "animation",
+        "style"
+      ],
+      "keywords": [
+        "design system",
+        "animation",
+        "style",
+        "motion_effect",
+        "kinetic",
+        "radial",
+        "sculpture",
+        "system"
+      ],
+      "source": {
+        "name": "Neuform prompt skill catalog",
+        "url": "https://neuform.ai/skill/kinetic-radial-sculpture-system-0gv4e7",
+        "originId": "kinetic-radial-sculpture-system-0gv4e7",
+        "license": "unknown-public-web-catalog"
+      },
+      "effectPicker": {
+        "group": "Motion Effects",
+        "intensity": "expressive",
+        "technicalComplexity": "medium_high",
+        "requiresVisualQA": true
+      }
+    },
+    {
+      "id": "neuform_d3-interactive-point-cloud-globe-3zkwpn",
+      "title": "D3 Interactive Point-Cloud Globe",
+      "provider": "neuform",
+      "path": "effects/d3-interactive-point-cloud-globe.md",
+      "patternKind": "webgl_background",
+      "pickerGroup": "Background Effects",
+      "intensity": "expressive",
+      "technicalComplexity": "high",
+      "recommendationStrength": "heavy_recommend_optional",
+      "themePickerReady": true,
+      "roles": [
+        "frontend_designer",
+        "frontend_builder",
+        "visual_polish_reviewer"
+      ],
+      "categories": [
+        "marketing_site"
+      ],
+      "appliesTo": [
+        "DESIGN.md",
+        "implementation",
+        "visual_review"
+      ],
+      "tags": [
+        "animation",
+        "3d",
+        "design system"
+      ],
+      "keywords": [
+        "animation",
+        "3d",
+        "design system",
+        "webgl_background",
+        "d3",
+        "interactive",
+        "point",
+        "cloud",
+        "globe"
+      ],
+      "source": {
+        "name": "Neuform prompt skill catalog",
+        "url": "https://neuform.ai/skill/d3-interactive-point-cloud-globe-3zkwpn",
+        "originId": "d3-interactive-point-cloud-globe-3zkwpn",
+        "license": "unknown-public-web-catalog"
+      },
+      "effectPicker": {
+        "group": "Background Effects",
+        "intensity": "expressive",
+        "technicalComplexity": "high",
+        "requiresVisualQA": true
+      }
+    },
+    {
+      "id": "neuform_atmospheric-webgl-field-system-8lvtag",
+      "title": "Atmospheric WebGL Field System",
+      "provider": "neuform",
+      "path": "effects/atmospheric-webgl-field-system.md",
+      "patternKind": "webgl_background",
+      "pickerGroup": "Background Effects",
+      "intensity": "expressive",
+      "technicalComplexity": "high",
+      "recommendationStrength": "heavy_recommend_optional",
+      "themePickerReady": true,
+      "roles": [
+        "frontend_designer",
+        "frontend_builder",
+        "visual_polish_reviewer"
+      ],
+      "categories": [
+        "marketing_site",
+        "saas_dashboard"
+      ],
+      "appliesTo": [
+        "DESIGN.md",
+        "implementation",
+        "visual_review"
+      ],
+      "tags": [
+        "style",
+        "webgl",
+        "shadow"
+      ],
+      "keywords": [
+        "style",
+        "webgl",
+        "shadow",
+        "webgl_background",
+        "atmospheric",
+        "field",
+        "system"
+      ],
+      "source": {
+        "name": "Neuform prompt skill catalog",
+        "url": "https://neuform.ai/skill/atmospheric-webgl-field-system-8lvtag",
+        "originId": "atmospheric-webgl-field-system-8lvtag",
+        "license": "unknown-public-web-catalog"
+      },
+      "effectPicker": {
+        "group": "Background Effects",
+        "intensity": "expressive",
+        "technicalComplexity": "high",
+        "requiresVisualQA": true
+      }
+    },
+    {
+      "id": "neuform_aura-3d-network-system-i4oa3n",
+      "title": "Aura 3D Network System",
+      "provider": "neuform",
+      "path": "effects/aura-3d-network-system.md",
+      "patternKind": "webgl_background",
+      "pickerGroup": "Background Effects",
+      "intensity": "expressive",
+      "technicalComplexity": "high",
+      "recommendationStrength": "heavy_recommend_optional",
+      "themePickerReady": true,
+      "roles": [
+        "frontend_designer",
+        "frontend_builder",
+        "visual_polish_reviewer"
+      ],
+      "categories": [
+        "marketing_site"
+      ],
+      "appliesTo": [
+        "DESIGN.md",
+        "implementation",
+        "visual_review"
+      ],
+      "tags": [
+        "style",
+        "3d",
+        "animation"
+      ],
+      "keywords": [
+        "style",
+        "3d",
+        "animation",
+        "webgl_background",
+        "aura",
+        "network",
+        "system"
+      ],
+      "source": {
+        "name": "Neuform prompt skill catalog",
+        "url": "https://neuform.ai/skill/aura-3d-network-system-i4oa3n",
+        "originId": "aura-3d-network-system-i4oa3n",
+        "license": "unknown-public-web-catalog"
+      },
+      "effectPicker": {
+        "group": "Background Effects",
+        "intensity": "expressive",
+        "technicalComplexity": "high",
+        "requiresVisualQA": true
+      }
+    },
+    {
+      "id": "neuform_premium-gradient-border-system-6skdcm",
+      "title": "Premium Gradient Border System",
+      "provider": "neuform",
+      "path": "effects/premium-gradient-border-system.md",
+      "patternKind": "motion_effect",
+      "pickerGroup": "Motion Effects",
+      "intensity": "expressive",
+      "technicalComplexity": "medium_high",
+      "recommendationStrength": "heavy_recommend_optional",
+      "themePickerReady": true,
+      "roles": [
+        "frontend_designer",
+        "frontend_builder",
+        "visual_polish_reviewer"
+      ],
+      "categories": [
+        "marketing_site",
+        "saas_dashboard",
+        "docs_portal"
+      ],
+      "appliesTo": [
+        "DESIGN.md",
+        "implementation",
+        "visual_review"
+      ],
+      "tags": [
+        "style",
+        "design system",
+        "shadow"
+      ],
+      "keywords": [
+        "style",
+        "design system",
+        "shadow",
+        "motion_effect",
+        "premium",
+        "gradient",
+        "border",
+        "system"
+      ],
+      "source": {
+        "name": "Neuform prompt skill catalog",
+        "url": "https://neuform.ai/skill/premium-gradient-border-system-6skdcm",
+        "originId": "premium-gradient-border-system-6skdcm",
+        "license": "unknown-public-web-catalog"
+      },
+      "effectPicker": {
+        "group": "Motion Effects",
+        "intensity": "expressive",
+        "technicalComplexity": "medium_high",
+        "requiresVisualQA": true
+      }
+    },
+    {
+      "id": "neuform_cyber-trail-webgl-background-system-vdwsx2",
+      "title": "Cyber-Trail WebGL Background System",
+      "provider": "neuform",
+      "path": "effects/cyber-trail-webgl-background-system.md",
+      "patternKind": "webgl_background",
+      "pickerGroup": "Background Effects",
+      "intensity": "expressive",
+      "technicalComplexity": "high",
+      "recommendationStrength": "heavy_recommend_optional",
+      "themePickerReady": true,
+      "roles": [
+        "frontend_designer",
+        "frontend_builder",
+        "visual_polish_reviewer"
+      ],
+      "categories": [
+        "marketing_site"
+      ],
+      "appliesTo": [
+        "DESIGN.md",
+        "implementation",
+        "visual_review"
+      ],
+      "tags": [
+        "webgl",
+        "threejs",
+        "animation"
+      ],
+      "keywords": [
+        "webgl",
+        "threejs",
+        "animation",
+        "webgl_background",
+        "cyber",
+        "trail",
+        "background",
+        "system"
+      ],
+      "source": {
+        "name": "Neuform prompt skill catalog",
+        "url": "https://neuform.ai/skill/cyber-trail-webgl-background-system-vdwsx2",
+        "originId": "cyber-trail-webgl-background-system-vdwsx2",
+        "license": "unknown-public-web-catalog"
+      },
+      "effectPicker": {
+        "group": "Background Effects",
+        "intensity": "expressive",
+        "technicalComplexity": "high",
+        "requiresVisualQA": true
+      }
+    },
+    {
+      "id": "neuform_atmospheric-ambient-ray-and-particle-system-3yx90f",
+      "title": "Atmospheric Ambient Ray & Particle System",
+      "provider": "neuform",
+      "path": "effects/atmospheric-ambient-ray-and-particle-system.md",
+      "patternKind": "webgl_background",
+      "pickerGroup": "Background Effects",
+      "intensity": "expressive",
+      "technicalComplexity": "high",
+      "recommendationStrength": "heavy_recommend_optional",
+      "themePickerReady": true,
+      "roles": [
+        "frontend_designer",
+        "frontend_builder",
+        "visual_polish_reviewer"
+      ],
+      "categories": [
+        "marketing_site"
+      ],
+      "appliesTo": [
+        "DESIGN.md",
+        "implementation",
+        "visual_review"
+      ],
+      "tags": [
+        "animation",
+        "webgl",
+        "style"
+      ],
+      "keywords": [
+        "animation",
+        "webgl",
+        "style",
+        "webgl_background",
+        "atmospheric",
+        "ambient",
+        "ray",
+        "particle",
+        "system"
+      ],
+      "source": {
+        "name": "Neuform prompt skill catalog",
+        "url": "https://neuform.ai/skill/atmospheric-ambient-ray-and-particle-system-3yx90f",
+        "originId": "atmospheric-ambient-ray-and-particle-system-3yx90f",
+        "license": "unknown-public-web-catalog"
+      },
+      "effectPicker": {
+        "group": "Background Effects",
+        "intensity": "expressive",
+        "technicalComplexity": "high",
+        "requiresVisualQA": true
+      }
+    },
+    {
+      "id": "neuform_chromatic-dispersion-webgl-system-40mkq2",
+      "title": "Chromatic Dispersion WebGL System",
+      "provider": "neuform",
+      "path": "effects/chromatic-dispersion-webgl-system.md",
+      "patternKind": "webgl_background",
+      "pickerGroup": "Background Effects",
+      "intensity": "expressive",
+      "technicalComplexity": "high",
+      "recommendationStrength": "heavy_recommend_optional",
+      "themePickerReady": true,
+      "roles": [
+        "frontend_designer",
+        "frontend_builder",
+        "visual_polish_reviewer"
+      ],
+      "categories": [
+        "marketing_site"
+      ],
+      "appliesTo": [
+        "DESIGN.md",
+        "implementation",
+        "visual_review"
+      ],
+      "tags": [
+        "webgl",
+        "threejs",
+        "animation"
+      ],
+      "keywords": [
+        "webgl",
+        "threejs",
+        "animation",
+        "webgl_background",
+        "chromatic",
+        "dispersion",
+        "system"
+      ],
+      "source": {
+        "name": "Neuform prompt skill catalog",
+        "url": "https://neuform.ai/skill/chromatic-dispersion-webgl-system-40mkq2",
+        "originId": "chromatic-dispersion-webgl-system-40mkq2",
+        "license": "unknown-public-web-catalog"
+      },
+      "effectPicker": {
+        "group": "Background Effects",
+        "intensity": "expressive",
+        "technicalComplexity": "high",
+        "requiresVisualQA": true
+      }
+    },
+    {
+      "id": "neuform_technical-tactical-globe-ui-3zjv9a",
+      "title": "Technical Tactical Globe UI",
+      "provider": "neuform",
+      "path": "effects/technical-tactical-globe-ui.md",
+      "patternKind": "webgl_background",
+      "pickerGroup": "Background Effects",
+      "intensity": "expressive",
+      "technicalComplexity": "high",
+      "recommendationStrength": "heavy_recommend_optional",
+      "themePickerReady": true,
+      "roles": [
+        "frontend_designer",
+        "frontend_builder",
+        "visual_polish_reviewer"
+      ],
+      "categories": [
+        "marketing_site"
+      ],
+      "appliesTo": [
+        "DESIGN.md",
+        "implementation",
+        "visual_review"
+      ],
+      "tags": [
+        "style",
+        "3d",
+        "animation"
+      ],
+      "keywords": [
+        "style",
+        "3d",
+        "animation",
+        "webgl_background",
+        "technical",
+        "tactical",
+        "globe",
+        "ui"
+      ],
+      "source": {
+        "name": "Neuform prompt skill catalog",
+        "url": "https://neuform.ai/skill/technical-tactical-globe-ui-3zjv9a",
+        "originId": "technical-tactical-globe-ui-3zjv9a",
+        "license": "unknown-public-web-catalog"
+      },
+      "effectPicker": {
+        "group": "Background Effects",
+        "intensity": "expressive",
+        "technicalComplexity": "high",
+        "requiresVisualQA": true
+      }
+    },
+    {
+      "id": "neuform_atmospheric-topographic-webgl-u55nmy",
+      "title": "Atmospheric Topographic WebGL",
+      "provider": "neuform",
+      "path": "effects/atmospheric-topographic-webgl.md",
+      "patternKind": "webgl_background",
+      "pickerGroup": "Background Effects",
+      "intensity": "expressive",
+      "technicalComplexity": "high",
+      "recommendationStrength": "heavy_recommend_optional",
+      "themePickerReady": true,
+      "roles": [
+        "frontend_designer",
+        "frontend_builder",
+        "visual_polish_reviewer"
+      ],
+      "categories": [
+        "marketing_site"
+      ],
+      "appliesTo": [
+        "DESIGN.md",
+        "implementation",
+        "visual_review"
+      ],
+      "tags": [
+        "webgl",
+        "animation",
+        "style"
+      ],
+      "keywords": [
+        "webgl",
+        "animation",
+        "style",
+        "webgl_background",
+        "atmospheric",
+        "topographic"
+      ],
+      "source": {
+        "name": "Neuform prompt skill catalog",
+        "url": "https://neuform.ai/skill/atmospheric-topographic-webgl-u55nmy",
+        "originId": "atmospheric-topographic-webgl-u55nmy",
+        "license": "unknown-public-web-catalog"
+      },
+      "effectPicker": {
+        "group": "Background Effects",
+        "intensity": "expressive",
+        "technicalComplexity": "high",
+        "requiresVisualQA": true
+      }
+    },
+    {
+      "id": "neuform_atmospheric-laser-and-webgl-design-system-8ljti2",
+      "title": "Atmospheric Laser & WebGL Design System",
+      "provider": "neuform",
+      "path": "effects/atmospheric-laser-and-webgl-design-system.md",
+      "patternKind": "webgl_background",
+      "pickerGroup": "Background Effects",
+      "intensity": "expressive",
+      "technicalComplexity": "high",
+      "recommendationStrength": "heavy_recommend_optional",
+      "themePickerReady": true,
+      "roles": [
+        "frontend_designer",
+        "frontend_builder",
+        "visual_polish_reviewer"
+      ],
+      "categories": [
+        "marketing_site"
+      ],
+      "appliesTo": [
+        "DESIGN.md",
+        "implementation",
+        "visual_review"
+      ],
+      "tags": [
+        "design system",
+        "webgl",
+        "animation"
+      ],
+      "keywords": [
+        "design system",
+        "webgl",
+        "animation",
+        "webgl_background",
+        "atmospheric",
+        "laser",
+        "design",
+        "system"
+      ],
+      "source": {
+        "name": "Neuform prompt skill catalog",
+        "url": "https://neuform.ai/skill/atmospheric-laser-and-webgl-design-system-8ljti2",
+        "originId": "atmospheric-laser-and-webgl-design-system-8ljti2",
+        "license": "unknown-public-web-catalog"
+      },
+      "effectPicker": {
+        "group": "Background Effects",
+        "intensity": "expressive",
+        "technicalComplexity": "high",
+        "requiresVisualQA": true
+      }
+    },
+    {
+      "id": "neuform_isometric-spatial-3d-system-i58999",
+      "title": "Isometric Spatial 3D System",
+      "provider": "neuform",
+      "path": "effects/isometric-spatial-3d-system.md",
+      "patternKind": "webgl_background",
+      "pickerGroup": "Background Effects",
+      "intensity": "expressive",
+      "technicalComplexity": "high",
+      "recommendationStrength": "heavy_recommend_optional",
+      "themePickerReady": true,
+      "roles": [
+        "frontend_designer",
+        "frontend_builder",
+        "visual_polish_reviewer"
+      ],
+      "categories": [
+        "marketing_site"
+      ],
+      "appliesTo": [
+        "DESIGN.md",
+        "implementation",
+        "visual_review"
+      ],
+      "tags": [
+        "3d",
+        "animation",
+        "threejs"
+      ],
+      "keywords": [
+        "3d",
+        "animation",
+        "threejs",
+        "webgl_background",
+        "isometric",
+        "spatial",
+        "system"
+      ],
+      "source": {
+        "name": "Neuform prompt skill catalog",
+        "url": "https://neuform.ai/skill/isometric-spatial-3d-system-i58999",
+        "originId": "isometric-spatial-3d-system-i58999",
+        "license": "unknown-public-web-catalog"
+      },
+      "effectPicker": {
+        "group": "Background Effects",
+        "intensity": "expressive",
+        "technicalComplexity": "high",
+        "requiresVisualQA": true
+      }
+    },
+    {
+      "id": "neuform_grainy-stepped-gradient-noise-trdra9",
+      "title": "Grainy Stepped Gradient Noise",
+      "provider": "neuform",
+      "path": "effects/grainy-stepped-gradient-noise.md",
+      "patternKind": "webgl_background",
+      "pickerGroup": "Background Effects",
+      "intensity": "expressive",
+      "technicalComplexity": "high",
+      "recommendationStrength": "heavy_recommend_optional",
+      "themePickerReady": true,
+      "roles": [
+        "frontend_designer",
+        "frontend_builder",
+        "visual_polish_reviewer"
+      ],
+      "categories": [
+        "marketing_site"
+      ],
+      "appliesTo": [
+        "DESIGN.md",
+        "implementation",
+        "visual_review"
+      ],
+      "tags": [
+        "webgl",
+        "threejs",
+        "animation"
+      ],
+      "keywords": [
+        "webgl",
+        "threejs",
+        "animation",
+        "webgl_background",
+        "grainy",
+        "stepped",
+        "gradient",
+        "noise"
+      ],
+      "source": {
+        "name": "Neuform prompt skill catalog",
+        "url": "https://neuform.ai/skill/grainy-stepped-gradient-noise-trdra9",
+        "originId": "grainy-stepped-gradient-noise-trdra9",
+        "license": "unknown-public-web-catalog"
+      },
+      "effectPicker": {
+        "group": "Background Effects",
+        "intensity": "expressive",
+        "technicalComplexity": "high",
+        "requiresVisualQA": true
+      }
+    }
+  ]
+}

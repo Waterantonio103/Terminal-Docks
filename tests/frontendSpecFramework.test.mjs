@@ -8,6 +8,11 @@ const {
   evaluateFrontendSpecCoverage,
 } = await import('../mcp-server/src/utils/frontend-spec-framework.mjs');
 
+const {
+  buildFrontendLibraryIndex,
+  buildFrontendReferenceIndex,
+} = await import('../mcp-server/src/resources/frontend-library.mjs');
+
 function run(name, fn) {
   try {
     fn();
@@ -28,9 +33,26 @@ run('framework exposes fill-in forms for PRD, DESIGN, and structure', () => {
   assert.equal(framework.mode, 'strict_ui');
   assert.ok(framework.schemas['PRD.md'].requiredSections.includes('Target Users'));
   assert.ok(framework.schemas['DESIGN.md'].requiredSections.includes('Design Tokens'));
+  assert.ok(framework.schemas['DESIGN.md'].requiredSections.includes('Builder Handoff'));
+  assert.ok(framework.schemas['DESIGN.md'].canonicalTemplate.frontmatter.colors.primary.includes('Exact hex'));
+  assert.ok(framework.schemas['DESIGN.md'].canonicalTemplate.frontmatter.typography['display-lg'].includes('family'));
   assert.ok(framework.schemas['structure.md'].aliases.includes('architecture.md'));
   assert.ok(framework.intakeSteps.some(step => step.includes('Preserve strong user files')));
   assert.ok(framework.alignmentChecks.some(check => check.includes('Product type matches')));
+});
+
+run('frontend library index exposes skills, patterns, and references', () => {
+  const library = buildFrontendLibraryIndex();
+  const references = buildFrontendReferenceIndex();
+
+  assert.equal(library.uri, 'frontend-library://index');
+  assert.equal(library.skills.length, 11);
+  assert.equal(library.patterns.indexUri, 'frontend-patterns://neuform/index');
+  assert.equal(library.patterns.totalPatterns, 69);
+  assert.equal(library.references.indexUri, 'frontend-reference://ui/index');
+  assert.equal(references.totalReferences, 50);
+  assert.ok(library.workflow.some(step => step.includes('Load only the skill docs needed')));
+  assert.ok(library.guardrails.some(rule => rule.includes('source of truth')));
 });
 
 run('all category overlays define required additions and reviewer rubrics', () => {
@@ -48,6 +70,11 @@ run('all category overlays define required additions and reviewer rubrics', () =
     assert.ok(schema.fillInPrompts.length >= 5, `${fileName} has fill-in prompts`);
     assert.ok(schema.qualityChecks.length >= 5, `${fileName} has quality checks`);
   }
+
+  assert.ok(
+    FRONTEND_SPEC_SCHEMAS['DESIGN.md'].qualityChecks.some(check => check.includes('canonical frontmatter')),
+    'DESIGN schema requires canonical structure',
+  );
 });
 
 run('classifier selects category-specific overlays from frontend prompts', () => {

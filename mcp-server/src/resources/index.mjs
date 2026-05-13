@@ -2,6 +2,7 @@ import { db } from '../db/index.mjs';
 import { loadAgentRoster } from '../utils/index.mjs';
 import { sessions } from '../state.mjs';
 import { buildFrontendSpecFramework } from '../utils/frontend-spec-framework.mjs';
+import { registerFrontendLibraryResources } from './frontend-library.mjs';
 
 export function registerResources(server) {
   server.registerResource('mission', 'mission://{missionId}', {
@@ -51,4 +52,6 @@ export function registerResources(server) {
       text: JSON.stringify(buildFrontendSpecFramework(), null, 2),
     }]
   }));
+
+  registerFrontendLibraryResources(server);
 }
