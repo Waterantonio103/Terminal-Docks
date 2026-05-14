@@ -1,4 +1,5 @@
 import type { FrontendWorkflowMode, WorkflowAgentCli, WorkflowEdgeCondition, WorkflowExecutionMode, WorkflowMode } from '../store/workspace.js';
+import type { FrontendDirectionSpec } from './frontendDirection.js';
 import { defaultPresetReadmeEnabled } from './workflowReadme.js';
 
 export type WorkflowPresetMode =
@@ -897,6 +898,7 @@ export function buildPresetFlowGraph(options: {
   bindingsByRole: Record<string, TerminalBindingLike>;
   instructionOverrides?: Record<string, string>;
   frontendMode?: FrontendWorkflowMode;
+  frontendDirection?: FrontendDirectionSpec;
   finalReadmeEnabled?: boolean;
 }) {
   const {
@@ -926,6 +928,7 @@ export function buildPresetFlowGraph(options: {
         mode,
         workspaceDir: workspaceDir ?? '',
         frontendMode,
+        frontendDirection: options.frontendDirection,
         specProfile: preset.specProfile ?? 'none',
         finalReadmeEnabled,
         authoringMode: 'preset',

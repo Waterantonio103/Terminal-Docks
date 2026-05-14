@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import { generateId } from '../lib/graphUtils.js';
 import type { RetryPolicy } from '../lib/workflow/WorkflowTypes.js';
+import type { FrontendDirectionSpec } from '../lib/frontendDirection.js';
 export type { RetryPolicy };
 
 export function arrayMove<T>(array: T[], fromIndex: number, toIndex: number): T[] {
@@ -94,6 +95,7 @@ export interface WorkflowNode {
     presetId?: string | null;
     runVersion?: number;
     frontendMode?: FrontendWorkflowMode;
+    frontendDirection?: FrontendDirectionSpec;
     specProfile?: PresetSpecProfile;
     finalReadmeEnabled?: boolean;
     finalReadmeOwnerNodeId?: string | null;
@@ -137,6 +139,7 @@ export interface CompiledMissionTaskContext {
   attachments?: TaskAttachment[];
   frontendMode?: FrontendWorkflowMode;
   frontendCategory?: FrontendSpecCategory;
+  frontendDirection?: FrontendDirectionSpec;
   specProfile?: PresetSpecProfile;
   finalReadmeEnabled?: boolean;
   finalReadmeOwnerNodeId?: string | null;
@@ -182,6 +185,7 @@ export interface CompiledMissionMetadata {
   runVersion?: number;
   frontendMode?: FrontendWorkflowMode;
   frontendCategory?: FrontendSpecCategory;
+  frontendDirection?: FrontendDirectionSpec;
   specProfile?: PresetSpecProfile;
   finalReadmeEnabled?: boolean;
   finalReadmeOwnerNodeId?: string | null;

@@ -346,7 +346,6 @@ pub fn init_db(app: &AppHandle) -> Result<(), String> {
         "session_id TEXT",
         "content_uri TEXT",
         "content_json TEXT",
-        "updated_at DATETIME DEFAULT CURRENT_TIMESTAMP",
     ] {
         let sql = format!("ALTER TABLE artifacts ADD COLUMN {}", col);
         if let Err(e) = conn.execute(&sql, ()) {
@@ -356,6 +355,17 @@ pub fn init_db(app: &AppHandle) -> Result<(), String> {
             }
         }
     }
+    if let Err(e) = conn.execute("ALTER TABLE artifacts ADD COLUMN updated_at DATETIME", ()) {
+        let s = e.to_string();
+        if !s.contains("duplicate column") {
+            return Err(s);
+        }
+    }
+    conn.execute(
+        "UPDATE artifacts SET updated_at = COALESCE(updated_at, created_at, CURRENT_TIMESTAMP)",
+        (),
+    )
+    .map_err(|e| e.to_string())?;
 
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_artifacts_mission_id ON artifacts(mission_id)",

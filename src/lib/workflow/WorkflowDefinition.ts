@@ -53,6 +53,7 @@ export interface WorkflowNodeDefinition {
     readonly runVersion?: number;
     readonly frontendMode?: import('../../store/workspace.js').FrontendWorkflowMode;
     readonly frontendCategory?: import('../../store/workspace.js').FrontendSpecCategory;
+    readonly frontendDirection?: import('../frontendDirection.js').FrontendDirectionSpec;
     readonly specProfile?: import('../../store/workspace.js').PresetSpecProfile;
     readonly finalReadmeEnabled?: boolean;
     readonly finalReadmeOwnerNodeId?: string | null;
@@ -193,6 +194,7 @@ export function compiledMissionToDefinition(
         runVersion: mission.metadata.runVersion,
         frontendMode: mission.metadata.frontendMode,
         frontendCategory: mission.metadata.frontendCategory,
+        frontendDirection: mission.metadata.frontendDirection,
         specProfile: mission.metadata.specProfile,
         finalReadmeEnabled: mission.metadata.finalReadmeEnabled,
         finalReadmeOwnerNodeId: mission.metadata.finalReadmeOwnerNodeId,

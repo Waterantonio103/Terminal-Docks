@@ -79,6 +79,7 @@ export interface CreateRuntimeArgs {
   goal?: string | null;
   frontendMode?: import('../../store/workspace.js').FrontendWorkflowMode;
   frontendCategory?: import('../../store/workspace.js').FrontendSpecCategory;
+  frontendDirection?: import('../frontendDirection.js').FrontendDirectionSpec;
   specProfile?: import('../../store/workspace.js').PresetSpecProfile;
   finalReadmeEnabled?: boolean;
   finalReadmeOwnerNodeId?: string | null;
@@ -129,6 +130,7 @@ export interface RuntimeSessionDescriptor {
   goal?: string;
   frontendMode?: import('../../store/workspace.js').FrontendWorkflowMode;
   frontendCategory?: import('../../store/workspace.js').FrontendSpecCategory;
+  frontendDirection?: import('../frontendDirection.js').FrontendDirectionSpec;
   specProfile?: import('../../store/workspace.js').PresetSpecProfile;
   finalReadmeEnabled?: boolean;
   finalReadmeOwnerNodeId?: string | null;

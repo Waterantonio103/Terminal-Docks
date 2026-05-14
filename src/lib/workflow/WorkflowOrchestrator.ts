@@ -295,7 +295,8 @@ export class WorkflowOrchestrator {
       (existingState === 'completed' || existingState === 'failed' || existingState === 'cancelled') &&
       currentAttempt?.outcome
     ) {
-      return;
+      const lateSuccessHealsFailure = existingState === 'failed' && currentAttempt.outcome === 'failure' && outcome === 'success';
+      if (!lateSuccessHealsFailure) return;
     }
 
     let explicitHandoff: HandoffRecord | null = null;
@@ -514,6 +515,7 @@ export class WorkflowOrchestrator {
         goal: taskConfig?.prompt || '',
         frontendMode: taskConfig?.frontendMode,
         frontendCategory: taskConfig?.frontendCategory ?? resolveFrontendCategory(taskConfig?.prompt ?? ''),
+        frontendDirection: taskConfig?.frontendDirection,
         specProfile: taskConfig?.specProfile,
         finalReadmeEnabled: Boolean(taskConfig?.finalReadmeEnabled),
         finalReadmeOwnerNodeId: taskConfig?.finalReadmeOwnerNodeId ?? null,

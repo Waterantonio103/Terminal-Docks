@@ -457,6 +457,76 @@ run('frontend category is inferred from the task prompt without user selection',
   assert.equal(mission.metadata.frontendCategory, 'docs_portal');
 });
 
+run('frontend App/Site preset preserves theme picker direction metadata', () => {
+  const preset = getWorkflowPreset('frontend_ui_delivery');
+  assert.ok(preset, 'frontend_ui_delivery preset must exist');
+
+  const frontendDirection = {
+    kind: 'app_site_frontend_direction',
+    version: 1,
+    layout: 'dashboard',
+    density: 'compact',
+    palette: {
+      kind: 'custom',
+      id: 'custom_palette',
+      label: 'Custom palette',
+      colors: ['#2563EB', '#14B8A6', '#F97316'],
+    },
+    shape: 'slightly_rounded',
+    effects: ['subtle_hover_motion'],
+    assets: 'data_visualization',
+    interaction: ['filtering_and_search'],
+    tone: 'technical',
+    delegatedSections: [],
+    summary: 'Layout: Dashboard; Density: Compact; Palette: Custom palette (#2563EB, #14B8A6, #F97316)',
+    agentGuidance: {
+      do: ['Use the picker direction.'],
+      avoid: ['Do not drift into a landing page.'],
+    },
+    preview: {
+      label: 'Dashboard low-fidelity preview',
+      note: 'Preview is broad layout reference only.',
+      lowFidelity: true,
+      nonAuthoritative: true,
+    },
+  };
+
+  const flow = buildPresetFlowGraph({
+    preset,
+    missionId: 'frontend-themed',
+    prompt: 'Build an operations dashboard',
+    mode: 'build',
+    workspaceDir: 'C:/workspace',
+    frontendMode: 'strict_ui',
+    frontendDirection,
+    instructionOverrides: {},
+    bindingsByRole: {
+      frontend_product: { terminalId: 'term-product', terminalTitle: 'Product Agent' },
+      frontend_designer: { terminalId: 'term-designer', terminalTitle: 'Designer' },
+      frontend_architect: { terminalId: 'term-architect', terminalTitle: 'Architecture Agent' },
+      frontend_builder: { terminalId: 'term-builder', terminalTitle: 'Frontend Builder' },
+      interaction_qa: { terminalId: 'term-qa', terminalTitle: 'Interaction QA' },
+      accessibility_reviewer: { terminalId: 'term-accessibility', terminalTitle: 'Accessibility Reviewer' },
+    },
+  });
+
+  const mission = compileMission({
+    graphId: 'preset:frontend_ui_delivery',
+    missionId: 'frontend-themed',
+    nodes: flow.nodes,
+    edges: flow.edges,
+    workspaceDirFallback: 'C:/workspace',
+    compiledAt: 123,
+    authoringMode: 'preset',
+    presetId: 'frontend_ui_delivery',
+    runVersion: 1,
+  });
+
+  assert.equal(mission.metadata.frontendDirection.layout, 'dashboard');
+  assert.deepEqual(mission.task.frontendDirection.palette.colors, ['#2563EB', '#14B8A6', '#F97316']);
+  assert.deepEqual(mission.metadata.frontendDirection.delegatedSections, []);
+});
+
 run('task frontend preset metadata wins over stale off compile option', () => {
   const preset = getWorkflowPreset('frontend_ui_delivery');
   assert.ok(preset, 'frontend_ui_delivery preset must exist');

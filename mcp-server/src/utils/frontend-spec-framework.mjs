@@ -8,16 +8,16 @@ export const FRONTEND_SPEC_MODES = {
   },
   aligned: {
     label: 'Aligned mode',
-    intent: 'Inspect supplied artifacts, record missing product/structure decisions in workspace context, create DESIGN.md only when durable UI guidance is needed, then build from accepted context.',
+    intent: 'Inspect supplied artifacts, create or patch durable PRD.md, DESIGN.md, and structure.md for App/Site three-file workflows, then build from accepted context.',
     requiredContext: ['product decisions', 'visual decisions', 'implementation plan'],
-    durableArtifacts: ['DESIGN.md', 'README.md'],
+    durableArtifacts: ['PRD.md', 'DESIGN.md', 'structure.md', 'README.md'],
     gateLevel: 'block_on_missing_required',
   },
   strict_ui: {
     label: 'Strict UI mode',
     intent: 'Require accepted product, design, and structure decisions, category rubric, screenshot review, accessibility checks, and a fix pass.',
     requiredContext: ['product decisions', 'visual decisions', 'implementation plan', 'visual-qa-evidence'],
-    durableArtifacts: ['DESIGN.md', 'README.md'],
+    durableArtifacts: ['PRD.md', 'DESIGN.md', 'structure.md', 'README.md'],
     gateLevel: 'block_on_missing_required',
   },
 };
@@ -285,7 +285,8 @@ export const FRONTEND_INTAKE_STEPS = [
   'Grade supplied files for coverage, specificity, contradictions, freshness, and buildability.',
   'Preserve strong user files as accepted artifacts.',
   'Patch or append missing sections with provenance instead of overwriting user files when the file already exists.',
-  'When PRD.md or structure.md is missing, record the required product or implementation decisions in workspace context instead of creating a new planning file by default.',
+  'For App/Site three-file workflows, create or patch PRD.md, DESIGN.md, and structure.md as durable handoff files before implementation.',
+  'For non-three-file frontend work, PRD.md or structure.md decisions may live in workspace context when durable files are not useful.',
   'Create or patch DESIGN.md for UI work when durable visual tokens, component recipes, or builder handoff rules are needed.',
   'Ask at most a few targeted questions when product type, audience, visual tone, core states, or hard constraints materially affect quality.',
   'Run an alignment check across accepted product, design, and structure decisions before implementation starts, including the generated app folder and subfolder layout.',
@@ -409,8 +410,8 @@ export function evaluateFrontendSpecCoverage({ categoryId = 'marketing_site', su
 
   const actionForMissingFile = file => {
     if (file === 'DESIGN.md') return 'Generate DESIGN.md from the framework schema when durable UI guidance is needed.';
-    if (file === 'PRD.md') return 'Record product decisions in frontendSpecs workspace context unless the user explicitly wants PRD.md created.';
-    if (file === 'structure.md') return 'Record route/component/file ownership decisions in frontendPlan workspace context unless the user explicitly wants structure.md created.';
+    if (file === 'PRD.md') return 'Generate PRD.md from the framework schema for App/Site three-file workflows; otherwise record product decisions in frontendSpecs workspace context.';
+    if (file === 'structure.md') return 'Generate structure.md from the framework schema for App/Site three-file workflows; otherwise record route/component/file ownership decisions in frontendPlan workspace context.';
     return `Resolve missing ${file}.`;
   };
   const actionForWeakFile = file => {

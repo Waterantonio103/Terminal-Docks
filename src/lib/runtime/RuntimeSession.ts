@@ -38,6 +38,7 @@ export class RuntimeSession {
   readonly goal?: string;
   readonly frontendMode?: import('../../store/workspace.js').FrontendWorkflowMode;
   readonly frontendCategory?: import('../../store/workspace.js').FrontendSpecCategory;
+  readonly frontendDirection?: import('../frontendDirection.js').FrontendDirectionSpec;
   readonly specProfile?: import('../../store/workspace.js').PresetSpecProfile;
   readonly finalReadmeEnabled?: boolean;
   readonly finalReadmeOwnerNodeId?: string | null;
@@ -75,6 +76,7 @@ export class RuntimeSession {
       goal?: string;
       frontendMode?: import('../../store/workspace.js').FrontendWorkflowMode;
       frontendCategory?: import('../../store/workspace.js').FrontendSpecCategory;
+      frontendDirection?: import('../frontendDirection.js').FrontendDirectionSpec;
       specProfile?: import('../../store/workspace.js').PresetSpecProfile;
       finalReadmeEnabled?: boolean;
       finalReadmeOwnerNodeId?: string | null;
@@ -101,6 +103,7 @@ export class RuntimeSession {
     this.goal = args.goal;
     this.frontendMode = args.frontendMode;
     this.frontendCategory = args.frontendCategory;
+    this.frontendDirection = args.frontendDirection;
     this.specProfile = args.specProfile;
     this.finalReadmeEnabled = args.finalReadmeEnabled;
     this.finalReadmeOwnerNodeId = args.finalReadmeOwnerNodeId ?? null;
@@ -168,6 +171,7 @@ export class RuntimeSession {
       goal: this.goal,
       frontendMode: this.frontendMode,
       frontendCategory: this.frontendCategory,
+      frontendDirection: this.frontendDirection,
       specProfile: this.specProfile,
       finalReadmeEnabled: this.finalReadmeEnabled,
       finalReadmeOwnerNodeId: this.finalReadmeOwnerNodeId,

@@ -1,5 +1,6 @@
 import agentsConfig from '../config/agents.js';
 import type { FrontendSpecCategory, FrontendWorkflowMode, PresetSpecProfile, WorkflowAuthoringMode } from '../store/workspace.js';
+import type { FrontendDirectionSpec } from './frontendDirection.js';
 import { FINAL_README_INSTRUCTION } from './workflowReadme.js';
 
 type AgentDef = (typeof agentsConfig.agents)[number];
@@ -26,6 +27,7 @@ export interface LaunchContext {
   runVersion?: number;
   frontendMode?: FrontendWorkflowMode;
   frontendCategory?: FrontendSpecCategory;
+  frontendDirection?: FrontendDirectionSpec;
   specProfile?: PresetSpecProfile;
   finalReadmeEnabled?: boolean;
   finalReadmeOwnerNodeId?: string | null;
@@ -69,15 +71,23 @@ function formatOutgoingTargets(targets: readonly LaunchOutgoingTarget[]): string
 function frontendModeGuidance(mode: FrontendWorkflowMode, specProfile?: PresetSpecProfile): string {
   const profileText = specProfile && specProfile !== 'none' ? ` Spec profile: ${specProfile}.` : '';
   if (mode === 'strict_ui') {
-    return `Frontend/UI workflow mode: strict_ui.${profileText} Treat frontend product, design, and structure decisions as binding before implementation or review. Strict mode should produce or accept explicit decisions in workspace context, with durable files only when useful: DESIGN.md for UI guidance and README.md/INSTRUCTIONS.md for human run instructions. Implementation plans must name the generated app folder and organize source, assets, styles, scripts, and docs into appropriate subfolders. Aliases are allowed when recorded in workspace context, but missing decisions must be sent back for intake/alignment instead of silently invented by builders.`;
+    return `Frontend/UI workflow mode: strict_ui.${profileText} Treat frontend product, design, and structure decisions as binding before implementation or review. In App/Site three-file workflows, produce or patch durable PRD.md, DESIGN.md, and structure.md before build, then create README.md/INSTRUCTIONS.md for human run instructions. Implementation plans must name the generated app folder and organize source, assets, styles, scripts, and docs into appropriate subfolders. Aliases are allowed when recorded in workspace context, but missing decisions must be sent back for intake/alignment instead of silently invented by builders.`;
   }
   if (mode === 'aligned') {
-    return `Frontend/UI workflow mode: aligned.${profileText} Prefer accepted product, design, and implementation-plan decisions from supplied files or workspace context. Create durable markdown only when it is directly useful to the user or builder, especially DESIGN.md for UI guidance and README.md/INSTRUCTIONS.md for final run instructions. New generated apps should use a clear project folder with conventional subfolders for source, assets, styles, scripts, and docs. If planning files are absent but the prompt and upstream context contain clear product, design, and structure decisions, proceed; request alignment only for material ambiguity.`;
+    return `Frontend/UI workflow mode: aligned.${profileText} Prefer accepted product, design, and implementation-plan decisions from supplied files or workspace context. In App/Site three-file workflows, keep PRD.md, DESIGN.md, and structure.md as durable handoff files; otherwise create durable markdown only when directly useful. New generated apps should use a clear project folder with conventional subfolders for source, assets, styles, scripts, and docs. If planning decisions are absent, request alignment only for material ambiguity.`;
   }
   if (mode === 'fast') {
     return `Frontend/UI workflow mode: fast.${profileText} Missing .md spec files must not block the workflow. Use any available specs or upstream context, but proceed from the task prompt when it is sufficient.`;
   }
   return '';
+}
+
+function frontendDirectionGuidance(spec?: FrontendDirectionSpec): string {
+  if (!spec) return '';
+  const delegated = spec.delegatedSections.length
+    ? ` Delegated picker sections: ${spec.delegatedSections.join(', ')}. For those sections, make a fitting decision and record a one-sentence reason for the final README Agent Decisions section.`
+    : '';
+  return `App/Site theme picker direction is binding user intent. ${spec.summary}.${delegated} Use its do/avoid guidance in PRD.md, DESIGN.md, structure.md, frontendSpecs, frontendPlan, implementation, and review. The preview is low-fidelity and non-authoritative.`;
 }
 
 export function buildLaunchPrompt(agentId: string, ctx: LaunchContext, instructionOverride?: string): string {
@@ -119,6 +129,9 @@ export function buildLaunchPrompt(agentId: string, ctx: LaunchContext, instructi
     }
     if (ctx.frontendMode && ctx.frontendMode !== 'off') {
       lines.push(frontendModeGuidance(ctx.frontendMode, ctx.specProfile));
+    }
+    if (ctx.frontendDirection) {
+      lines.push(frontendDirectionGuidance(ctx.frontendDirection));
     }
     if (ctx.finalReadmeEnabled && ctx.finalReadmeOwnerNodeId === ctx.nodeId) {
       lines.push(FINAL_README_INSTRUCTION);

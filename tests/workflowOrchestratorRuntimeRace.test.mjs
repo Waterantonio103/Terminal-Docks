@@ -82,6 +82,50 @@ function fanInDefinition() {
   };
 }
 
+function twoStepDefinition() {
+  return {
+    id: 'late-completion-definition',
+    name: 'Late completion regression',
+    createdAt: new Date(0).toISOString(),
+    updatedAt: new Date(0).toISOString(),
+    nodes: [
+      {
+        id: 'task',
+        kind: 'task',
+        roleId: 'task',
+        config: {
+          prompt: 'Run the late completion regression',
+          mode: 'build',
+        },
+      },
+      {
+        id: 'builder',
+        kind: 'agent',
+        roleId: 'builder',
+        config: {
+          cli: 'codex',
+          executionMode: 'interactive_pty',
+          terminalId: 'term-builder',
+        },
+      },
+      {
+        id: 'reviewer',
+        kind: 'agent',
+        roleId: 'reviewer',
+        config: {
+          cli: 'codex',
+          executionMode: 'interactive_pty',
+          terminalId: 'term-reviewer',
+        },
+      },
+    ],
+    edges: [
+      { fromNodeId: 'task', toNodeId: 'builder', condition: 'always' },
+      { fromNodeId: 'builder', toNodeId: 'reviewer', condition: 'on_success' },
+    ],
+  };
+}
+
 function createFastCompletingRuntimeManager() {
   const listeners = new Set();
   return {
@@ -200,4 +244,31 @@ await run('explicit MCP handoff waits for all fan-in parents', async () => {
   assert.equal(run?.nodeStates['parent-b']?.state, 'completed');
   assert.equal(run?.nodeStates.merge?.state, 'launching_runtime');
   assert.equal(run?.nodeStates.merge?.attempt, 1);
+});
+
+await run('late MCP success heals watchdog failure and routes downstream', async () => {
+  const orchestrator = new WorkflowOrchestrator();
+
+  orchestrator.startRun(twoStepDefinition(), { runId: 'late-success-run' });
+  orchestrator.handleNodeCompletion('late-success-run', {
+    nodeId: 'builder',
+    attempt: 1,
+    outcome: 'failure',
+    summary: 'watchdog timeout',
+  });
+
+  let run = orchestrator.getRun('late-success-run');
+  assert.equal(run?.nodeStates.builder?.state, 'failed');
+  assert.equal(run?.nodeStates.reviewer?.state, 'idle');
+
+  orchestrator.handleNodeCompletion('late-success-run', {
+    nodeId: 'builder',
+    attempt: 1,
+    outcome: 'success',
+    summary: 'late complete_task success',
+  });
+
+  run = orchestrator.getRun('late-success-run');
+  assert.equal(run?.nodeStates.builder?.state, 'completed');
+  assert.equal(run?.nodeStates.reviewer?.state, 'launching_runtime');
 });

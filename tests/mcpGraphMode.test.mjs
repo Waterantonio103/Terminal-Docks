@@ -175,9 +175,71 @@ try {
     assert.equal(details.frontendMode, 'strict_ui');
     assert.equal(details.specProfile, 'frontend_three_file');
     assert.equal(details.frontendFramework.categoryId, 'admin_internal_tool');
-    assert.deepEqual(details.frontendFramework.modeConfig.durableArtifacts, ['DESIGN.md', 'README.md']);
+    assert.deepEqual(details.frontendFramework.modeConfig.durableArtifacts, ['PRD.md', 'DESIGN.md', 'structure.md', 'README.md']);
     assert.ok(details.frontendFramework.schemas['PRD.md'].requiredSections.includes('Target Users'));
     assert.equal(details.assignment.frontendFramework.categoryId, 'admin_internal_tool');
+  });
+
+  await run('get_task_details exposes theme picker direction only for App/Site presets', async () => {
+    resetStarlinkState();
+    const mission = demoMission();
+    mission.metadata.presetId = 'frontend_ui_delivery';
+    mission.metadata.frontendMode = 'strict_ui';
+    mission.metadata.specProfile = 'frontend_three_file';
+    mission.metadata.frontendDirection = {
+      kind: 'app_site_frontend_direction',
+      version: 1,
+      layout: 'dashboard',
+      density: 'compact',
+      palette: {
+        kind: 'custom',
+        id: 'custom_palette',
+        label: 'Custom palette',
+        colors: ['#2563EB', '#14B8A6', '#F97316'],
+      },
+      shape: 'slightly_rounded',
+      effects: ['subtle_hover_motion'],
+      assets: 'data_visualization',
+      interaction: ['filtering_and_search'],
+      tone: 'technical',
+      delegatedSections: [],
+      summary: 'Layout: Dashboard; Density: Compact; Palette: Custom palette (#2563EB, #14B8A6, #F97316)',
+      agentGuidance: {
+        do: ['Use a dense app-shell layout.'],
+        avoid: ['Do not create a marketing landing page.'],
+      },
+      preview: {
+        label: 'Dashboard low-fidelity preview',
+        note: 'Preview is secondary only.',
+        lowFidelity: true,
+        nonAuthoritative: true,
+      },
+    };
+    seedCompiledMission(mission);
+    seedMissionNodeRuntime({
+      missionId: 'mission-graph',
+      nodeId: 'builder',
+      roleId: 'builder',
+      status: 'running',
+      attempt: 1,
+      currentWaveId: 'root:mission-graph',
+    });
+
+    const details = buildTaskDetails('mission-graph', 'builder');
+    assert.equal(details.frontendDirection.layout, 'dashboard');
+    assert.deepEqual(details.assignment.frontendDirection.palette.colors, ['#2563EB', '#14B8A6', '#F97316']);
+    assert.deepEqual(details.frontendDirection.delegatedSections, []);
+    assert.match(details.assignment.roleInstructions, /App\/Site theme picker direction/);
+    assert.equal(details.frontendDirectionReview.flagDelegatedWithoutReason, true);
+
+    const nonAppMission = demoMission();
+    nonAppMission.metadata.presetId = 'rapid_patch';
+    nonAppMission.metadata.frontendDirection = mission.metadata.frontendDirection;
+    seedCompiledMission(nonAppMission);
+    const nonAppDetails = buildTaskDetails('mission-graph', 'builder');
+    assert.equal(nonAppDetails.frontendDirection, null);
+    assert.equal(nonAppDetails.assignment.frontendDirection, null);
+    assert.doesNotMatch(nonAppDetails.assignment.roleInstructions, /App\/Site theme picker direction/);
   });
 
   await run('get_task_details includes final README guidance only for selected owner', async () => {

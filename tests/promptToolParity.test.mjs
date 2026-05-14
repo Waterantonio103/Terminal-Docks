@@ -59,10 +59,12 @@ for (const requiredTool of ['get_workspace_context', 'update_workspace_context',
 const agents = JSON.parse(agentsSource);
 const byId = Object.fromEntries(agents.agents.map(agent => [agent.id, agent.coreInstructions]));
 assert.match(byId.frontend_product, /Product intake owns product-decision coverage only/);
+assert.match(byId.frontend_product, /create or patch PRD\.md as the durable product handoff/);
 assert.match(byId.frontend_product, /Do not create DESIGN\.md, structure\.md, implementation plans/);
 assert.match(byId.frontend_designer, /Designer owns durable UI guidance only/);
 assert.match(byId.frontend_designer, /Do not create PRD\.md, structure\.md, implementation plans/);
 assert.match(byId.frontend_architect, /Architecture owns implementation-plan coverage only/);
+assert.match(byId.frontend_architect, /create or patch structure\.md as the durable implementation handoff/);
 assert.match(byId.frontend_architect, /Do not create PRD\.md, DESIGN\.md, visual specs/);
 assert.match(byId.frontend_builder, /clear generated project folder or existing app root/);
 

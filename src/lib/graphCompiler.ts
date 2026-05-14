@@ -22,6 +22,8 @@ import { deriveExecutionLayers } from './graphUtils.js';
 import { normalizeCliId, supportsHeadless } from './cliIdentity.js';
 import agentsConfig from '../config/agents.js';
 import { resolveFrontendCategory } from './frontendWorkflow.js';
+import type { FrontendDirectionSpec } from './frontendDirection.js';
+import { isAppSitePresetId } from './frontendDirection.js';
 import { getPresetReadmeDefault, getWorkflowPreset } from './workflowPresets.js';
 import { selectFinalReadmeOwner } from './workflowReadme.js';
 
@@ -203,6 +205,27 @@ function getSpecProfile(value: unknown): PresetSpecProfile {
 function getOptionalSpecProfile(value: unknown): PresetSpecProfile | undefined {
   if (value === 'frontend_three_file' || value === 'none') return value;
   return undefined;
+}
+
+function getFrontendDirectionSpec(value: unknown): FrontendDirectionSpec | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const candidate = value as Partial<FrontendDirectionSpec>;
+  if (candidate.kind !== 'app_site_frontend_direction' || candidate.version !== 1) return undefined;
+  if (typeof candidate.layout !== 'string') return undefined;
+  if (typeof candidate.density !== 'string') return undefined;
+  if (typeof candidate.palette !== 'string') {
+    if (!candidate.palette || typeof candidate.palette !== 'object') return undefined;
+    const palette = candidate.palette as { kind?: unknown; id?: unknown; label?: unknown; colors?: unknown };
+    if (palette.kind !== 'preset' && palette.kind !== 'custom' && palette.kind !== 'agent_decides') return undefined;
+    if (typeof palette.id !== 'string' || typeof palette.label !== 'string') return undefined;
+    if (!Array.isArray(palette.colors) || !palette.colors.every(color => typeof color === 'string')) return undefined;
+  }
+  if (typeof candidate.shape !== 'string') return undefined;
+  if (!Array.isArray(candidate.effects)) return undefined;
+  if (typeof candidate.assets !== 'string') return undefined;
+  if (!Array.isArray(candidate.interaction)) return undefined;
+  if (typeof candidate.tone !== 'string') return undefined;
+  return candidate as FrontendDirectionSpec;
 }
 
 function getOptionalBoolean(value: unknown): boolean | undefined {
@@ -558,6 +581,7 @@ export function serializeWorkflowGraph(
             presetId: asString(node.data?.presetId) ?? undefined,
             runVersion: getRunVersion(node.data?.runVersion),
             frontendMode: getFrontendMode(node.data?.frontendMode),
+            frontendDirection: getFrontendDirectionSpec(node.data?.frontendDirection),
             specProfile: getSpecProfile(node.data?.specProfile),
             finalReadmeEnabled: getOptionalBoolean(node.data?.finalReadmeEnabled),
             finalReadmeOwnerNodeId: asString(node.data?.finalReadmeOwnerNodeId) ?? undefined,
@@ -662,6 +686,7 @@ export interface CompileMissionOptions {
   presetId?: string | null;
   runVersion?: number;
   frontendMode?: FrontendWorkflowMode;
+  frontendDirection?: FrontendDirectionSpec;
   specProfile?: PresetSpecProfile;
   finalReadmeEnabled?: boolean;
 }
@@ -678,6 +703,7 @@ export function compileMission({
   presetId,
   runVersion,
   frontendMode,
+  frontendDirection,
   specProfile,
   finalReadmeEnabled,
 }: CompileMissionOptions): CompiledMission {
@@ -699,6 +725,10 @@ export function compileMission({
     ? taskSpecProfile
     : specProfile ?? preset?.specProfile ?? taskSpecProfile ?? 'none';
   const resolvedFrontendCategory = resolveFrontendCategory(asString(taskNode.data?.prompt) ?? '');
+  const taskFrontendDirection = getFrontendDirectionSpec(taskNode.data?.frontendDirection);
+  const resolvedFrontendDirection = isAppSitePresetId(resolvedPresetId)
+    ? (taskFrontendDirection ?? frontendDirection)
+    : undefined;
   const resolvedFinalReadmeEnabled = getOptionalBoolean(taskNode.data?.finalReadmeEnabled)
     ?? finalReadmeEnabled
     ?? (preset ? getPresetReadmeDefault(preset) : false);
@@ -775,6 +805,7 @@ export function compileMission({
       attachments: taskAttachments,
       frontendMode: resolvedFrontendMode,
       frontendCategory: resolvedFrontendCategory,
+      frontendDirection: resolvedFrontendDirection,
       specProfile: resolvedSpecProfile,
       finalReadmeEnabled: resolvedFinalReadmeEnabled,
       finalReadmeOwnerNodeId: resolvedFinalReadmeOwnerNodeId,
@@ -789,6 +820,7 @@ export function compileMission({
       runVersion: resolvedRunVersion,
       frontendMode: resolvedFrontendMode,
       frontendCategory: resolvedFrontendCategory,
+      frontendDirection: resolvedFrontendDirection,
       specProfile: resolvedSpecProfile,
       finalReadmeEnabled: resolvedFinalReadmeEnabled,
       finalReadmeOwnerNodeId: resolvedFinalReadmeOwnerNodeId,

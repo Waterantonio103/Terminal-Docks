@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { DotTunnelBackground } from '../shared/DotTunnelBackground';
 import { WorkflowPresetPicker } from './WorkflowPresetPicker';
+import { AppSiteThemePicker } from '../Launcher/AppSiteThemePicker';
 import { ModelDiscoveryLoading } from '../models/ModelDiscoveryLoading';
 import { AgentActionBadge } from '../models/AgentActionBadge';
 import { AlignJustify, ArrowUpRight, Check, ChevronDown, ChevronLeft, ClipboardPaste, FileText, FolderOpen, Image as ImageIcon, Paperclip, Play, Plus, RefreshCw, ScanSearch, ShieldCheck, Sparkles, Square, Terminal, Trash2, UserCheck, Workflow, X, Zap } from 'lucide-react';
@@ -13,6 +14,7 @@ import agentsConfig from '../../config/agents';
 import { compileMission, validateGraph } from '../../lib/graphCompiler';
 import { generateId } from '../../lib/graphUtils';
 import { buildPresetFlowGraph, getPresetReadmeDefault, getWorkflowPreset, listWorkflowPresetModes, type PresetDefinition, type WorkflowPresetMode } from '../../lib/workflowPresets';
+import { isAppSitePresetId, type FrontendDirectionSpec } from '../../lib/frontendDirection';
 import { isWorkflowStatusActive, workflowStatusLabel, workflowStatusTone } from '../../lib/workflowStatus';
 import {
   legacyGraphToNodeDocument,
@@ -694,6 +696,7 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
   const [customModelNodeIds, setCustomModelNodeIds] = useState<Set<string>>(new Set());
   const [modelDropdownOpenNodeId, setModelDropdownOpenNodeId] = useState<string | null>(null);
   const [presetPickerOpen, setPresetPickerOpen] = useState(false);
+  const [appSiteThemePickerOpen, setAppSiteThemePickerOpen] = useState(false);
   const [runMenuOpen, setRunMenuOpen] = useState(false);
   const [selectedRunWorkflowIds, setSelectedRunWorkflowIds] = useState<Set<string>>(new Set());
   const [expandedRunModeIds, setExpandedRunModeIds] = useState<Set<string>>(new Set());
@@ -1604,7 +1607,7 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
     }
   }, [registry, state.document, workflowGroups]);
 
-  const runWorkflow = useCallback(async () => {
+  const runWorkflow = useCallback(async (frontendDirection?: FrontendDirectionSpec) => {
     try {
       const flowByMode = new Map<WorkflowGraphMode, ReturnType<typeof nodeDocumentToFlowGraph>>();
       flowByMode.set(workflowGraphMode, nodeDocumentToFlowGraph(state.document, registry));
@@ -1618,6 +1621,16 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
       const groupsToRun = selectedWorkflowGroups;
       if (groupsToRun.length === 0) {
         throw new Error('Select at least one workflow before running.');
+      }
+      const needsThemePicker = groupsToRun.some(group => {
+        const presetId = group.preset?.id ?? String(group.taskNode.properties.presetId ?? '').trim();
+        return isAppSitePresetId(presetId);
+      });
+      if (needsThemePicker && !frontendDirection) {
+        setAppSiteThemePickerOpen(true);
+        setValidationTone('idle');
+        setValidationMessage('Choose App/Site direction before launching selected App/Site workflow presets.');
+        return;
       }
       for (const group of groupsToRun) {
         const flow = flowByMode.get(group.graphMode);
@@ -1772,8 +1785,10 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
         const hydratedNodes = groupSubgraph.nodes.map(node => {
           const data: Record<string, unknown> = { ...((node.data ?? {}) as Record<string, unknown>) };
           if (flowNodeKind(node) === 'task') {
-            const preset = group.preset;
+            const taskPresetId = group.preset?.id ?? String(group.taskNode.properties.presetId ?? '').trim();
+            const preset = group.preset ?? getWorkflowPreset(taskPresetId);
             data.frontendMode = preset?.frontendMode ?? data.frontendMode ?? frontendMode;
+            data.frontendDirection = isAppSitePresetId(taskPresetId) ? frontendDirection : data.frontendDirection;
             data.workflowId = group.id;
             data.workflowName = group.name;
             data.workflowSubMode = group.subMode;
@@ -1807,6 +1822,7 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
             : 'graph'
         ) as WorkflowAuthoringMode;
         const taskPresetId = group.preset?.id ?? (String(group.taskNode.properties.presetId ?? '').trim() || null);
+        const taskPreset = group.preset ?? getWorkflowPreset(taskPresetId);
         const mission = compileMission({
           missionId,
           graphId: `${(group.graphMode === workflowGraphMode ? graph.id : workflowGraphs[group.graphMode]?.id) || group.graphMode}:${group.id}`,
@@ -1817,9 +1833,10 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
           authoringMode: taskAuthoringMode,
           presetId: taskPresetId,
           runVersion: 1,
-          frontendMode: group.preset?.frontendMode ?? frontendMode,
-          specProfile: group.preset?.specProfile,
-          finalReadmeEnabled: group.preset ? getPresetReadmeDefault(group.preset) : undefined,
+          frontendMode: taskPreset?.frontendMode ?? frontendMode,
+          frontendDirection: isAppSitePresetId(taskPresetId) ? frontendDirection : undefined,
+          specProfile: taskPreset?.specProfile,
+          finalReadmeEnabled: taskPreset ? getPresetReadmeDefault(taskPreset) : undefined,
         });
 
         const nodeById = new Map(mission.nodes.map(node => [node.id, node]));
@@ -2939,6 +2956,15 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
         initialMode="build"
         onClose={() => setPresetPickerOpen(false)}
         onApply={importPresetGraph}
+      />
+
+      <AppSiteThemePicker
+        open={appSiteThemePickerOpen}
+        onClose={() => setAppSiteThemePickerOpen(false)}
+        onApply={spec => {
+          setAppSiteThemePickerOpen(false);
+          void runWorkflow(spec);
+        }}
       />
 
       <div className="px-3 py-2 shrink-0 border-b border-border-panel background-bg-surface flex items-center justify-between text-[11px]">

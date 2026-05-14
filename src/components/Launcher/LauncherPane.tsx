@@ -17,7 +17,9 @@ import { type LaunchMode } from '../../lib/buildPrompt';
 import { compileMission } from '../../lib/graphCompiler';
 import { generateId } from '../../lib/graphUtils';
 import { buildPresetFlowGraph, getPresetReadmeDefault, getWorkflowPreset, listWorkflowPresets } from '../../lib/workflowPresets';
+import { isAppSitePresetId, type FrontendDirectionSpec } from '../../lib/frontendDirection';
 import { detectCliForPane, detectRoleForPane, type AgentCli } from '../../lib/cliDetection';
+import { AppSiteThemePicker } from './AppSiteThemePicker';
 
 const PRESETS = listWorkflowPresets();
 
@@ -234,6 +236,8 @@ export function LauncherPane() {
   const [isConfirming, setIsConfirming] = useState(false);
   const [mcpUrl, setMcpUrl] = useState('http://localhost:3741/mcp');
   const [pendingLaunch, setPendingLaunch] = useState<PendingLaunchState | null>(null);
+  const [themePickerOpen, setThemePickerOpen] = useState(false);
+  const [pendingFrontendDirection, setPendingFrontendDirection] = useState<FrontendDirectionSpec | null>(null);
   const [editingCliPaneId, setEditingCliPaneId] = useState<string | null>(null);
   const [editCliCommand, setEditCliCommand] = useState('');
   const [editCliArgs, setEditCliArgs] = useState('');
@@ -270,6 +274,8 @@ export function LauncherPane() {
   useEffect(() => {
     setIsConfirming(false);
     setPendingLaunch(null);
+    setPendingFrontendDirection(null);
+    setThemePickerOpen(false);
   }, [task, mode, authoringMode, presetId, finalReadmeEnabled, allPanes]);
 
   useEffect(() => {
@@ -362,7 +368,7 @@ export function LauncherPane() {
     }
   }
 
-  function compileLaunchMission(missionId: string): CompiledMission {
+  function compileLaunchMission(missionId: string, frontendDirection?: FrontendDirectionSpec): CompiledMission {
     if (!task.trim()) {
       throw new Error('Enter a task description first.');
     }
@@ -409,6 +415,7 @@ export function LauncherPane() {
         workspaceDir,
         bindingsByRole: bindingByRole,
         instructionOverrides: agentInstructions,
+        frontendDirection: isAppSitePresetId(preset.id) ? frontendDirection : undefined,
         finalReadmeEnabled,
       });
 
@@ -422,6 +429,7 @@ export function LauncherPane() {
         authoringMode: 'preset',
         presetId: preset.id,
         runVersion: 1,
+        frontendDirection: isAppSitePresetId(preset.id) ? frontendDirection : undefined,
       });
     }
 
@@ -472,50 +480,63 @@ export function LauncherPane() {
     });
   }
 
+  function preparePendingLaunch(frontendDirection?: FrontendDirectionSpec) {
+    const missionId = generateId();
+    const mission = compileLaunchMission(missionId, frontendDirection);
+
+    const agents: MissionAgent[] = mission.nodes.map(node => ({
+      terminalId: node.terminal.terminalId,
+      title: node.terminal.terminalTitle,
+      roleId: node.roleId,
+      paneId: node.terminal.paneId,
+      status: 'idle',
+      attempt: 0,
+      lastPayload: null,
+      attemptHistory: [],
+      nodeId: node.id,
+      runtimeCli: node.terminal.cli,
+      model: node.terminal.model ?? null,
+      executionMode: node.terminal.executionMode,
+      activeRunId: null,
+      runtimeSessionId: null,
+      runtimeBootstrapState: 'NOT_CONNECTED',
+      runtimeBootstrapReason: null,
+    }));
+
+    const nodeById = new Map(mission.nodes.map(node => [node.id, node]));
+    const startTerminalIds = Array.from(
+      new Set(
+        mission.metadata.startNodeIds
+          .map(nodeId => nodeById.get(nodeId)?.terminal.terminalId)
+          .filter((value): value is string => Boolean(value))
+      )
+    );
+
+    if (startTerminalIds.length === 0) {
+      throw new Error('Compiled mission has no start nodes with terminal bindings.');
+    }
+
+    setPendingLaunch({ missionId, mission, agents, startTerminalIds });
+    setPendingFrontendDirection(frontendDirection ?? null);
+    setIsConfirming(true);
+    setStatus('Mission compiled. Review the plan, then click Confirm to launch through RuntimeManager.');
+  }
+
   async function handleLaunch() {
     setBusy(true);
     setStatus(null);
 
     try {
       if (!isConfirming) {
-        const missionId = generateId();
-        const mission = compileLaunchMission(missionId);
-
-        const agents: MissionAgent[] = mission.nodes.map(node => ({
-          terminalId: node.terminal.terminalId,
-          title: node.terminal.terminalTitle,
-          roleId: node.roleId,
-          paneId: node.terminal.paneId,
-          status: 'idle',
-          attempt: 0,
-          lastPayload: null,
-          attemptHistory: [],
-          nodeId: node.id,
-          runtimeCli: node.terminal.cli,
-          model: node.terminal.model ?? null,
-          executionMode: node.terminal.executionMode,
-          activeRunId: null,
-          runtimeSessionId: null,
-          runtimeBootstrapState: 'NOT_CONNECTED',
-          runtimeBootstrapReason: null,
-        }));
-
-        const nodeById = new Map(mission.nodes.map(node => [node.id, node]));
-        const startTerminalIds = Array.from(
-          new Set(
-            mission.metadata.startNodeIds
-              .map(nodeId => nodeById.get(nodeId)?.terminal.terminalId)
-              .filter((value): value is string => Boolean(value))
-          )
-        );
-
-        if (startTerminalIds.length === 0) {
-          throw new Error('Compiled mission has no start nodes with terminal bindings.');
+        if (authoringMode === 'preset' && isAppSitePresetId(presetId) && !pendingFrontendDirection) {
+          if (!task.trim()) {
+            throw new Error('Enter a task description first.');
+          }
+          setThemePickerOpen(true);
+          setStatus('Choose App/Site direction, then apply to compile the mission.');
+          return;
         }
-
-        setPendingLaunch({ missionId, mission, agents, startTerminalIds });
-        setIsConfirming(true);
-        setStatus('Mission compiled. Review the plan, then click Confirm to launch through RuntimeManager.');
+        preparePendingLaunch(pendingFrontendDirection ?? undefined);
       } else {
         if (!pendingLaunch) {
           throw new Error('No compiled mission found. Re-compile before confirming.');
@@ -523,6 +544,7 @@ export function LauncherPane() {
 
         // TS Orchestrator is the canonical runtime brain.
         const { missionOrchestrator } = await import('../../lib/workflow/MissionOrchestrator');
+        await invoke('seed_mission_to_db', { missionId: pendingLaunch.missionId, graph: pendingLaunch.mission });
         await missionOrchestrator.launchMission(pendingLaunch.mission);
 
         addPane('missioncontrol', 'Mission Control', {
@@ -537,10 +559,12 @@ export function LauncherPane() {
         setStatus(`Launched ${pendingLaunch.startTerminalIds.length} start node(s) in ${modeLabel} mode. Mission Control opened.`);
         setIsConfirming(false);
         setPendingLaunch(null);
+        setPendingFrontendDirection(null);
       }
     } catch (error) {
       setStatus(`Error: ${error}`);
       setPendingLaunch(null);
+      setPendingFrontendDirection(null);
       setIsConfirming(false);
     } finally {
       setBusy(false);
@@ -552,6 +576,24 @@ export function LauncherPane() {
 
   return (
     <div className="flex flex-col h-full bg-bg-panel overflow-hidden">
+      <AppSiteThemePicker
+        open={themePickerOpen}
+        onClose={() => setThemePickerOpen(false)}
+        onApply={spec => {
+          setThemePickerOpen(false);
+          setBusy(true);
+          setStatus(null);
+          try {
+            preparePendingLaunch(spec);
+          } catch (error) {
+            setStatus(`Error: ${error}`);
+            setPendingLaunch(null);
+            setIsConfirming(false);
+          } finally {
+            setBusy(false);
+          }
+        }}
+      />
       <div className="flex items-center gap-2 px-4 py-2.5 border-b border-border-panel shrink-0">
         <Rocket size={14} className="text-accent-primary" />
         <span className="text-xs font-semibold text-text-secondary uppercase tracking-wider">Task Launcher</span>

@@ -7,6 +7,41 @@ import { buildFrontendSpecFramework } from '../utils/frontend-spec-framework.mjs
 const FINAL_README_INSTRUCTION =
   'Final README instruction: before completing, create one very short human guidance file for the work produced by this workflow. Prefer the generated app/target folder, and make the run commands start by changing into that folder. If README.md does not exist there, create README.md. If README.md already exists, do not overwrite or append to it by default; create INSTRUCTIONS.md instead. If both files already exist, update workspace context or the completion payload instead of creating another markdown file. Keep it concise: summarize the files and folders created or changed, note the main entry points, and include only the concrete run/test commands the user needs, such as cd into the created app folder and npm run dev. Do not write a long architecture rundown.';
 
+const APP_SITE_PRESET_IDS = new Set(['app_site_small', 'frontend_ui_delivery', 'app_site_expanded']);
+
+function isAppSiteMission(mission) {
+  const presetId = mission?.metadata?.presetId ?? mission?.task?.presetId;
+  return typeof presetId === 'string' && APP_SITE_PRESET_IDS.has(presetId);
+}
+
+function getFrontendDirection(mission) {
+  if (!isAppSiteMission(mission)) return null;
+  const candidate = mission?.metadata?.frontendDirection ?? mission?.task?.frontendDirection;
+  if (!candidate || typeof candidate !== 'object') return null;
+  if (candidate.kind !== 'app_site_frontend_direction' || candidate.version !== 1) return null;
+  return candidate;
+}
+
+function buildFrontendDirectionInstruction(frontendDirection) {
+  if (!frontendDirection) return '';
+  const delegated = Array.isArray(frontendDirection.delegatedSections) && frontendDirection.delegatedSections.length > 0
+    ? ` Delegated sections: ${frontendDirection.delegatedSections.join(', ')}. For those sections, choose a fitting concrete decision and record a one-sentence reason in shared context or completion payload so the final README can include a numbered Agent Decisions section.`
+    : '';
+  return `App/Site theme picker direction: treat this as binding user intent for PRD.md, DESIGN.md, structure.md, frontendSpecs/frontendPlan, implementation, and review. ${frontendDirection.summary ?? ''}.${delegated} The preview is low-fidelity and non-authoritative; use it only for broad layout, density, and composition.`;
+}
+
+function buildFrontendDirectionReviewChecklist(frontendDirection) {
+  if (!frontendDirection) return null;
+  return {
+    expectation: 'Review generated output against every App/Site theme picker section.',
+    sections: ['layout', 'density', 'palette', 'shape', 'effects', 'assets', 'interaction', 'tone'],
+    allowedResults: ['pass', 'fail', 'delegated'],
+    failConcreteMismatches: true,
+    flagDelegatedWithoutReason: true,
+    previewUse: 'secondary_only',
+  };
+}
+
 const GENERIC_README_ROLE_PRIORITY = [
   'visual_polish_reviewer',
   'interaction_qa',
@@ -238,6 +273,9 @@ export function buildTaskDetails(missionId, nodeId) {
   const frontendMode = record.mission.metadata?.frontendMode ?? 'off';
   const frontendCategory = record.mission.metadata?.frontendCategory ?? 'marketing_site';
   const specProfile = record.mission.metadata?.specProfile ?? 'none';
+  const frontendDirection = getFrontendDirection(record.mission);
+  const frontendDirectionInstruction = buildFrontendDirectionInstruction(frontendDirection);
+  const frontendDirectionReview = buildFrontendDirectionReviewChecklist(frontendDirection);
   const frontendFramework = frontendMode !== 'off' || specProfile === 'frontend_three_file'
     ? buildFrontendSpecFramework({ categoryId: frontendCategory, mode: frontendMode === 'off' ? 'aligned' : frontendMode })
     : null;
@@ -246,6 +284,7 @@ export function buildTaskDetails(missionId, nodeId) {
   const isFinalReadmeOwner = Boolean(finalReadmeEnabled && finalReadmeOwnerNodeId === nodeId);
   const nodeInstructionOverride = joinInstructionParts(
     node.instructionOverride ?? '',
+    frontendDirectionInstruction,
     isFinalReadmeOwner ? FINAL_README_INSTRUCTION : '',
   );
 
@@ -262,6 +301,8 @@ export function buildTaskDetails(missionId, nodeId) {
     specProfile,
     finalReadmeEnabled,
     finalReadmeOwnerNodeId,
+    frontendDirection,
+    frontendDirectionReview,
     frontendFramework,
     goal: record.mission.task?.prompt ?? '',
     objective: nodeInstructionOverride || record.mission.task?.prompt || '',
@@ -319,6 +360,8 @@ export function buildTaskDetails(missionId, nodeId) {
       specProfile,
       finalReadmeEnabled,
       finalReadmeOwnerNodeId,
+      frontendDirection,
+      frontendDirectionReview,
       frontendFramework,
     },
   };
