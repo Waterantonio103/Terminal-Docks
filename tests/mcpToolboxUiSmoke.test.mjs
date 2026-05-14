@@ -25,6 +25,8 @@ includesAll(page, [
   '/internal/mcp-tool-approvals',
   '/restore',
   'Filter MCP events by source',
+  'Resources',
+  'listStarlinkResources',
 ]);
 
 includesAll(css, [

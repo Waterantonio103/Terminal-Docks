@@ -5,6 +5,65 @@ import type {
   WorkflowEventRecord,
 } from '../hooks/useMissionSnapshot.js';
 
+export interface WorkflowRunHistorySummary {
+  missionId: string;
+  graphId: string | null;
+  goal: string | null;
+  status: string;
+  workspaceDir: string | null;
+  createdAt: string | null;
+  updatedAt: string | null;
+  totalDurationMs: number | null;
+  nodeCount: number;
+  eventCount: number;
+}
+
+export interface AgentRunHistoryRecord {
+  runId: string;
+  sessionId: string;
+  cli: string;
+  executionMode: string;
+  cwd: string | null;
+  command: string;
+  args: string[];
+  promptPath: string | null;
+  stdoutPath: string | null;
+  stderrPath: string | null;
+  transcriptPath: string | null;
+  status: string;
+  exitCode: number | null;
+  startedAt: string | null;
+  completedAt: string | null;
+  durationMs: number | null;
+  error: string | null;
+  stdoutText: string | null;
+  stderrText: string | null;
+  transcriptText: string | null;
+}
+
+export interface WorkflowNodeRunHistory {
+  nodeId: string;
+  role: string | null;
+  title: string | null;
+  status: string;
+  attempt: number;
+  terminalId: string | null;
+  sessionId: string | null;
+  startedAt: string | null;
+  endedAt: string | null;
+  durationMs: number | null;
+  fullOutput: string;
+  agentRuns: AgentRunHistoryRecord[];
+}
+
+export interface WorkflowRunHistory {
+  summary: WorkflowRunHistorySummary;
+  missionJson: string | null;
+  nodes: WorkflowNodeRunHistory[];
+  events: WorkflowEventRecord[];
+  artifacts: ArtifactRecord[];
+}
+
 export interface UpsertMissionInput {
   missionId: string;
   goal?: string | null;
@@ -196,6 +255,14 @@ export const missionRepository = {
 
   getWorkflowEvents(missionId: string, limit = 100): Promise<WorkflowEventRecord[]> {
     return invoke<WorkflowEventRecord[]>('get_workflow_events', { missionId, limit });
+  },
+
+  listWorkflowRunHistory(limit = 25): Promise<WorkflowRunHistorySummary[]> {
+    return invoke<WorkflowRunHistorySummary[]>('list_workflow_run_history', { limit });
+  },
+
+  getWorkflowRunHistory(missionId: string): Promise<WorkflowRunHistory> {
+    return invoke<WorkflowRunHistory>('get_workflow_run_history', { missionId });
   },
 
   createTaskInboxItem(input: TaskInboxInput): Promise<void> {

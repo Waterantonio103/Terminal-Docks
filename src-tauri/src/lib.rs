@@ -71,6 +71,8 @@ pub fn run() {
             db::list_artifacts,
             db::append_workflow_event,
             db::get_workflow_events,
+            db::list_workflow_run_history,
+            db::get_workflow_run_history,
             db::create_task_inbox_item,
             db::get_task_inbox_items,
             db::update_task_inbox_item_status,

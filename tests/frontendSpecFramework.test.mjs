@@ -31,6 +31,8 @@ run('framework exposes fill-in forms for PRD, DESIGN, and structure', () => {
 
   assert.equal(framework.categoryId, 'docs_portal');
   assert.equal(framework.mode, 'strict_ui');
+  assert.deepEqual(framework.modeConfig.durableArtifacts, ['DESIGN.md', 'README.md']);
+  assert.ok(framework.modeConfig.requiredContext.includes('implementation plan'));
   assert.ok(framework.schemas['PRD.md'].requiredSections.includes('Target Users'));
   assert.ok(framework.schemas['DESIGN.md'].requiredSections.includes('Design Tokens'));
   assert.ok(framework.schemas['DESIGN.md'].requiredSections.includes('Builder Handoff'));
@@ -38,6 +40,7 @@ run('framework exposes fill-in forms for PRD, DESIGN, and structure', () => {
   assert.ok(framework.schemas['DESIGN.md'].canonicalTemplate.frontmatter.typography['display-lg'].includes('family'));
   assert.ok(framework.schemas['structure.md'].aliases.includes('architecture.md'));
   assert.ok(framework.intakeSteps.some(step => step.includes('Preserve strong user files')));
+  assert.ok(framework.intakeSteps.some(step => step.includes('workspace context instead of creating')));
   assert.ok(framework.alignmentChecks.some(check => check.includes('Product type matches')));
 });
 
@@ -111,7 +114,19 @@ run('intake gate preserves user files and reports missing sections instead of ov
   assert.equal(result.files['PRD.md'].status, 'weak');
   assert.ok(result.files['PRD.md'].missingRequiredSections.includes('Open Questions'));
   assert.ok(result.files['DESIGN.md'].missingCategoryAdditions.includes('Code block treatment'));
-  assert.ok(result.nextActions.some(action => action.includes('Patch PRD.md')));
+  assert.ok(result.nextActions.some(action => action.includes('Patch the supplied PRD.md')));
+});
+
+run('missing planning docs become workspace context actions, not required generated files', () => {
+  const result = evaluateFrontendSpecCoverage({
+    categoryId: 'marketing_site',
+    suppliedFiles: {},
+  });
+
+  assert.equal(result.status, 'needs_spec_work');
+  assert.ok(result.nextActions.some(action => action.includes('Record product decisions in frontendSpecs workspace context')));
+  assert.ok(result.nextActions.some(action => action.includes('Record route/component/file ownership decisions in frontendPlan workspace context')));
+  assert.ok(result.nextActions.some(action => action.includes('Generate DESIGN.md')));
 });
 
 run('complete category specs pass the intake gate', () => {

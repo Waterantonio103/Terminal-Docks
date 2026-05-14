@@ -175,6 +175,7 @@ try {
     assert.equal(details.frontendMode, 'strict_ui');
     assert.equal(details.specProfile, 'frontend_three_file');
     assert.equal(details.frontendFramework.categoryId, 'admin_internal_tool');
+    assert.deepEqual(details.frontendFramework.modeConfig.durableArtifacts, ['DESIGN.md', 'README.md']);
     assert.ok(details.frontendFramework.schemas['PRD.md'].requiredSections.includes('Target Users'));
     assert.equal(details.assignment.frontendFramework.categoryId, 'admin_internal_tool');
   });
@@ -474,6 +475,15 @@ try {
       broadcasts.filter(message => message.type === 'handoff').length,
       2,
     );
+
+    const runtimeRow = db.prepare(
+      `SELECT status, ended_at, failure_reason
+         FROM agent_runtime_sessions
+        WHERE session_id = ?`,
+    ).get('session:mission-graph:builder:1');
+    assert.equal(runtimeRow.status, 'completed');
+    assert.ok(runtimeRow.ended_at, 'complete_task should stamp runtime end time for run history');
+    assert.equal(runtimeRow.failure_reason, null);
   });
 
   await run('handoff_task rejects graph-mode role-only handoffs', async () => {

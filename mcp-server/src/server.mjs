@@ -15,6 +15,7 @@ import { registerWorkflowTools } from './tools/workflow.mjs';
 import { registerAgentTools } from './tools/agents.mjs';
 import { registerAdapterTools } from './tools/adapters.mjs';
 import { registerInboxTools } from './tools/inbox.mjs';
+import { registerWorkspaceTools } from './tools/workspace.mjs';
 import { registerDebugTools } from './debug/index.mjs';
 import { registerResources } from './resources/index.mjs';
 import { registerPrompts } from './prompts/index.mjs';
@@ -46,6 +47,7 @@ function createMcpServer(getSessionId) {
   registerWorkflowTools(server, getSessionId);
   registerAgentTools(server, getSessionId);
   registerInboxTools(server, getSessionId);
+  registerWorkspaceTools(server, getSessionId);
   registerAdapterTools(server);
   registerDebugTools(server, getSessionId);
   registerResources(server);
@@ -186,8 +188,8 @@ function registerRuntimeBootstrap(body) {
 
   db.prepare(
     `INSERT INTO agent_runtime_sessions
-       (session_id, agent_id, mission_id, node_id, attempt, terminal_id, status, run_id, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, 'registered', ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+       (session_id, agent_id, mission_id, node_id, attempt, terminal_id, status, run_id, started_at, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, 'registered', ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
      ON CONFLICT(session_id) DO UPDATE SET
        agent_id = excluded.agent_id,
        mission_id = excluded.mission_id,
@@ -196,6 +198,9 @@ function registerRuntimeBootstrap(body) {
        terminal_id = excluded.terminal_id,
        status = 'registered',
        run_id = excluded.run_id,
+       started_at = COALESCE(agent_runtime_sessions.started_at, CURRENT_TIMESTAMP),
+       ended_at = NULL,
+       failure_reason = NULL,
        updated_at = CURRENT_TIMESTAMP`
   ).run(
     sessionId,
@@ -450,7 +455,14 @@ app.post('/internal/push', (req, res) => {
   if (body.type === 'runtime_disconnected') {
     if (body.sessionId) {
       if (sessions[body.sessionId]) sessions[body.sessionId].status = 'disconnected';
-      db.prepare(`UPDATE agent_runtime_sessions SET status = 'disconnected', updated_at = CURRENT_TIMESTAMP WHERE session_id = ?`).run(body.sessionId);
+      db.prepare(
+        `UPDATE agent_runtime_sessions
+            SET status = 'disconnected',
+                ended_at = COALESCE(ended_at, CURRENT_TIMESTAMP),
+                failure_reason = COALESCE(failure_reason, ?),
+                updated_at = CURRENT_TIMESTAMP
+          WHERE session_id = ?`
+      ).run(body.reason != null ? String(body.reason) : 'disconnected', body.sessionId);
       emitAgentEvent({
         type: 'agent:disconnected',
         sessionId: body.sessionId,

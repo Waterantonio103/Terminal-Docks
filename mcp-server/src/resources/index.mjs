@@ -44,7 +44,7 @@ export function registerResources(server) {
 
   server.registerResource('frontend_spec_framework', 'frontend-spec://framework', {
     title: 'Frontend Spec Framework',
-    description: 'Fill-in schemas, category overlays, intake steps, and rubrics for frontend PRD.md, DESIGN.md, and structure.md specs.',
+    description: 'Fill-in schemas, category overlays, intake steps, and rubrics for frontend product decisions, DESIGN.md, and implementation-plan context.',
   }, async () => ({
     contents: [{
       uri: 'frontend-spec://framework',

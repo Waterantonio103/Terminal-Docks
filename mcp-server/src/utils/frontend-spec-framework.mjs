@@ -2,19 +2,22 @@ export const FRONTEND_SPEC_MODES = {
   fast: {
     label: 'Fast mode',
     intent: 'Infer reasonable specs from the prompt and ask only when blocked.',
-    requiredArtifacts: ['PRD.md', 'DESIGN.md', 'structure.md'],
+    requiredContext: ['product decisions', 'visual decisions', 'implementation plan'],
+    durableArtifacts: ['README.md'],
     gateLevel: 'warn',
   },
   aligned: {
     label: 'Aligned mode',
-    intent: 'Inspect supplied artifacts, patch or generate missing specs, then build from accepted files.',
-    requiredArtifacts: ['PRD.md', 'DESIGN.md', 'structure.md'],
+    intent: 'Inspect supplied artifacts, record missing product/structure decisions in workspace context, create DESIGN.md only when durable UI guidance is needed, then build from accepted context.',
+    requiredContext: ['product decisions', 'visual decisions', 'implementation plan'],
+    durableArtifacts: ['DESIGN.md', 'README.md'],
     gateLevel: 'block_on_missing_required',
   },
   strict_ui: {
     label: 'Strict UI mode',
-    intent: 'Require accepted specs, category rubric, screenshot review, accessibility checks, and a fix pass.',
-    requiredArtifacts: ['PRD.md', 'DESIGN.md', 'structure.md', 'visual-qa-evidence'],
+    intent: 'Require accepted product, design, and structure decisions, category rubric, screenshot review, accessibility checks, and a fix pass.',
+    requiredContext: ['product decisions', 'visual decisions', 'implementation plan', 'visual-qa-evidence'],
+    durableArtifacts: ['DESIGN.md', 'README.md'],
     gateLevel: 'block_on_missing_required',
   },
 };
@@ -185,14 +188,14 @@ export const FRONTEND_SPEC_SCHEMAS = {
       'What shared layout and navigation patterns should every page or screen use?',
       'Which reusable components should be built?',
       'What data models or mock data are needed to make visuals credible?',
-      'Where should files live in the target project?',
+      'What generated app folder and subfolders should own source, assets, styles, scripts, docs, and tests?',
       'Which launch and verification steps must run before completion?',
     ],
     qualityChecks: [
       'Routes/screens match the PRD and are implementation-ready.',
       'Sections are ordered by user value, not by generic page templates.',
       'Names reusable components and data objects clearly.',
-      'Includes a file structure that can be adapted to the target framework.',
+      'Includes a tidy generated project structure with conventional subfolders instead of placing every file at the workspace root.',
       'Lists concrete verification steps for navigation, states, responsiveness, and launch.',
     ],
   },
@@ -277,14 +280,16 @@ export const FRONTEND_CATEGORY_OVERLAYS = {
 };
 
 export const FRONTEND_INTAKE_STEPS = [
-  'Classify the frontend category before writing specs.',
+  'Classify the frontend category before writing or accepting specs.',
   'Collect user-supplied PRD, DESIGN, structure/architecture, screenshots, brand files, content, and repository context.',
   'Grade supplied files for coverage, specificity, contradictions, freshness, and buildability.',
   'Preserve strong user files as accepted artifacts.',
-  'Patch or append missing sections with provenance instead of overwriting user files.',
+  'Patch or append missing sections with provenance instead of overwriting user files when the file already exists.',
+  'When PRD.md or structure.md is missing, record the required product or implementation decisions in workspace context instead of creating a new planning file by default.',
+  'Create or patch DESIGN.md for UI work when durable visual tokens, component recipes, or builder handoff rules are needed.',
   'Ask at most a few targeted questions when product type, audience, visual tone, core states, or hard constraints materially affect quality.',
-  'Run an alignment check across PRD.md, DESIGN.md, and structure.md before implementation starts.',
-  'Treat accepted spec paths and sections as binding handoff references for builders and reviewers.',
+  'Run an alignment check across accepted product, design, and structure decisions before implementation starts, including the generated app folder and subfolder layout.',
+  'Treat accepted spec paths and workspace-context sections as binding handoff references for builders and reviewers.',
 ];
 
 export const FRONTEND_ALIGNMENT_CHECKS = [
@@ -402,6 +407,17 @@ export function evaluateFrontendSpecCoverage({ categoryId = 'marketing_site', su
   if (missingFiles.length > 0) alignmentRisks.push(`Missing files: ${missingFiles.join(', ')}.`);
   if (weakFiles.length > 0) alignmentRisks.push(`Files need patching before build: ${weakFiles.join(', ')}.`);
 
+  const actionForMissingFile = file => {
+    if (file === 'DESIGN.md') return 'Generate DESIGN.md from the framework schema when durable UI guidance is needed.';
+    if (file === 'PRD.md') return 'Record product decisions in frontendSpecs workspace context unless the user explicitly wants PRD.md created.';
+    if (file === 'structure.md') return 'Record route/component/file ownership decisions in frontendPlan workspace context unless the user explicitly wants structure.md created.';
+    return `Resolve missing ${file}.`;
+  };
+  const actionForWeakFile = file => {
+    if (file === 'DESIGN.md') return 'Patch DESIGN.md by appending missing sections with provenance.';
+    return `Patch the supplied ${file} only if the user provided it as a durable source; otherwise record the missing decisions in workspace context.`;
+  };
+
   return {
     categoryId: FRONTEND_CATEGORY_OVERLAYS[categoryId] ? categoryId : 'marketing_site',
     categoryLabel: category.label,
@@ -409,8 +425,8 @@ export function evaluateFrontendSpecCoverage({ categoryId = 'marketing_site', su
     files: results,
     alignmentRisks,
     nextActions: [
-      ...missingFiles.map(file => `Generate ${file} from the framework schema or ask for the user's existing file.`),
-      ...weakFiles.map(file => `Patch ${file} by appending missing sections with provenance.`),
+      ...missingFiles.map(actionForMissingFile),
+      ...weakFiles.map(actionForWeakFile),
       'Run alignment checks before implementation starts.',
     ],
   };

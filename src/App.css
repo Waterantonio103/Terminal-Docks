@@ -1699,6 +1699,70 @@ body {
   font-size: 12px;
 }
 
+.td-mcp-page .td-mcp-resource-head {
+  min-height: 32px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-top: 14px;
+  padding: 0 10px;
+  border-top: 1px solid var(--border-panel);
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.td-mcp-page .td-mcp-resource-head em {
+  margin-left: auto;
+  font-style: normal;
+}
+
+.td-mcp-page .td-mcp-resource-row {
+  min-height: 50px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 118px;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 10px;
+  border-top: 1px solid var(--border-panel);
+}
+
+.td-mcp-page .td-mcp-resource-row div {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.td-mcp-page .td-mcp-resource-row strong,
+.td-mcp-page .td-mcp-resource-row span,
+.td-mcp-page .td-mcp-resource-row em {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.td-mcp-page .td-mcp-resource-row strong {
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.td-mcp-page .td-mcp-resource-row span {
+  color: var(--syntax-constant);
+  font-family: "Cascadia Mono", Consolas, "Courier New", monospace;
+  font-size: 11px;
+}
+
+.td-mcp-page .td-mcp-resource-row em {
+  color: var(--text-muted);
+  font-size: 11px;
+  font-style: normal;
+}
+
 .td-mcp-spin {
   animation: td-mcp-spin 0.9s linear infinite;
 }

@@ -97,7 +97,7 @@ export function registerQualityTools(server, getSessionId) {
 
   server.registerTool('get_frontend_spec_framework', {
     title: 'Get Frontend Spec Framework',
-    description: 'Return fill-in schemas, category overlays, intake steps, and rubrics for frontend PRD.md, DESIGN.md, and structure.md specs.',
+    description: 'Return fill-in schemas, category overlays, intake steps, and rubrics for frontend product decisions, DESIGN.md, and implementation-plan context.',
     inputSchema: {
       categoryId: z.enum(Object.keys(FRONTEND_CATEGORY_OVERLAYS)).optional(),
       mode: z.enum(Object.keys(FRONTEND_SPEC_MODES)).optional(),
@@ -118,7 +118,7 @@ export function registerQualityTools(server, getSessionId) {
 
   server.registerTool('evaluate_frontend_spec_intake', {
     title: 'Evaluate Frontend Spec Intake',
-    description: 'Grade supplied PRD.md, DESIGN.md, and structure.md/architecture.md content for schema coverage without overwriting user files.',
+    description: 'Grade supplied PRD.md, DESIGN.md, and structure.md/architecture.md content for schema coverage without overwriting user files or requiring missing planning files to be generated.',
     inputSchema: {
       categoryId: z.enum(Object.keys(FRONTEND_CATEGORY_OVERLAYS)).optional(),
       prdText: z.string().optional(),

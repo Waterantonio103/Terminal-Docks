@@ -1,7 +1,7 @@
 import type { WorkflowPresetMode } from './workflowPresets.js';
 
 export const FINAL_README_INSTRUCTION =
-  'Final README instruction: before completing, create a very short user guidance file for the work produced by this workflow. Prefer the generated/target folder. If README.md does not exist there, create README.md. If README.md already exists, do not overwrite or append to it by default; create INSTRUCTIONS.md instead. If INSTRUCTIONS.md also exists, use SUMMARY.md, then REVIEW.md as the last fallback. Keep it concise: summarize the files and folders created or changed, note the main entry points, and include only the concrete run/test commands the user needs, such as cd into the created app folder and npm run dev. Do not write a long architecture rundown.';
+  'Final README instruction: before completing, create one very short human guidance file for the work produced by this workflow. Prefer the generated app/target folder, and make the run commands start by changing into that folder. If README.md does not exist there, create README.md. If README.md already exists, do not overwrite or append to it by default; create INSTRUCTIONS.md instead. If both files already exist, update workspace context or the completion payload instead of creating another markdown file. Keep it concise: summarize the files and folders created or changed, note the main entry points, and include only the concrete run/test commands the user needs, such as cd into the created app folder and npm run dev. Do not write a long architecture rundown.';
 
 export interface ReadmeSelectableNode {
   id: string;

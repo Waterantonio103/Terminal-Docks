@@ -328,16 +328,34 @@ pub fn init_db(app: &AppHandle) -> Result<(), String> {
             id TEXT PRIMARY KEY,
             mission_id TEXT NOT NULL,
             node_id TEXT,
+            session_id TEXT,
             kind TEXT NOT NULL DEFAULT 'summary',
             title TEXT NOT NULL,
             content_uri TEXT,
             content_text TEXT,
+            content_json TEXT,
             metadata_json TEXT,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )",
         (),
     )
     .map_err(|e| e.to_string())?;
+
+    for col in [
+        "session_id TEXT",
+        "content_uri TEXT",
+        "content_json TEXT",
+        "updated_at DATETIME DEFAULT CURRENT_TIMESTAMP",
+    ] {
+        let sql = format!("ALTER TABLE artifacts ADD COLUMN {}", col);
+        if let Err(e) = conn.execute(&sql, ()) {
+            let s = e.to_string();
+            if !s.contains("duplicate column") {
+                return Err(s);
+            }
+        }
+    }
 
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_artifacts_mission_id ON artifacts(mission_id)",
@@ -364,6 +382,29 @@ pub fn init_db(app: &AppHandle) -> Result<(), String> {
 
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_workflow_events_mission_id ON workflow_events(mission_id, id)",
+        (),
+    )
+    .map_err(|e| e.to_string())?;
+
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS pty_output_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            terminal_id TEXT NOT NULL,
+            mission_id TEXT,
+            node_id TEXT,
+            session_id TEXT,
+            attempt INTEGER,
+            stream TEXT NOT NULL DEFAULT 'pty',
+            chunk TEXT NOT NULL,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )",
+        (),
+    )
+    .map_err(|e| e.to_string())?;
+
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_pty_output_log_mission_node
+         ON pty_output_log (mission_id, node_id, session_id, id)",
         (),
     )
     .map_err(|e| e.to_string())?;
@@ -741,8 +782,15 @@ pub fn get_session_history(
 }
 
 #[tauri::command]
-pub fn save_workflow_definition(id: String, graph_json: String, state: State<'_, DbState>) -> Result<(), String> {
-    let db_lock = state.db.lock().map_err(|_| "Failed to lock database".to_string())?;
+pub fn save_workflow_definition(
+    id: String,
+    graph_json: String,
+    state: State<'_, DbState>,
+) -> Result<(), String> {
+    let db_lock = state
+        .db
+        .lock()
+        .map_err(|_| "Failed to lock database".to_string())?;
     let conn = db_lock.as_ref().ok_or("Database not initialized")?;
     conn.execute(
         "INSERT INTO workflow_definitions (id, graph_json, updated_at) VALUES (?1, ?2, CURRENT_TIMESTAMP)
@@ -754,10 +802,17 @@ pub fn save_workflow_definition(id: String, graph_json: String, state: State<'_,
 
 #[tauri::command]
 pub fn get_workflow_definition(id: String, state: State<'_, DbState>) -> Result<String, String> {
-    let db_lock = state.db.lock().map_err(|_| "Failed to lock database".to_string())?;
+    let db_lock = state
+        .db
+        .lock()
+        .map_err(|_| "Failed to lock database".to_string())?;
     let conn = db_lock.as_ref().ok_or("Database not initialized")?;
-    let mut stmt = conn.prepare("SELECT graph_json FROM workflow_definitions WHERE id = ?1").map_err(|e| e.to_string())?;
-    let json: String = stmt.query_row([&id], |row| row.get(0)).map_err(|e| e.to_string())?;
+    let mut stmt = conn
+        .prepare("SELECT graph_json FROM workflow_definitions WHERE id = ?1")
+        .map_err(|e| e.to_string())?;
+    let json: String = stmt
+        .query_row([&id], |row| row.get(0))
+        .map_err(|e| e.to_string())?;
     Ok(json)
 }
 
@@ -864,6 +919,42 @@ pub fn append_workflow_event_direct(
     );
 }
 
+pub fn append_pty_output_direct(
+    app: &AppHandle,
+    terminal_id: &str,
+    mission_id: Option<&str>,
+    node_id: Option<&str>,
+    session_id: Option<&str>,
+    attempt: Option<u32>,
+    chunk: &str,
+) {
+    if mission_id.is_none() && node_id.is_none() && session_id.is_none() {
+        return;
+    }
+    let Some(state) = app.try_state::<DbState>() else {
+        return;
+    };
+    let Ok(db_lock) = state.db.lock() else {
+        return;
+    };
+    let Some(conn) = db_lock.as_ref() else {
+        return;
+    };
+    let _ = conn.execute(
+        "INSERT INTO pty_output_log
+         (terminal_id, mission_id, node_id, session_id, attempt, stream, chunk, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, 'pty', ?6, CURRENT_TIMESTAMP)",
+        params![
+            terminal_id,
+            mission_id,
+            node_id,
+            session_id,
+            attempt.map(|value| value as i64),
+            chunk,
+        ],
+    );
+}
+
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct TaskInboxItem {
@@ -956,8 +1047,81 @@ pub struct MissionSnapshot {
     pub status_mappings: Vec<WorkflowStatusMappingRecord>,
 }
 
+#[derive(Serialize, Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowRunHistorySummary {
+    pub mission_id: String,
+    pub graph_id: Option<String>,
+    pub goal: Option<String>,
+    pub status: String,
+    pub workspace_dir: Option<String>,
+    pub created_at: Option<String>,
+    pub updated_at: Option<String>,
+    pub total_duration_ms: Option<i64>,
+    pub node_count: i64,
+    pub event_count: i64,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentRunHistoryRecord {
+    pub run_id: String,
+    pub session_id: String,
+    pub cli: String,
+    pub execution_mode: String,
+    pub cwd: Option<String>,
+    pub command: String,
+    pub args: Vec<String>,
+    pub prompt_path: Option<String>,
+    pub stdout_path: Option<String>,
+    pub stderr_path: Option<String>,
+    pub transcript_path: Option<String>,
+    pub status: String,
+    pub exit_code: Option<i32>,
+    pub started_at: Option<String>,
+    pub completed_at: Option<String>,
+    pub duration_ms: Option<i64>,
+    pub error: Option<String>,
+    pub stdout_text: Option<String>,
+    pub stderr_text: Option<String>,
+    pub transcript_text: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowNodeRunHistory {
+    pub node_id: String,
+    pub role: Option<String>,
+    pub title: Option<String>,
+    pub status: String,
+    pub attempt: u32,
+    pub terminal_id: Option<String>,
+    pub session_id: Option<String>,
+    pub started_at: Option<String>,
+    pub ended_at: Option<String>,
+    pub duration_ms: Option<i64>,
+    pub full_output: String,
+    pub agent_runs: Vec<AgentRunHistoryRecord>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowRunHistory {
+    pub summary: WorkflowRunHistorySummary,
+    pub mission_json: Option<String>,
+    pub nodes: Vec<WorkflowNodeRunHistory>,
+    pub events: Vec<WorkflowEventRecord>,
+    pub artifacts: Vec<ArtifactRecord>,
+}
+
 // Public helpers for workflow_engine.rs to call within its own lock context
-pub fn upsert_mission_canonical(conn: &Connection, mission_id: &str, goal: &str, workspace_dir: Option<&str>, status: &str) {
+pub fn upsert_mission_canonical(
+    conn: &Connection,
+    mission_id: &str,
+    goal: &str,
+    workspace_dir: Option<&str>,
+    status: &str,
+) {
     let _ = conn.execute(
         "INSERT INTO missions (id, goal, status, workspace_dir, created_at, updated_at)
          VALUES (?1, ?2, ?3, ?4, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
@@ -970,7 +1134,14 @@ pub fn upsert_mission_canonical(conn: &Connection, mission_id: &str, goal: &str,
     );
 }
 
-pub fn upsert_node_edge_direct(conn: &Connection, id: &str, mission_id: &str, from_node_id: &str, to_node_id: &str, condition: &str) {
+pub fn upsert_node_edge_direct(
+    conn: &Connection,
+    id: &str,
+    mission_id: &str,
+    from_node_id: &str,
+    to_node_id: &str,
+    condition: &str,
+) {
     let _ = conn.execute(
         "INSERT INTO node_edges (id, mission_id, from_node_id, to_node_id, condition)
          VALUES (?1, ?2, ?3, ?4, ?5)
@@ -983,16 +1154,26 @@ pub fn upsert_node_edge_direct(conn: &Connection, id: &str, mission_id: &str, fr
 }
 
 #[tauri::command]
-pub fn get_mission_snapshot(mission_id: String, state: State<'_, DbState>) -> Result<MissionSnapshot, String> {
-    let db_lock = state.db.lock().map_err(|_| "Failed to lock database".to_string())?;
+pub fn get_mission_snapshot(
+    mission_id: String,
+    state: State<'_, DbState>,
+) -> Result<MissionSnapshot, String> {
+    let db_lock = state
+        .db
+        .lock()
+        .map_err(|_| "Failed to lock database".to_string())?;
     let conn = db_lock.as_ref().ok_or("Database not initialized")?;
 
     // Base mission data from compiled_missions
-    let mut stmt = conn.prepare(
-        "SELECT graph_id, mission_json, status FROM compiled_missions WHERE mission_id = ?1"
-    ).map_err(|e| e.to_string())?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT graph_id, mission_json, status FROM compiled_missions WHERE mission_id = ?1",
+        )
+        .map_err(|e| e.to_string())?;
     let (graph_id, mission_json, cm_status): (String, String, String) = stmt
-        .query_row([&mission_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .query_row([&mission_id], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })
         .map_err(|e| e.to_string())?;
 
     // Prefer canonical missions table status if it exists
@@ -1008,34 +1189,51 @@ pub fn get_mission_snapshot(mission_id: String, state: State<'_, DbState>) -> Re
                 execution_policy, assigned_cli, assigned_model, max_attempts, dependency_node_ids_json
          FROM mission_node_runtime WHERE mission_id = ?1"
     ).map_err(|e| e.to_string())?;
-    let node_iter = stmt2.query_map([&mission_id], |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, String>(1)?,
-            row.get::<_, u32>(2)?,
-            row.get::<_, Option<String>>(3)?,
-            row.get::<_, Option<String>>(4)?,
-            row.get::<_, Option<String>>(5)?,
-            row.get::<_, Option<String>>(6)?,
-            row.get::<_, Option<String>>(7)?,
-            row.get::<_, Option<String>>(8)?,
-            row.get::<_, Option<String>>(9)?,
-            row.get::<_, Option<u32>>(10)?,
-            row.get::<_, Option<String>>(11)?,
-        ))
-    }).map_err(|e| e.to_string())?;
+    let node_iter = stmt2
+        .query_map([&mission_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, u32>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, Option<String>>(5)?,
+                row.get::<_, Option<String>>(6)?,
+                row.get::<_, Option<String>>(7)?,
+                row.get::<_, Option<String>>(8)?,
+                row.get::<_, Option<String>>(9)?,
+                row.get::<_, Option<u32>>(10)?,
+                row.get::<_, Option<String>>(11)?,
+            ))
+        })
+        .map_err(|e| e.to_string())?;
 
     let mut nodes = Vec::new();
     for n in node_iter {
-        let (node_id, node_status, attempt, last_outcome, role, title, objective,
-             execution_policy, assigned_cli, assigned_model, max_attempts_opt, dep_json)
-            = n.map_err(|e| e.to_string())?;
+        let (
+            node_id,
+            node_status,
+            attempt,
+            last_outcome,
+            role,
+            title,
+            objective,
+            execution_policy,
+            assigned_cli,
+            assigned_model,
+            max_attempts_opt,
+            dep_json,
+        ) = n.map_err(|e| e.to_string())?;
 
-        let mut stmt3 = conn.prepare(
-            "SELECT terminal_id FROM agent_runtime_sessions
-             WHERE mission_id = ?1 AND node_id = ?2 ORDER BY attempt DESC LIMIT 1"
-        ).map_err(|e| e.to_string())?;
-        let terminal_id: Option<String> = stmt3.query_row([&mission_id, &node_id], |row| row.get(0)).ok();
+        let mut stmt3 = conn
+            .prepare(
+                "SELECT terminal_id FROM agent_runtime_sessions
+             WHERE mission_id = ?1 AND node_id = ?2 ORDER BY attempt DESC LIMIT 1",
+            )
+            .map_err(|e| e.to_string())?;
+        let terminal_id: Option<String> = stmt3
+            .query_row([&mission_id, &node_id], |row| row.get(0))
+            .ok();
 
         let dependency_node_ids: Vec<String> = dep_json
             .as_deref()
@@ -1062,125 +1260,144 @@ pub fn get_mission_snapshot(mission_id: String, state: State<'_, DbState>) -> Re
 
     // Edges
     let edges: Vec<NodeEdgeRecord> = {
-        let mut stmt = conn.prepare(
-            "SELECT id, mission_id, from_node_id, to_node_id, condition
-             FROM node_edges WHERE mission_id = ?1"
-        ).map_err(|e| e.to_string())?;
-        let iter = stmt.query_map([&mission_id], |row| {
-            Ok(NodeEdgeRecord {
-                id: row.get(0)?,
-                mission_id: row.get(1)?,
-                from_node_id: row.get(2)?,
-                to_node_id: row.get(3)?,
-                condition: row.get(4)?,
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, mission_id, from_node_id, to_node_id, condition
+             FROM node_edges WHERE mission_id = ?1",
+            )
+            .map_err(|e| e.to_string())?;
+        let iter = stmt
+            .query_map([&mission_id], |row| {
+                Ok(NodeEdgeRecord {
+                    id: row.get(0)?,
+                    mission_id: row.get(1)?,
+                    from_node_id: row.get(2)?,
+                    to_node_id: row.get(3)?,
+                    condition: row.get(4)?,
+                })
             })
-        }).map_err(|e| e.to_string())?;
+            .map_err(|e| e.to_string())?;
         iter.filter_map(|r| r.ok()).collect()
     };
 
     // Runtime sessions
-    let runtime_sessions: Vec<RuntimeSessionRecord> = {
-        let mut stmt = conn.prepare(
+    let runtime_sessions: Vec<RuntimeSessionRecord> =
+        {
+            let mut stmt = conn.prepare(
             "SELECT session_id, agent_id, mission_id, node_id, attempt, terminal_id, run_id,
                     status, model, execution_mode,
                     datetime(started_at, 'localtime'), datetime(ended_at, 'localtime'),
                     failure_reason, datetime(created_at, 'localtime')
              FROM agent_runtime_sessions WHERE mission_id = ?1 ORDER BY created_at DESC LIMIT 100"
         ).map_err(|e| e.to_string())?;
-        let iter = stmt.query_map([&mission_id], |row| {
-            Ok(RuntimeSessionRecord {
-                session_id: row.get(0)?,
-                agent_id: row.get(1)?,
-                mission_id: row.get(2)?,
-                node_id: row.get(3)?,
-                attempt: row.get::<_, Option<u32>>(4)?.unwrap_or(0),
-                terminal_id: row.get(5)?,
-                run_id: row.get(6)?,
-                status: {
-                    let status: String = row.get(7)?;
-                    status
-                },
-                canonical_status: {
-                    let status: String = row.get(7)?;
-                    canonical_runtime_session_status(&status)
-                },
-                model: row.get(8)?,
-                execution_mode: row.get(9)?,
-                started_at: row.get(10)?,
-                ended_at: row.get(11)?,
-                failure_reason: row.get(12)?,
-                created_at: row.get(13)?,
-            })
-        }).map_err(|e| e.to_string())?;
-        iter.filter_map(|r| r.ok()).collect()
-    };
+            let iter = stmt
+                .query_map([&mission_id], |row| {
+                    Ok(RuntimeSessionRecord {
+                        session_id: row.get(0)?,
+                        agent_id: row.get(1)?,
+                        mission_id: row.get(2)?,
+                        node_id: row.get(3)?,
+                        attempt: row.get::<_, Option<u32>>(4)?.unwrap_or(0),
+                        terminal_id: row.get(5)?,
+                        run_id: row.get(6)?,
+                        status: {
+                            let status: String = row.get(7)?;
+                            status
+                        },
+                        canonical_status: {
+                            let status: String = row.get(7)?;
+                            canonical_runtime_session_status(&status)
+                        },
+                        model: row.get(8)?,
+                        execution_mode: row.get(9)?,
+                        started_at: row.get(10)?,
+                        ended_at: row.get(11)?,
+                        failure_reason: row.get(12)?,
+                        created_at: row.get(13)?,
+                    })
+                })
+                .map_err(|e| e.to_string())?;
+            iter.filter_map(|r| r.ok()).collect()
+        };
 
     // Artifacts
     let artifacts: Vec<ArtifactRecord> = {
-        let mut stmt = conn.prepare(
-            "SELECT id, mission_id, node_id, kind, title, content_uri, content_text,
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, mission_id, node_id, kind, title, content_uri, content_text,
                     metadata_json, datetime(created_at, 'localtime')
-             FROM artifacts WHERE mission_id = ?1 ORDER BY created_at ASC"
-        ).map_err(|e| e.to_string())?;
-        let iter = stmt.query_map([&mission_id], |row| {
-            Ok(ArtifactRecord {
-                id: row.get(0)?,
-                mission_id: row.get(1)?,
-                node_id: row.get(2)?,
-                kind: row.get(3)?,
-                title: row.get(4)?,
-                content_uri: row.get(5)?,
-                content_text: row.get(6)?,
-                metadata_json: row.get(7)?,
-                created_at: row.get(8)?,
+             FROM artifacts WHERE mission_id = ?1 ORDER BY created_at ASC",
+            )
+            .map_err(|e| e.to_string())?;
+        let iter = stmt
+            .query_map([&mission_id], |row| {
+                Ok(ArtifactRecord {
+                    id: row.get(0)?,
+                    mission_id: row.get(1)?,
+                    node_id: row.get(2)?,
+                    kind: row.get(3)?,
+                    title: row.get(4)?,
+                    content_uri: row.get(5)?,
+                    content_text: row.get(6)?,
+                    metadata_json: row.get(7)?,
+                    created_at: row.get(8)?,
+                })
             })
-        }).map_err(|e| e.to_string())?;
+            .map_err(|e| e.to_string())?;
         iter.filter_map(|r| r.ok()).collect()
     };
 
     // Active file locks for this mission
     let file_locks: Vec<FileLockRecord> = {
-        let mut stmt = conn.prepare(
-            "SELECT file_path, agent_id, datetime(locked_at, 'localtime'),
+        let mut stmt = conn
+            .prepare(
+                "SELECT file_path, agent_id, datetime(locked_at, 'localtime'),
                     mission_id, mode, status, datetime(expires_at, 'localtime')
-             FROM file_locks WHERE mission_id = ?1 AND (status IS NULL OR status = 'active')"
-        ).map_err(|e| e.to_string())?;
-        let iter = stmt.query_map([&mission_id], |row| {
-            Ok(FileLockRecord {
-                file_path: row.get(0)?,
-                agent_id: row.get(1)?,
-                locked_at: row.get(2)?,
-                mission_id: row.get(3)?,
-                mode: row.get(4)?,
-                lock_status: row.get(5)?,
-                expires_at: row.get(6)?,
+             FROM file_locks WHERE mission_id = ?1 AND (status IS NULL OR status = 'active')",
+            )
+            .map_err(|e| e.to_string())?;
+        let iter = stmt
+            .query_map([&mission_id], |row| {
+                Ok(FileLockRecord {
+                    file_path: row.get(0)?,
+                    agent_id: row.get(1)?,
+                    locked_at: row.get(2)?,
+                    mission_id: row.get(3)?,
+                    mode: row.get(4)?,
+                    lock_status: row.get(5)?,
+                    expires_at: row.get(6)?,
+                })
             })
-        }).map_err(|e| e.to_string())?;
+            .map_err(|e| e.to_string())?;
         iter.filter_map(|r| r.ok()).collect()
     };
 
     // Recent events: workflow_events first, fall back to mission_timeline
     let recent_events: Vec<WorkflowEventRecord> = {
         let mut events: Vec<WorkflowEventRecord> = {
-            let mut stmt = conn.prepare(
-                "SELECT id, mission_id, node_id, session_id, terminal_id,
+            let mut stmt = conn
+                .prepare(
+                    "SELECT id, mission_id, node_id, session_id, terminal_id,
                         type, severity, message, payload_json, datetime(created_at, 'localtime')
-                 FROM workflow_events WHERE mission_id = ?1 ORDER BY id DESC LIMIT 100"
-            ).map_err(|e| e.to_string())?;
-            let iter = stmt.query_map([&mission_id], |row| {
-                Ok(WorkflowEventRecord {
-                    id: row.get(0)?,
-                    mission_id: row.get(1)?,
-                    node_id: row.get(2)?,
-                    session_id: row.get(3)?,
-                    terminal_id: row.get(4)?,
-                    event_type: row.get(5)?,
-                    severity: row.get(6)?,
-                    message: row.get(7)?,
-                    payload_json: row.get(8)?,
-                    created_at: row.get(9)?,
+                 FROM workflow_events WHERE mission_id = ?1 ORDER BY id DESC LIMIT 100",
+                )
+                .map_err(|e| e.to_string())?;
+            let iter = stmt
+                .query_map([&mission_id], |row| {
+                    Ok(WorkflowEventRecord {
+                        id: row.get(0)?,
+                        mission_id: row.get(1)?,
+                        node_id: row.get(2)?,
+                        session_id: row.get(3)?,
+                        terminal_id: row.get(4)?,
+                        event_type: row.get(5)?,
+                        severity: row.get(6)?,
+                        message: row.get(7)?,
+                        payload_json: row.get(8)?,
+                        created_at: row.get(9)?,
+                    })
                 })
-            }).map_err(|e| e.to_string())?;
+                .map_err(|e| e.to_string())?;
             iter.filter_map(|r| r.ok()).collect()
         };
 
@@ -1188,7 +1405,7 @@ pub fn get_mission_snapshot(mission_id: String, state: State<'_, DbState>) -> Re
         if events.is_empty() {
             if let Ok(mut stmt) = conn.prepare(
                 "SELECT id, mission_id, event_type, payload, datetime(created_at, 'localtime')
-                 FROM mission_timeline WHERE mission_id = ?1 ORDER BY id DESC LIMIT 100"
+                 FROM mission_timeline WHERE mission_id = ?1 ORDER BY id DESC LIMIT 100",
             ) {
                 if let Ok(iter) = stmt.query_map([&mission_id], |row| {
                     let id: i64 = row.get(0)?;
@@ -1284,7 +1501,10 @@ pub fn upsert_mission_record(
     workspace_dir: Option<String>,
     state: State<'_, DbState>,
 ) -> Result<(), String> {
-    let db_lock = state.db.lock().map_err(|_| "Failed to lock database".to_string())?;
+    let db_lock = state
+        .db
+        .lock()
+        .map_err(|_| "Failed to lock database".to_string())?;
     let conn = db_lock.as_ref().ok_or("Database not initialized")?;
     conn.execute(
         "INSERT INTO missions (id, goal, status, workspace_dir, created_at, updated_at)
@@ -1324,7 +1544,10 @@ pub fn update_mission_status(
     final_summary: Option<String>,
     state: State<'_, DbState>,
 ) -> Result<(), String> {
-    let db_lock = state.db.lock().map_err(|_| "Failed to lock database".to_string())?;
+    let db_lock = state
+        .db
+        .lock()
+        .map_err(|_| "Failed to lock database".to_string())?;
     let conn = db_lock.as_ref().ok_or("Database not initialized")?;
     conn.execute(
         "UPDATE missions SET status = ?1, final_summary = COALESCE(?2, final_summary), updated_at = CURRENT_TIMESTAMP WHERE id = ?3",
@@ -1372,16 +1595,20 @@ pub fn write_artifact(
     metadata_json: Option<String>,
     state: State<'_, DbState>,
 ) -> Result<(), String> {
-    let db_lock = state.db.lock().map_err(|_| "Failed to lock database".to_string())?;
+    let db_lock = state
+        .db
+        .lock()
+        .map_err(|_| "Failed to lock database".to_string())?;
     let conn = db_lock.as_ref().ok_or("Database not initialized")?;
     conn.execute(
-        "INSERT INTO artifacts (id, mission_id, node_id, kind, title, content_uri, content_text, metadata_json, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, CURRENT_TIMESTAMP)
+        "INSERT INTO artifacts (id, mission_id, node_id, kind, title, content_uri, content_text, metadata_json, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
          ON CONFLICT(id) DO UPDATE SET
            title = excluded.title,
            content_uri = COALESCE(excluded.content_uri, artifacts.content_uri),
            content_text = COALESCE(excluded.content_text, artifacts.content_text),
-           metadata_json = COALESCE(excluded.metadata_json, artifacts.metadata_json)",
+           metadata_json = COALESCE(excluded.metadata_json, artifacts.metadata_json),
+           updated_at = CURRENT_TIMESTAMP",
         params![&id, &mission_id, &node_id, &kind, &title, &content_uri, &content_text, &metadata_json],
     )
     .map_err(|e| e.to_string())?;
@@ -1406,27 +1633,37 @@ pub fn write_artifact(
 }
 
 #[tauri::command]
-pub fn list_artifacts(mission_id: String, state: State<'_, DbState>) -> Result<Vec<ArtifactRecord>, String> {
-    let db_lock = state.db.lock().map_err(|_| "Failed to lock database".to_string())?;
+pub fn list_artifacts(
+    mission_id: String,
+    state: State<'_, DbState>,
+) -> Result<Vec<ArtifactRecord>, String> {
+    let db_lock = state
+        .db
+        .lock()
+        .map_err(|_| "Failed to lock database".to_string())?;
     let conn = db_lock.as_ref().ok_or("Database not initialized")?;
-    let mut stmt = conn.prepare(
-        "SELECT id, mission_id, node_id, kind, title, content_uri, content_text,
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, mission_id, node_id, kind, title, content_uri, content_text,
                 metadata_json, datetime(created_at, 'localtime')
-         FROM artifacts WHERE mission_id = ?1 ORDER BY created_at ASC"
-    ).map_err(|e| e.to_string())?;
-    let iter = stmt.query_map([&mission_id], |row| {
-        Ok(ArtifactRecord {
-            id: row.get(0)?,
-            mission_id: row.get(1)?,
-            node_id: row.get(2)?,
-            kind: row.get(3)?,
-            title: row.get(4)?,
-            content_uri: row.get(5)?,
-            content_text: row.get(6)?,
-            metadata_json: row.get(7)?,
-            created_at: row.get(8)?,
+         FROM artifacts WHERE mission_id = ?1 ORDER BY created_at ASC",
+        )
+        .map_err(|e| e.to_string())?;
+    let iter = stmt
+        .query_map([&mission_id], |row| {
+            Ok(ArtifactRecord {
+                id: row.get(0)?,
+                mission_id: row.get(1)?,
+                node_id: row.get(2)?,
+                kind: row.get(3)?,
+                title: row.get(4)?,
+                content_uri: row.get(5)?,
+                content_text: row.get(6)?,
+                metadata_json: row.get(7)?,
+                created_at: row.get(8)?,
+            })
         })
-    }).map_err(|e| e.to_string())?;
+        .map_err(|e| e.to_string())?;
     Ok(iter.filter_map(|r| r.ok()).collect())
 }
 
@@ -1442,7 +1679,10 @@ pub fn append_workflow_event(
     payload_json: Option<String>,
     state: State<'_, DbState>,
 ) -> Result<i64, String> {
-    let db_lock = state.db.lock().map_err(|_| "Failed to lock database".to_string())?;
+    let db_lock = state
+        .db
+        .lock()
+        .map_err(|_| "Failed to lock database".to_string())?;
     let conn = db_lock.as_ref().ok_or("Database not initialized")?;
     conn.execute(
         "INSERT INTO workflow_events
@@ -1460,31 +1700,381 @@ pub fn get_workflow_events(
     limit: Option<i64>,
     state: State<'_, DbState>,
 ) -> Result<Vec<WorkflowEventRecord>, String> {
-    let db_lock = state.db.lock().map_err(|_| "Failed to lock database".to_string())?;
+    let db_lock = state
+        .db
+        .lock()
+        .map_err(|_| "Failed to lock database".to_string())?;
     let conn = db_lock.as_ref().ok_or("Database not initialized")?;
     let lim = limit.unwrap_or(100);
-    let mut stmt = conn.prepare(
-        "SELECT id, mission_id, node_id, session_id, terminal_id,
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, mission_id, node_id, session_id, terminal_id,
                 type, severity, message, payload_json, datetime(created_at, 'localtime')
-         FROM workflow_events WHERE mission_id = ?1 ORDER BY id DESC LIMIT ?2"
-    ).map_err(|e| e.to_string())?;
-    let iter = stmt.query_map(params![mission_id, lim], |row| {
-        Ok(WorkflowEventRecord {
-            id: row.get(0)?,
-            mission_id: row.get(1)?,
-            node_id: row.get(2)?,
-            session_id: row.get(3)?,
-            terminal_id: row.get(4)?,
-            event_type: row.get(5)?,
-            severity: row.get(6)?,
-            message: row.get(7)?,
-            payload_json: row.get(8)?,
-            created_at: row.get(9)?,
+         FROM workflow_events WHERE mission_id = ?1 ORDER BY id DESC LIMIT ?2",
+        )
+        .map_err(|e| e.to_string())?;
+    let iter = stmt
+        .query_map(params![mission_id, lim], |row| {
+            Ok(WorkflowEventRecord {
+                id: row.get(0)?,
+                mission_id: row.get(1)?,
+                node_id: row.get(2)?,
+                session_id: row.get(3)?,
+                terminal_id: row.get(4)?,
+                event_type: row.get(5)?,
+                severity: row.get(6)?,
+                message: row.get(7)?,
+                payload_json: row.get(8)?,
+                created_at: row.get(9)?,
+            })
         })
-    }).map_err(|e| e.to_string())?;
+        .map_err(|e| e.to_string())?;
     let mut events: Vec<WorkflowEventRecord> = iter.filter_map(|r| r.ok()).collect();
     events.reverse();
     Ok(events)
+}
+
+#[tauri::command]
+pub fn list_workflow_run_history(
+    limit: Option<i64>,
+    state: State<'_, DbState>,
+) -> Result<Vec<WorkflowRunHistorySummary>, String> {
+    let db_lock = state
+        .db
+        .lock()
+        .map_err(|_| "Failed to lock database".to_string())?;
+    let conn = db_lock.as_ref().ok_or("Database not initialized")?;
+    let lim = limit.unwrap_or(25).clamp(1, 200);
+    let mut stmt = conn.prepare(
+        "SELECT
+            cm.mission_id,
+            cm.graph_id,
+            m.goal,
+            COALESCE(m.status, cm.status) AS status,
+            m.workspace_dir,
+            datetime(cm.created_at, 'localtime') AS created_at,
+            datetime(COALESCE(m.updated_at, cm.updated_at), 'localtime') AS updated_at,
+            CAST((julianday(COALESCE(MAX(ars.ended_at), MAX(ar.completed_at), COALESCE(m.updated_at, cm.updated_at))) -
+                  julianday(COALESCE(MIN(ars.started_at), MIN(ar.started_at), cm.created_at))) * 86400000 AS INTEGER) AS duration_ms,
+            (SELECT COUNT(*) FROM mission_node_runtime n WHERE n.mission_id = cm.mission_id) AS node_count,
+            (SELECT COUNT(*) FROM workflow_events e WHERE e.mission_id = cm.mission_id) AS event_count
+         FROM compiled_missions cm
+         LEFT JOIN missions m ON m.id = cm.mission_id
+         LEFT JOIN agent_runtime_sessions ars ON ars.mission_id = cm.mission_id
+         LEFT JOIN agent_runs ar ON ar.mission_id = cm.mission_id
+         GROUP BY cm.mission_id, cm.graph_id, m.goal, m.status, cm.status, m.workspace_dir, cm.created_at, m.updated_at, cm.updated_at
+         ORDER BY COALESCE(m.updated_at, cm.updated_at) DESC
+         LIMIT ?1",
+    ).map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([lim], |row| {
+            Ok(WorkflowRunHistorySummary {
+                mission_id: row.get(0)?,
+                graph_id: row.get(1)?,
+                goal: row.get(2)?,
+                status: row.get(3)?,
+                workspace_dir: row.get(4)?,
+                created_at: row.get(5)?,
+                updated_at: row.get(6)?,
+                total_duration_ms: row.get(7)?,
+                node_count: row.get(8)?,
+                event_count: row.get(9)?,
+            })
+        })
+        .map_err(|e| e.to_string())?;
+    let mut summaries = Vec::new();
+    for row in rows {
+        summaries.push(row.map_err(|e| e.to_string())?);
+    }
+    Ok(summaries)
+}
+
+fn read_text_file_if_present(path: &Option<String>) -> Option<String> {
+    let path = path.as_ref()?.trim();
+    if path.is_empty() {
+        return None;
+    }
+    fs::read_to_string(path).ok()
+}
+
+fn load_agent_runs_for_node(
+    conn: &Connection,
+    mission_id: &str,
+    node_id: &str,
+) -> Result<Vec<AgentRunHistoryRecord>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT run_id, session_id, cli, execution_mode, cwd, command, args_json,
+                prompt_path, stdout_path, stderr_path, transcript_path, status,
+                exit_code, error,
+                datetime(started_at, 'localtime'),
+                datetime(completed_at, 'localtime'),
+                CAST((julianday(completed_at) - julianday(started_at)) * 86400000 AS INTEGER)
+         FROM agent_runs
+         WHERE mission_id = ?1 AND node_id = ?2
+         ORDER BY created_at ASC",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(params![mission_id, node_id], |row| {
+            let args_json: String = row.get(6)?;
+            let stdout_path: Option<String> = row.get(8)?;
+            let stderr_path: Option<String> = row.get(9)?;
+            let transcript_path: Option<String> = row.get(10)?;
+            Ok(AgentRunHistoryRecord {
+                run_id: row.get(0)?,
+                session_id: row.get(1)?,
+                cli: row.get(2)?,
+                execution_mode: row.get(3)?,
+                cwd: row.get(4)?,
+                command: row.get(5)?,
+                args: serde_json::from_str(&args_json).unwrap_or_default(),
+                prompt_path: row.get(7)?,
+                stdout_path: stdout_path.clone(),
+                stderr_path: stderr_path.clone(),
+                transcript_path: transcript_path.clone(),
+                status: row.get(11)?,
+                exit_code: row.get(12)?,
+                error: row.get(13)?,
+                started_at: row.get(14)?,
+                completed_at: row.get(15)?,
+                duration_ms: row.get(16)?,
+                stdout_text: read_text_file_if_present(&stdout_path),
+                stderr_text: read_text_file_if_present(&stderr_path),
+                transcript_text: read_text_file_if_present(&transcript_path),
+            })
+        })
+        .map_err(|e| e.to_string())?;
+    let mut records = Vec::new();
+    for row in rows {
+        records.push(row.map_err(|e| e.to_string())?);
+    }
+    Ok(records)
+}
+
+#[tauri::command]
+pub fn get_workflow_run_history(
+    mission_id: String,
+    state: State<'_, DbState>,
+) -> Result<WorkflowRunHistory, String> {
+    let db_lock = state
+        .db
+        .lock()
+        .map_err(|_| "Failed to lock database".to_string())?;
+    let conn = db_lock.as_ref().ok_or("Database not initialized")?;
+
+    let summary = {
+        let mut stmt = conn.prepare(
+            "SELECT
+                cm.mission_id,
+                cm.graph_id,
+                m.goal,
+                COALESCE(m.status, cm.status) AS status,
+                m.workspace_dir,
+                datetime(cm.created_at, 'localtime') AS created_at,
+                datetime(COALESCE(m.updated_at, cm.updated_at), 'localtime') AS updated_at,
+                CAST((julianday(COALESCE(MAX(ars.ended_at), MAX(ar.completed_at), COALESCE(m.updated_at, cm.updated_at))) -
+                      julianday(COALESCE(MIN(ars.started_at), MIN(ar.started_at), cm.created_at))) * 86400000 AS INTEGER) AS duration_ms,
+                (SELECT COUNT(*) FROM mission_node_runtime n WHERE n.mission_id = cm.mission_id) AS node_count,
+                (SELECT COUNT(*) FROM workflow_events e WHERE e.mission_id = cm.mission_id) AS event_count
+             FROM compiled_missions cm
+             LEFT JOIN missions m ON m.id = cm.mission_id
+             LEFT JOIN agent_runtime_sessions ars ON ars.mission_id = cm.mission_id
+             LEFT JOIN agent_runs ar ON ar.mission_id = cm.mission_id
+             WHERE cm.mission_id = ?1
+             GROUP BY cm.mission_id, cm.graph_id, m.goal, m.status, cm.status, m.workspace_dir, cm.created_at, m.updated_at, cm.updated_at",
+        ).map_err(|e| e.to_string())?;
+        stmt.query_row([&mission_id], |row| {
+            Ok(WorkflowRunHistorySummary {
+                mission_id: row.get(0)?,
+                graph_id: row.get(1)?,
+                goal: row.get(2)?,
+                status: row.get(3)?,
+                workspace_dir: row.get(4)?,
+                created_at: row.get(5)?,
+                updated_at: row.get(6)?,
+                total_duration_ms: row.get(7)?,
+                node_count: row.get(8)?,
+                event_count: row.get(9)?,
+            })
+        })
+        .map_err(|e| e.to_string())?
+    };
+
+    let mission_json: Option<String> = conn
+        .prepare("SELECT mission_json FROM compiled_missions WHERE mission_id = ?1")
+        .ok()
+        .and_then(|mut stmt| stmt.query_row([&mission_id], |row| row.get(0)).ok());
+
+    let mut node_stmt = conn
+        .prepare(
+            "SELECT n.node_id, n.role_id, n.title, n.status, n.attempt,
+                COALESCE(ars.terminal_id, latest.terminal_id) AS terminal_id,
+                ars.session_id,
+                datetime(ars.started_at, 'localtime'),
+                datetime(ars.ended_at, 'localtime'),
+                CAST((julianday(ars.ended_at) - julianday(ars.started_at)) * 86400000 AS INTEGER)
+         FROM mission_node_runtime n
+         LEFT JOIN (
+            SELECT mission_id, node_id, MAX(updated_at) AS max_updated_at
+            FROM agent_runtime_sessions
+            GROUP BY mission_id, node_id
+         ) latest_key ON latest_key.mission_id = n.mission_id AND latest_key.node_id = n.node_id
+         LEFT JOIN agent_runtime_sessions latest
+            ON latest.mission_id = latest_key.mission_id
+           AND latest.node_id = latest_key.node_id
+           AND latest.updated_at = latest_key.max_updated_at
+         LEFT JOIN agent_runtime_sessions ars
+            ON ars.mission_id = n.mission_id AND ars.node_id = n.node_id AND ars.attempt = n.attempt
+         WHERE n.mission_id = ?1
+         ORDER BY n.rowid ASC",
+        )
+        .map_err(|e| e.to_string())?;
+    let node_rows = node_stmt
+        .query_map([&mission_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, Option<i64>>(4)?.unwrap_or(0) as u32,
+                row.get::<_, Option<String>>(5)?,
+                row.get::<_, Option<String>>(6)?,
+                row.get::<_, Option<String>>(7)?,
+                row.get::<_, Option<String>>(8)?,
+                row.get::<_, Option<i64>>(9)?,
+            ))
+        })
+        .map_err(|e| e.to_string())?;
+
+    let mut nodes = Vec::new();
+    for row in node_rows {
+        let (
+            node_id,
+            role,
+            title,
+            status,
+            attempt,
+            terminal_id,
+            session_id,
+            started_at,
+            ended_at,
+            duration_ms,
+        ) = row.map_err(|e| e.to_string())?;
+        let mut output_stmt = conn
+            .prepare(
+                "SELECT chunk FROM pty_output_log
+             WHERE mission_id = ?1 AND node_id = ?2
+             ORDER BY id ASC",
+            )
+            .map_err(|e| e.to_string())?;
+        let chunks = output_stmt
+            .query_map(params![&mission_id, &node_id], |chunk_row| {
+                chunk_row.get::<_, String>(0)
+            })
+            .map_err(|e| e.to_string())?;
+        let mut full_output = String::new();
+        for chunk in chunks {
+            full_output.push_str(&chunk.map_err(|e| e.to_string())?);
+        }
+        let agent_runs = load_agent_runs_for_node(conn, &mission_id, &node_id)?;
+        if full_output.trim().is_empty() {
+            for run in &agent_runs {
+                if let Some(stdout) = &run.stdout_text {
+                    full_output.push_str(stdout);
+                }
+                if let Some(stderr) = &run.stderr_text {
+                    if !full_output.is_empty() {
+                        full_output.push('\n');
+                    }
+                    full_output.push_str(stderr);
+                }
+            }
+        }
+        nodes.push(WorkflowNodeRunHistory {
+            node_id,
+            role,
+            title,
+            status,
+            attempt,
+            terminal_id,
+            session_id,
+            started_at,
+            ended_at,
+            duration_ms,
+            full_output,
+            agent_runs,
+        });
+    }
+
+    let events: Vec<WorkflowEventRecord> = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, mission_id, node_id, session_id, terminal_id,
+                    type, severity, message, payload_json, datetime(created_at, 'localtime')
+             FROM workflow_events WHERE mission_id = ?1 ORDER BY id ASC LIMIT 1000",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([&mission_id], |row| {
+                Ok(WorkflowEventRecord {
+                    id: row.get(0)?,
+                    mission_id: row.get(1)?,
+                    node_id: row.get(2)?,
+                    session_id: row.get(3)?,
+                    terminal_id: row.get(4)?,
+                    event_type: row.get(5)?,
+                    severity: row.get(6)?,
+                    message: row.get(7)?,
+                    payload_json: row.get(8)?,
+                    created_at: row.get(9)?,
+                })
+            })
+            .map_err(|e| e.to_string())?;
+        let mut records = Vec::new();
+        for row in rows {
+            records.push(row.map_err(|e| e.to_string())?);
+        }
+        records
+    };
+
+    let artifacts: Vec<ArtifactRecord> = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, mission_id, node_id, kind, title, content_uri, content_text,
+                    metadata_json, datetime(created_at, 'localtime')
+             FROM artifacts WHERE mission_id = ?1 ORDER BY created_at ASC",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([&mission_id], |row| {
+                Ok(ArtifactRecord {
+                    id: row.get(0)?,
+                    mission_id: row.get(1)?,
+                    node_id: row.get(2)?,
+                    kind: row.get(3)?,
+                    title: row.get(4)?,
+                    content_uri: row.get(5)?,
+                    content_text: row.get(6)?,
+                    metadata_json: row.get(7)?,
+                    created_at: row.get(8)?,
+                })
+            })
+            .map_err(|e| e.to_string())?;
+        let mut records = Vec::new();
+        for row in rows {
+            records.push(row.map_err(|e| e.to_string())?);
+        }
+        records
+    };
+
+    Ok(WorkflowRunHistory {
+        summary,
+        mission_json,
+        nodes,
+        events,
+        artifacts,
+    })
 }
 
 #[tauri::command]
@@ -1497,7 +2087,10 @@ pub fn create_task_inbox_item(
     payload_json: Option<String>,
     state: State<'_, DbState>,
 ) -> Result<(), String> {
-    let db_lock = state.db.lock().map_err(|_| "Failed to lock database".to_string())?;
+    let db_lock = state
+        .db
+        .lock()
+        .map_err(|_| "Failed to lock database".to_string())?;
     let conn = db_lock.as_ref().ok_or("Database not initialized")?;
     conn.execute(
         "INSERT INTO task_inbox (id, mission_id, from_node_id, to_node_id, kind, payload_json, status, created_at)
@@ -1532,27 +2125,32 @@ pub fn get_task_inbox_items(
     mission_id: String,
     state: State<'_, DbState>,
 ) -> Result<Vec<TaskInboxItem>, String> {
-    let db_lock = state.db.lock().map_err(|_| "Failed to lock database".to_string())?;
+    let db_lock = state
+        .db
+        .lock()
+        .map_err(|_| "Failed to lock database".to_string())?;
     let conn = db_lock.as_ref().ok_or("Database not initialized")?;
     let mut stmt = conn.prepare(
         "SELECT id, mission_id, from_node_id, to_node_id, kind, payload_json, status,
                 datetime(created_at, 'localtime'), datetime(claimed_at, 'localtime'), datetime(completed_at, 'localtime')
          FROM task_inbox WHERE mission_id = ?1 ORDER BY created_at ASC"
     ).map_err(|e| e.to_string())?;
-    let iter = stmt.query_map([&mission_id], |row| {
-        Ok(TaskInboxItem {
-            id: row.get(0)?,
-            mission_id: row.get(1)?,
-            from_node_id: row.get(2)?,
-            to_node_id: row.get(3)?,
-            kind: row.get(4)?,
-            payload_json: row.get(5)?,
-            status: row.get(6)?,
-            created_at: row.get(7)?,
-            claimed_at: row.get(8)?,
-            completed_at: row.get(9)?,
+    let iter = stmt
+        .query_map([&mission_id], |row| {
+            Ok(TaskInboxItem {
+                id: row.get(0)?,
+                mission_id: row.get(1)?,
+                from_node_id: row.get(2)?,
+                to_node_id: row.get(3)?,
+                kind: row.get(4)?,
+                payload_json: row.get(5)?,
+                status: row.get(6)?,
+                created_at: row.get(7)?,
+                claimed_at: row.get(8)?,
+                completed_at: row.get(9)?,
+            })
         })
-    }).map_err(|e| e.to_string())?;
+        .map_err(|e| e.to_string())?;
     Ok(iter.filter_map(|r| r.ok()).collect())
 }
 
@@ -1562,10 +2160,21 @@ pub fn update_task_inbox_item_status(
     status: String,
     state: State<'_, DbState>,
 ) -> Result<(), String> {
-    let db_lock = state.db.lock().map_err(|_| "Failed to lock database".to_string())?;
+    let db_lock = state
+        .db
+        .lock()
+        .map_err(|_| "Failed to lock database".to_string())?;
     let conn = db_lock.as_ref().ok_or("Database not initialized")?;
-    let claimed_set = if status == "claimed" { ", claimed_at = CURRENT_TIMESTAMP" } else { "" };
-    let completed_set = if status == "completed" || status == "cancelled" { ", completed_at = CURRENT_TIMESTAMP" } else { "" };
+    let claimed_set = if status == "claimed" {
+        ", claimed_at = CURRENT_TIMESTAMP"
+    } else {
+        ""
+    };
+    let completed_set = if status == "completed" || status == "cancelled" {
+        ", completed_at = CURRENT_TIMESTAMP"
+    } else {
+        ""
+    };
     let task_context: Option<(String, String)> = conn
         .query_row(
             "SELECT mission_id, to_node_id FROM task_inbox WHERE id = ?1",
@@ -1612,7 +2221,10 @@ pub fn upsert_node_edge(
     condition: String,
     state: State<'_, DbState>,
 ) -> Result<(), String> {
-    let db_lock = state.db.lock().map_err(|_| "Failed to lock database".to_string())?;
+    let db_lock = state
+        .db
+        .lock()
+        .map_err(|_| "Failed to lock database".to_string())?;
     let conn = db_lock.as_ref().ok_or("Database not initialized")?;
     conn.execute(
         "INSERT INTO node_edges (id, mission_id, from_node_id, to_node_id, condition)

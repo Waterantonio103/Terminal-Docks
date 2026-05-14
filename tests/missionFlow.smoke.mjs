@@ -203,6 +203,8 @@ try {
     assert.match(ownerPrompt, /Final README instruction/);
     assert.match(ownerPrompt, /If README\.md already exists/);
     assert.match(ownerPrompt, /create INSTRUCTIONS\.md instead/);
+    assert.match(ownerPrompt, /completion payload instead of creating another markdown file/);
+    assert.doesNotMatch(ownerPrompt, /SUMMARY\.md/);
 
     const nonOwnerPrompt = buildLaunchPrompt('accessibility_reviewer', {
       workspaceDir: 'C:/workspace/app-test',

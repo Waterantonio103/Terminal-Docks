@@ -69,10 +69,10 @@ function formatOutgoingTargets(targets: readonly LaunchOutgoingTarget[]): string
 function frontendModeGuidance(mode: FrontendWorkflowMode, specProfile?: PresetSpecProfile): string {
   const profileText = specProfile && specProfile !== 'none' ? ` Spec profile: ${specProfile}.` : '';
   if (mode === 'strict_ui') {
-    return `Frontend/UI workflow mode: strict_ui.${profileText} Treat frontend specs as binding decisions before implementation or review. Strict mode should produce or accept explicit product, design, and structure sources; aliases are allowed when recorded in workspace context, but missing decisions must be sent back for intake/alignment instead of silently invented by builders.`;
+    return `Frontend/UI workflow mode: strict_ui.${profileText} Treat frontend product, design, and structure decisions as binding before implementation or review. Strict mode should produce or accept explicit decisions in workspace context, with durable files only when useful: DESIGN.md for UI guidance and README.md/INSTRUCTIONS.md for human run instructions. Implementation plans must name the generated app folder and organize source, assets, styles, scripts, and docs into appropriate subfolders. Aliases are allowed when recorded in workspace context, but missing decisions must be sent back for intake/alignment instead of silently invented by builders.`;
   }
   if (mode === 'aligned') {
-    return `Frontend/UI workflow mode: aligned.${profileText} Prefer accepted PRD.md, DESIGN.md, and structure.md/architecture.md sources, including aliases or generated files recorded in workspace context. If files are absent but the prompt and upstream context contain clear product, design, and structure decisions, proceed; request alignment only for material ambiguity.`;
+    return `Frontend/UI workflow mode: aligned.${profileText} Prefer accepted product, design, and implementation-plan decisions from supplied files or workspace context. Create durable markdown only when it is directly useful to the user or builder, especially DESIGN.md for UI guidance and README.md/INSTRUCTIONS.md for final run instructions. New generated apps should use a clear project folder with conventional subfolders for source, assets, styles, scripts, and docs. If planning files are absent but the prompt and upstream context contain clear product, design, and structure decisions, proceed; request alignment only for material ambiguity.`;
   }
   if (mode === 'fast') {
     return `Frontend/UI workflow mode: fast.${profileText} Missing .md spec files must not block the workflow. Use any available specs or upstream context, but proceed from the task prompt when it is sufficient.`;
@@ -133,7 +133,7 @@ export function buildLaunchPrompt(agentId: string, ctx: LaunchContext, instructi
       lines.push('This node currently has no legal outgoing targets. Still call `complete_task` when your work is done; do not guess a successor.');
     }
 
-    lines.push('Graph-mode minimal MCP contract: `get_task_details`, `receive_messages({ missionId, nodeId, afterSeq? })`, `complete_task({ missionId, nodeId, attempt, outcome, summary, filesChanged?, artifactReferences?, downstreamPayload? })`, `handoff_task({ missionId, fromNodeId, targetNodeId, outcome, title, description?, payload?, fromAttempt })`, `write_artifact`, `get_workspace_context`, `request_file_lock`, `release_file_lock`.');
+    lines.push('Graph-mode minimal MCP contract: `get_task_details`, `read_inbox({ missionId, nodeId, afterSeq? })`, `complete_task({ missionId, nodeId, attempt, outcome, summary, filesChanged?, artifactReferences?, downstreamPayload? })`, `handoff_task({ missionId, fromNodeId, targetNodeId, outcome, title, description?, payload?, fromAttempt })`, `write_artifact`, `get_workspace_context`, `request_file_lock`, `release_file_lock`.');
     lines.push('MCP `complete_task` is the completion authority for graph nodes. A natural-language final answer does not complete the node or advance the workflow.');
   } else {
     lines.push('No mission/node context was provided. Treat this as manual execution and avoid speculative handoffs.');
@@ -151,12 +151,12 @@ export function buildLaunchPrompt(agentId: string, ctx: LaunchContext, instructi
     lines.push('Graph-routing override: ignore any older role-level instructions that mention `targetRole`, `successorRole`, or handing off to `done`. In graph mode you must route by exact node IDs from `get_task_details`, not by guessing from role names.');
   }
 
-  lines.push('CRITICAL: If you receive a raw JSON message starting with {"signal":"NEW_TASK"...}, you MUST parse it and immediately call the `get_task_details` tool using the provided missionId and nodeId, and then call `receive_messages({ missionId, nodeId })` to process your inbox. Do this on every activation, including retries.');
+  lines.push('CRITICAL: If you receive a raw JSON message starting with {"signal":"NEW_TASK"...}, you MUST parse it and immediately call the `get_task_details` tool using the provided missionId and nodeId, and then call `read_inbox({ missionId, nodeId })` to process your inbox. Do this on every activation, including retries.');
 
   lines.push('When your work is complete:');
   let step = 1;
   if (hasNodeContext) {
-    lines.push(`${step++}. If you need a user-visible note, call the \`write_artifact\` MCP tool with \`content\` = "${agent.name} Summary: <your summary>" and \`type\` = "markdown" before completing.`);
+    lines.push(`${step++}. Put routine handoff details in \`downstreamPayload\` or workspace context. Use \`write_artifact\` only for user-facing URLs or summaries the user explicitly needs in Mission Control.`);
     if (outgoingTargets.length > 0) {
       lines.push(`${step++}. Decide your explicit outcome: \`success\` or \`failure\`. Use \`get_task_details\` as the canonical list of which target nodes are legal for that outcome.`);
       lines.push(`${step++}. Call \`complete_task({ missionId: "${ctx.missionId}", nodeId: "${ctx.nodeId}", attempt: ${ctx.attempt ?? 1}, outcome, summary, filesChanged, artifactReferences, downstreamPayload })\` (missionId="${ctx.missionId}", nodeId="${ctx.nodeId}", fromNodeId="${ctx.nodeId}", fromAttempt=${ctx.attempt ?? 1}) as your final MCP action so MCP records your result and activates every legal downstream node for that outcome. Use \`handoff_task\` only when you intentionally need to route to one exact targetNodeId.`);

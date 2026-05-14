@@ -95,15 +95,19 @@ export async function resizeTerminal(terminalId: string, rows: number, cols: num
 
 export async function registerTerminalMetadata(args: {
   terminalId: string;
+  missionId: string;
   nodeId: string;
   runtimeSessionId: string;
+  attempt: number;
   cli: string;
 }): Promise<void> {
   try {
     await invoke('register_pty_runtime_metadata', {
       terminalId: args.terminalId,
+      missionId: args.missionId,
       nodeId: args.nodeId,
       runtimeSessionId: args.runtimeSessionId,
+      attempt: args.attempt,
       cli: args.cli,
     });
   } catch {

@@ -240,8 +240,10 @@ struct PtyExitPayload {
 #[serde(rename_all = "camelCase")]
 pub struct TerminalRuntimeMetadata {
     pub terminal_id: String,
+    pub mission_id: Option<String>,
     pub node_id: Option<String>,
     pub runtime_session_id: Option<String>,
+    pub attempt: Option<u32>,
     pub cli: Option<String>,
 }
 
@@ -528,8 +530,10 @@ fn maybe_emit_permission_request(
         .cloned()
         .unwrap_or_else(|| TerminalRuntimeMetadata {
             terminal_id: terminal_id.to_string(),
+            mission_id: None,
             node_id: None,
             runtime_session_id: None,
+            attempt: None,
             cli: Some("generic".to_string()),
         });
 
@@ -715,6 +719,23 @@ pub fn spawn_pty(
                     let pty_state = app_clone.state::<PtyState>();
                     maybe_answer_terminal_query(&pty_state, &id_clone, &chunk);
                     maybe_emit_permission_request(&app_clone, &pty_state, &id_clone, &chunk);
+                    if let Some(metadata) = pty_state
+                        .terminal_metadata
+                        .lock()
+                        .unwrap()
+                        .get(&id_clone)
+                        .cloned()
+                    {
+                        crate::db::append_pty_output_direct(
+                            &app_clone,
+                            &id_clone,
+                            metadata.mission_id.as_deref(),
+                            metadata.node_id.as_deref(),
+                            metadata.runtime_session_id.as_deref(),
+                            metadata.attempt,
+                            &chunk,
+                        );
+                    }
                     let _ = app_clone.emit(
                         "pty-out",
                         Payload {
@@ -869,6 +890,23 @@ pub fn spawn_pty_with_command(
                     let pty_state = app_clone.state::<PtyState>();
                     maybe_answer_terminal_query(&pty_state, &id_clone, &chunk);
                     maybe_emit_permission_request(&app_clone, &pty_state, &id_clone, &chunk);
+                    if let Some(metadata) = pty_state
+                        .terminal_metadata
+                        .lock()
+                        .unwrap()
+                        .get(&id_clone)
+                        .cloned()
+                    {
+                        crate::db::append_pty_output_direct(
+                            &app_clone,
+                            &id_clone,
+                            metadata.mission_id.as_deref(),
+                            metadata.node_id.as_deref(),
+                            metadata.runtime_session_id.as_deref(),
+                            metadata.attempt,
+                            &chunk,
+                        );
+                    }
                     let _ = app_clone.emit(
                         "pty-out",
                         Payload {
@@ -1072,8 +1110,10 @@ pub fn handle_workflow_permission_decision(
 pub fn register_pty_runtime_metadata(
     state: State<'_, PtyState>,
     terminal_id: String,
+    mission_id: Option<String>,
     node_id: Option<String>,
     runtime_session_id: Option<String>,
+    attempt: Option<u32>,
     cli: Option<String>,
 ) -> Result<(), String> {
     if terminal_id.trim().is_empty() {
@@ -1083,6 +1123,14 @@ pub fn register_pty_runtime_metadata(
         terminal_id.clone(),
         TerminalRuntimeMetadata {
             terminal_id,
+            mission_id: mission_id.and_then(|value| {
+                let trimmed = value.trim().to_string();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed)
+                }
+            }),
             node_id: node_id.and_then(|value| {
                 let trimmed = value.trim().to_string();
                 if trimmed.is_empty() {
@@ -1099,6 +1147,7 @@ pub fn register_pty_runtime_metadata(
                     Some(trimmed)
                 }
             }),
+            attempt,
             cli: Some(normalize_cli(cli.as_deref())),
         },
     );

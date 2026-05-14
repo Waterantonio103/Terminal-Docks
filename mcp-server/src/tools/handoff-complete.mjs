@@ -171,10 +171,15 @@ function markRuntimeCompletion({
 
   db.prepare(
     `UPDATE agent_runtime_sessions
-        SET status = ?,
-            updated_at = CURRENT_TIMESTAMP
-      WHERE mission_id = ? AND node_id = ? AND attempt = ?`
-  ).run(status, missionId, nodeId, attempt);
+         SET status = ?,
+             ended_at = COALESCE(ended_at, CURRENT_TIMESTAMP),
+             failure_reason = CASE
+               WHEN ? = 'failure' THEN COALESCE(failure_reason, ?)
+               ELSE failure_reason
+             END,
+             updated_at = CURRENT_TIMESTAMP
+       WHERE mission_id = ? AND node_id = ? AND attempt = ?`
+  ).run(status, outcome, structuredCompletion?.summary ?? status, missionId, nodeId, attempt);
 
   for (const row of sessionRows) {
     if (sessions[row.session_id]) {

@@ -1,8 +1,7 @@
 import { z } from 'zod';
 import { db } from '../db/index.mjs';
-import { makeToolText, logSession } from '../utils/index.mjs';
+import { appendWorkflowEvent, logSession } from '../utils/index.mjs';
 import { sessions, messageQueues, broadcast, emitAgentEvent } from '../state.mjs';
-import { buildTaskDetails } from './task-details.mjs';
 import { parseJsonSafe } from '../utils/index.mjs';
 
 export function registerCommunicationTools(server, getSessionId) {
@@ -29,16 +28,14 @@ export function registerCommunicationTools(server, getSessionId) {
     return { isError: true, content: [{ type: 'text', text: 'Must provide either targetSessionId or targetNodeId' }] };
   });
 
-  server.registerTool('read_inbox', {
-    title: 'Read Inbox',
-    description: 'Read pending messages for your node or session.',
-    inputSchema: {
+  const readInboxSchema = {
       missionId: z.string().optional(),
       nodeId: z.string().optional(),
       afterSeq: z.number().int().min(0).optional(),
       ackThroughSeq: z.number().int().positive().optional(),
-    }
-  }, async ({ missionId, nodeId, afterSeq, ackThroughSeq }) => {
+  };
+
+  const readInbox = async ({ missionId, nodeId, afterSeq, ackThroughSeq }) => {
     const sid = getSessionId() ?? 'unknown';
     emitAgentEvent({ type: 'agent:heartbeat', sessionId: sid, at: Date.now() });
 
@@ -66,7 +63,19 @@ export function registerCommunicationTools(server, getSessionId) {
     messageQueues[sid] = [];
     if (queued.length === 0) return { content: [{ type: 'text', text: 'No new messages.' }] };
     return { content: [{ type: 'text', text: queued.map(m => `[${new Date(m.timestamp).toISOString()}] from ${m.from}: ${m.text}`).join('\n') }] };
-  });
+  };
+
+  server.registerTool('read_inbox', {
+    title: 'Read Inbox',
+    description: 'Read pending messages for your node or session.',
+    inputSchema: readInboxSchema,
+  }, readInbox);
+
+  server.registerTool('receive_messages', {
+    title: 'Receive Messages',
+    description: 'Backward-compatible alias for read_inbox. Prefer read_inbox in new prompts.',
+    inputSchema: readInboxSchema,
+  }, readInbox);
 
   server.registerTool('broadcast_status', {
     title: 'Broadcast Status',

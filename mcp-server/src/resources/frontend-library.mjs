@@ -207,7 +207,7 @@ export function buildFrontendReferenceIndex() {
     usagePolicy: {
       mandatory: false,
       recommendedSelection: 'Pick 1 to 4 relevant references only when the category, product type, or visual goal matches.',
-      sourceOfTruth: 'Explicit user instructions, accepted PRD.md, accepted DESIGN.md, structure.md, brand files, and current code override screenshots.',
+      sourceOfTruth: 'Explicit user instructions, accepted product/design/implementation decisions, brand files, and current code override screenshots.',
       doNotUseFor: 'Hardcoding layouts, copying brands, replacing exact design tokens, or overriding supplied user references.',
     },
     groups,
@@ -224,13 +224,13 @@ export function buildFrontendLibraryIndex() {
     uri: 'frontend-library://index',
     purpose: 'Agent-facing map for optional frontend craft skills, visual effects, and screenshot references.',
     workflow: [
-      'Read accepted PRD.md, DESIGN.md, structure.md/architecture.md, user screenshots, brand files, and current code first.',
+      'Read accepted product context, DESIGN.md or design context, implementation plan, user screenshots, brand files, and current code first.',
       'Read this library index to identify relevant skill docs, effects, and reference image groups.',
       'Load only the skill docs needed for your role and task. Do not bulk-load the whole library.',
       'For visual elevation, strongly consider 1 to 3 Neuform effect resources, but only when they fit the product and DESIGN.md.',
       'For calibration, inspect 1 to 4 UI reference images from the matching group when the task benefits from screenshots.',
       'Translate selected skills/effects/references into exact tokens, component recipes, states, responsive rules, and verification steps.',
-      'Record which resources influenced the decision in frontendSpecs/frontendPlan or the review artifact.',
+      'Record which resources influenced the decision in frontendSpecs/frontendPlan, downstreamPayload, or completion metadata. Do not create extra markdown files just to list resource URIs.',
     ],
     guardrails: [
       'The library is advisory. Explicit user instructions and accepted spec files are the source of truth.',

@@ -1150,31 +1150,26 @@ const PROMPT_03_UI_MODE_WORKFLOWS: Prompt06WorkflowSpec[] = [
       'Create a compact SaaS dashboard first screen for incident triage in a regional hospital operations center.',
       'Target audience: hospital operations coordinators who scan active incidents, filter by severity/location/status, compare response times, and take the next action quickly.',
       'Quality targets: dense but readable operational UI; no marketing hero, landing-page structure, or decorative filler; clear navigation, command area, filters, incident table/list, status indicators, priority metrics, and primary action; hospital incident-triage copy; cards only for metrics or repeated incident items; responsive desktop and mobile layouts.',
-      'Product Agent must create or accept PRD.md. Designer must create or accept DESIGN.md. Architecture Agent must create or accept ARCHITECTURE.md. Frontend Builder must implement the dashboard. Interaction QA must verify at least one state change or responsive behavior and write QA_REPORT.md. Accessibility Reviewer must check contrast, labels, keyboard affordances, focus states, non-color-only status indicators, and text fit, then write ACCESSIBILITY_REVIEW.md.',
+      'Product Agent must create or accept product decisions in workspace context. Designer must create or accept DESIGN.md. Architecture Agent must record the implementation plan in workspace context. Frontend Builder must implement the dashboard. Interaction QA must verify at least one state change or responsive behavior and put notes in the completion payload. Accessibility Reviewer must check contrast, labels, keyboard affordances, focus states, non-color-only status indicators, and text fit, then put findings in the completion payload.',
     ].join(' '),
     expectedFiles: expectedWithArtifacts(
       [
-        'PRD.md',
         'DESIGN.md',
-        'INTERACTION_QA_PLAN.md',
         'index.html',
         'styles.css',
         'script.js',
-        'QA_REPORT.md',
-        'ACCESSIBILITY_REVIEW.md',
-        'VISUAL_POLISH_REVIEW.md',
         'README.md',
       ],
       ['product', 'designer', 'interaction-qa', 'builder', 'accessibility', 'visual-polish'],
     ),
     runInstruction: 'Open index.html in a browser and exercise the severity/status/location filters or incident action control.',
     agents: [
-      prompt06Agent('product', 'frontend_product', 'Product Agent', 'Classify the UI category, define Strict UI requirements, and create PRD.md with concrete dashboard acceptance criteria.', PROMPT_03_CLI),
+      prompt06Agent('product', 'frontend_product', 'Product Agent', 'Classify the UI category and record Strict UI product requirements with concrete dashboard acceptance criteria in workspace context.', PROMPT_03_CLI),
       prompt06Agent('designer', 'frontend_designer', 'Designer', 'Create DESIGN.md with concrete layout, typography, color, density, state, responsive, and accessibility rules for the hospital incident dashboard.', PROMPT_03_CLI),
-      prompt06Agent('interaction-qa', 'interaction_qa', 'Interaction QA', 'Create INTERACTION_QA_PLAN.md with required filter/action/responsive states, then hand off the concrete QA checklist to the builder.', PROMPT_03_CLI),
-      prompt06Agent('builder', 'frontend_builder', 'Frontend Builder', 'Implement the runnable static dashboard in index.html, styles.css, and script.js, following PRD.md, DESIGN.md, and INTERACTION_QA_PLAN.md.', PROMPT_03_CLI),
-      prompt06Agent('accessibility', 'accessibility_reviewer', 'Accessibility Reviewer', 'Review accessibility and final visual polish, then write ACCESSIBILITY_REVIEW.md and ensure README.md lists the open/run instruction.', PROMPT_03_CLI),
-      prompt06Agent('visual-polish', 'visual_polish_reviewer', 'Visual Polish Reviewer', 'Inspect the finished dashboard for landing-page drift, density, visual hierarchy, responsive fit, and domain specificity; write VISUAL_POLISH_REVIEW.md and QA_REPORT.md.', PROMPT_03_CLI),
+      prompt06Agent('interaction-qa', 'interaction_qa', 'Interaction QA', 'Record required filter/action/responsive states in workspace context, then hand off the concrete QA checklist to the builder.', PROMPT_03_CLI),
+      prompt06Agent('builder', 'frontend_builder', 'Frontend Builder', 'Implement the runnable static dashboard in index.html, styles.css, and script.js, following workspace product context, DESIGN.md, and frontendPlan.', PROMPT_03_CLI),
+      prompt06Agent('accessibility', 'accessibility_reviewer', 'Accessibility Reviewer', 'Review accessibility and final visual polish, put findings in the completion payload, and ensure README.md lists the open/run instruction.', PROMPT_03_CLI),
+      prompt06Agent('visual-polish', 'visual_polish_reviewer', 'Visual Polish Reviewer', 'Inspect the finished dashboard for landing-page drift, density, visual hierarchy, responsive fit, and domain specificity; put concrete fix requests or pass notes in the completion payload.', PROMPT_03_CLI),
     ],
     edges: [
       prompt06Edge('product', 'designer'),
@@ -2791,7 +2786,7 @@ function buildPrompt06Mission(
     ? [
         'Prompt 03 UI builder mode requirements: treat frontendMode as Strict UI and use the frontend role responsibilities rather than generic builder/reviewer behavior.',
         'The deliverable must be a compact operational SaaS dashboard, not a landing page or marketing site.',
-        'The final output must include accepted PRD.md, DESIGN.md, INTERACTION_QA_PLAN.md, runnable static frontend files, interaction QA notes, accessibility review, visual polish review, and README open/run instructions.',
+        'The final output must include accepted product/implementation decisions in workspace context, DESIGN.md, runnable static frontend files, interaction QA notes, accessibility review, visual polish review, and README open/run instructions. Review notes should stay in completion payloads or workspace context unless the user asks for separate files.',
         'Reviewer roles must judge concrete visible output quality, responsiveness, state behavior, accessibility, and product/spec adherence before completing.',
       ]
     : [];

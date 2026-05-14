@@ -2360,8 +2360,10 @@ class RuntimeManager {
 
     await registerTerminalMetadata({
       terminalId: session.terminalId,
+      missionId: session.missionId,
       nodeId: session.nodeId,
       runtimeSessionId: session.sessionId,
+      attempt: session.attempt,
       cli: session.cliId,
     });
 

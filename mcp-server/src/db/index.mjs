@@ -83,6 +83,9 @@ export function initDb() {
       terminal_id TEXT NOT NULL,
       status TEXT NOT NULL,
       run_id TEXT,
+      started_at DATETIME,
+      ended_at DATETIME,
+      failure_reason TEXT,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
@@ -137,6 +140,7 @@ export function initDb() {
       session_id TEXT,
       kind TEXT NOT NULL,
       title TEXT NOT NULL,
+      content_uri TEXT,
       content_text TEXT,
       content_json TEXT,
       metadata_json TEXT,
@@ -268,6 +272,23 @@ export function initDb() {
     catch (e) { if (!String(e).includes('duplicate column')) throw e; }
   }
 
-  try { db.exec(`ALTER TABLE agent_runtime_sessions ADD COLUMN run_id TEXT`); }
-  catch (e) { if (!String(e).includes('duplicate column')) throw e; }
+  for (const col of [
+    'run_id TEXT',
+    'started_at DATETIME',
+    'ended_at DATETIME',
+    'failure_reason TEXT',
+  ]) {
+    try { db.exec(`ALTER TABLE agent_runtime_sessions ADD COLUMN ${col}`); }
+    catch (e) { if (!String(e).includes('duplicate column')) throw e; }
+  }
+
+  for (const col of [
+    'session_id TEXT',
+    'content_uri TEXT',
+    'content_json TEXT',
+    'updated_at DATETIME DEFAULT CURRENT_TIMESTAMP',
+  ]) {
+    try { db.exec(`ALTER TABLE artifacts ADD COLUMN ${col}`); }
+    catch (e) { if (!String(e).includes('duplicate column')) throw e; }
+  }
 }

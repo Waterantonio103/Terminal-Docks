@@ -1,6 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
-import { Activity, AlertTriangle, Archive, Ban, Bot, Check, Plus, RefreshCw, RotateCcw, Save, Search, SlidersHorizontal, Wrench, X } from 'lucide-react';
+import { Activity, AlertTriangle, Archive, Ban, BookOpen, Bot, Check, Plus, RefreshCw, RotateCcw, Save, Search, SlidersHorizontal, Wrench, X } from 'lucide-react';
 import type { CSSProperties } from 'react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import agentsConfig from '../../config/agents';
@@ -16,6 +16,14 @@ interface McpToolDescriptor {
   description?: string;
   inputSchema?: JsonObject;
   _meta?: JsonObject;
+}
+
+interface McpResourceDescriptor {
+  uri: string;
+  name?: string;
+  title?: string;
+  description?: string;
+  mimeType?: string;
 }
 
 interface BackendTool {
@@ -83,6 +91,7 @@ interface ToolView {
 interface SourceView extends Omit<BackendSource, 'tools'> {
   tools: ToolView[];
   toolCount: number;
+  resourceCount: number;
 }
 
 interface McpFeedItem {
@@ -239,6 +248,35 @@ async function listStarlinkTools(): Promise<McpToolDescriptor[]> {
     }));
 }
 
+async function listStarlinkResources(): Promise<McpResourceDescriptor[]> {
+  const mcpUrl = await invoke<string>('get_mcp_url');
+  const initialized = await postMcpRpc(mcpUrl, {
+    jsonrpc: '2.0',
+    id: 1,
+    method: 'initialize',
+    params: {
+      protocolVersion: MCP_PROTOCOL_VERSION,
+      capabilities: {},
+      clientInfo: { name: 'terminal-docks-mcp-toolbox', version: '0.1.0' },
+    },
+  });
+  if (!initialized.sessionId) throw new Error('MCP initialize did not return a session id.');
+  await postMcpRpc(mcpUrl, { jsonrpc: '2.0', method: 'notifications/initialized', params: {} }, initialized.sessionId);
+  const listed = await postMcpRpc(mcpUrl, { jsonrpc: '2.0', id: 3, method: 'resources/list', params: {} }, initialized.sessionId);
+  const result = listed.data.result;
+  if (!isJsonObject(result) || !Array.isArray(result.resources)) return [];
+  return result.resources
+    .filter((resource): resource is JsonObject => isJsonObject(resource) && typeof resource.uri === 'string')
+    .filter(resource => !String(resource.uri).startsWith('td-mcp://'))
+    .map(resource => ({
+      uri: String(resource.uri),
+      name: typeof resource.name === 'string' ? resource.name : undefined,
+      title: typeof resource.title === 'string' ? resource.title : undefined,
+      description: typeof resource.description === 'string' ? resource.description : undefined,
+      mimeType: typeof resource.mimeType === 'string' ? resource.mimeType : undefined,
+    }));
+}
+
 async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
   const baseUrl = await invoke<string>('get_mcp_base_url');
   const response = await fetch(`${baseUrl}${path}`, {
@@ -295,8 +333,14 @@ function statusFor(enabled: boolean, sourceStatus: string, toolStatus: string): 
   return 'unavailable';
 }
 
-function mergeStarlinkTools(source: BackendSource | undefined, tools: McpToolDescriptor[]): SourceView {
+function mergeStarlinkTools(source: BackendSource | undefined, tools: McpToolDescriptor[], resources: McpResourceDescriptor[]): SourceView {
   const overrides = new Map((source?.tools ?? []).map(tool => [tool.originalName, tool]));
+  const resourceRows = resources.map(resource => ({
+    proxiedUri: resource.uri,
+    name: resource.title || resource.name || resource.uri,
+    mimeType: resource.mimeType ?? null,
+    status: 'available',
+  }));
   return {
     id: 'starlink',
     displayName: source?.displayName ?? 'Starlink',
@@ -312,6 +356,7 @@ function mergeStarlinkTools(source: BackendSource | undefined, tools: McpToolDes
     allowedRoles: source?.allowedRoles ?? [],
     defaultArgs: source?.defaultArgs ?? {},
     lastDiscoveredAt: source?.lastDiscoveredAt ?? null,
+    resources: resourceRows,
     tools: tools.map(tool => {
       const override = overrides.get(tool.name);
       const enabled = source?.enabled !== false && override?.enabled !== false;
@@ -333,6 +378,7 @@ function mergeStarlinkTools(source: BackendSource | undefined, tools: McpToolDes
       };
     }),
     toolCount: tools.length,
+    resourceCount: resourceRows.length,
   };
 }
 
@@ -356,7 +402,7 @@ function toSourceView(source: BackendSource): SourceView {
       defaultArgs: tool.defaultArgs ?? {},
     } satisfies ToolView;
   });
-  return { ...source, tools, toolCount: tools.length };
+  return { ...source, tools, toolCount: tools.length, resourceCount: source.resources?.length ?? 0 };
 }
 
 function toFeedItem(raw: unknown, fallbackIndex: number): McpFeedItem | null {
@@ -475,14 +521,15 @@ export function McpToolboxPage() {
         window.localStorage.removeItem(TOOL_CONFIG_STORAGE_KEY);
       }
 
-      const [registry, starlinkTools, approvalPayload] = await Promise.all([
+      const [registry, starlinkTools, starlinkResources, approvalPayload] = await Promise.all([
         apiFetch<{ sources: BackendSource[] }>('/internal/mcp-sources?includeArchived=1'),
         listStarlinkTools(),
+        listStarlinkResources(),
         apiFetch<{ approvals: McpApproval[] }>('/internal/mcp-tool-approvals').catch(() => ({ approvals: [] })),
       ]);
       const starlinkSource = registry.sources.find(source => source.id === 'starlink');
       const externalSources = registry.sources.filter(source => source.id !== 'starlink').map(toSourceView);
-      const nextSources = [mergeStarlinkTools(starlinkSource, starlinkTools), ...externalSources];
+      const nextSources = [mergeStarlinkTools(starlinkSource, starlinkTools, starlinkResources), ...externalSources];
       setSources(nextSources);
       setApprovals(approvalPayload.approvals ?? []);
       setSelectedSourceId(current => nextSources.some(source => source.id === current) ? current : 'starlink');
@@ -528,6 +575,7 @@ export function McpToolboxPage() {
 
   const selectedSource = sources.find(source => source.id === selectedSourceId) ?? sources[0] ?? null;
   const visibleTools = selectedSource?.tools ?? [];
+  const visibleResources = selectedSource?.resources ?? [];
   const selectedTool = visibleTools.find(tool => tool.name === selectedToolName) ?? visibleTools[0] ?? null;
   const visibleFeed = eventFilterSourceId === 'all'
     ? feed
@@ -538,7 +586,8 @@ export function McpToolboxPage() {
     if (error) return 'MCP source registry is unavailable.';
     const sourceCount = sources.filter(source => !source.archived).length;
     const toolCount = sources.reduce((sum, source) => sum + source.toolCount, 0);
-    return `${sourceCount} sources, ${toolCount} tools discovered.`;
+    const resourceCount = sources.reduce((sum, source) => sum + source.resourceCount, 0);
+    return `${sourceCount} sources, ${toolCount} tools, ${resourceCount} resources discovered.`;
   }, [error, loading, sources]);
 
   const openToolConfig = useCallback((tool: ToolView) => {
@@ -761,7 +810,9 @@ export function McpToolboxPage() {
                   <strong>{source.displayName}</strong>
                   <span>{sourceHealthLabel(source)} · {source.type === 'builtin' ? 'Built-in' : source.transport}</span>
                 </div>
-                <em>{source.toolCount}</em>
+                <em title={`${source.toolCount} tools, ${source.resourceCount} resources`}>
+                  {source.resourceCount ? `${source.toolCount}/${source.resourceCount}` : source.toolCount}
+                </em>
               </button>
             ))}
             {!loading && sources.filter(source => source.id !== 'starlink').length === 0 && (
@@ -860,6 +911,23 @@ export function McpToolboxPage() {
               ))}
               {!loading && visibleTools.length === 0 && (
                 <div className="td-mcp-empty">No tools available for this source.</div>
+              )}
+              <div className="td-mcp-resource-head">
+                <BookOpen size={13} />
+                <span>Resources</span>
+                <em>{visibleResources.length}</em>
+              </div>
+              {visibleResources.map(resource => (
+                <div key={resource.proxiedUri} className="td-mcp-resource-row">
+                  <div>
+                    <strong>{resource.name}</strong>
+                    <span>{resource.proxiedUri}</span>
+                  </div>
+                  <em>{resource.mimeType || 'resource'}</em>
+                </div>
+              ))}
+              {!loading && visibleResources.length === 0 && (
+                <div className="td-mcp-empty">No resources available for this source.</div>
               )}
             </section>
 
