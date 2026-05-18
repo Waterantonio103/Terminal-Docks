@@ -131,6 +131,7 @@ export interface NodeCompletionReport {
   outcome: CompletionOutcome;
   summary?: string;
   filesChanged?: string[];
+  artifacts?: Artifact[];
   artifactReferences?: string[];
   rawOutput?: string;
   downstreamPayload?: unknown;
@@ -323,7 +324,7 @@ export class WorkflowOrchestrator {
       }
     }
 
-    completeNodeInRun(run, nodeId, outcome, report.summary, report.filesChanged, (report as any).artifacts);
+    completeNodeInRun(run, nodeId, outcome, report.summary, report.filesChanged, report.artifacts);
     this.emit({
       type: 'node_completed',
       runId,

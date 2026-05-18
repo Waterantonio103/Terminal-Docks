@@ -53,6 +53,164 @@ function resolveCurrentTaskBinding(requestedSessionId, callerSessionId) {
   return null;
 }
 
+function compactFrontendFramework(framework) {
+  if (!framework) return framework;
+  const schemas = {};
+  for (const [fileName, schema] of Object.entries(framework.schemas ?? {})) {
+    schemas[fileName] = {
+      purpose: schema.purpose,
+      outputBudget: schema.outputBudget,
+      aliases: schema.aliases,
+      requiredSections: schema.requiredSections,
+      qualityChecks: schema.qualityChecks,
+    };
+  }
+  return {
+    version: framework.version,
+    mode: framework.mode,
+    modeConfig: framework.modeConfig,
+    categoryId: framework.categoryId,
+    category: framework.category
+      ? {
+          label: framework.category.label,
+          requiredAdditions: framework.category.requiredAdditions,
+          rubric: framework.category.rubric,
+        }
+      : null,
+    schemas,
+    intakeSteps: [
+      'Use accepted files and workspace context as binding source of truth.',
+      'Create or patch only the durable handoff owned by this role.',
+      'Run one focused alignment check before completing.',
+    ],
+    alignmentChecks: framework.alignmentChecks,
+  };
+}
+
+function compactTaskForCurrentTask(task, frontendFramework) {
+  if (!task || typeof task !== 'object') return task;
+  return {
+    prompt: task.prompt,
+    mode: task.mode,
+    workspaceDir: task.workspaceDir,
+    presetId: task.presetId,
+    frontendMode: task.frontendMode,
+    frontendCategory: task.frontendCategory,
+    specProfile: task.specProfile,
+    finalReadmeEnabled: task.finalReadmeEnabled,
+    finalReadmeOwnerNodeId: task.finalReadmeOwnerNodeId,
+    frontendDirection: task.frontendDirection ?? null,
+    frontendDirectionReview: task.frontendDirectionReview ?? null,
+    frontendFramework,
+    outputContract: task.outputContract,
+  };
+}
+
+function compactCompletionPayload(value) {
+  if (!value || typeof value !== 'object') return null;
+  return {
+    outcome: value.outcome ?? null,
+    summary: value.summary ?? null,
+    filesChanged: Array.isArray(value.filesChanged) ? value.filesChanged.slice(0, 20) : [],
+    artifactReferences: Array.isArray(value.artifactReferences) ? value.artifactReferences.slice(0, 20) : [],
+    keyFindings: Array.isArray(value.keyFindings) ? value.keyFindings.slice(0, 12) : [],
+  };
+}
+
+function compactInboxMessages(messages) {
+  return (Array.isArray(messages) ? messages : []).map(message => {
+    const parsed = message.content_json && typeof message.content_json === 'object'
+      ? message.content_json
+      : {};
+    const rawCompletion = parsed.payload ?? parsed.completion;
+    const completion = typeof rawCompletion === 'string'
+      ? (() => { try { return JSON.parse(rawCompletion); } catch { return null; } })()
+      : rawCompletion;
+    return {
+      id: message.id,
+      sessionId: message.session_id,
+      eventType: message.event_type,
+      createdAt: message.created_at,
+      isRead: Boolean(message.is_read),
+      fromNodeId: parsed.fromNodeId ?? null,
+      targetNodeId: parsed.targetNodeId ?? null,
+      outcome: parsed.outcome ?? completion?.outcome ?? null,
+      completion: compactCompletionPayload(completion),
+    };
+  });
+}
+
+function compactArtifacts(artifacts) {
+  return (Array.isArray(artifacts) ? artifacts : []).map(artifact => ({
+    id: artifact.id,
+    kind: artifact.kind,
+    title: artifact.title,
+    createdAt: artifact.created_at,
+  }));
+}
+
+function compactTaskDetails(details) {
+  if (!details?.frontendFramework) return details;
+  const frontendFramework = compactFrontendFramework(details.frontendFramework);
+  return {
+    missionId: details.missionId,
+    nodeId: details.nodeId,
+    graphId: details.graphId,
+    missionStatus: details.missionStatus,
+    authoringMode: details.authoringMode,
+    presetId: details.presetId,
+    runVersion: details.runVersion,
+    frontendMode: details.frontendMode,
+    frontendCategory: details.frontendCategory,
+    specProfile: details.specProfile,
+    finalReadmeEnabled: details.finalReadmeEnabled,
+    finalReadmeOwnerNodeId: details.finalReadmeOwnerNodeId,
+    frontendDirection: details.frontendDirection,
+    frontendDirectionReview: details.frontendDirectionReview,
+    frontendFramework,
+    goal: details.goal,
+    objective: details.objective,
+    acceptanceCriteria: details.acceptanceCriteria ?? [],
+    outputContract: details.outputContract ?? '',
+    relevantArtifacts: compactArtifacts(details.relevantArtifacts),
+    task: compactTaskForCurrentTask(details.task, frontendFramework),
+    node: details.node,
+    runtimeSession: details.runtimeSession,
+    legalNextTargets: details.legalNextTargets ?? [],
+    inbox: compactInboxMessages(details.inbox),
+    pendingPushes: details.pendingPushes ?? [],
+    upstreamContext: details.upstreamContext ?? {},
+    workspaceContext: details.workspaceContext ?? {},
+    frontendToolHints: details.frontendToolHints,
+    completionContract: details.completionContract,
+    workspaceDir: details.workspaceDir,
+    assignment: details.assignment
+      ? {
+          missionId: details.assignment.missionId,
+          nodeId: details.assignment.nodeId,
+          roleId: details.assignment.roleId,
+          instructionOverride: details.assignment.instructionOverride,
+          roleInstructions: details.assignment.roleInstructions,
+          goal: details.assignment.goal,
+          workspaceDir: details.assignment.workspaceDir,
+          terminalId: details.assignment.terminalId,
+          modelId: details.assignment.modelId,
+          yolo: details.assignment.yolo,
+          frontendMode: details.assignment.frontendMode,
+          frontendCategory: details.assignment.frontendCategory,
+          specProfile: details.assignment.specProfile,
+          finalReadmeEnabled: details.assignment.finalReadmeEnabled,
+          finalReadmeOwnerNodeId: details.assignment.finalReadmeOwnerNodeId,
+          frontendDirection: details.assignment.frontendDirection,
+          frontendDirectionReview: details.assignment.frontendDirectionReview,
+          frontendFramework,
+          frontendToolHints: details.assignment.frontendToolHints,
+          workspaceContext: details.assignment.workspaceContext ?? {},
+        }
+      : details.assignment,
+  };
+}
+
 export function executeGetCurrentTask(args = {}, callerSessionId = 'unknown') {
   const binding = resolveCurrentTaskBinding(args.sessionId, callerSessionId);
   if (!binding) {
@@ -71,7 +229,17 @@ export function executeGetCurrentTask(args = {}, callerSessionId = 'unknown') {
   }
 
   ackAndEmitTaskFetch(details, callerSessionId);
-  return { content: [{ type: 'text', text: JSON.stringify(details, null, 2) }] };
+  const responseDetails = compactTaskDetails(details);
+  return { content: [{ type: 'text', text: JSON.stringify(responseDetails, null, 2) }] };
+}
+
+export function executeGetTaskDetails(args = {}, callerSessionId = 'unknown') {
+  const { missionId, nodeId, includeFullFramework = false } = args;
+  const details = buildTaskDetails(missionId, nodeId);
+  if (!details) return { isError: true, content: [{ type: 'text', text: 'Task details not found.' }] };
+  ackAndEmitTaskFetch(details, callerSessionId);
+  const responseDetails = includeFullFramework ? details : compactTaskDetails(details);
+  return { content: [{ type: 'text', text: JSON.stringify(responseDetails, null, 2) }] };
 }
 
 export function registerTaskTools(server, getSessionId) {
@@ -230,17 +398,13 @@ export function registerTaskTools(server, getSessionId) {
 
   server.registerTool('get_task_details', {
     title: 'Get Task Details',
-    inputSchema: { missionId: z.string(), nodeId: z.string() }
-  }, async ({ missionId, nodeId }) => {
-    const details = buildTaskDetails(missionId, nodeId);
-    if (!details) return { isError: true, content: [{ type: 'text', text: 'Task details not found.' }] };
-    ackAndEmitTaskFetch(details, getSessionId());
-    return { content: [{ type: 'text', text: JSON.stringify(details, null, 2) }] };
-  });
+    description: 'Return compact graph task details by default. Set includeFullFramework=true only when debugging Terminal Docks framework/template internals.',
+    inputSchema: { missionId: z.string(), nodeId: z.string(), includeFullFramework: z.boolean().optional() }
+  }, async (args) => executeGetTaskDetails(args, getSessionId() ?? 'unknown'));
 
   server.registerTool('get_current_task', {
     title: 'Get Current Task',
-    description: 'Compatibility alias for runtime-launched agents. Resolves the current mission/node from the bound runtime session, then returns get_task_details output and acknowledges the task activation.',
+    description: 'Compatibility alias for runtime-launched agents. Resolves the current mission/node from the bound runtime session, then returns compact task details and acknowledges the task activation.',
     inputSchema: { sessionId: z.string().optional() }
   }, async (args = {}) => executeGetCurrentTask(args, getSessionId() ?? 'unknown'));
 }

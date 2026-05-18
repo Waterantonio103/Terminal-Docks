@@ -49,10 +49,12 @@ export function initDb() {
       is_read BOOLEAN DEFAULT 0
     );
     CREATE TABLE IF NOT EXISTS workspace_context (
-      key TEXT PRIMARY KEY,
+      mission_id TEXT NOT NULL DEFAULT '__global__',
+      key TEXT NOT NULL,
       value TEXT,
       updated_by TEXT,
-      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (mission_id, key)
     );
     CREATE TABLE IF NOT EXISTS compiled_missions (
       mission_id TEXT PRIMARY KEY,
@@ -272,6 +274,29 @@ export function initDb() {
     catch (e) { if (!String(e).includes('duplicate column')) throw e; }
   }
 
+  const workspaceContextColumns = db.prepare('PRAGMA table_info(workspace_context)').all();
+  const missionColumn = workspaceContextColumns.find(col => col.name === 'mission_id');
+  const keyColumn = workspaceContextColumns.find(col => col.name === 'key');
+  const needsWorkspaceContextMigration = !missionColumn || !keyColumn || Number(keyColumn.pk) === 1;
+  if (needsWorkspaceContextMigration) {
+    db.exec(`
+      BEGIN;
+      ALTER TABLE workspace_context RENAME TO workspace_context_legacy;
+      CREATE TABLE workspace_context (
+        mission_id TEXT NOT NULL DEFAULT '__global__',
+        key TEXT NOT NULL,
+        value TEXT,
+        updated_by TEXT,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (mission_id, key)
+      );
+      INSERT OR REPLACE INTO workspace_context (mission_id, key, value, updated_by, updated_at)
+        SELECT '__global__', key, value, updated_by, updated_at FROM workspace_context_legacy;
+      DROP TABLE workspace_context_legacy;
+      COMMIT;
+    `);
+  }
+
   for (const col of [
     'run_id TEXT',
     'started_at DATETIME',
@@ -289,6 +314,20 @@ export function initDb() {
     'updated_at DATETIME DEFAULT CURRENT_TIMESTAMP',
   ]) {
     try { db.exec(`ALTER TABLE artifacts ADD COLUMN ${col}`); }
+    catch (e) { if (!String(e).includes('duplicate column')) throw e; }
+  }
+
+  for (const col of [
+    'from_session_id TEXT',
+    'recipient_session_id TEXT',
+    'recipient_node_id TEXT',
+    'role_id TEXT',
+    'expected_output TEXT',
+    'acceptance_criteria TEXT',
+    'result_task_id INTEGER',
+    'updated_at DATETIME DEFAULT CURRENT_TIMESTAMP',
+  ]) {
+    try { db.exec(`ALTER TABLE task_inbox ADD COLUMN ${col}`); }
     catch (e) { if (!String(e).includes('duplicate column')) throw e; }
   }
 }

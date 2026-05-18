@@ -72,7 +72,13 @@ import {
 import { getRuntimeBootstrapContract, buildRuntimeBootstrapRegistrationRequest } from '../runtimeBootstrap.js';
 import { mcpBus } from '../workers/mcpEventBus.js';
 import { detectCliFromTerminalOutput } from '../cliDetection.js';
-import { useWorkspaceStore } from '../../store/workspace.js';
+import {
+  getRuntimeNodeBinding,
+  getRuntimeNodeBindings,
+  getRuntimeTerminalPane,
+  setRuntimeNodeBinding,
+  updateRuntimeTerminalPaneData,
+} from './RuntimeWorkspaceBridge.js';
 import { emit } from '@tauri-apps/api/event';
 import { terminalOutputBus } from './TerminalOutputBus.js';
 import { missionRepository } from '../missionRepository.js';
@@ -133,7 +139,7 @@ const MISSING_MCP_COMPLETION_RENUDGE_MS = 4_000;
 const PERMISSION_REDETECT_SUPPRESSION_MS = 2_500;
 const MISSING_MCP_COMPLETION_FAIL_MS = 90_000;
 const POST_ACK_NO_PROGRESS_WINDOW_MS = readRuntimeEnvNumber('VITE_RUNTIME_POST_ACK_NO_PROGRESS_WINDOW_MS', 60_000, 1_000);
-const POST_ACK_NO_MCP_COMPLETION_MAX_MS = readRuntimeEnvNumber('VITE_RUNTIME_POST_ACK_NO_MCP_COMPLETION_MAX_MS', 180_000, 30_000);
+const POST_ACK_NO_MCP_COMPLETION_MAX_MS = readRuntimeEnvNumber('VITE_RUNTIME_POST_ACK_NO_MCP_COMPLETION_MAX_MS', 600_000, 60_000);
 const MAX_RETAINED_RUNTIME_VIEW_SESSIONS = readRuntimeEnvNumber('VITE_RUNTIME_RETAINED_VIEW_SESSIONS', 16, 0);
 const RUNTIME_COMPLETION_POLL_MS = 2_000;
 const CODEX_IDLE_WAIT_MS = 1_000;
@@ -178,11 +184,7 @@ function joinRuntimePath(...parts: string[]): string {
 function inferCodexTrustedProjectDir(workspaceDir: string | null | undefined): string | null {
   const workspace = workspaceDir?.trim();
   if (!workspace) return null;
-  const normalized = workspace.replace(/[\\\/]+/g, '\\').replace(/\\+$/g, '');
-  const marker = '\\docks-testing\\';
-  const markerIndex = normalized.toLowerCase().indexOf(marker);
-  const trustedPath = markerIndex > 0 ? normalized.slice(0, markerIndex) : normalized;
-  return trustedPath.toLowerCase();
+  return workspace.replace(/[\\\/]+/g, '\\').replace(/\\+$/g, '');
 }
 
 function isManagedCliActiveWorkStatus(status: StatusDetectionResult | null | undefined): boolean {
@@ -287,6 +289,25 @@ function extractExpectedOutputFiles(value: string | null | undefined): string[] 
       return true;
     })
     .slice(0, 20);
+}
+
+function expectedOutputFilesForSession(session: RuntimeSession): string[] {
+  const expected = extractExpectedOutputFiles(
+    `${session.goal ?? ''}\n${session.instructionOverride ?? ''}`,
+  );
+  if (expected.length > 0) return expected;
+
+  const role = session.role || session.agentId;
+  if (session.specProfile === 'frontend_three_file' || session.frontendMode === 'strict_ui') {
+    if (role === 'frontend_product') return ['PRD.md'];
+    if (role === 'frontend_designer') return ['DESIGN.md'];
+    if (role === 'frontend_architect') return ['structure.md'];
+    if (role === 'frontend_builder') return ['README.md'];
+  }
+  if (session.finalReadmeEnabled && session.finalReadmeOwnerNodeId === session.nodeId) {
+    return ['README.md'];
+  }
+  return [];
 }
 
 function joinWorkspaceOutputPath(workspaceDir: string, relativePath: string): string {
@@ -522,7 +543,7 @@ class RuntimeManager {
     );
     if (!session || !this.isCurrentOwner(session)) return;
 
-    if (status === 'completed') {
+    if (status === 'completed' && update.outcome !== 'failure') {
       const outcome = update.outcome ?? 'success';
       session.markCompleted();
       this.emit({
@@ -540,7 +561,11 @@ class RuntimeManager {
       return;
     }
 
-    const reason = update.reason || `Node ${session.nodeId} reported failed from native workflow update.`;
+    const reason = update.reason || (
+      update.outcome === 'failure'
+        ? `Node ${session.nodeId} completed with failure outcome.`
+        : `Node ${session.nodeId} reported failed from native workflow update.`
+    );
     session.markFailed(reason);
     this.emit({
       type: 'session_failed',
@@ -621,10 +646,10 @@ class RuntimeManager {
         to,
       });
 
-      const existingBinding = useWorkspaceStore.getState().nodeRuntimeBindings[session.nodeId];
+      const existingBinding = getRuntimeNodeBinding(session.nodeId);
       if (existingBinding?.adapterStatus !== to || existingBinding?.runtimeSessionId !== session.sessionId) {
         const existingTerminalId = existingBinding?.terminalId;
-        useWorkspaceStore.getState().setNodeRuntimeBinding(session.nodeId, {
+        setRuntimeNodeBinding(session.nodeId, {
           terminalId: session.terminalId || existingTerminalId || '',
           runtimeSessionId: session.sessionId,
           adapterStatus: to as any,
@@ -1059,7 +1084,7 @@ class RuntimeManager {
       if (isWorkflowRun) {
         // Flag the pane as runtime-managed BEFORE destroying the PTY.
         // TerminalPane reads this on remount — if set after destroy it always reads false.
-        useWorkspaceStore.getState().updatePaneDataByTerminalId(terminalId, {
+        updateRuntimeTerminalPaneData(terminalId, {
           runtimeManaged: true,
         });
         console.log(`[runtime] workflow run: unconditionally destroying terminal=${terminalId}`);
@@ -1323,7 +1348,7 @@ class RuntimeManager {
       if (event.type === 'agent:artifact') {
         const artifact = {
           id: event.key || `art-${event.at}-${Math.random().toString(36).slice(2, 7)}`,
-          kind: (event.artifactType ?? 'reference') as any,
+          kind: event.artifactType ?? 'reference',
           label: event.label ?? 'Artifact',
           content: event.content,
           path: event.path,
@@ -1539,9 +1564,7 @@ class RuntimeManager {
 
     this.clearPostAckNoProgressWatchdog(session.sessionId);
     const now = Date.now();
-    const expectedFiles = extractExpectedOutputFiles(
-      `${session.goal ?? ''}\n${session.instructionOverride ?? ''}`,
-    );
+    const expectedFiles = expectedOutputFilesForSession(session);
     this.postAckNoProgressWatchdogs.set(session.sessionId, {
       acknowledgedAt: now,
       lastProgressAt: now,
@@ -1682,7 +1705,7 @@ class RuntimeManager {
   }
 
   private async maybeRecordManagedCliActiveWorkProgress(session: RuntimeSession): Promise<boolean> {
-    if (!new Set(['codex', 'gemini', 'opencode']).has(session.cliId) || !session.terminalId) return false;
+    if (!new Set(['claude', 'codex', 'gemini', 'opencode']).has(session.cliId) || !session.terminalId) return false;
 
     let recentOutput = '';
     try {
@@ -1731,6 +1754,17 @@ class RuntimeManager {
     if (await this.settleSessionFromRuntimeRecord(sessionId, 'post_ack_no_progress_pre_nudge')) return;
     if (session.state === 'awaiting_permission' || session.activePermission) {
       this.recordPostAckProgress(session, 'permission_prompt');
+      return;
+    }
+    const preProgressDecision = evaluatePostAckWatchdog({
+      snapshot: this.getPostAckSnapshot(state),
+      now: Date.now(),
+      windowMs: POST_ACK_NO_PROGRESS_WINDOW_MS,
+      maxRuntimeMs: POST_ACK_NO_MCP_COMPLETION_MAX_MS,
+      blockedOnPermission: Boolean(session.activePermission),
+    });
+    if (preProgressDecision.action === 'fail') {
+      await this.handlePostAckNoProgressFailure(sessionId);
       return;
     }
     if (await this.maybeRecordExpectedFileProgress(session, state)) return;
@@ -1821,16 +1855,27 @@ class RuntimeManager {
       this.recordPostAckProgress(session, 'permission_prompt');
       return;
     }
-    if (await this.maybeRecordExpectedFileProgress(session, state)) return;
-    if (await this.maybeRecordManagedCliActiveWorkProgress(session)) return;
-
-    const decision = evaluatePostAckWatchdog({
+    const preProgressDecision = evaluatePostAckWatchdog({
       snapshot: this.getPostAckSnapshot(state),
       now: Date.now(),
       windowMs: POST_ACK_NO_PROGRESS_WINDOW_MS,
       maxRuntimeMs: POST_ACK_NO_MCP_COMPLETION_MAX_MS,
       blockedOnPermission: Boolean(session.activePermission),
     });
+    if (preProgressDecision.action !== 'fail') {
+      if (await this.maybeRecordExpectedFileProgress(session, state)) return;
+      if (await this.maybeRecordManagedCliActiveWorkProgress(session)) return;
+    }
+
+    const decision = preProgressDecision.action === 'fail'
+      ? preProgressDecision
+      : evaluatePostAckWatchdog({
+          snapshot: this.getPostAckSnapshot(state),
+          now: Date.now(),
+          windowMs: POST_ACK_NO_PROGRESS_WINDOW_MS,
+          maxRuntimeMs: POST_ACK_NO_MCP_COMPLETION_MAX_MS,
+          blockedOnPermission: Boolean(session.activePermission),
+        });
     if (decision.action === 'nudge') {
       await this.handlePostAckNoProgressNudge(sessionId);
       return;
@@ -2327,7 +2372,7 @@ class RuntimeManager {
               workspaceDir: session.workspaceDir,
             });
             await this.writeToTerminalOrFail(session, `${launchCmd}\r`);
-            useWorkspaceStore.getState().updatePaneDataByTerminalId(session.terminalId, {
+            updateRuntimeTerminalPaneData(session.terminalId, {
               cliSource: 'connect_agent',
               cli: session.cliId,
               model: session.model,
@@ -2460,7 +2505,7 @@ class RuntimeManager {
         }
         await sleep(CLI_STARTUP_WAIT_MS);
         launchedCli = true;
-        useWorkspaceStore.getState().updatePaneDataByTerminalId(session.terminalId, {
+        updateRuntimeTerminalPaneData(session.terminalId, {
           cliSource: 'connect_agent',
           cli: session.cliId,
           model: session.model,
@@ -2886,7 +2931,7 @@ class RuntimeManager {
     }
     await resizeTerminal(session.terminalId, rows, cols).catch(() => {});
 
-    useWorkspaceStore.getState().updatePaneDataByTerminalId(session.terminalId, {
+    updateRuntimeTerminalPaneData(session.terminalId, {
       runtimeManaged: true,
       cli: session.cliId,
       cliSource: 'runtime_shell_launch',
@@ -2989,10 +3034,7 @@ class RuntimeManager {
 
   private getTerminalDimensions(terminalId: string): { rows: number; cols: number } {
     const fallback = { rows: 24, cols: 80 };
-    const panes = useWorkspaceStore.getState().tabs.flatMap(tab => tab.panes);
-    const pane = panes.find(candidate =>
-      candidate.type === 'terminal' && candidate.data?.terminalId === terminalId,
-    );
+    const pane = getRuntimeTerminalPane(terminalId);
     const rows = Number(pane?.data?.terminalRows);
     const cols = Number(pane?.data?.terminalCols);
     return {
@@ -3163,7 +3205,7 @@ class RuntimeManager {
       `cli="${session.cliId}", profileId="${profileId}", sessionId="${session.sessionId}", runtimeSessionId="${session.sessionId}", ` +
       `missionId="${session.missionId}", nodeId="${session.nodeId}", attempt=${session.attempt}${payloadSuffix}. ` +
       'Use the configured Terminal Docks MCP tools in this Codex session; do not search the web for the local MCP URL. ' +
-      'After connection, wait for NEW_TASK. If get_current_task or get_task_details returns an active task, execute the actual task payload immediately and call complete_task as your final MCP action. Do not stop after connecting or after reporting that the task is ready.';
+      `After connection, call get_current_task({ sessionId: "${session.sessionId}" }) immediately. The compact returned objective, assignment, roleInstructions, frontend framework summary, inbox, and legal targets are the actual task payload; do not request the full frontend framework unless explicitly debugging Terminal Docks itself. Do not wait for any separate NEW_TASK, inbox payload, or user message. Execute that task, create the required files/context for your role, and call complete_task as your final MCP action. Do not stop after connecting, after reading task details, or after reporting that the task is ready.`;
     return `${prompt}\r`;
   }
 
@@ -3182,7 +3224,7 @@ class RuntimeManager {
     const legalTargets: import('../missionRuntime.js').RuntimeAssignmentLegalTarget[] = session.legalTargets?.map(t => ({
       targetNodeId: t.targetNodeId,
       targetRoleId: t.targetRoleId,
-      condition: t.condition.toLowerCase() as any,
+      condition: t.condition,
       allowedOutcomes: ['success', 'failure'],
     })) ?? [];
 
@@ -3331,25 +3373,20 @@ class RuntimeManager {
   }
 
   private getTerminalRuntimeConfig(terminalId: string): Record<string, unknown> {
-    const state = useWorkspaceStore.getState();
-    for (const tab of state.tabs) {
-      const terminalPane = tab.panes.find(candidate =>
-        candidate.type === 'terminal' && candidate.data?.terminalId === terminalId,
-      );
-      if (terminalPane) {
-        return {
-          customCommand: terminalPane.data?.customCliCommand ?? null,
-          customArgs: Array.isArray(terminalPane.data?.customCliArgs) ? terminalPane.data?.customCliArgs : null,
-          customEnv: terminalPane.data?.customCliEnv ?? null,
-        };
-      }
+    const terminalPane = getRuntimeTerminalPane(terminalId);
+    if (terminalPane) {
+      return {
+        customCommand: terminalPane.data?.customCliCommand ?? null,
+        customArgs: Array.isArray(terminalPane.data?.customCliArgs) ? terminalPane.data?.customCliArgs : null,
+        customEnv: terminalPane.data?.customCliEnv ?? null,
+      };
     }
     return {};
   }
 
   private bindRuntimeToTerminalPane(session: RuntimeSession): void {
     const isWorkflowRun = !session.missionId.startsWith('adhoc-');
-    useWorkspaceStore.getState().updatePaneDataByTerminalId(session.terminalId, {
+    updateRuntimeTerminalPaneData(session.terminalId, {
       runtimeSessionId: session.sessionId,
       nodeId: session.nodeId,
       roleId: session.role,
@@ -3656,15 +3693,13 @@ class RuntimeManager {
   }
 
   private hasDifferentLiveSessionOnTerminal(current: RuntimeSession): boolean {
-    const state = useWorkspaceStore.getState();
-    const allPanes = state.tabs.flatMap(t => t.panes);
-    const pane = allPanes.find(p => p.data?.terminalId === current.terminalId);
+    const pane = getRuntimeTerminalPane(current.terminalId);
     const paneSessionId = typeof pane?.data?.runtimeSessionId === 'string' ? pane.data.runtimeSessionId : null;
     if (paneSessionId && paneSessionId !== current.sessionId && this.sessions.has(paneSessionId)) {
       return true;
     }
 
-    for (const binding of Object.values(state.nodeRuntimeBindings)) {
+    for (const binding of Object.values(getRuntimeNodeBindings())) {
       if (!binding || binding.terminalId !== current.terminalId) continue;
       const sessionId = binding.runtimeSessionId;
       if (typeof sessionId !== 'string') continue;
@@ -3676,9 +3711,7 @@ class RuntimeManager {
   }
 
   private async shouldLaunchCliInTerminal(session: RuntimeSession): Promise<boolean> {
-    const state = useWorkspaceStore.getState();
-    const allPanes = state.tabs.flatMap(t => t.panes);
-    const pane = allPanes.find(p => p.data?.terminalId === session.terminalId);
+    const pane = getRuntimeTerminalPane(session.terminalId);
 
     const paneCli = typeof pane?.data?.cli === 'string' ? pane.data.cli : null;
     const paneCliSource = typeof pane?.data?.cliSource === 'string' ? pane.data.cliSource : null;
@@ -3723,7 +3756,7 @@ class RuntimeManager {
     }
 
     if (session.terminalId) {
-      useWorkspaceStore.getState().updatePaneDataByTerminalId(session.terminalId, {
+      updateRuntimeTerminalPaneData(session.terminalId, {
         cliSource: undefined,
         cli: undefined,
         model: undefined,

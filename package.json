@@ -7,11 +7,12 @@
     "dev": "vite",
     "preflight:live-workflow": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/live-workflow-preflight.ps1",
     "build": "tsc && vite build",
+    "check:bundle": "node ./scripts/check-bundle-size.mjs",
     "preview": "vite preview",
     "tauri": "tauri",
     "mcp:install": "npm install --prefix mcp-server",
     "test:graph": "tsc -p tsconfig.graph-tests.json && node ./tests/graphCompiler.test.mjs && node ./tests/workflowOrchestratorRuntimeRace.test.mjs",
-    "test:mcp": "node ./tests/mcpGraphMode.test.mjs && node ./tests/mcpSourceProxy.test.mjs && node ./tests/mcpToolboxUiSmoke.test.mjs && node ./tests/frontendSpecFramework.test.mjs && node ./tests/mcpDbMigration.test.mjs",
+    "test:mcp": "node ./tests/mcpGraphMode.test.mjs && node ./tests/mcpSourceProxy.test.mjs && node ./tests/mcpToolboxUiSmoke.test.mjs && node ./tests/frontendSpecFramework.test.mjs && node ./tests/mcpDbMigration.test.mjs && node ./tests/mcpLockTools.test.mjs && node ./tests/mcpResourceTemplates.test.mjs",
     "test:smoke": "tsc -p tsconfig.graph-tests.json && node ./tests/missionFlow.smoke.mjs",
     "test:prompt-parity": "node ./tests/promptToolParity.test.mjs",
     "test:runtime-adapters": "tsc -p tsconfig.graph-tests.json && node ./tests/runtimeAdapters.test.mjs",
@@ -45,12 +46,14 @@
     "react-dom": "^19.1.0",
     "react-markdown": "^10.1.0",
     "tailwindcss": "^4.2.2",
+    "three": "^0.184.0",
     "zustand": "^5.0.12"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2",
     "@types/react": "^19.1.8",
     "@types/react-dom": "^19.1.6",
+    "@types/three": "^0.184.1",
     "@vitejs/plugin-react": "^4.6.0",
     "typescript": "~5.8.3",
     "vite": "^7.0.4"

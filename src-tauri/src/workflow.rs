@@ -65,6 +65,8 @@ pub struct CompiledMissionTaskContext {
     #[serde(default)]
     pub frontend_category: Option<String>,
     #[serde(default)]
+    pub frontend_direction: Option<serde_json::Value>,
+    #[serde(default)]
     pub spec_profile: Option<String>,
     #[serde(default)]
     pub final_readme_enabled: Option<bool>,
@@ -134,6 +136,8 @@ pub struct CompiledMissionMetadata {
     pub frontend_mode: Option<String>,
     #[serde(default)]
     pub frontend_category: Option<String>,
+    #[serde(default)]
+    pub frontend_direction: Option<serde_json::Value>,
     #[serde(default)]
     pub spec_profile: Option<String>,
     #[serde(default)]

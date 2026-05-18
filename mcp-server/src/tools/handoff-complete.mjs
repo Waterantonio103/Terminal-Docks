@@ -2,6 +2,8 @@ import { db } from '../db/index.mjs';
 import { makeToolText, appendWorkflowEvent, logSession, parseJsonSafe } from '../utils/index.mjs';
 import { broadcast, emitAgentEvent, sessions, ackTaskPush } from '../state.mjs';
 import { loadCompiledMissionRecord, getMissionNode, getMissionNodeRuntime, allowedOutcomesForCondition, getRuntimeSessionByAttempt } from '../utils/workflow.mjs';
+import { existsSync, readdirSync } from 'node:fs';
+import { resolve, relative } from 'node:path';
 
 function normalizeCompletionStatus(value) {
   if (value === 'success' || value === 'failure') return value;
@@ -53,6 +55,68 @@ function requireRuntimeSessionForAttempt(missionId, nodeId, attempt) {
     return { error: `No runtime session registration found for ${missionId}/${nodeId} attempt ${attempt}.` };
   }
   return { row };
+}
+
+function completionChangedFiles(structuredCompletion) {
+  const files = new Set(normalizeStringArray(structuredCompletion?.filesChanged));
+  const downstream = structuredCompletion?.downstreamPayload;
+  if (downstream && typeof downstream === 'object') {
+    for (const key of ['changedFiles', 'filesChanged']) {
+      for (const file of normalizeStringArray(downstream[key])) files.add(file);
+    }
+  }
+  return [...files];
+}
+
+function workspacePathExists(workspaceDir, relativePath) {
+  const workspace = typeof workspaceDir === 'string' ? workspaceDir.trim() : '';
+  if (!workspace || !relativePath) return false;
+  const root = resolve(workspace);
+  const target = resolve(root, relativePath);
+  const rel = relative(root, target);
+  if (rel.startsWith('..') || resolve(rel) === rel) return false;
+  return existsSync(target);
+}
+
+function workspaceHasConcreteOutput(workspaceDir) {
+  const workspace = typeof workspaceDir === 'string' ? workspaceDir.trim() : '';
+  if (!workspace) return false;
+  try {
+    return readdirSync(workspace, { withFileTypes: true })
+      .some(entry => entry.name !== '.terminal-docks');
+  } catch {
+    return false;
+  }
+}
+
+function requiredStrictFrontendFile(roleId) {
+  if (roleId === 'frontend_product') return 'PRD.md';
+  if (roleId === 'frontend_designer') return 'DESIGN.md';
+  if (roleId === 'frontend_architect') return 'structure.md';
+  return null;
+}
+
+function validateStrictFrontendSuccess(record, node, structuredCompletion, outcome) {
+  if (outcome !== 'success') return null;
+  const metadata = record?.mission?.metadata ?? {};
+  const strictFrontend = metadata.frontendMode === 'strict_ui' && metadata.specProfile === 'frontend_three_file';
+  if (!strictFrontend) return null;
+
+  const workspaceDir = record?.mission?.task?.workspaceDir;
+  const changedFiles = completionChangedFiles(structuredCompletion);
+  const requiredFile = requiredStrictFrontendFile(node.roleId);
+  if (requiredFile) {
+    const mentionsRequiredFile = changedFiles.some(file => file.replace(/\\/g, '/').toLowerCase().endsWith(requiredFile.toLowerCase()));
+    if (!mentionsRequiredFile && !workspacePathExists(workspaceDir, requiredFile)) {
+      return `Strict UI success for ${node.id} requires durable ${requiredFile}. Create or patch ${requiredFile}, include it in filesChanged, then call complete_task again.`;
+    }
+  }
+
+  if (node.roleId === 'frontend_builder' && changedFiles.length === 0 && !workspaceHasConcreteOutput(workspaceDir)) {
+    return `Strict UI success for ${node.id} requires concrete implementation output. Create or modify implementation files and include filesChanged before calling complete_task with outcome "success".`;
+  }
+
+  return null;
 }
 
 const ACTIVE_RUNTIME_SESSION_STATUSES = new Set([
@@ -446,6 +510,9 @@ export function executeCompleteTask(args, sid) {
   });
   structuredCompletion.rawOutput = rawOutput;
   structuredCompletion.logRef = logRef;
+
+  const outputError = validateStrictFrontendSuccess(record, node, structuredCompletion, normalizedOutcome);
+  if (outputError) return makeToolText(outputError, true);
 
   const targets = matchingOutgoingTargets(record.mission, nodeId, normalizedOutcome);
   const routed = [];

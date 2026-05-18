@@ -136,6 +136,31 @@ function pathToSlug(path) {
   return basename(path, extname(path));
 }
 
+function neuformEntryUris(entry) {
+  const values = new Set();
+  const addValue = (value) => {
+    const normalized = String(value ?? '').trim().replaceAll('\\', '/').replace(/^neuform[_-]/, '');
+    if (!normalized) return;
+    values.add(normalized);
+    values.add(normalized.replace(/\.md$/, ''));
+    values.add(pathToSlug(normalized));
+    if (!normalized.startsWith('effects/')) values.add(`effects/${normalized}`);
+    if (!normalized.endsWith('.md')) values.add(`${normalized}.md`);
+    if (!normalized.startsWith('effects/') && !normalized.endsWith('.md')) values.add(`effects/${normalized}.md`);
+  };
+
+  addValue(entry.path);
+  addValue(entry.id);
+  addValue(entry.source?.originId);
+
+  const uris = [];
+  for (const value of values) {
+    uris.push(`frontend-patterns://neuform/${value}`);
+    uris.push(`frontend-pattern://neuform/${value}`);
+  }
+  return [...new Set(uris)];
+}
+
 function buildSkillEntries() {
   return listFiles(SKILLS_DIR, path => extname(path).toLowerCase() === '.md').map(path => {
     const text = readFileSync(path, 'utf8');
@@ -163,7 +188,8 @@ function buildNeuformIndex() {
     uri: 'frontend-patterns://neuform/index',
     entries: (parsed.entries || []).map(entry => ({
       ...entry,
-      uri: `frontend-pattern://neuform/${basename(entry.path, '.md')}`,
+      uri: neuformEntryUris(entry)[0],
+      uriAliases: neuformEntryUris(entry).slice(1),
     })),
   };
 }
@@ -305,13 +331,16 @@ export function registerFrontendLibraryResources(server) {
 
   for (const entry of buildNeuformIndex().entries) {
     const path = join(NEUFORM_DIR, entry.path);
-    server.registerResource(`frontend_pattern_${entry.id}`, entry.uri, {
-      title: entry.title,
-      description: `Neuform optional pattern: ${entry.pickerGroup || entry.patternKind || 'frontend effect'}.`,
-      mimeType: 'text/markdown',
-    }, async () => ({
-      contents: [{ uri: entry.uri, mimeType: 'text/markdown', text: readFileSync(path, 'utf8') }],
-    }));
+    const uris = [entry.uri, ...(entry.uriAliases || [])];
+    uris.forEach((uri, index) => {
+      server.registerResource(`frontend_pattern_${entry.id}_${index}`, uri, {
+        title: entry.title,
+        description: `Neuform optional pattern: ${entry.pickerGroup || entry.patternKind || 'frontend effect'}.`,
+        mimeType: 'text/markdown',
+      }, async () => ({
+        contents: [{ uri, mimeType: 'text/markdown', text: readFileSync(path, 'utf8') }],
+      }));
+    });
   }
 
   server.registerResource('frontend_reference_ui_index', 'frontend-reference://ui/index', {

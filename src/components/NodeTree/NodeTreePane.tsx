@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { DotTunnelBackground } from '../shared/DotTunnelBackground';
 import { WorkflowPresetPicker } from './WorkflowPresetPicker';
+import { NodeRuntimeInspector } from './NodeRuntimeInspector';
 import { AppSiteThemePicker } from '../Launcher/AppSiteThemePicker';
 import { ModelDiscoveryLoading } from '../models/ModelDiscoveryLoading';
 import { AgentActionBadge } from '../models/AgentActionBadge';
@@ -95,9 +96,10 @@ const AGENT_NODE_ESTIMATED_HEIGHT = 330;
 const CANVAS_CULL_PADDING = 900;
 const ALIGN_SNAP_THRESHOLD = 12;
 const ALIGN_GUIDE_MARGIN = 32;
-const SUPPORTED_WORKFLOW_CLIS = new Set(['claude', 'gemini', 'opencode', 'codex', 'custom', 'ollama', 'lmstudio']);
 const SELECTABLE_WORKFLOW_CLIS: WorkflowAgentCli[] = ['claude', 'codex', 'gemini', 'opencode', 'custom', 'ollama', 'lmstudio'];
+const SELECTABLE_WORKFLOW_CLI_SET = new Set<WorkflowAgentCli>(SELECTABLE_WORKFLOW_CLIS);
 const SELECTABLE_EXECUTION_MODES: WorkflowExecutionMode[] = ['api', 'streaming_headless', 'headless', 'interactive_pty', 'manual'];
+const SELECTABLE_EXECUTION_MODE_SET = new Set<WorkflowExecutionMode>(SELECTABLE_EXECUTION_MODES);
 const UI_FRONTEND_WORKFLOW_MODES: Array<{ value: Exclude<FrontendWorkflowMode, 'off'>; label: string; icon: typeof Workflow }> = [
   { value: 'fast', label: 'UI Fast', icon: Zap },
   { value: 'aligned', label: 'UI Aligned', icon: AlignJustify },
@@ -405,6 +407,22 @@ function fileLabel(value: string | null | undefined): string {
   if (!trimmed) return 'Untitled';
   const normalized = trimmed.replace(/[\\/]+$/, '');
   return normalized.split(/[\\/]/).filter(Boolean).pop() || normalized;
+}
+
+function parseWorkflowAgentCli(value: unknown): WorkflowAgentCli | null {
+  return typeof value === 'string' && SELECTABLE_WORKFLOW_CLI_SET.has(value as WorkflowAgentCli)
+    ? value as WorkflowAgentCli
+    : null;
+}
+
+function asWorkflowAgentCli(value: unknown, fallback: WorkflowAgentCli = 'claude'): WorkflowAgentCli {
+  return parseWorkflowAgentCli(value) ?? fallback;
+}
+
+function asWorkflowExecutionMode(value: unknown, fallback: WorkflowExecutionMode = 'streaming_headless'): WorkflowExecutionMode {
+  return typeof value === 'string' && SELECTABLE_EXECUTION_MODE_SET.has(value as WorkflowExecutionMode)
+    ? value as WorkflowExecutionMode
+    : fallback;
 }
 
 function attachmentKindForName(name: string, mime?: string): TaskAttachmentKind {
@@ -767,8 +785,8 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
             let dirty = false;
             const patched = { ...newTree.nodes[nodeId], properties: { ...newTree.nodes[nodeId].properties } };
             for (const key of runtimeKeys) {
-              if ((oldNode.properties as any)[key] && !(patched.properties as any)[key]) {
-                (patched.properties as any)[key] = (oldNode.properties as any)[key];
+              if (oldNode.properties[key] && !patched.properties[key]) {
+                patched.properties[key] = oldNode.properties[key];
                 dirty = true;
               }
             }
@@ -1061,6 +1079,61 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
     }
     return [...merged.values()].sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt));
   }, [missionAgents, missionSnapshot?.artifacts]);
+  const runtimeViewByNodeId = useMemo(() => {
+    const viewByNode = new Map<string, {
+      status: string;
+      reason: string;
+      terminalId: string;
+      attemptCount: number;
+      cli: WorkflowAgentCli;
+      sessionId: string;
+      artifactHints: string[];
+      latestEvent: ReturnType<typeof latestEventByNodeId.get>;
+      isActiveAgent: boolean;
+    }>();
+
+    for (const materializedNode of materializedNodes) {
+      const nodeId = materializedNode.node.id;
+      const runtimeAgent = missionAgentByNodeId.get(nodeId);
+      const runtimeBinding = nodeRuntimeBindings[nodeId];
+      const snapshotNode = snapshotNodeById.get(nodeId);
+      const status = String(
+        snapshotNode?.status ??
+        runtimeAgent?.status ??
+        runtimeBinding?.adapterStatus ??
+        materializedNode.node.properties.status ??
+        'idle'
+      );
+      const terminalId = String(
+        snapshotNode?.terminalId ??
+        runtimeAgent?.terminalId ??
+        materializedNode.node.properties.terminalId ??
+        runtimeBinding?.terminalId ??
+        ''
+      ).trim();
+      const terminal = terminalById.get(terminalId);
+      const cli = asWorkflowAgentCli(
+        materializedNode.node.properties.cli ??
+        terminal?.cli ??
+        runtimeAgent?.runtimeCli ??
+        materializedNode.node.properties.runtimeCli
+      );
+
+      viewByNode.set(nodeId, {
+        status,
+        reason: String(runtimeAgent?.lastError ?? materializedNode.node.properties.runtimeReason ?? '').trim(),
+        terminalId,
+        attemptCount: snapshotNode?.attempt ?? Number(materializedNode.node.properties.attempt ?? 0),
+        cli,
+        sessionId: String(runtimeAgent?.runtimeSessionId ?? runtimeBinding?.runtimeSessionId ?? '').trim(),
+        artifactHints: artifactHintsByNodeId.get(nodeId) ?? [],
+        latestEvent: latestEventByNodeId.get(nodeId),
+        isActiveAgent: materializedNode.node.type === 'workflow.agent' && isWorkflowStatusActive(status),
+      });
+    }
+
+    return viewByNode;
+  }, [artifactHintsByNodeId, latestEventByNodeId, materializedNodes, missionAgentByNodeId, nodeRuntimeBindings, snapshotNodeById, terminalById]);
   const setRuntimeNodeState = useCallback(
     (nodeId: string, status: string, reason?: string | null) => {
       setState(previous => {
@@ -1317,14 +1390,10 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
     async (nodeId: string): Promise<{ id: string; paneId: string; title: string; cli: WorkflowAgentCli } | null> => {
       const node = activeTree.nodes[nodeId];
       const role = String(node?.properties.roleId ?? 'agent');
-      const cli = SELECTABLE_WORKFLOW_CLIS.includes(node?.properties.cli as WorkflowAgentCli)
-        ? (node?.properties.cli as WorkflowAgentCli)
-        : 'claude';
-      let executionMode = SELECTABLE_EXECUTION_MODES.includes(node?.properties.executionMode as WorkflowExecutionMode)
-        ? (node?.properties.executionMode as WorkflowExecutionMode)
-        : 'streaming_headless';
+      const cli = asWorkflowAgentCli(node?.properties.cli);
+      let executionMode = asWorkflowExecutionMode(node?.properties.executionMode);
 
-      if (executionMode !== 'interactive_pty' && !supportsHeadless(cli as any)) {
+      if (executionMode !== 'interactive_pty' && !supportsHeadless(cli)) {
         executionMode = 'interactive_pty';
       }
 
@@ -1470,9 +1539,7 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
     if (!inspectorNodeId) return;
     const node = activeTree.nodes[inspectorNodeId];
     const terminalId = String(node?.properties.terminalId ?? '');
-    const executionMode = SELECTABLE_EXECUTION_MODES.includes(node?.properties.executionMode as WorkflowExecutionMode)
-      ? node?.properties.executionMode as WorkflowExecutionMode
-      : 'streaming_headless';
+    const executionMode = asWorkflowExecutionMode(node?.properties.executionMode);
     const command = inspectorCommand.trim();
     if (!terminalId || !command) return;
     if (executionMode !== 'interactive_pty') {
@@ -1577,9 +1644,7 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
     if (!inspectorNodeId) return;
     const node = activeTree.nodes[inspectorNodeId];
     if (!node || node.type !== 'workflow.agent') return;
-    const executionMode = SELECTABLE_EXECUTION_MODES.includes(node.properties.executionMode as WorkflowExecutionMode)
-      ? node.properties.executionMode as WorkflowExecutionMode
-      : 'streaming_headless';
+    const executionMode = asWorkflowExecutionMode(node.properties.executionMode);
     if (executionMode !== 'interactive_pty') return;
     const terminalId = String(node.properties.terminalId ?? '').trim();
     if (!terminalId) return;
@@ -1658,9 +1723,7 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
           if (!selectedNodeIds.has(String(node.id))) continue;
         const nodeId = String(node.id);
         const data = node.data as Record<string, unknown>;
-        const selectedCli: WorkflowAgentCli = SELECTABLE_WORKFLOW_CLIS.includes(data.cli as WorkflowAgentCli)
-          ? (data.cli as WorkflowAgentCli)
-          : 'claude';
+        const selectedCli = asWorkflowAgentCli(data.cli);
         const role = String(data.roleId ?? 'agent');
 
         // Force interactive PTY so each agent node owns a real terminal.
@@ -1764,8 +1827,8 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
 
       const terminalClis = Object.fromEntries(
         openTerminals
-          .filter(terminal => terminal.cli && SUPPORTED_WORKFLOW_CLIS.has(terminal.cli))
-          .map(terminal => [terminal.id, terminal.cli as WorkflowAgentCli])
+          .map(terminal => [terminal.id, parseWorkflowAgentCli(terminal.cli)] as const)
+          .filter((entry): entry is readonly [string, WorkflowAgentCli] => entry[1] !== null)
       );
       // Freshly staged bindings must win over any stale openTerminals snapshot.
       for (const [, binding] of freshBindings) {
@@ -1853,7 +1916,7 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
           }
           if (terminal.cli !== null) {
             const cli = String(terminal.cli ?? '').trim().toLowerCase();
-            if (!SUPPORTED_WORKFLOW_CLIS.has(cli)) {
+            if (!parseWorkflowAgentCli(cli)) {
               throw new Error(`CLI not detected or unsupported for ${startNode.terminal.terminalTitle} (${startNode.id}).`);
             }
           }
@@ -1939,14 +2002,17 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
 
   const importPresetGraph = useCallback((presets: PresetDefinition[], options: { finalReadmeEnabled: boolean }) => {
     if (presets.length === 0) return;
-    const bindingsByRole: Record<string, { terminalId: string; terminalTitle: string; paneId?: string }> = {};
+    const bindingsByRole: Record<string, Array<{ terminalId: string; terminalTitle: string; paneId?: string }>> = {};
     for (const terminal of openTerminals) {
       const role = detectRoleForPane({ title: terminal.title, data: {} });
-      if (role && !bindingsByRole[role]) {
-        bindingsByRole[role] = {
-          terminalId: terminal.id,
-          terminalTitle: terminal.title,
-        };
+      if (role) {
+        bindingsByRole[role] = [
+          ...(bindingsByRole[role] ?? []),
+          {
+            terminalId: terminal.id,
+            terminalTitle: terminal.title,
+          },
+        ];
       }
     }
 
@@ -2611,17 +2677,13 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
   const inspectedSnapshotNode = inspectorNodeId ? missionSnapshot?.nodes.find(n => n.nodeId === inspectorNodeId) : undefined;
   const inspectedTerminalId = String(inspectedSnapshotNode?.terminalId ?? inspectedNode?.properties.terminalId ?? inspectedRuntimeAgent?.terminalId ?? '').trim();
   const inspectedTerminal = openTerminals.find(terminal => terminal.id === inspectedTerminalId);
-  const inspectedExecutionMode = SELECTABLE_EXECUTION_MODES.includes(inspectedNode?.properties.executionMode as WorkflowExecutionMode)
-    ? inspectedNode?.properties.executionMode as WorkflowExecutionMode
-    : 'streaming_headless';
+  const inspectedExecutionMode = asWorkflowExecutionMode(inspectedNode?.properties.executionMode);
   const inspectedUsesPty = inspectedExecutionMode === 'interactive_pty';
   const inspectorOutput = inspectorNodeId
     ? (inspectedUsesPty ? (runtimeOutputByTerminalId[inspectedTerminalId] ?? '') : (runtimeOutputByNodeId[inspectorNodeId] ?? ''))
     : '';
 
-  const inspectedCli = (SELECTABLE_WORKFLOW_CLIS.includes(String(inspectedNode?.properties.cli ?? '') as WorkflowAgentCli)
-    ? String(inspectedNode?.properties.cli ?? 'claude')
-    : 'claude') as WorkflowAgentCli;
+  const inspectedCli = asWorkflowAgentCli(inspectedNode?.properties.cli);
 
   const globalAgentCliNodes = useMemo(() => {
     return Object.values(activeTree.nodes)
@@ -2631,11 +2693,7 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
 
   const agentCliValues = useMemo(() => {
     return globalAgentCliNodes
-      .map(node => (
-        SELECTABLE_WORKFLOW_CLIS.includes(String(node.properties.cli ?? '') as WorkflowAgentCli)
-          ? String(node.properties.cli)
-          : 'claude'
-      ) as WorkflowAgentCli);
+      .map(node => asWorkflowAgentCli(node.properties.cli));
   }, [globalAgentCliNodes]);
 
   const globalAgentCli = useMemo(() => {
@@ -2800,8 +2858,8 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
           <select
             value={globalAgentCli}
             onChange={event => {
-              const value = event.target.value as WorkflowAgentCli;
-              if (SELECTABLE_WORKFLOW_CLIS.includes(value)) applyGlobalAgentCli(value);
+              const value = parseWorkflowAgentCli(event.target.value);
+              if (value) applyGlobalAgentCli(value);
             }}
             disabled={agentCliValues.length === 0}
             className="background-bg-surface border border-border-panel rounded px-2 py-1 text-[11px] text-text-secondary disabled:opacity-40"
@@ -3110,45 +3168,16 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
             const rect = worldRect(materializedNode);
             const isSelected = selectedNodeIds.has(materializedNode.node.id);
             const isFrame = materializedNode.node.type === 'workflow.frame';
-            const runtimeAgent = missionAgentByNodeId.get(materializedNode.node.id);
-            const runtimeBinding = nodeRuntimeBindings[materializedNode.node.id];
-            
-            const snapshotNode = snapshotNodeById.get(materializedNode.node.id);
-            
-            const runtimeStatus = String(
-              snapshotNode?.status ??
-              runtimeAgent?.status ??
-              runtimeBinding?.adapterStatus ??
-              materializedNode.node.properties.status ??
-              'idle'
-            );
-            const runtimeReason = String(
-              runtimeAgent?.lastError ??
-              materializedNode.node.properties.runtimeReason ??
-              ''
-            ).trim();
-            const terminalId = String(
-              snapshotNode?.terminalId ??
-              runtimeAgent?.terminalId ??
-              materializedNode.node.properties.terminalId ??
-              runtimeBinding?.terminalId ??
-              ''
-            ).trim();
-            
-            const attemptCount = snapshotNode?.attempt ?? Number(materializedNode.node.properties.attempt ?? 0);
-            
-            const terminal = terminalById.get(terminalId);
-            const runtimeCli = String(
-              materializedNode.node.properties.cli ??
-              terminal?.cli ??
-              runtimeAgent?.runtimeCli ??
-              materializedNode.node.properties.runtimeCli ??
-              'claude'
-            ).trim();
-            const runtimeSessionId = String(runtimeAgent?.runtimeSessionId ?? runtimeBinding?.runtimeSessionId ?? '').trim();
-            const artifactHints = artifactHintsByNodeId.get(materializedNode.node.id) ?? [];
-            const latestNodeEvent = latestEventByNodeId.get(materializedNode.node.id);
-            const isActiveAgent = materializedNode.node.type === 'workflow.agent' && isWorkflowStatusActive(runtimeStatus);
+            const runtimeView = runtimeViewByNodeId.get(materializedNode.node.id);
+            const runtimeStatus = runtimeView?.status ?? 'idle';
+            const runtimeReason = runtimeView?.reason ?? '';
+            const terminalId = runtimeView?.terminalId ?? '';
+            const attemptCount = runtimeView?.attemptCount ?? 0;
+            const runtimeCli = runtimeView?.cli ?? asWorkflowAgentCli(materializedNode.node.properties.cli);
+            const runtimeSessionId = runtimeView?.sessionId ?? '';
+            const artifactHints = runtimeView?.artifactHints ?? [];
+            const latestNodeEvent = runtimeView?.latestEvent;
+            const isActiveAgent = runtimeView?.isActiveAgent ?? false;
 
             return (
               <div
@@ -3439,9 +3468,7 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
                           ))}
                         </select>
                         <select
-                          value={SELECTABLE_WORKFLOW_CLIS.includes(String(materializedNode.node.properties.cli ?? runtimeCli) as WorkflowAgentCli)
-                            ? String(materializedNode.node.properties.cli ?? runtimeCli)
-                            : 'claude'}
+                          value={asWorkflowAgentCli(materializedNode.node.properties.cli, runtimeCli)}
                           onChange={event => handleCliChange(materializedNode.node.id, event.target.value as WorkflowAgentCli)}
                           className="flex-1 background-bg-surface border border-border-panel rounded-lg px-2 py-1.5 text-[11px]"
                           title="Runtime CLI"
@@ -3452,9 +3479,7 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
                         </select>
                       </div>
                       {(() => {
-                        const activeCli = (SELECTABLE_WORKFLOW_CLIS.includes(String(materializedNode.node.properties.cli ?? runtimeCli) as WorkflowAgentCli)
-                          ? String(materializedNode.node.properties.cli ?? runtimeCli)
-                          : 'claude') as WorkflowAgentCli;
+                        const activeCli = asWorkflowAgentCli(materializedNode.node.properties.cli, runtimeCli);
                         const isSupported = supportsModelDiscovery(activeCli);
                         const modelResult = isSupported ? detectedModels.get(activeCli) : undefined;
                         const discoveredModels = modelResult?.models ?? [];
@@ -3649,9 +3674,7 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
                       )}
                       <div className="grid grid-cols-2 gap-2">
                         <select
-                          value={SELECTABLE_EXECUTION_MODES.includes(materializedNode.node.properties.executionMode as WorkflowExecutionMode)
-                            ? String(materializedNode.node.properties.executionMode)
-                            : 'streaming_headless'}
+                          value={asWorkflowExecutionMode(materializedNode.node.properties.executionMode)}
                           onChange={event => applyOperator({
                             type: 'set_node_property',
                             nodeId: materializedNode.node.id,
@@ -3661,7 +3684,7 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
                           className="background-bg-surface border border-border-panel rounded px-2 py-1.5 text-[10px] text-text-secondary"
                           title="Runtime execution mode"
                         >
-                          {supportsHeadless(runtimeCli as any) && (
+                          {supportsHeadless(runtimeCli) && (
                             <>
                               <option value="api">API</option>
                               <option value="streaming_headless">Stream</option>
@@ -3882,115 +3905,23 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
         )}
 
         {inspectorNodeId && (
-          <div
-            className="absolute z-40 right-3 top-3 bottom-3 w-[420px] rounded-xl border border-border-panel background-bg-panel shadow-2xl flex flex-col"
-            onMouseDown={event => event.stopPropagation()}
-          >
-            <div className="px-3 py-2 border-b border-border-panel background-bg-titlebar flex items-center justify-between">
-              <div className="min-w-0">
-                <div className="text-[10px] uppercase tracking-[0.2em] text-accent-primary">Node Runtime Inspector</div>
-                <div className="text-[12px] text-text-primary truncate">
-                  {inspectedNode?.type === 'workflow.agent' ? 'Agent' :
-                   inspectedNode?.type === 'workflow.task' ? 'Task' :
-                   (inspectedNode?.label ?? inspectedNode?.id ?? inspectorNodeId)}
-                </div>
-              </div>
-              <div className="flex items-center gap-1">
-                {inspectedTerminalId && inspectedUsesPty && (
-                  <button
-                    type="button"
-                    onClick={() => openTerminalById(inspectedTerminalId)}
-                    className="p-1.5 rounded border border-border-panel text-text-muted hover:text-text-primary hover:background-bg-surface"
-                    title="Open full terminal pane"
-                  >
-                    <ArrowUpRight size={12} />
-                  </button>
-                )}
-                <button
-                  type="button"
-                  onClick={() => setInspectorNodeId(null)}
-                  className="p-1.5 rounded border border-border-panel text-text-muted hover:text-text-primary hover:background-bg-surface"
-                  title="Close inspector"
-                >
-                  <X size={12} />
-                </button>
-              </div>
-            </div>
-
-            {!inspectedNode ? (
-              <div className="flex-1 flex items-center justify-center text-[12px] text-text-muted px-4 text-center">
-                Selected node is no longer available.
-              </div>
-            ) : !inspectedTerminalId ? (
-              <div className="flex-1 flex flex-col items-center justify-center text-[12px] text-text-muted px-4 text-center gap-3">
-                <p>This node has no terminal runtime binding.</p>
-                <button
-                  type="button"
-                  onClick={() => {
-                    if (inspectorNodeId) createAndBindRuntime(inspectorNodeId);
-                  }}
-                  className="px-2.5 py-1.5 rounded border border-border-panel text-text-muted hover:text-text-primary hover:background-bg-surface text-[11px] inline-flex items-center gap-1"
-                >
-                  <Plus size={11} />
-                  Create Runtime Binding
-                </button>
-              </div>
-            ) : (
-              <>
-                <div className="px-3 py-2 border-b border-border-panel text-[10px] text-text-muted flex items-center justify-between gap-2">
-                  <span className="truncate">
-                    {inspectedTerminal?.title ?? inspectedTerminalId}
-                    {inspectedRuntimeAgent?.runtimeSessionId ? ` · ${shortId(inspectedRuntimeAgent.runtimeSessionId)}` : ''}
-                  </span>
-                  {inspectedUsesPty && (
-                    <button
-                      type="button"
-                      onClick={() => void refreshTerminalOutput(inspectedTerminalId)}
-                      className="inline-flex items-center gap-1 px-2 py-1 rounded border border-border-panel hover:background-bg-surface text-text-muted hover:text-text-primary"
-                      title="Refresh runtime output"
-                    >
-                      <RefreshCw size={11} />
-                      Refresh
-                    </button>
-                  )}
-                </div>
-
-                <pre className="flex-1 overflow-auto px-3 py-3 text-[11px] leading-relaxed text-text-secondary whitespace-pre-wrap background-bg-app">
-                  {inspectorOutput || 'Waiting for runtime output...'}
-                </pre>
-
-                {inspectorError && (
-                  <div className="px-3 py-1.5 text-[10px] text-red-200 bg-red-500/10 border-t border-red-400/20">
-                    {inspectorError}
-                  </div>
-                )}
-
-                {inspectedUsesPty && (
-                  <form
-                    className="px-3 py-2 border-t border-border-panel background-bg-titlebar flex gap-2"
-                    onSubmit={event => {
-                      event.preventDefault();
-                      void sendInspectorCommand();
-                    }}
-                  >
-                    <input
-                      value={inspectorCommand}
-                      onChange={event => setInspectorCommand(event.target.value)}
-                      placeholder="Send command to runtime"
-                      className="flex-1 background-bg-surface border border-border-panel rounded px-2 py-1.5 text-[11px] text-text-primary"
-                    />
-                    <button
-                      type="submit"
-                      disabled={!inspectorCommand.trim()}
-                      className="px-2.5 py-1.5 rounded border border-accent-primary text-accent-primary hover:bg-accent-primary/10 disabled:opacity-40 disabled:cursor-not-allowed text-[11px]"
-                    >
-                      Send
-                    </button>
-                  </form>
-                )}
-              </>
-            )}
-          </div>
+          <NodeRuntimeInspector
+            nodeId={inspectorNodeId}
+            node={inspectedNode}
+            terminalId={inspectedTerminalId}
+            terminalTitle={inspectedTerminal?.title}
+            usesPty={inspectedUsesPty}
+            runtimeSessionLabel={inspectedRuntimeAgent?.runtimeSessionId ? shortId(inspectedRuntimeAgent.runtimeSessionId) : undefined}
+            output={inspectorOutput}
+            error={inspectorError}
+            command={inspectorCommand}
+            onCommandChange={setInspectorCommand}
+            onClose={() => setInspectorNodeId(null)}
+            onOpenTerminal={() => openTerminalById(inspectedTerminalId)}
+            onCreateRuntime={() => createAndBindRuntime(inspectorNodeId)}
+            onRefreshOutput={() => void refreshTerminalOutput(inspectedTerminalId)}
+            onSubmitCommand={() => void sendInspectorCommand()}
+          />
         )}
       </div>
 

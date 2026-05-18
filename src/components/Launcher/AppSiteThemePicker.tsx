@@ -1,5 +1,6 @@
-import { useMemo, useState } from 'react';
-import { Bot, Check, ChevronLeft, ChevronRight, Image as ImageIcon, Layers, Sparkles, X } from 'lucide-react';
+import { useEffect, useMemo, useState } from 'react';
+import { Bot, Check, ChevronLeft, ChevronRight, Eye, Image as ImageIcon, Layers, Sparkles, X } from 'lucide-react';
+import { useWorkspaceStore, type ThemeType } from '../../store/workspace';
 import {
   frontendDirectionLabel,
   normalizeFrontendDirectionSpec,
@@ -14,6 +15,16 @@ import {
   type FrontendDirectionSpec,
   type FrontendDirectionTone,
 } from '../../lib/frontendDirection';
+import { resolveFrontendPaletteColors } from '../../lib/frontendPaletteColors';
+import { EffectPreviewStage } from './effectPreviews/EffectPreviewStage';
+import { effectPreviewConflictReason, resolveEffectPreview } from './effectPreviews/registry';
+import neuformIndex from '../../../mcp-server/src/resources/frontend-patterns/neuform/index.json';
+
+const NEUFORM_EFFECT_DOCS = import.meta.glob('../../../mcp-server/src/resources/frontend-patterns/neuform/effects/*.md', {
+  eager: true,
+  import: 'default',
+  query: '?raw',
+}) as Record<string, string>;
 
 type StepId = 'layout' | 'density' | 'palette' | 'shape' | 'effects' | 'assets' | 'interaction' | 'tone' | 'review';
 type ChoiceValue =
@@ -30,6 +41,22 @@ interface Choice {
   value: ChoiceValue;
   label: string;
   description: string;
+}
+
+interface NeuformIndexEntry {
+  id?: string;
+  title?: string;
+  path?: string;
+  source?: {
+    originId?: string;
+    url?: string;
+  };
+}
+
+interface PaletteChoiceGroup {
+  id: 'light' | 'dark';
+  label: string;
+  choices: Choice[];
 }
 
 interface PickerState {
@@ -68,42 +95,53 @@ const paletteChoice = (id: string, label: string, colors: string[]): FrontendDir
   colors,
 });
 
-const PALETTE_CHOICES: Choice[] = [
-  { value: { kind: 'agent_decides', id: 'agent_decides', label: 'Let agents decide', colors: [] }, label: 'Let agents decide', description: 'Agents choose tokens that fit the build type.' },
-  { value: paletteChoice('slate_cyan', 'Slate / Cyan', ['#0F172A', '#22D3EE']), label: 'Slate / Cyan', description: 'Technical, focused, cool accent.' },
-  { value: paletteChoice('ink_lime', 'Ink / Lime', ['#111827', '#A3E635']), label: 'Ink / Lime', description: 'Sharp product UI contrast.' },
-  { value: paletteChoice('navy_coral', 'Navy / Coral', ['#1E3A8A', '#FB7185']), label: 'Navy / Coral', description: 'Confident SaaS with warm action.' },
-  { value: paletteChoice('charcoal_gold', 'Charcoal / Gold', ['#18181B', '#FBBF24']), label: 'Charcoal / Gold', description: 'Premium contrast without beige drift.' },
-  { value: paletteChoice('forest_mint', 'Forest / Mint', ['#14532D', '#6EE7B7']), label: 'Forest / Mint', description: 'Calm, natural, modern.' },
-  { value: paletteChoice('plum_sky', 'Plum / Sky', ['#581C87', '#38BDF8']), label: 'Plum / Sky', description: 'Expressive but still crisp.' },
-  { value: paletteChoice('graphite_blue', 'Graphite / Blue', ['#27272A', '#3B82F6']), label: 'Graphite / Blue', description: 'Utility app default.' },
-  { value: paletteChoice('white_emerald', 'White / Emerald', ['#F8FAFC', '#10B981']), label: 'White / Emerald', description: 'Clean light interface.' },
-  { value: paletteChoice('black_rose', 'Black / Rose', ['#020617', '#F43F5E']), label: 'Black / Rose', description: 'High contrast and direct.' },
-  { value: paletteChoice('indigo_amber', 'Indigo / Amber', ['#312E81', '#F59E0B']), label: 'Indigo / Amber', description: 'Decision-heavy dashboard feel.' },
-  { value: paletteChoice('teal_orange', 'Teal / Orange', ['#0F766E', '#F97316']), label: 'Teal / Orange', description: 'Balanced analytical warmth.' },
-  { value: paletteChoice('zinc_violet', 'Zinc / Violet', ['#3F3F46', '#8B5CF6']), label: 'Zinc / Violet', description: 'Modern creative tooling.' },
-  { value: paletteChoice('blue_red', 'Blue / Red', ['#2563EB', '#EF4444']), label: 'Blue / Red', description: 'Clear primary and alert contrast.' },
-  { value: paletteChoice('stone_green', 'Stone / Green', ['#44403C', '#22C55E']), label: 'Stone / Green', description: 'Grounded operations palette.' },
-  { value: paletteChoice('black_white', 'Black / White', ['#020617', '#F8FAFC']), label: 'Black / White', description: 'Monochrome with strict contrast.' },
-  { value: paletteChoice('slate_cyan_orange', 'Slate / Cyan / Orange', ['#0F172A', '#06B6D4', '#F97316']), label: 'Slate / Cyan / Orange', description: 'App shell plus warm action color.' },
-  { value: paletteChoice('navy_sky_lime', 'Navy / Sky / Lime', ['#172554', '#38BDF8', '#A3E635']), label: 'Navy / Sky / Lime', description: 'Technical and active.' },
-  { value: paletteChoice('ink_violet_pink', 'Ink / Violet / Pink', ['#111827', '#8B5CF6', '#EC4899']), label: 'Ink / Violet / Pink', description: 'Creative product energy.' },
-  { value: paletteChoice('white_blue_emerald', 'White / Blue / Emerald', ['#F8FAFC', '#2563EB', '#10B981']), label: 'White / Blue / Emerald', description: 'Readable light SaaS.' },
-  { value: paletteChoice('charcoal_amber_red', 'Charcoal / Amber / Red', ['#18181B', '#F59E0B', '#EF4444']), label: 'Charcoal / Amber / Red', description: 'Monitoring and urgency.' },
-  { value: paletteChoice('forest_mint_sky', 'Forest / Mint / Sky', ['#14532D', '#6EE7B7', '#38BDF8']), label: 'Forest / Mint / Sky', description: 'Fresh environmental/product tone.' },
-  { value: paletteChoice('plum_lilac_gold', 'Plum / Lilac / Gold', ['#581C87', '#C084FC', '#FBBF24']), label: 'Plum / Lilac / Gold', description: 'Premium expressive palette.' },
-  { value: paletteChoice('graphite_blue_cyan', 'Graphite / Blue / Cyan', ['#27272A', '#3B82F6', '#22D3EE']), label: 'Graphite / Blue / Cyan', description: 'Builder/editor friendly.' },
-  { value: paletteChoice('black_green_cyan', 'Black / Green / Cyan', ['#020617', '#22C55E', '#06B6D4']), label: 'Black / Green / Cyan', description: 'Terminal-like but polished.' },
-  { value: paletteChoice('aubergine_coral_mint', 'Aubergine / Coral / Mint', ['#3B0764', '#FB7185', '#6EE7B7']), label: 'Aubergine / Coral / Mint', description: 'Consumer-friendly contrast.' },
-  { value: paletteChoice('blue_amber_slate', 'Blue / Amber / Slate', ['#1D4ED8', '#F59E0B', '#475569']), label: 'Blue / Amber / Slate', description: 'Business dashboard balance.' },
-  { value: paletteChoice('red_cyan_zinc', 'Red / Cyan / Zinc', ['#DC2626', '#06B6D4', '#3F3F46']), label: 'Red / Cyan / Zinc', description: 'Sharp event/status UI.' },
-  { value: paletteChoice('emerald_indigo_rose', 'Emerald / Indigo / Rose', ['#059669', '#4F46E5', '#E11D48']), label: 'Emerald / Indigo / Rose', description: 'Distinct sections and actions.' },
-  { value: paletteChoice('orange_blue_lime', 'Orange / Blue / Lime', ['#EA580C', '#2563EB', '#84CC16']), label: 'Orange / Blue / Lime', description: 'Bright, functional energy.' },
-  { value: paletteChoice('white_black_cyan', 'White / Black / Cyan', ['#F8FAFC', '#020617', '#0891B2']), label: 'White / Black / Cyan', description: 'Editorial clarity with accent.' },
+const AGENT_PALETTE_CHOICE: Choice = {
+  value: { kind: 'agent_decides', id: 'agent_decides', label: 'Let agents decide', colors: [] },
+  label: 'Let agents decide',
+  description: 'Agents choose production-ready tokens that fit the build type.',
+};
+
+const PALETTE_GROUPS: PaletteChoiceGroup[] = [
+  {
+    id: 'light',
+    label: 'Light palettes',
+    choices: [
+      { value: paletteChoice('light_saas_blue', 'SaaS blue', ['#F8FAFC', '#2563EB', '#0F172A']), label: 'SaaS blue', description: 'Clean product default with readable navy text.' },
+      { value: paletteChoice('light_finance_emerald', 'Finance emerald', ['#F7FAF8', '#047857', '#111827']), label: 'Finance emerald', description: 'Trustworthy, data-friendly green with neutral surfaces.' },
+      { value: paletteChoice('light_health_teal', 'Health teal', ['#F6FEFC', '#0F766E', '#134E4A']), label: 'Health teal', description: 'Calm app and service palette with restrained contrast.' },
+      { value: paletteChoice('light_editorial_ink', 'Editorial ink', ['#FAFAF9', '#1F2937', '#B45309']), label: 'Editorial ink', description: 'Publication-like neutral base with a measured amber accent.' },
+      { value: paletteChoice('light_agency_indigo', 'Agency indigo', ['#F9FAFB', '#4F46E5', '#111827']), label: 'Agency indigo', description: 'Modern portfolio or services tone without purple overload.' },
+      { value: paletteChoice('light_commerce_rose', 'Commerce rose', ['#FFF7F9', '#E11D48', '#1F2937']), label: 'Commerce rose', description: 'Consumer-facing accent with practical dark text.' },
+      { value: paletteChoice('light_ops_slate_cyan', 'Ops slate/cyan', ['#F8FAFC', '#0891B2', '#334155']), label: 'Ops slate/cyan', description: 'Technical dashboards and admin surfaces.' },
+      { value: paletteChoice('light_warm_product', 'Warm product', ['#FFFBF5', '#EA580C', '#1E293B']), label: 'Warm product', description: 'Friendly product UI with restrained orange action color.' },
+      { value: paletteChoice('light_luxury_graphite', 'Luxury graphite', ['#F6F5F2', '#27272A', '#A16207']), label: 'Luxury graphite', description: 'Premium light surfaces with low-noise gold detail.' },
+      { value: paletteChoice('light_mono_blue', 'Mono blue', ['#FFFFFF', '#0F172A', '#2563EB']), label: 'Mono blue', description: 'Highly readable monochrome system with one proven accent.' },
+    ],
+  },
+  {
+    id: 'dark',
+    label: 'Dark palettes',
+    choices: [
+      { value: paletteChoice('dark_neutral_contrast', 'Neutral contrast', ['#050505', '#F4F4F5', '#71717A']), label: 'Neutral contrast', description: 'Default black, white, and zinc for serious dark UI.' },
+      { value: paletteChoice('dark_product_blue', 'Product blue', ['#0B1220', '#60A5FA', '#94A3B8']), label: 'Product blue', description: 'Dark SaaS with accessible blue accent.' },
+      { value: paletteChoice('dark_terminal_green', 'Terminal green', ['#050A07', '#34D399', '#9CA3AF']), label: 'Terminal green', description: 'Developer-tool dark mode without neon excess.' },
+      { value: paletteChoice('dark_graphite_violet', 'Graphite violet', ['#111113', '#8B5CF6', '#A1A1AA']), label: 'Graphite violet', description: 'Creative tooling with neutral graphite support.' },
+      { value: paletteChoice('dark_navy_cyan', 'Navy cyan', ['#08111F', '#22D3EE', '#CBD5E1']), label: 'Navy cyan', description: 'Technical, crisp, and familiar for dashboards.' },
+      { value: paletteChoice('dark_security_amber', 'Security amber', ['#0F0F0B', '#F59E0B', '#D4D4D8']), label: 'Security amber', description: 'Monitoring and alert systems with careful warmth.' },
+      { value: paletteChoice('dark_ink_rose', 'Ink rose', ['#09090B', '#FB7185', '#A1A1AA']), label: 'Ink rose', description: 'Sharp consumer or media accent on blackened ink.' },
+      { value: paletteChoice('dark_forest_mint', 'Forest mint', ['#07130D', '#6EE7B7', '#A7F3D0']), label: 'Forest mint', description: 'Calm sustainability, wellness, and data products.' },
+      { value: paletteChoice('dark_aubergine_sky', 'Aubergine sky', ['#16091F', '#38BDF8', '#C4B5FD']), label: 'Aubergine sky', description: 'Expressive dark brand palette that stays legible.' },
+      { value: paletteChoice('dark_contrast_white', 'Contrast white', ['#020617', '#F8FAFC', '#64748B']), label: 'Contrast white', description: 'Minimal high-contrast product or editorial UI.' },
+      { value: paletteChoice('dark_red_status', 'Red status', ['#0A0A0A', '#EF4444', '#CBD5E1']), label: 'Red status', description: 'Incident, security, and high-priority workflow accents.' },
+    ],
+  },
 ];
 
 const CUSTOM_PALETTE_ID = 'custom_palette';
 const DEFAULT_CUSTOM_COLORS = ['#2563EB', '#14B8A6', '#F97316'];
+const DEFAULT_LIGHT_PALETTE = PALETTE_GROUPS[0].choices[0].value as FrontendDirectionPaletteChoice;
+const DEFAULT_DARK_PALETTE = PALETTE_GROUPS[1].choices[0].value as FrontendDirectionPaletteChoice;
+const LIGHT_APP_THEMES = new Set<ThemeType>(['light', 'paper', 'starlink-light', 'solar', 'arctic', 'ivory']);
 
 const CHOICES: Record<Exclude<StepId, 'review' | 'palette' | 'effects'>, Choice[]> = {
   layout: [
@@ -165,6 +203,11 @@ const CHOICES: Record<Exclude<StepId, 'review' | 'palette' | 'effects'>, Choice[
     { value: 'educational', label: 'Educational', description: 'Explanatory but still concise.' },
   ],
 };
+
+const BASE_EFFECT_CHOICES: Choice[] = [
+  { value: 'agent_decides', label: 'Let agents decide', description: 'Agents select restrained effects that fit the workflow.' },
+  { value: 'none', label: 'No effects', description: 'Static, functional presentation only.' },
+];
 
 const EFFECT_CATEGORIES = [
   {
@@ -268,6 +311,11 @@ const EFFECT_CATEGORIES = [
   },
 ] satisfies Array<{ id: string; label: string; choices: Choice[] }>;
 
+const EFFECT_CHOICES_BY_ID = new Map(
+  [...BASE_EFFECT_CHOICES, ...EFFECT_CATEGORIES.flatMap(category => category.choices)]
+    .map(choice => [String(choice.value), choice]),
+);
+
 const MULTI_STEPS = new Set<StepId>(['effects', 'interaction']);
 
 function paletteKey(value: FrontendDirectionPalette): string {
@@ -279,8 +327,7 @@ function paletteLabel(value: FrontendDirectionPalette): string {
 }
 
 function paletteColors(value: FrontendDirectionPalette): string[] {
-  if (typeof value === 'object' && value.colors.length > 0) return value.colors;
-  return ['#0F172A', '#22D3EE', '#F97316'];
+  return resolveFrontendPaletteColors(value, ['#0F172A', '#22D3EE', '#F97316']);
 }
 
 function isPaletteDelegated(value?: FrontendDirectionPalette): boolean {
@@ -289,6 +336,19 @@ function isPaletteDelegated(value?: FrontendDirectionPalette): boolean {
 
 function customPalette(colors: string[]): FrontendDirectionPaletteChoice {
   return { kind: 'custom', id: CUSTOM_PALETTE_ID, label: 'Custom palette', colors };
+}
+
+function defaultPaletteForTheme(theme: ThemeType): FrontendDirectionPaletteChoice {
+  return LIGHT_APP_THEMES.has(theme) ? DEFAULT_LIGHT_PALETTE : DEFAULT_DARK_PALETTE;
+}
+
+function orderedPaletteGroups(theme: ThemeType): PaletteChoiceGroup[] {
+  const preferred = LIGHT_APP_THEMES.has(theme) ? 'light' : 'dark';
+  return [...PALETTE_GROUPS].sort((left, right) => {
+    if (left.id === preferred) return -1;
+    if (right.id === preferred) return 1;
+    return 0;
+  });
 }
 
 function stepHasSelection(state: PickerState, step: StepId): boolean {
@@ -304,18 +364,27 @@ function stepIsDelegated(state: PickerState, step: StepId): boolean {
   return Array.isArray(value) ? value.includes('agent_decides' as never) : value === 'agent_decides';
 }
 
-function previewState(state: PickerState, hover: { step: StepId; value: ChoiceValue } | null): Required<PickerState> {
+function previewableEffects(state: PickerState, hover: { step: StepId; value: ChoiceValue } | null): FrontendDirectionEffect[] {
+  if (hover?.step === 'effects' && resolveEffectPreview(String(hover.value))) {
+    return [hover.value as FrontendDirectionEffect];
+  }
+  return (state.effects ?? []).filter(effect => resolveEffectPreview(String(effect)));
+}
+
+function previewState(state: PickerState, hover: { step: StepId; value: ChoiceValue } | null, defaultPalette: FrontendDirectionPaletteChoice): Required<PickerState> {
   const next: PickerState = { ...state };
   if (hover && hover.step !== 'review') {
-    if (MULTI_STEPS.has(hover.step)) next[hover.step as 'effects' | 'interaction'] = [hover.value as never];
+    if (hover.step === 'effects') {
+      next.effects = previewableEffects(state, hover);
+    } else if (MULTI_STEPS.has(hover.step)) next[hover.step as 'effects' | 'interaction'] = [hover.value as never];
     else (next as Record<string, ChoiceValue>)[hover.step] = hover.value;
   }
   return {
     layout: next.layout ?? 'agent_decides',
     density: next.density ?? 'balanced',
-    palette: next.palette ?? paletteChoice('slate_cyan', 'Slate / Cyan', ['#0F172A', '#22D3EE']),
+    palette: next.palette ?? defaultPalette,
     shape: next.shape ?? 'slightly_rounded',
-    effects: next.effects?.length ? next.effects : ['subtle_hover_motion'],
+    effects: previewableEffects(next, hover),
     assets: next.assets ?? 'icons_only',
     interaction: next.interaction?.length ? next.interaction : ['basic_navigation'],
     tone: next.tone ?? 'technical',
@@ -325,9 +394,46 @@ function previewState(state: PickerState, hover: { step: StepId; value: ChoiceVa
 function PaletteCircle({ colors, className = 'h-10 w-10' }: { colors: string[]; className?: string }) {
   const safeColors = colors.length > 0 ? colors : ['#64748B', '#94A3B8'];
   const background = safeColors.length === 2
-    ? `linear-gradient(90deg, ${safeColors[0]} 0 50%, ${safeColors[1]} 50% 100%)`
-    : `conic-gradient(${safeColors[0]} 0 33%, ${safeColors[1] ?? safeColors[0]} 33% 66%, ${safeColors[2] ?? safeColors[1] ?? safeColors[0]} 66% 100%)`;
-  return <span className={`${className} shrink-0 rounded-full border border-white/20 shadow-inner`} style={{ background }} />;
+    ? `linear-gradient(90deg, ${safeColors[0]} 0% 50%, ${safeColors[1]} 50% 100%)`
+    : `conic-gradient(from -90deg, ${safeColors[0]} 0deg 120deg, ${safeColors[1] ?? safeColors[0]} 120deg 240deg, ${safeColors[2] ?? safeColors[1] ?? safeColors[0]} 240deg 360deg)`;
+  return <span className={`${className} shrink-0 rounded-full border border-border-panel`} style={{ background }} />;
+}
+
+function PaletteButton({
+  choice,
+  currentKey,
+  onHover,
+  onSelect,
+}: {
+  choice: Choice;
+  currentKey: string | null;
+  onHover: (hover: { step: StepId; value: ChoiceValue } | null) => void;
+  onSelect: (value: FrontendDirectionPalette) => void;
+}) {
+  const value = choice.value as FrontendDirectionPalette;
+  const selected = currentKey === paletteKey(value);
+  const delegated = isPaletteDelegated(value);
+  return (
+    <button
+      type="button"
+      onMouseEnter={() => onHover({ step: 'palette', value })}
+      onMouseLeave={() => onHover(null)}
+      onClick={() => onSelect(value)}
+      className={`flex items-center gap-3 rounded-lg border p-3 text-left transition-colors ${
+        selected
+          ? delegated
+            ? 'border-blue-400/70 bg-blue-500/10 text-blue-100'
+            : 'border-accent-primary bg-accent-primary/10 text-text-primary'
+          : 'border-border-panel bg-bg-panel text-text-secondary hover:border-accent-primary/50 hover:bg-bg-surface'
+      }`}
+    >
+      {delegated ? <span className="flex h-10 w-10 items-center justify-center rounded-full border border-blue-300/40 bg-blue-500/10"><Bot size={16} className="text-blue-300" /></span> : <PaletteCircle colors={paletteColors(value)} />}
+      <span className="min-w-0">
+        <span className="block truncate text-[12px] font-semibold">{choice.label}</span>
+        <span className="mt-1 block text-[10px] leading-relaxed text-text-muted">{choice.description}</span>
+      </span>
+    </button>
+  );
 }
 
 function ShapeBlock({ className = '', color = 'rgba(148,163,184,.45)' }: { className?: string; color?: string }) {
@@ -366,90 +472,179 @@ function AssetHints({ asset, radius, accent, muted }: { asset: FrontendDirection
   return null;
 }
 
-function WireframePreview({ state, emptyLayout, review }: { state: Required<PickerState>; emptyLayout: boolean; review: boolean }) {
+function effectPathSlug(path?: string): string {
+  return String(path ?? '').split('/').pop()?.replace(/\.md$/, '') ?? '';
+}
+
+function effectAlias(id?: string): string {
+  return String(id ?? '').replace(/^neuform[_-]/, '').replace(/_/g, '-').replace(/-[a-z0-9]{6}$/, '');
+}
+
+function firstParagraphAfterHeading(markdown: string, heading: string): string | null {
+  const lines = markdown.split(/\r?\n/);
+  const headingIndex = lines.findIndex(line => line.trim().toLowerCase() === heading.toLowerCase());
+  if (headingIndex < 0) return null;
+  const paragraph: string[] = [];
+  for (const line of lines.slice(headingIndex + 1)) {
+    const trimmed = line.trim();
+    if (trimmed.startsWith('## ')) break;
+    if (!trimmed && paragraph.length === 0) continue;
+    if (!trimmed) break;
+    paragraph.push(trimmed.replace(/^- /, ''));
+  }
+  return paragraph.length > 0 ? paragraph.join(' ') : null;
+}
+
+const NEUFORM_SKILL_DESCRIPTIONS = (() => {
+  const descriptions = new Map<string, string>();
+  const docsBySlug = new Map<string, string>();
+  for (const [path, content] of Object.entries(NEUFORM_EFFECT_DOCS)) {
+    docsBySlug.set(effectPathSlug(path.replace(/\\/g, '/')), content);
+  }
+  const entries = (neuformIndex.entries ?? []) as NeuformIndexEntry[];
+  for (const entry of entries) {
+    const slug = effectPathSlug(entry.path);
+    const intent = firstParagraphAfterHeading(docsBySlug.get(slug) ?? '', '## Intent');
+    if (!intent) continue;
+    const aliases = [
+      entry.id,
+      entry.id?.replace(/^neuform_/, ''),
+      entry.source?.originId,
+      slug,
+      effectAlias(entry.id),
+      effectAlias(entry.source?.originId),
+      effectAlias(slug),
+    ];
+    for (const alias of aliases) {
+      if (!alias) continue;
+      descriptions.set(String(alias), intent);
+      descriptions.set(String(alias).replace(/_/g, '-'), intent);
+    }
+  }
+  return descriptions;
+})();
+
+function neuformEffectDescription(effectId: ChoiceValue): string | null {
+  const id = String(effectId);
+  return NEUFORM_SKILL_DESCRIPTIONS.get(id) ?? NEUFORM_SKILL_DESCRIPTIONS.get(id.replace(/_/g, '-')) ?? null;
+}
+
+function effectChoiceDescription(effectId: ChoiceValue): string | null {
+  const id = String(effectId);
+  const choice = EFFECT_CHOICES_BY_ID.get(id);
+  return neuformEffectDescription(effectId) ?? choice?.description ?? null;
+}
+
+function WireframePreview({
+  state,
+  emptyLayout,
+  review,
+  isolatedEffect,
+}: {
+  state: Required<PickerState>;
+  emptyLayout: boolean;
+  review: boolean;
+  isolatedEffect?: FrontendDirectionEffect | null;
+}) {
   const compact = state.density === 'compact';
   const spacious = state.density === 'spacious';
-  const radius = state.shape === 'boxy' || state.shape === 'sharp_editorial' ? 'rounded-[2px]' : state.shape === 'soft' || state.shape === 'pill_heavy' ? 'rounded-xl' : 'rounded-md';
+  const panelRadius = state.shape === 'sharp_editorial'
+    ? 'rounded-none'
+    : state.shape === 'boxy'
+      ? 'rounded-[2px]'
+      : state.shape === 'soft'
+        ? 'rounded-2xl'
+        : state.shape === 'pill_heavy'
+          ? 'rounded-lg'
+          : 'rounded-md';
+  const controlRadius = state.shape === 'pill_heavy'
+    ? 'rounded-full'
+    : state.shape === 'soft'
+      ? 'rounded-xl'
+      : panelRadius;
   const gap = compact ? 'gap-1.5' : spacious ? 'gap-4' : 'gap-2.5';
   const padding = compact ? 'p-3' : spacious ? 'p-6' : 'p-4';
   const colors = paletteColors(state.palette);
   const base = colors[0] ?? '#0F172A';
   const accent = colors[1] ?? '#22D3EE';
   const secondary = colors[2] ?? accent;
-  const light = base.toLowerCase() === '#f8fafc' || base.toLowerCase() === '#ffffff';
+  const light = ['#f8fafc', '#ffffff', '#f9fafb', '#fafaf9', '#f7faf8', '#f6fefc', '#fff7f9', '#fffbf5', '#f6f5f2'].includes(base.toLowerCase());
   const muted = light ? 'rgba(71,85,105,.22)' : 'rgba(148,163,184,.24)';
   const block = light ? 'rgba(71,85,105,.35)' : 'rgba(148,163,184,.45)';
-  const effectIds = state.effects.map(effect => String(effect).replace(/_/g, '-'));
-  const glass = effectIds.some(effect => effect.includes('glass') || effect.includes('frosted') || effect.includes('translucent') || effect.includes('blur'));
-  const depth = effectIds.some(effect => effect.includes('depth') || effect.includes('shadow') || effect.includes('floating') || effect.includes('elevated') || effect.includes('3d') || effect.includes('isometric'));
-  const motion = effectIds.some(effect => effect.includes('motion') || effect.includes('gsap') || effect.includes('kinetic') || effect.includes('marquee') || effect.includes('reveal') || effect.includes('interactive') || effect === 'subtle-hover-motion' || effect === 'microinteractions');
-  const grid = effectIds.some(effect => effect.includes('grid') || effect.includes('particle') || effect.includes('background') || effect.includes('webgl') || effect.includes('field') || effect.includes('terminal'));
-  const borderEffect = effectIds.some(effect => effect.includes('gradient-border') || effect.includes('border-gradient') || effect.includes('border-glow'));
   const shellStyle = {
-    background: grid
-      ? `linear-gradient(rgba(15,23,42,.25), rgba(15,23,42,.25)), ${base}`
-      : base,
-    borderColor: borderEffect ? accent : light ? '#CBD5E1' : '#334155',
-    boxShadow: depth ? `0 24px 60px ${accent}24` : undefined,
+    background: base,
+    borderColor: light ? '#CBD5E1' : '#334155',
   };
+
+  if (isolatedEffect && resolveEffectPreview(String(isolatedEffect))) {
+    return (
+      <div className="relative h-full w-full overflow-hidden border transition-opacity duration-300" style={shellStyle}>
+        <EffectPreviewStage effects={[isolatedEffect]} mode="live" palette={state.palette} quality="effect" />
+      </div>
+    );
+  }
 
   if (emptyLayout) {
     return <div className="h-full w-full border transition-colors duration-300" style={shellStyle} />;
   }
 
   const layout = state.layout === 'agent_decides' ? 'dashboard' : state.layout;
-  const panelClass = `${radius} ${glass ? 'backdrop-blur bg-white/12 border border-white/15' : ''}`;
-  const motionClass = motion ? 'transition-all duration-300 ease-out hover:scale-[1.01]' : 'transition-opacity duration-300';
+  const shapeBorder = state.shape === 'sharp_editorial'
+    ? 'border border-current/30'
+    : state.shape === 'boxy'
+      ? 'border-2 border-current/20'
+      : 'border border-white/10';
+  const panelClass = `${panelRadius} ${shapeBorder}`;
 
   return (
-    <div className={`relative h-full w-full overflow-hidden border ${padding} ${motionClass}`} style={shellStyle}>
-      {grid && <div className="absolute inset-0 opacity-25 [background-image:linear-gradient(rgba(148,163,184,.25)_1px,transparent_1px),linear-gradient(90deg,rgba(148,163,184,.25)_1px,transparent_1px)] [background-size:22px_22px]" />}
-      {effectIds.some(effect => effect.includes('mesh') || effect.includes('vignette') || effect.includes('cloudy') || effect.includes('aura') || effect.includes('nebula') || effect.includes('blob')) && <div className="absolute inset-0 opacity-35" style={{ background: `radial-gradient(circle at 80% 10%, ${secondary}, transparent 28%), radial-gradient(circle at 15% 80%, ${accent}, transparent 26%)` }} />}
-      <div className={`relative flex h-full ${gap} ${layout === 'landing_page' || layout === 'portfolio' || layout === 'content_first_site' || layout === 'product_commerce' ? 'flex-col' : ''}`}>
+    <div className={`relative h-full w-full overflow-hidden border ${padding} transition-opacity duration-300`} style={shellStyle}>
+      {state.shape === 'sharp_editorial' && <div className="pointer-events-none absolute inset-0 opacity-50 [background-image:linear-gradient(90deg,rgba(148,163,184,.24)_1px,transparent_1px)] [background-size:64px_100%]" />}
+      {state.shape === 'boxy' && <div className="pointer-events-none absolute left-4 top-4 h-3 w-12 border-t-2 border-l-2 opacity-70" style={{ borderColor: accent }} />}
+      <div className={`relative z-10 flex h-full ${gap} ${layout === 'landing_page' || layout === 'portfolio' || layout === 'content_first_site' || layout === 'product_commerce' ? 'flex-col' : ''}`}>
         {layout === 'dashboard' && (
           <>
-            <div className={`${panelClass} w-[18%] p-2`} style={{ backgroundColor: glass ? undefined : muted }}>
+            <div className={`${panelClass} w-[18%] p-2`} style={{ backgroundColor: muted }}>
               <ShapeBlock className="mb-3 h-3 w-2/3" color={accent} />
               <ShapeBlock className="mb-1.5 h-2.5 w-full" color={block} />
               <ShapeBlock className="mb-1.5 h-2.5 w-4/5" color={block} />
               <ShapeBlock className="h-2.5 w-5/6" color={block} />
             </div>
             <div className={`flex flex-1 flex-col ${gap}`}>
-              <div className={panelClass} style={{ height: '12%', backgroundColor: glass ? undefined : muted }} />
+              <div className={panelClass} style={{ height: '12%', backgroundColor: muted }} />
               <div className={`grid grid-cols-4 ${gap} h-[20%]`}>
-                {[0, 1, 2, 3].map(i => <div key={i} className={panelClass} style={{ backgroundColor: i === 0 ? accent : muted }} />)}
+                {[0, 1, 2, 3].map(i => <div key={i} className={i === 0 && state.shape === 'pill_heavy' ? controlRadius : panelClass} style={{ backgroundColor: i === 0 ? accent : muted }} />)}
               </div>
               <div className={`grid flex-1 grid-cols-[1.4fr_.9fr] ${gap}`}>
-                <div className={`${panelClass} p-3`} style={{ backgroundColor: glass ? undefined : muted }}><ShapeBlock className="h-full w-full opacity-70" color={secondary} /></div>
-                <div className={panelClass} style={{ backgroundColor: glass ? undefined : muted }} />
+                <div className={`${panelClass} p-3`} style={{ backgroundColor: muted }}><ShapeBlock className="h-full w-full opacity-70" color={secondary} /></div>
+                <div className={panelClass} style={{ backgroundColor: muted }} />
               </div>
-              <div className={panelClass} style={{ height: '18%', backgroundColor: glass ? undefined : muted }} />
+              <div className={panelClass} style={{ height: '18%', backgroundColor: muted }} />
             </div>
           </>
         )}
         {layout === 'single_screen_tool' && (
           <div className={`flex h-full w-full flex-col ${gap}`}>
-            <div className={`${panelClass} flex h-[14%] items-center gap-2 p-2`} style={{ backgroundColor: glass ? undefined : muted }}>
+            <div className={`${panelClass} flex h-[14%] items-center gap-2 p-2`} style={{ backgroundColor: muted }}>
               <ShapeBlock className="h-3 w-20" color={block} />
-              <ShapeBlock className={`h-5 w-16 ${state.shape === 'pill_heavy' ? 'rounded-full' : ''}`} color={accent} />
+              <ShapeBlock className={`h-5 w-16 ${controlRadius}`} color={accent} />
               <ShapeBlock className="ml-auto h-5 w-20" color={block} />
             </div>
             <div className={`grid flex-1 grid-cols-[.7fr_1.3fr] ${gap}`}>
-              <div className={`${panelClass} p-3`} style={{ backgroundColor: glass ? undefined : muted }}><ShapeBlock className="mb-2 h-3 w-4/5" color={block} /><ShapeBlock className="mb-2 h-16 w-full" color={secondary} /><ShapeBlock className="h-10 w-2/3" color={accent} /></div>
-              <div className={`${panelClass} p-4`} style={{ backgroundColor: glass ? undefined : muted }}><ShapeBlock className="h-full w-full opacity-70" color={block} /></div>
+              <div className={`${panelClass} p-3`} style={{ backgroundColor: muted }}><ShapeBlock className="mb-2 h-3 w-4/5" color={block} /><ShapeBlock className="mb-2 h-16 w-full" color={secondary} /><ShapeBlock className="h-10 w-2/3" color={accent} /></div>
+              <div className={`${panelClass} p-4`} style={{ backgroundColor: muted }}><ShapeBlock className="h-full w-full opacity-70" color={block} /></div>
             </div>
           </div>
         )}
         {layout === 'workbench_editor' && (
           <>
-            <div className={panelClass} style={{ width: '18%', backgroundColor: glass ? undefined : muted }} />
-            <div className={`${panelClass} flex-1 p-3`} style={{ backgroundColor: glass ? undefined : muted }}><ShapeBlock className="h-full w-full opacity-70" color={secondary} /></div>
-            <div className={panelClass} style={{ width: '22%', backgroundColor: glass ? undefined : muted }} />
+            <div className={panelClass} style={{ width: '18%', backgroundColor: muted }} />
+            <div className={`${panelClass} flex-1 p-3`} style={{ backgroundColor: muted }}><ShapeBlock className="h-full w-full opacity-70" color={secondary} /></div>
+            <div className={panelClass} style={{ width: '22%', backgroundColor: muted }} />
           </>
         )}
         {(layout === 'landing_page' || layout === 'portfolio' || layout === 'product_commerce' || layout === 'content_first_site') && (
           <>
-            <div className={`${panelClass} h-[50%] p-5`} style={{ backgroundColor: glass ? undefined : muted }}>
+            <div className={`${panelClass} h-[50%] p-5`} style={{ backgroundColor: muted }}>
               <ShapeBlock className="mb-3 h-5 w-2/5" color={accent} />
               <ShapeBlock className="mb-2 h-3 w-3/5" color={block} />
               <ShapeBlock className="h-3 w-2/5" color={block} />
@@ -461,43 +656,55 @@ function WireframePreview({ state, emptyLayout, review }: { state: Required<Pick
         )}
         {layout === 'docs_knowledge_base' && (
           <>
-            <div className={panelClass} style={{ width: '20%', backgroundColor: glass ? undefined : muted }} />
-            <div className={`${panelClass} flex-1 p-4`} style={{ backgroundColor: glass ? undefined : muted }}>
+            <div className={panelClass} style={{ width: '20%', backgroundColor: muted }} />
+            <div className={`${panelClass} flex-1 p-4`} style={{ backgroundColor: muted }}>
               <ShapeBlock className="mb-3 h-5 w-1/2" color={accent} />
               <ShapeBlock className="mb-2 h-2.5 w-full" color={block} />
               <ShapeBlock className="mb-2 h-2.5 w-5/6" color={block} />
               <ShapeBlock className="mt-5 h-20 w-full" color={secondary} />
             </div>
-            <div className={panelClass} style={{ width: '18%', backgroundColor: glass ? undefined : muted }} />
+            <div className={panelClass} style={{ width: '18%', backgroundColor: muted }} />
           </>
         )}
         {layout === 'game_interactive' && (
           <div className={`flex h-full w-full flex-col ${gap}`}>
-            <div className={`${panelClass} flex-1 p-5`} style={{ backgroundColor: glass ? undefined : muted }}><ShapeBlock className="h-full w-full" color={accent} /></div>
-            <div className={panelClass} style={{ height: '18%', backgroundColor: glass ? undefined : muted }} />
+            <div className={`${panelClass} flex-1 p-5`} style={{ backgroundColor: muted }}><ShapeBlock className="h-full w-full" color={accent} /></div>
+            <div className={panelClass} style={{ height: '18%', backgroundColor: muted }} />
           </div>
         )}
       </div>
-      <AssetHints asset={state.assets} radius={radius} accent={accent} muted={secondary} />
+      <AssetHints asset={state.assets} radius={controlRadius} accent={accent} muted={secondary} />
       {review && <div className="pointer-events-none absolute bottom-2 right-2 rounded border border-slate-500/50 bg-black/20 px-2 py-1 text-[9px] font-semibold uppercase tracking-wide text-slate-300">Low-fidelity preview</div>}
     </div>
   );
 }
 
 export function AppSiteThemePicker({ open, onClose, onApply }: AppSiteThemePickerProps) {
+  const appTheme = useWorkspaceStore(s => s.theme);
+  const defaultPalette = useMemo(() => defaultPaletteForTheme(appTheme), [appTheme]);
+  const paletteGroups = useMemo(() => orderedPaletteGroups(appTheme), [appTheme]);
   const [activeStep, setActiveStep] = useState<StepId>('layout');
-  const [state, setState] = useState<PickerState>({});
+  const [state, setState] = useState<PickerState>(() => ({ palette: defaultPaletteForTheme(useWorkspaceStore.getState().theme) }));
   const [completed, setCompleted] = useState<Set<StepId>>(new Set());
   const [hover, setHover] = useState<{ step: StepId; value: ChoiceValue } | null>(null);
   const [showMissing, setShowMissing] = useState(false);
   const [customColors, setCustomColors] = useState(DEFAULT_CUSTOM_COLORS);
   const [effectCategory, setEffectCategory] = useState(EFFECT_CATEGORIES[0].id);
+  const [isolatedEffect, setIsolatedEffect] = useState<FrontendDirectionEffect | null>(null);
 
   const stepIndex = STEPS.findIndex(step => step.id === activeStep);
-  const preview = useMemo(() => previewState(state, hover), [state, hover]);
+  const preview = useMemo(() => previewState(state, hover, defaultPalette), [state, hover, defaultPalette]);
   const missingSteps = STEPS.filter(step => step.id !== 'review' && !stepHasSelection(state, step.id)).map(step => step.id);
   const emptyLayout = activeStep === 'layout' && !state.layout && hover?.step !== 'layout';
   const activeEffectCategory = EFFECT_CATEGORIES.find(category => category.id === effectCategory) ?? EFFECT_CATEGORIES[0];
+
+  useEffect(() => {
+    setState(current => {
+      const currentKey = current.palette ? paletteKey(current.palette) : null;
+      const selectedDefault = currentKey === DEFAULT_LIGHT_PALETTE.id || currentKey === DEFAULT_DARK_PALETTE.id || currentKey === null;
+      return selectedDefault ? { ...current, palette: defaultPalette } : current;
+    });
+  }, [defaultPalette]);
 
   if (!open) return null;
 
@@ -508,6 +715,7 @@ export function AppSiteThemePicker({ open, onClose, onApply }: AppSiteThemePicke
         const nextValue = value as FrontendDirectionEffect;
         if (nextValue === 'agent_decides' || nextValue === 'none') return { ...current, effects: [nextValue] };
         const currentValues = (current.effects ?? []).filter(item => item !== 'agent_decides' && item !== 'none');
+        if (!currentValues.includes(nextValue) && effectPreviewConflictReason(currentValues.map(String), String(nextValue))) return current;
         return { ...current, effects: currentValues.includes(nextValue) ? currentValues.filter(item => item !== nextValue) : [...currentValues, nextValue] };
       }
       if (step === 'interaction') {
@@ -536,11 +744,13 @@ export function AppSiteThemePicker({ open, onClose, onApply }: AppSiteThemePicke
     if (activeStep !== 'review' && stepHasSelection(state, activeStep)) {
       setCompleted(current => new Set(current).add(activeStep));
     }
+    setIsolatedEffect(null);
     setActiveStep(STEPS[Math.min(STEPS.length - 1, stepIndex + 1)].id);
     setHover(null);
   }
 
   function goBack() {
+    setIsolatedEffect(null);
     setActiveStep(STEPS[Math.max(0, stepIndex - 1)].id);
     setHover(null);
   }
@@ -548,6 +758,7 @@ export function AppSiteThemePicker({ open, onClose, onApply }: AppSiteThemePicke
   function apply() {
     if (missingSteps.length > 0) {
       setShowMissing(true);
+      setIsolatedEffect(null);
       setActiveStep(missingSteps[0]);
       return;
     }
@@ -597,33 +808,18 @@ export function AppSiteThemePicker({ open, onClose, onApply }: AppSiteThemePicke
     const currentKey = state.palette ? paletteKey(state.palette) : null;
     return (
       <>
-        {PALETTE_CHOICES.map(choice => {
-          const value = choice.value as FrontendDirectionPalette;
-          const selected = currentKey === paletteKey(value);
-          const delegated = isPaletteDelegated(value);
-          return (
-            <button
-              key={paletteKey(value)}
-              type="button"
-              onMouseEnter={() => setHover({ step: 'palette', value })}
-              onMouseLeave={() => setHover(null)}
-              onClick={() => selectChoice('palette', value)}
-              className={`flex items-center gap-3 rounded-lg border p-3 text-left transition-colors ${
-                selected
-                  ? delegated
-                    ? 'border-blue-400/70 bg-blue-500/10 text-blue-100'
-                    : 'border-accent-primary bg-accent-primary/10 text-text-primary'
-                  : 'border-border-panel bg-bg-panel text-text-secondary hover:border-accent-primary/50 hover:bg-bg-surface'
-              }`}
-            >
-              {delegated ? <span className="flex h-10 w-10 items-center justify-center rounded-full border border-blue-300/40 bg-blue-500/10"><Bot size={16} className="text-blue-300" /></span> : <PaletteCircle colors={paletteColors(value)} />}
-              <span className="min-w-0">
-                <span className="block truncate text-[12px] font-semibold">{choice.label}</span>
-                <span className="mt-1 block text-[10px] leading-relaxed text-text-muted">{choice.description}</span>
-              </span>
-            </button>
-          );
-        })}
+        <PaletteButton choice={AGENT_PALETTE_CHOICE} currentKey={currentKey} onHover={setHover} onSelect={value => selectChoice('palette', value)} />
+        {paletteGroups.map(group => (
+          <div key={group.id} className="col-span-full grid grid-cols-2 gap-2 lg:grid-cols-3">
+            <div className="col-span-full flex items-center justify-between pt-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-text-muted">
+              <span>{group.label}</span>
+              {group.choices[0]?.value === defaultPalette && <span className="normal-case tracking-normal text-accent-primary">Default for current app theme</span>}
+            </div>
+            {group.choices.map(choice => (
+              <PaletteButton key={paletteKey(choice.value as FrontendDirectionPalette)} choice={choice} currentKey={currentKey} onHover={setHover} onSelect={value => selectChoice('palette', value)} />
+            ))}
+          </div>
+        ))}
         <div
           onMouseEnter={() => setHover({ step: 'palette', value: customPalette(customColors) })}
           onMouseLeave={() => setHover(null)}
@@ -654,13 +850,10 @@ export function AppSiteThemePicker({ open, onClose, onApply }: AppSiteThemePicke
   }
 
   function renderEffectsChoices() {
-    const baseChoices: Choice[] = [
-      { value: 'agent_decides', label: 'Let agents decide', description: 'Agents select restrained effects that fit the workflow.' },
-      { value: 'none', label: 'No effects', description: 'Static, functional presentation only.' },
-    ];
     const current = state.effects ?? [];
+    const hoveredEffectDescription = hover?.step === 'effects' ? effectChoiceDescription(hover.value) : null;
     return (
-      <div className="col-span-full grid grid-cols-[160px_1fr] gap-3">
+      <div className="relative col-span-full grid grid-cols-[150px_1fr] gap-3">
         <div className="space-y-1.5">
           {EFFECT_CATEGORIES.map(category => (
             <button
@@ -678,41 +871,94 @@ export function AppSiteThemePicker({ open, onClose, onApply }: AppSiteThemePicke
             </button>
           ))}
         </div>
-        <div className="grid grid-cols-2 gap-2 lg:grid-cols-3">
-          {[...baseChoices, ...activeEffectCategory.choices].map(choice => {
+        <div className="grid grid-cols-2 items-start gap-2 lg:grid-cols-3 xl:grid-cols-4">
+          {[...BASE_EFFECT_CHOICES, ...activeEffectCategory.choices].map(choice => {
             const selected = current.includes(choice.value as FrontendDirectionEffect);
             const delegated = choice.value === 'agent_decides';
+            const specialChoice = choice.value === 'agent_decides' || choice.value === 'none';
+            const hasCardPreview = Boolean(resolveEffectPreview(String(choice.value)));
+            const conflictReason = !selected && !specialChoice ? effectPreviewConflictReason(current.map(String), String(choice.value)) : null;
+            const disabled = Boolean(conflictReason);
             return (
-              <button
+              <div
                 key={String(choice.value)}
-                type="button"
+                role="button"
+                tabIndex={disabled ? -1 : 0}
                 onMouseEnter={() => setHover({ step: 'effects', value: choice.value })}
                 onMouseLeave={() => setHover(null)}
-                onClick={() => selectChoice('effects', choice.value)}
-                className={`rounded-lg border p-3 text-left transition-colors ${
-                  selected
+                onClick={() => {
+                  if (!disabled) selectChoice('effects', choice.value);
+                }}
+                onKeyDown={event => {
+                  if (!disabled && (event.key === 'Enter' || event.key === ' ')) {
+                    event.preventDefault();
+                    selectChoice('effects', choice.value);
+                  }
+                }}
+                title={conflictReason ?? choice.label}
+                aria-disabled={disabled}
+                className={`relative flex min-h-[70px] cursor-pointer flex-col overflow-hidden rounded-lg border p-2.5 text-left transition-colors duration-150 focus:outline-none focus:ring-2 focus:ring-accent-primary/60 ${
+                  disabled
+                    ? 'cursor-not-allowed border-border-panel bg-bg-panel/50 text-text-muted opacity-45'
+                    : selected
                     ? delegated
                       ? 'border-blue-400/70 bg-blue-500/10 text-blue-100'
                       : 'border-accent-primary bg-accent-primary/10 text-text-primary'
                     : 'border-border-panel bg-bg-panel text-text-secondary hover:border-accent-primary/50 hover:bg-bg-surface'
                 }`}
               >
-                <div className="flex items-center gap-2 text-[12px] font-semibold">
-                  {delegated && <Bot size={13} className="text-blue-300" />}
-                  {choice.label}
+                {hasCardPreview && (
+                  <>
+                    <EffectPreviewStage effects={[choice.value as FrontendDirectionEffect]} mode="poster" palette={preview.palette} quality="thumbnail" />
+                    <div className="pointer-events-none absolute inset-0 bg-gradient-to-b from-bg-panel/10 via-bg-panel/25 to-bg-panel/80" />
+                  </>
+                )}
+                <div className="relative z-10 flex w-full items-start gap-2">
+                  <span className="min-w-0 flex-1 text-[11px] font-semibold leading-snug text-text-primary">
+                    {choice.label}
+                  </span>
+                  {!specialChoice && hasCardPreview && (
+                    <button
+                      type="button"
+                      onClick={event => {
+                        event.stopPropagation();
+                        setHover(null);
+                        setIsolatedEffect(choice.value as FrontendDirectionEffect);
+                      }}
+                      onMouseDown={event => event.stopPropagation()}
+                      className={`flex h-6 w-6 shrink-0 items-center justify-center rounded border transition-colors ${
+                        isolatedEffect === choice.value
+                          ? 'border-accent-primary bg-accent-primary/15 text-accent-primary'
+                          : 'border-border-panel text-text-muted hover:border-accent-primary hover:text-accent-primary'
+                      }`}
+                      aria-label={`Preview ${choice.label}`}
+                      aria-pressed={isolatedEffect === choice.value}
+                    >
+                      <Eye size={12} />
+                    </button>
+                  )}
                 </div>
-                <p className="mt-1 text-[10px] leading-relaxed text-text-muted">{choice.description}</p>
-              </button>
+                {selected && <span className="absolute -right-1 -top-1 flex h-4 w-4 items-center justify-center rounded-full bg-accent-primary text-accent-text"><Check size={10} /></span>}
+              </div>
             );
           })}
         </div>
+        {hoveredEffectDescription && (
+          <div className="pointer-events-none fixed left-1/2 top-24 z-[140] w-[360px] max-w-[calc(100vw-2rem)] -translate-x-1/2 rounded-xl border border-border-panel bg-bg-app/90 p-3 text-[11px] leading-relaxed text-text-secondary shadow-2xl backdrop-blur-md">
+            {hoveredEffectDescription}
+          </div>
+        )}
       </div>
     );
   }
 
   return (
     <div className="fixed inset-0 z-[110] flex items-center justify-center bg-black/65 backdrop-blur-sm" role="dialog" aria-modal="true">
-      <div className="flex h-[82vh] w-[92vw] max-w-[1180px] overflow-hidden rounded-xl border border-border-panel bg-bg-app shadow-2xl">
+      <div className={`flex overflow-hidden rounded-xl border border-border-panel bg-bg-app shadow-2xl ${
+        activeStep === 'review'
+          ? 'h-[94vh] w-[98vw] max-w-[1760px]'
+          : 'h-[82vh] w-[92vw] max-w-[1180px]'
+      }`}>
         <aside className="w-52 shrink-0 border-r border-border-panel bg-bg-titlebar p-3">
           <div className="mb-4 flex items-center gap-2 px-1 text-[11px] font-semibold uppercase tracking-[0.2em] text-accent-primary">
             <Sparkles size={14} />
@@ -729,6 +975,7 @@ export function AppSiteThemePicker({ open, onClose, onApply }: AppSiteThemePicke
                   key={step.id}
                   type="button"
                   onClick={() => {
+                    setIsolatedEffect(null);
                     setActiveStep(step.id);
                     setHover(null);
                   }}
@@ -777,9 +1024,17 @@ export function AppSiteThemePicker({ open, onClose, onApply }: AppSiteThemePicke
               </div>
             )}
 
-            <div className={`${activeStep === 'review' ? 'h-full' : 'h-[calc(65%-1rem)]'} min-h-0 rounded-xl border border-border-panel bg-bg-panel p-3`}>
-              <WireframePreview state={preview} emptyLayout={emptyLayout} review={activeStep === 'review'} />
-            </div>
+            {activeStep === 'review' ? (
+              <div className="flex h-full min-h-0 items-center justify-center">
+                <div className="aspect-video h-full max-h-full w-auto max-w-full rounded-xl border border-border-panel bg-bg-panel p-3">
+                  <WireframePreview state={preview} emptyLayout={emptyLayout} review isolatedEffect={isolatedEffect} />
+                </div>
+              </div>
+            ) : (
+              <div className="h-[calc(65%-1rem)] min-h-0 rounded-xl border border-border-panel bg-bg-panel p-3">
+                <WireframePreview state={preview} emptyLayout={emptyLayout} review={false} isolatedEffect={isolatedEffect} />
+              </div>
+            )}
           </div>
 
           <footer className="flex items-center justify-between gap-3 border-t border-border-panel bg-bg-titlebar px-4 py-3">

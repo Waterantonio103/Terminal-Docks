@@ -69,6 +69,8 @@ interface TerminalBindingLike {
   executionMode?: WorkflowExecutionMode | null;
 }
 
+type RoleTerminalBinding = TerminalBindingLike | TerminalBindingLike[];
+
 export const WORKFLOW_PRESET_MODES: WorkflowPresetModeOption[] = [
   { value: 'build', label: 'Build', description: 'Create, modify, fix, refactor, or deliver software.' },
   { value: 'research', label: 'Research', description: 'Investigate code, architecture, bugs, libraries, migrations, or unknowns.' },
@@ -305,10 +307,8 @@ export const WORKFLOW_PRESETS: PresetDefinition[] = [
     edges: [
       ...chainEdges(['frontend_product', 'frontend_designer', 'frontend_architect'], 'on_success'),
       { fromNodeId: 'frontend_architect', toNodeId: 'frontend_builder_core', condition: 'on_success' },
-      { fromNodeId: 'frontend_architect', toNodeId: 'frontend_builder_states', condition: 'on_success' },
-      { fromNodeId: 'frontend_architect', toNodeId: 'frontend_builder_responsive', condition: 'on_success' },
-      { fromNodeId: 'frontend_builder_core', toNodeId: 'interaction_qa', condition: 'on_success' },
-      { fromNodeId: 'frontend_builder_states', toNodeId: 'interaction_qa', condition: 'on_success' },
+      { fromNodeId: 'frontend_builder_core', toNodeId: 'frontend_builder_states', condition: 'on_success' },
+      { fromNodeId: 'frontend_builder_states', toNodeId: 'frontend_builder_responsive', condition: 'on_success' },
       { fromNodeId: 'frontend_builder_responsive', toNodeId: 'interaction_qa', condition: 'on_success' },
       { fromNodeId: 'interaction_qa', toNodeId: 'accessibility_reviewer', condition: 'on_success' },
       { fromNodeId: 'interaction_qa', toNodeId: 'visual_polish_reviewer', condition: 'on_success' },
@@ -895,7 +895,8 @@ export function buildPresetFlowGraph(options: {
   prompt: string;
   mode: WorkflowMode;
   workspaceDir: string | null;
-  bindingsByRole: Record<string, TerminalBindingLike>;
+  bindingsByRole: Record<string, RoleTerminalBinding>;
+  bindingsByNodeId?: Record<string, TerminalBindingLike>;
   instructionOverrides?: Record<string, string>;
   frontendMode?: FrontendWorkflowMode;
   frontendDirection?: FrontendDirectionSpec;
@@ -916,6 +917,17 @@ export function buildPresetFlowGraph(options: {
   const taskNodeId = `task-${missionId}`;
   const startNodeIds = getPresetStartNodeIds(preset);
   const agentPositions = getPresetNodePositions(preset);
+  const bindingCursorByRole = new Map<string, number>();
+
+  function takeRoleBinding(roleId: string): TerminalBindingLike | undefined {
+    const binding = bindingsByRole[roleId];
+    if (Array.isArray(binding)) {
+      const index = bindingCursorByRole.get(roleId) ?? 0;
+      bindingCursorByRole.set(roleId, index + 1);
+      return binding[Math.min(index, binding.length - 1)];
+    }
+    return binding;
+  }
 
   const nodes = [
     {
@@ -937,7 +949,7 @@ export function buildPresetFlowGraph(options: {
       },
     },
     ...preset.nodes.map((presetNode, index) => {
-      const binding = bindingsByRole[presetNode.roleId];
+      const binding = options.bindingsByNodeId?.[presetNode.id] ?? takeRoleBinding(presetNode.roleId);
       return {
         id: presetNode.id,
         type: 'agent',

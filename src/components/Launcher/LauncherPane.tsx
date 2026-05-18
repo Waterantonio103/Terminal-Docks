@@ -66,6 +66,9 @@ function buildRoleBindingPools(rows: TerminalRow[]) {
     hasRole(roleId: string) {
       return (byRole.get(roleId)?.length ?? 0) > 0;
     },
+    count(roleId: string) {
+      return byRole.get(roleId)?.length ?? 0;
+    },
     take(roleId: string): TerminalRow | null {
       const pool = byRole.get(roleId) ?? [];
       if (pool.length === 0) return null;
@@ -287,8 +290,8 @@ export function LauncherPane() {
     () =>
       terminals.map(p => ({
         pane: p,
-        roleId: detectRoleForPane(p as any) ?? '',
-        cli: detectCliForPane(p as any),
+        roleId: detectRoleForPane(p) ?? '',
+        cli: detectCliForPane(p),
       })),
     [terminals]
   );
@@ -387,17 +390,24 @@ export function LauncherPane() {
       }
 
       const pools = buildRoleBindingPools(syncedRows);
+      const requiredByRole = new Map<string, number>();
       for (const node of preset.nodes) {
-        if (!pools.hasRole(node.roleId)) {
-          throw new Error(`Preset requires a terminal with role "${node.roleId}".`);
+        requiredByRole.set(node.roleId, (requiredByRole.get(node.roleId) ?? 0) + 1);
+      }
+      for (const [roleId, requiredCount] of requiredByRole) {
+        const availableCount = pools.count(roleId);
+        if (availableCount < requiredCount) {
+          const suffix = requiredCount === 1 ? '' : 's';
+          throw new Error(`Preset requires ${requiredCount} terminal${suffix} with role "${roleId}" (${availableCount} detected).`);
         }
       }
 
       const bindingByRole: Record<string, { terminalId: string; terminalTitle: string; paneId?: string; cli?: AgentCli | null; model?: string; executionMode?: WorkflowExecutionMode }> = {};
+      const bindingByNodeId: Record<string, { terminalId: string; terminalTitle: string; paneId?: string; cli?: AgentCli | null; model?: string; executionMode?: WorkflowExecutionMode }> = {};
       for (const node of preset.nodes) {
         const picked = pools.take(node.roleId);
         if (!picked) continue;
-        bindingByRole[node.roleId] = {
+        const binding = {
           terminalId: picked.pane.data?.terminalId ?? `term-${picked.pane.id}`,
           terminalTitle: picked.pane.title,
           paneId: picked.pane.id,
@@ -405,6 +415,10 @@ export function LauncherPane() {
           model: (picked.pane.data?.model as string | undefined) ?? '',
           executionMode: (picked.pane.data?.executionMode as WorkflowExecutionMode | undefined) ?? 'interactive_pty',
         };
+        bindingByNodeId[node.id] = binding;
+        if (!bindingByRole[node.roleId]) {
+          bindingByRole[node.roleId] = binding;
+        }
       }
 
       const flow = buildPresetFlowGraph({
@@ -414,6 +428,7 @@ export function LauncherPane() {
         mode,
         workspaceDir,
         bindingsByRole: bindingByRole,
+        bindingsByNodeId: bindingByNodeId,
         instructionOverrides: agentInstructions,
         frontendDirection: isAppSitePresetId(preset.id) ? frontendDirection : undefined,
         finalReadmeEnabled,

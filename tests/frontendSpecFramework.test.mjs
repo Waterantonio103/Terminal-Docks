@@ -11,11 +11,22 @@ const {
 const {
   buildFrontendLibraryIndex,
   buildFrontendReferenceIndex,
+  registerFrontendLibraryResources,
 } = await import('../mcp-server/src/resources/frontend-library.mjs');
 
 function run(name, fn) {
   try {
     fn();
+    console.log(`PASS ${name}`);
+  } catch (error) {
+    console.error(`FAIL ${name}`);
+    throw error;
+  }
+}
+
+async function runAsync(name, fn) {
+  try {
+    await fn();
     console.log(`PASS ${name}`);
   } catch (error) {
     console.error(`FAIL ${name}`);
@@ -56,6 +67,28 @@ run('frontend library index exposes skills, patterns, and references', () => {
   assert.equal(references.totalReferences, 50);
   assert.ok(library.workflow.some(step => step.includes('Load only the skill docs needed')));
   assert.ok(library.guardrails.some(rule => rule.includes('source of truth')));
+});
+
+await runAsync('Neuform pattern entries advertise plural URIs and register compatibility aliases', async () => {
+  const resources = new Map();
+  registerFrontendLibraryResources({
+    registerResource(name, uri, metadata, handler) {
+      resources.set(uri, { name, metadata, handler });
+    },
+  });
+
+  const indexResource = await resources.get('frontend-patterns://neuform/index').handler();
+  const index = JSON.parse(indexResource.contents[0].text);
+  const beautifulShadows = index.entries.find(entry => entry.id === 'neuform_beautiful-shadows');
+
+  assert.equal(beautifulShadows.uri, 'frontend-patterns://neuform/effects/beautiful-shadows.md');
+  assert.ok(beautifulShadows.uriAliases.includes('frontend-patterns://neuform/beautiful-shadows'));
+  assert.ok(beautifulShadows.uriAliases.includes('frontend-pattern://neuform/beautiful-shadows'));
+  assert.ok(beautifulShadows.uriAliases.includes('frontend-pattern://neuform/effects/beautiful-shadows.md'));
+  assert.ok(resources.has('frontend-patterns://neuform/beautiful-shadows'));
+  assert.ok(resources.has('frontend-patterns://neuform/effects/beautiful-shadows.md'));
+  assert.ok(resources.has('frontend-pattern://neuform/beautiful-shadows'));
+  assert.ok(resources.has('frontend-pattern://neuform/effects/beautiful-shadows.md'));
 });
 
 run('all category overlays define required additions and reviewer rubrics', () => {

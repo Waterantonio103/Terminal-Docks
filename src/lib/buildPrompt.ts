@@ -87,7 +87,9 @@ function frontendDirectionGuidance(spec?: FrontendDirectionSpec): string {
   const delegated = spec.delegatedSections.length
     ? ` Delegated picker sections: ${spec.delegatedSections.join(', ')}. For those sections, make a fitting decision and record a one-sentence reason for the final README Agent Decisions section.`
     : '';
-  return `App/Site theme picker direction is binding user intent. ${spec.summary}.${delegated} Use its do/avoid guidance in PRD.md, DESIGN.md, structure.md, frontendSpecs, frontendPlan, implementation, and review. The preview is low-fidelity and non-authoritative.`;
+  const doGuidance = spec.agentGuidance?.do?.length ? ` Do: ${spec.agentGuidance.do.join(' ')}` : '';
+  const avoidGuidance = spec.agentGuidance?.avoid?.length ? ` Avoid: ${spec.agentGuidance.avoid.join(' ')}` : '';
+  return `App/Site theme picker direction is binding user intent. ${spec.summary}.${delegated}${doGuidance}${avoidGuidance} Apply this in PRD.md, DESIGN.md, structure.md, frontendSpecs, frontendPlan, implementation, and review. The preview is low-fidelity and non-authoritative.`;
 }
 
 export function buildLaunchPrompt(agentId: string, ctx: LaunchContext, instructionOverride?: string): string {
@@ -138,7 +140,7 @@ export function buildLaunchPrompt(agentId: string, ctx: LaunchContext, instructi
     }
 
     lines.push(`Mission: ${ctx.missionId}. Node: ${ctx.nodeId}. Current attempt: ${ctx.attempt ?? 1}.`);
-    lines.push('Treat `get_task_details` as the canonical source of truth for your current node context, incoming payloads, attempt number, and legal next targets. Call it whenever you receive a NEW_TASK activation and before any handoff if anything is unclear.');
+    lines.push('Treat `get_task_details` as the canonical source of truth for your current node context, objective, assignment, role instructions, incoming payloads, attempt number, and legal next targets. The returned objective/assignment is the actual task; do not wait for a separate inbox payload before doing the role work.');
 
     if (outgoingTargets.length > 0) {
       lines.push(`Legal outgoing targets for this node: ${formatOutgoingTargets(outgoingTargets)}.`);
@@ -164,7 +166,7 @@ export function buildLaunchPrompt(agentId: string, ctx: LaunchContext, instructi
     lines.push('Graph-routing override: ignore any older role-level instructions that mention `targetRole`, `successorRole`, or handing off to `done`. In graph mode you must route by exact node IDs from `get_task_details`, not by guessing from role names.');
   }
 
-  lines.push('CRITICAL: If you receive a raw JSON message starting with {"signal":"NEW_TASK"...}, you MUST parse it and immediately call the `get_task_details` tool using the provided missionId and nodeId, and then call `read_inbox({ missionId, nodeId })` to process your inbox. Do this on every activation, including retries.');
+  lines.push('CRITICAL: If you receive a raw JSON message starting with {"signal":"NEW_TASK"...}, you MUST parse it and immediately call the `get_task_details` tool using the provided missionId and nodeId, and then call `read_inbox({ missionId, nodeId })` to process your inbox. The task details objective and assignment are sufficient to proceed even when the inbox has no extra messages. Do this on every activation, including retries.');
 
   lines.push('When your work is complete:');
   let step = 1;

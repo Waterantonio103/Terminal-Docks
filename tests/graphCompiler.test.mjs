@@ -378,6 +378,71 @@ run('frontend preset compiles with explicit UI roles and metadata', () => {
   ]);
 });
 
+run('expanded app site preset keeps repeated frontend builder terminal bindings distinct', () => {
+  const preset = getWorkflowPreset('app_site_expanded');
+  assert.ok(preset, 'app_site_expanded preset must exist');
+
+  const flow = buildPresetFlowGraph({
+    preset,
+    missionId: 'expanded-frontend',
+    prompt: 'Build a hospital incident triage dashboard',
+    mode: 'build',
+    workspaceDir: 'C:/workspace',
+    frontendMode: 'strict_ui',
+    instructionOverrides: {},
+    bindingsByRole: {
+      frontend_product: { terminalId: 'term-product', terminalTitle: 'Product Agent' },
+      frontend_designer: { terminalId: 'term-designer', terminalTitle: 'Designer' },
+      frontend_architect: { terminalId: 'term-architect', terminalTitle: 'Architecture Agent' },
+      frontend_builder: [
+        { terminalId: 'term-builder-core', terminalTitle: 'Core Builder', cli: 'codex' },
+        { terminalId: 'term-builder-states', terminalTitle: 'States Builder', cli: 'claude' },
+        { terminalId: 'term-builder-responsive', terminalTitle: 'Responsive Builder', cli: 'codex' },
+      ],
+      interaction_qa: { terminalId: 'term-qa', terminalTitle: 'Interaction QA' },
+      accessibility_reviewer: { terminalId: 'term-accessibility', terminalTitle: 'Accessibility Reviewer' },
+      visual_polish_reviewer: { terminalId: 'term-polish', terminalTitle: 'Visual Polish Reviewer' },
+      reviewer: { terminalId: 'term-final', terminalTitle: 'Final Reviewer' },
+    },
+  });
+
+  const mission = compileMission({
+    graphId: 'preset:app_site_expanded',
+    missionId: 'expanded-frontend',
+    nodes: flow.nodes,
+    edges: flow.edges,
+    workspaceDirFallback: 'C:/workspace',
+    compiledAt: 123,
+    authoringMode: 'preset',
+    presetId: 'app_site_expanded',
+    runVersion: 1,
+  });
+
+  const builders = mission.nodes.filter(node => node.roleId === 'frontend_builder');
+  assert.deepEqual(builders.map(node => node.id), [
+    'frontend_builder_core',
+    'frontend_builder_states',
+    'frontend_builder_responsive',
+  ]);
+  assert.deepEqual(builders.map(node => node.terminal.terminalId), [
+    'term-builder-core',
+    'term-builder-states',
+    'term-builder-responsive',
+  ]);
+  assert.deepEqual(builders.map(node => node.terminal.cli), ['codex', 'claude', 'codex']);
+  assert.deepEqual(mission.metadata.executionLayers, [
+    ['frontend_product'],
+    ['frontend_designer'],
+    ['frontend_architect'],
+    ['frontend_builder_core'],
+    ['frontend_builder_states'],
+    ['frontend_builder_responsive'],
+    ['interaction_qa'],
+    ['accessibility_reviewer', 'visual_polish_reviewer'],
+    ['reviewer_final'],
+  ]);
+});
+
 run('preset final README can be disabled and defaults off for patch presets', () => {
   const patchPreset = getWorkflowPreset('rapid_patch');
   assert.ok(patchPreset, 'rapid_patch preset must exist');

@@ -131,6 +131,12 @@ export interface WorkflowGraph {
   edges: WorkflowEdge[];
 }
 
+type RuntimeOnlyWorkflowConfig = NonNullable<WorkflowNode['config']> & {
+  runtimeSessionId?: unknown;
+  currentAttempt?: unknown;
+  heartbeat?: unknown;
+};
+
 export interface CompiledMissionTaskContext {
   nodeId: string;
   prompt: string;
@@ -295,6 +301,7 @@ export interface Pane {
     cliUpdatedAt?: number;
     roleId?: string;
     filePath?: string;
+    cwd?: string;
     initialCommand?: string;
     customCliCommand?: string;
     customCliArgs?: string[];
@@ -370,7 +377,7 @@ export interface SavedLayout {
   id: string;
   name: string;
   createdAt: number;
-  panes: Array<{ type: PaneType; title: string; data?: any }>;
+  panes: Array<Pick<Pane, 'type' | 'title' | 'data' | 'gridPos'>>;
 }
 
 export const TAB_COLORS = [
@@ -584,13 +591,13 @@ function stripRuntimeFromGraph(graph: WorkflowGraph | null): WorkflowGraph | nul
   return {
     ...graph,
     nodes: graph.nodes.map(node => {
-      const config = node.config ? { ...node.config } : undefined;
+      const config: RuntimeOnlyWorkflowConfig | undefined = node.config ? { ...node.config } : undefined;
       if (config) {
         delete config.terminalId;
         delete config.paneId;
-        delete (config as any).runtimeSessionId;
-        delete (config as any).currentAttempt;
-        delete (config as any).heartbeat;
+        delete config.runtimeSessionId;
+        delete config.currentAttempt;
+        delete config.heartbeat;
       }
       return {
         ...node,
@@ -1030,7 +1037,7 @@ export const useWorkspaceStore = create<WorkspaceState>()(
       loadLayout: (id) => set((state) => {
         const layout = state.savedLayouts.find(l => l.id === id);
         if (!layout) return state;
-        const newPanes: Pane[] = (layout.panes as any[]).map(p => {
+        const newPanes: Pane[] = layout.panes.map(p => {
           const newData = p.data ? { ...p.data } : {};
           if (p.type === 'terminal') newData.terminalId = generateId();
           return { 
@@ -1125,7 +1132,7 @@ export const useWorkspaceStore = create<WorkspaceState>()(
           };
         }
         if (version <= 2) {
-          const tabs = (persistedState as any).tabs || [];
+          const tabs = persistedState.tabs || [];
           const updatedTabs = tabs.map((tab: any) => ({
             ...tab,
             panes: (tab.panes || []).map((pane: any, idx: number) => ({

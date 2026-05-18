@@ -21,8 +21,10 @@ const SHELL_PROMPT_RE = /(?:^|\n)\s*(?:[A-Za-z]:\\[^>\r\n]*>|PS [^>\r\n]*>|[$#>]
 const CLAUDE_UI_RE = /(?:\bclaude (?:code|assistant)\b|Sonnet|Opus|Haiku|--\s*INSERT\s*--|bypass permissions|shift\+tab to cycle|❯|⏵⏵)/i;
 const CLAUDE_INPUT_READY_RE = /(?:^|\n)\s*(?:[│┃]\s*)?(?:❯|>)\s*(?:["'`]?Try\b|$|\n|[^\S\r\n]{0,8}[\u2580-\u259f]?[\s\S]{0,1}(?:\n|$))|--\s*INSERT\s*--|\b(?:type|enter|paste|write)\b.*\b(?:prompt|message|input)\b/i;
 const CLAUDE_VISIBLE_PROMPT_RE = /(?:^|\n)\s*(?:[│┃]\s*)?(?:❯|>)\s*(?:["'`]?Try\b|[^\S\r\n]{0,12}[\u2580-\u259f]?[^\S\r\n]*(?:\n|$))/m;
+const CLAUDE_ACTIVE_TITLE_RE =
+  /\x1b\]0;[^\x07]*(?:[⠐⠂⠒⠲⠴⠦⠖⠆⠋⠙⠹⠸⠼⠧⠇⠏]|Determining|thinking|tokens)[^\x07]*\x07/i;
 const ACTIVE_WORK_RE =
-  /(?:\bStewing\b|\bSimmering\b|\bContemplating\b|\bThinking\b|\bProcessing\b|\bWorking\b|\bRunning\b|\bExecuting\b|\bCalling\b|\bUsing tool\b|\btool execution\b|\bqueued message\b|\besc to interrupt\b|\bctrl-c to interrupt\b|[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏])/i;
+  /(?:\bStewing\b|\bSimmering\b|\bContemplating\b|\bDetermining\b|\bThinking\b|\bthinking some more\b|\balmost done thinking\b|\bthought for\b|\bProcessing\b|\bWorking\b|\bRunning\b|\bExecuting\b|\bCalling\b|\bUsing tool\b|\btool execution\b|\bqueued message\b|\besc to interrupt\b|\bctrl-c to interrupt\b|[⠐⠂⠒⠲⠴⠦⠖⠆⠋⠙⠹⠸⠼⠧⠇⠏])/i;
 const PERMISSION_RE =
   /(?:permission request|allow|approve|grant|trust|deny|reject|do you want).*(?:\?|y\/n|\[y\/n\]|\b1\.|yes\/no|always allow)/is;
 
@@ -115,6 +117,7 @@ export const claudeAdapter: CliAdapter = {
   detectStatus(output: string): StatusDetectionResult {
     const clean = stripTerminalControls(output);
     const hasClaudeUi = CLAUDE_UI_RE.test(clean);
+    const hasActiveTitle = CLAUDE_ACTIVE_TITLE_RE.test(output);
     const lastLine = lastNonEmptyLines(clean, 1);
     const readyPromptIndex = Math.max(
       lastMatchIndex(clean, CLAUDE_INPUT_READY_RE),
@@ -136,6 +139,10 @@ export const claudeAdapter: CliAdapter = {
 
     if (hasClaudeUi && readyPromptIndex >= 0 && readyPromptIndex >= activeWorkIndex) {
       return { status: 'idle', confidence: 'high', detail: 'Claude input prompt detected' };
+    }
+
+    if (hasActiveTitle) {
+      return { status: 'processing', confidence: 'high', detail: 'Claude active work indicator detected' };
     }
 
     if (ACTIVE_WORK_RE.test(clean)) {

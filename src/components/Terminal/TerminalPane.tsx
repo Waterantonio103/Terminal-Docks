@@ -223,7 +223,9 @@ export function TerminalPane({ pane, dragEndSeq }: { pane: Pane; dragEndSeq?: nu
     const initPty = async () => {
       if (disposed) return;
       const storeSnap = useWorkspaceStore.getState();
-      const workspaceDir = storeSnap.workspaceDir;
+      const paneCwd = typeof pane.data?.cwd === 'string' ? pane.data.cwd.replace(/\0/g, '').trim() : '';
+      const paneWorkspaceDir = typeof pane.data?.workspaceDir === 'string' ? pane.data.workspaceDir.replace(/\0/g, '').trim() : '';
+      const workspaceDir = paneCwd || paneWorkspaceDir || storeSnap.workspaceDir;
       const boundNodeId = typeof pane.data?.nodeId === 'string' ? pane.data.nodeId : null;
       // Read CLI from globalGraph (authoritative) by matching terminalId. pane.data.cli can
       // be stale when the CLI was changed in workflow mode while the app was in workspace mode,

@@ -116,6 +116,10 @@ export const codexAdapter: CliAdapter = {
         '-c',
         'mcp_servers.terminal-docks.tool_timeout_sec=120',
       ] : []),
+      '-c',
+      'approval_policy="never"',
+      '-c',
+      'sandbox_mode="danger-full-access"',
     ];
     if (context.model?.trim()) args.push('--model', context.model.trim());
     if (context.workspaceDir?.trim()) args.push('--cd', context.workspaceDir.trim());
@@ -192,7 +196,7 @@ export const codexAdapter: CliAdapter = {
   },
 
   buildInitialPrompt(context: TaskContext): string {
-    return `NEW_TASK. call get_task_details({ missionId: "${escapeInstructionValue(context.missionId)}", nodeId: "${escapeInstructionValue(context.nodeId)}" }), execute the actual task from that payload, then call complete_task({ missionId: "${escapeInstructionValue(context.missionId)}", nodeId: "${escapeInstructionValue(context.nodeId)}", attempt: ${context.attempt}, outcome: "success" or "failure", summary: "<concise summary>" }) as the final MCP action. Do not stop after connecting, after reading task details, or after a normal final answer.`;
+    return `NEW_TASK. call get_task_details({ missionId: "${escapeInstructionValue(context.missionId)}", nodeId: "${escapeInstructionValue(context.nodeId)}" }); the returned objective, assignment, roleInstructions, inbox, and legal targets are the actual task payload, even if no separate inbox payload exists. Execute that task, create the required output, then call complete_task({ missionId: "${escapeInstructionValue(context.missionId)}", nodeId: "${escapeInstructionValue(context.nodeId)}", attempt: ${context.attempt}, outcome: "success" or "failure", summary: "<concise summary>" }) as the final MCP action. Do not stop after connecting, after reading task details, or after a normal final answer.`;
   },
 
   detectPermissionRequest(output: string): PermissionDetectionResult | null {
@@ -294,12 +298,12 @@ export const codexAdapter: CliAdapter = {
         const escapedMissionId = escapeInstructionValue(missionId);
         const escapedNodeId = escapeInstructionValue(nodeId);
         target =
-          `NEW_TASK. call get_task_details({ missionId: "${escapedMissionId}", nodeId: "${escapedNodeId}" }), ` +
-          'execute the actual task from that payload, then call ' +
+          `NEW_TASK. call get_task_details({ missionId: "${escapedMissionId}", nodeId: "${escapedNodeId}" }); ` +
+          'the returned objective, assignment, roleInstructions, inbox, and legal targets are the actual task payload, even if no separate inbox payload exists. Execute that task, create the required output, then call ' +
           `complete_task({ missionId: "${escapedMissionId}", nodeId: "${escapedNodeId}", attempt: ${attempt}, outcome: "success" or "failure", summary: "<concise summary>" }) ` +
           'as the final MCP action. Do not stop after connecting, after reading task details, or after a normal final answer.';
       } else if (sessionIdMatch) {
-        target = `NEW_TASK. call get_current_task({ sessionId: "${escapeInstructionValue(sessionIdMatch[1])}" }), execute the active task it returns, then call complete_task as the final MCP action. Do not stop after connecting, after reading task details, or after a normal final answer.`;
+        target = `NEW_TASK. call get_current_task({ sessionId: "${escapeInstructionValue(sessionIdMatch[1])}" }); the returned objective, assignment, roleInstructions, inbox, and legal targets are the actual task payload, even if no separate inbox payload exists. Execute that task, create the required output, then call complete_task as the final MCP action. Do not stop after connecting, after reading task details, or after a normal final answer.`;
       }
     }
 

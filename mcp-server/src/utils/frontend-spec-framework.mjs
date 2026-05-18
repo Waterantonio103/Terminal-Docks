@@ -25,6 +25,7 @@ export const FRONTEND_SPEC_MODES = {
 export const FRONTEND_SPEC_SCHEMAS = {
   'PRD.md': {
     purpose: 'Product intent and acceptance criteria. Do not use it for visual styling or implementation structure.',
+    outputBudget: '90-140 concise lines for generated App/Site handoffs.',
     requiredSections: [
       'Product Context',
       'Source Material',
@@ -63,6 +64,7 @@ export const FRONTEND_SPEC_SCHEMAS = {
   },
   'DESIGN.md': {
     purpose: 'Visual decisions and design constraints. Do not use it for product scope or route architecture.',
+    outputBudget: '110-170 concise lines for generated App/Site handoffs.',
     structuredBlock: 'Use the canonical design-system frontmatter/template shape. Fill every field with exact, product-specific values; do not copy sample values or leave broad adjectives where tokens, measurements, or component recipes are required.',
     canonicalTemplate: {
       frontmatter: {
@@ -170,6 +172,7 @@ export const FRONTEND_SPEC_SCHEMAS = {
   },
   'structure.md': {
     purpose: 'Information architecture and implementation structure. Do not use it for visual taste or product positioning.',
+    outputBudget: '90-150 concise lines for generated App/Site handoffs.',
     aliases: ['architecture.md'],
     requiredSections: [
       'Purpose',
@@ -360,11 +363,18 @@ function sectionPattern(section) {
 export function evaluateFrontendSpecCoverage({ categoryId = 'marketing_site', suppliedFiles = {} } = {}) {
   const category = FRONTEND_CATEGORY_OVERLAYS[categoryId] ?? FRONTEND_CATEGORY_OVERLAYS.marketing_site;
   const files = ['PRD.md', 'DESIGN.md', 'structure.md'];
+  const hasAnySuppliedFile = Object.values(suppliedFiles).some(value => typeof value === 'string' && value.trim());
+  const filesToEvaluate = hasAnySuppliedFile
+    ? files.filter(fileName => {
+        const aliases = FRONTEND_SPEC_SCHEMAS[fileName].aliases ?? [];
+        return [fileName, ...aliases].some(name => typeof suppliedFiles[name] === 'string' && suppliedFiles[name].trim());
+      })
+    : files;
   const results = {};
   const missingFiles = [];
   const weakFiles = [];
 
-  for (const fileName of files) {
+  for (const fileName of filesToEvaluate) {
     const aliases = FRONTEND_SPEC_SCHEMAS[fileName].aliases ?? [];
     const providedName = [fileName, ...aliases].find(name => typeof suppliedFiles[name] === 'string' && suppliedFiles[name].trim());
     const content = providedName ? suppliedFiles[providedName] : '';

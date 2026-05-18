@@ -34,6 +34,7 @@ import { useMissionSnapshot } from '../../hooks/useMissionSnapshot';
 import { missionOrchestrator } from '../../lib/workflow/MissionOrchestrator';
 
 type MissionTab = 'nodes' | 'preview' | 'output' | 'tasks';
+type DbTaskTree = DbTask & { children?: DbTaskTree[] };
 
 const RUNTIME_ACTIVE_STATES = new Set<MissionAgent['status']>([
   'launching',
@@ -830,21 +831,21 @@ export function MissionControlPane({ pane }: { pane: Pane }) {
   );
 }
 
-function TaskRow({ task, depth }: { task: DbTask & { children?: DbTask[] }; depth: number }) {
+function TaskRow({ task, depth }: { task: DbTaskTree; depth: number }) {
   return (
     <div className="py-1.5 border-b border-border-panel/40 px-3" style={{ paddingLeft: `${12 + depth * 16}px` }}>
       <span className="text-[11px] text-text-secondary">{task.title}</span>
       <span className="ml-2 text-[10px] text-accent-primary uppercase font-bold">{task.status}</span>
-      {task.children?.map(child => <TaskRow key={child.id} task={child as any} depth={depth + 1} />)}
+      {task.children?.map(child => <TaskRow key={child.id} task={child} depth={depth + 1} />)}
     </div>
   );
 }
 
-function TaskTreePanel({ tasks }: { tasks: DbTask[] }) {
+function TaskTreePanel({ tasks }: { tasks: DbTaskTree[] }) {
   const roots = tasks.filter(t => t.parent_id === null);
   return (
     <div className="flex-1 overflow-y-auto">
-      {roots.map(task => <TaskRow key={task.id} task={task as any} depth={0} />)}
+      {roots.map(task => <TaskRow key={task.id} task={task} depth={0} />)}
     </div>
   );
 }

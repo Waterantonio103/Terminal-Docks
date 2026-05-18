@@ -155,6 +155,19 @@ run('Claude empty prompt line with footer chrome maps to idle', () => {
   assert.equal(claudeAdapter.detectReady(promptReady).ready, true);
 });
 
+run('Claude active OSC title maps to high-confidence processing', () => {
+  const activeOutput = [
+    '\u001b]0;⠐ Connect to MCP and execute frontend design task\u0007',
+    '\u001b[38;2;215;119;87m\r✽\u001b[m',
+    'Determining… (2m 7s · ↓ 5.9k tokens · thought for 4s)',
+  ].join('\n');
+  const status = claudeAdapter.detectStatus(activeOutput);
+  assert.equal(status.status, 'processing', status.detail);
+  assert.equal(status.confidence, 'high');
+  assert.match(status.detail, /active work/i);
+  assert.equal(claudeAdapter.detectReady(activeOutput).ready, false);
+});
+
 run('Gemini trust/startup prompt output does not map to idle', () => {
   const prompt = '\u001b]0;Gemini CLI\u0007Trust this folder?';
   assert.equal(geminiAdapter.detectStatus(prompt).status, 'waiting_user_answer');

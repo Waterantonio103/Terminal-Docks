@@ -345,6 +345,10 @@ function buildCodexInteractiveFlagArgs({
       '-c',
       `projects."${trustedProjectKey}".trust_level="trusted"`,
     ] : []),
+    '-c',
+    'approval_policy="never"',
+    '-c',
+    'sandbox_mode="danger-full-access"',
     ...(mcpUrl?.trim() ? [
       '-c',
       `mcp_servers.terminal-docks.url="${mcpUrl.trim()}"`,
@@ -461,13 +465,13 @@ export function buildCodexFollowupTaskSignal({
     const escapedMissionId = escapeInlineInstruction(missionId.trim());
     const escapedNodeId = escapeInlineInstruction(nodeId.trim());
     const safeAttempt = Number.isInteger(attempt) && Number(attempt) > 0 ? Number(attempt) : 1;
-    return `NEW_TASK. call get_task_details({ missionId: "${escapedMissionId}", nodeId: "${escapedNodeId}" }), execute the actual task from that payload, then call complete_task({ missionId: "${escapedMissionId}", nodeId: "${escapedNodeId}", attempt: ${safeAttempt}, outcome: "success" or "failure", summary: "<concise summary>" }) as the final MCP action. Do not stop after connecting, after reading task details, or after a normal final answer.`;
+    return `NEW_TASK. call get_task_details({ missionId: "${escapedMissionId}", nodeId: "${escapedNodeId}" }); the returned objective, assignment, roleInstructions, inbox, and legal targets are the actual task payload, even if no separate inbox payload exists. Execute that task, create the required output, then call complete_task({ missionId: "${escapedMissionId}", nodeId: "${escapedNodeId}", attempt: ${safeAttempt}, outcome: "success" or "failure", summary: "<concise summary>" }) as the final MCP action. Do not stop after connecting, after reading task details, or after a normal final answer.`;
   }
   if (sessionId?.trim()) {
     const escaped = escapeInlineInstruction(sessionId.trim());
-    return `NEW_TASK. call get_current_task({ sessionId: "${escaped}" }), execute the active task it returns, then call complete_task as the final MCP action. Do not stop after connecting, after reading task details, or after a normal final answer.`;
+    return `NEW_TASK. call get_current_task({ sessionId: "${escaped}" }); the returned objective, assignment, roleInstructions, inbox, and legal targets are the actual task payload, even if no separate inbox payload exists. Execute that task, create the required output, then call complete_task as the final MCP action. Do not stop after connecting, after reading task details, or after a normal final answer.`;
   }
-  return 'NEW_TASK. call get_current_task(), execute the active task it returns, then call complete_task as the final MCP action. Do not stop after connecting, after reading task details, or after a normal final answer.';
+  return 'NEW_TASK. call get_current_task(); the returned objective, assignment, roleInstructions, inbox, and legal targets are the actual task payload, even if no separate inbox payload exists. Execute that task, create the required output, then call complete_task as the final MCP action. Do not stop after connecting, after reading task details, or after a normal final answer.';
 }
 
 export interface PtyLaunchOptions {

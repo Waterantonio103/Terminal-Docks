@@ -1,3 +1,5 @@
+import { selectedNeuformEffects } from './neuformEffects.js';
+
 export const FRONTEND_DIRECTION_KIND = 'app_site_frontend_direction' as const;
 export const FRONTEND_DIRECTION_VERSION = 1 as const;
 
@@ -249,16 +251,53 @@ export function summarizeFrontendDirection(spec: Pick<FrontendDirectionSpec, 'la
   ].join('; ');
 }
 
+function normalizedEffectId(effect: FrontendDirectionEffect): string {
+  return String(effect).replace(/_/g, '-').toLowerCase();
+}
+
+function effectGuidance(spec: Pick<FrontendDirectionSpec, 'effects'>): string[] {
+  const ids = spec.effects
+    .filter(effect => effect !== 'none' && effect !== 'agent_decides')
+    .map(normalizedEffectId);
+  if (ids.length === 0) return [];
+  const selectedEffects = selectedNeuformEffects(ids);
+  const effectDetails = selectedEffects.length > 0
+    ? selectedEffects.map(effect => `${effect.title} (${effect.resourceUri}; group: ${effect.group}; intensity: ${effect.intensity}; complexity: ${effect.technicalComplexity})`).join('; ')
+    : ids.join(', ');
+
+  const guidance = [
+    `Implement selected visual effects as first-class design requirements, not optional decoration: ${effectDetails}.`,
+    'For each selected effect, load the matching Neuform effect resource, translate its Intent and Pattern Guidance into exact DESIGN.md decisions, include implementation notes in structure.md/frontendPlan, and verify it in visual review.',
+  ];
+
+  const has = (...needles: string[]) => ids.some(id => needles.some(needle => id.includes(needle)));
+  if (has('webgl', '3d', 'shader', 'particle', 'field', 'globe', 'laser', 'canvas')) {
+    guidance.push('For canvas, WebGL, particle, shader, or 3D effects, include reduced-motion fallback, nonblank render checks, and mobile framing checks.');
+  }
+  if (has('motion', 'gsap', 'kinetic', 'marquee', 'reveal', 'scroll', 'interactive', 'cursor', 'parallax')) {
+    guidance.push('For motion effects, define trigger, duration/easing, hover/focus/touch behavior, and prefers-reduced-motion behavior.');
+  }
+  if (has('glass', 'blur', 'shadow', 'skeuomorphic', 'border', 'gradient', 'material', 'frosted')) {
+    guidance.push('For material effects, specify surface opacity, border, shadow, blur, and contrast constraints so text remains readable.');
+  }
+  if (has('grid', 'framed', 'container', 'wireframe', 'editorial', 'paper', 'agency')) {
+    guidance.push('For layout/framing effects, translate them into section boundaries, spacing rules, divider lines, and responsive behavior.');
+  }
+  return guidance;
+}
+
 export function buildFrontendDirectionGuidance(spec: Pick<FrontendDirectionSpec, 'layout' | 'density' | 'palette' | 'shape' | 'effects' | 'assets' | 'interaction' | 'tone'>): FrontendDirectionAgentGuidance {
   const delegated = delegatedFrontendDirectionSections(spec);
   const doList = [
     `Treat the App/Site theme picker as binding user intent: ${summarizeFrontendDirection(spec)}.`,
     'Translate concrete choices into PRD.md, DESIGN.md, structure.md, frontendSpecs, or frontendPlan as appropriate for the role.',
     'Compare QA and review output against every picker section.',
+    ...effectGuidance(spec),
   ];
   const avoid = [
     'Do not replace delegated sections with hidden defaults; record the agent decision and a short reason.',
     'Do not treat the preview as final content, copy, or a pixel-perfect mockup.',
+    'Do not ignore selected effects because they are visually complex; reduce scope only by preserving the same visual intent with a simpler implementation and record the tradeoff.',
   ];
 
   if (delegated.length > 0) {

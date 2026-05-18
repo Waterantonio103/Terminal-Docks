@@ -10,6 +10,7 @@
   },
   "include": [
     "src/lib/buildPrompt.ts",
+    "src/lib/neuformEffects.ts",
     "src/lib/graphCompiler.ts",
     "src/lib/graphUtils.ts",
     "src/lib/cliCommandBuilders.ts",

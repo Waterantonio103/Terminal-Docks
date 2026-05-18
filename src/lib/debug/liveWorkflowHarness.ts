@@ -1,7 +1,8 @@
 import { invoke } from '@tauri-apps/api/core';
 import { Window } from '@tauri-apps/api/window';
-import type { CompiledMission, WorkflowAgentCli } from '../../store/workspace.js';
+import type { CompiledMission, FrontendSpecCategory, WorkflowAgentCli } from '../../store/workspace.js';
 import { useWorkspaceStore } from '../../store/workspace.js';
+import { isAppSitePresetId, normalizeFrontendDirectionSpec, type FrontendDirectionSpec } from '../frontendDirection.js';
 import { missionOrchestrator } from '../workflow/MissionOrchestrator.js';
 import { workflowOrchestrator } from '../workflow/WorkflowOrchestrator.js';
 import { runtimeManager } from '../runtime/RuntimeManager.js';
@@ -21,10 +22,12 @@ type LiveWorkflowTaskType =
 interface LiveWorkflowHarnessOptions {
   suiteName?: string | null;
   repoRoot: string;
+  directOutputDir?: string | null;
   outputPath: string;
   screenwatchDir: string;
   screenwatchEnabled: boolean;
   screenwatchIntervalMs: number;
+  frontendDirection?: FrontendDirectionSpec | null;
   clis: WorkflowAgentCli[];
   phases: LiveWorkflowPhase[];
   cliSequences: WorkflowAgentCli[][];
@@ -94,6 +97,35 @@ const LIVE_WORKFLOW_FILTER: string | undefined =
 
 function liveWorkflowModelForCli(cli: WorkflowAgentCli): string | undefined {
   return LIVE_WORKFLOW_CLI_MODELS[cli];
+}
+
+function parseLiveWorkflowFrontendDirection(raw: unknown): FrontendDirectionSpec | null {
+  if (typeof raw !== 'string' || !raw.trim()) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object') return null;
+    const effects = Array.isArray(parsed.effects) ? parsed.effects : [];
+    const interaction = Array.isArray(parsed.interaction) ? parsed.interaction : [];
+    if (!parsed.layout || !parsed.density || !parsed.palette || !parsed.shape || effects.length === 0 || !parsed.assets || interaction.length === 0 || !parsed.tone) {
+      console.warn('[liveWorkflowHarness] Ignoring incomplete VITE_LIVE_WORKFLOW_FRONTEND_DIRECTION_JSON; choose at least one value in every App/Site theme picker section.');
+      return null;
+    }
+    return normalizeFrontendDirectionSpec({
+      layout: parsed.layout,
+      density: parsed.density,
+      palette: parsed.palette,
+      shape: parsed.shape,
+      effects,
+      assets: parsed.assets,
+      interaction,
+      tone: parsed.tone,
+      notes: typeof parsed.notes === 'string' ? parsed.notes : undefined,
+      preview: parsed.preview,
+    });
+  } catch (error) {
+    console.warn('[liveWorkflowHarness] Ignoring invalid VITE_LIVE_WORKFLOW_FRONTEND_DIRECTION_JSON', error);
+    return null;
+  }
 }
 
 const PROMPT_03_CLI = VALID_CLIS.includes((import.meta.env.VITE_LIVE_WORKFLOW_PROMPT03_CLI || '').toLowerCase() as WorkflowAgentCli)
@@ -977,7 +1009,34 @@ interface Prompt06WorkflowSpec {
   suiteSlug?: string;
   suiteDirName?: string;
   expectedFailure?: boolean;
+  presetId?: string;
+  frontendMode?: 'off' | 'aligned' | 'strict_ui';
+  frontendCategory?: FrontendSpecCategory;
+  frontendDirection?: FrontendDirectionSpec;
+  specProfile?: 'none' | 'frontend_three_file';
 }
+
+const STARV_EXPANDED_THEME_DIRECTION = normalizeFrontendDirectionSpec({
+  layout: 'landing_page',
+  density: 'balanced',
+  palette: {
+    kind: 'custom',
+    id: 'starv_fresh_editorial',
+    label: 'Starv fresh editorial',
+    colors: ['#F7FFF9', '#0F766E', '#1F2937'],
+  },
+  shape: 'slightly_rounded',
+  effects: ['light-mode-paper-technical', 'number-details'],
+  assets: 'data_visualization',
+  interaction: ['basic_navigation', 'forms'],
+  tone: 'consumer',
+  preview: {
+    label: 'Starv landing page low-fidelity preview',
+    note: 'Hero-led marketing page with product-flow, plan, grocery logic, and FAQ sections.',
+    lowFidelity: true,
+    nonAuthoritative: true,
+  },
+});
 
 const PROMPT_06_WORKFLOWS: Prompt06WorkflowSpec[] = [
   {
@@ -1177,6 +1236,59 @@ const PROMPT_03_UI_MODE_WORKFLOWS: Prompt06WorkflowSpec[] = [
       prompt06Edge('interaction-qa', 'builder'),
       prompt06Edge('builder', 'accessibility'),
       prompt06Edge('accessibility', 'visual-polish'),
+    ],
+  },
+];
+
+const EXPANDED_APP_SITE_PRESET_WORKFLOWS: Prompt06WorkflowSpec[] = [
+  {
+    name: 'starv-expanded-app-site',
+    title: 'Expanded App/Site preset smoke',
+    task: [
+      'Run the actual expanded App/Site frontend preset as Strict UI for a fictional product called Starv.',
+      'Build a polished marketing/product website for Starv, an AI meal planning service for busy professionals who want fast grocery-aware weeknight meals.',
+      'The workflow must produce compact PRD.md, DESIGN.md, structure.md, then one runnable app folder named starv-site.',
+      'Builder ownership is staged: frontend_builder_core creates starv-site; frontend_builder_states patches that same folder for interactions and UI states; frontend_builder_responsive patches that same folder for responsive fit and text overflow. Do not create starv-states-site, starv-responsive-site, or any second app folder.',
+      'Final reviewers must inspect the same starv-site output and complete promptly after the required files exist.',
+    ].join(' '),
+    expectedFiles: [
+      'PRD.md',
+      'DESIGN.md',
+      'structure.md',
+      'starv-site/index.html',
+      'starv-site/src/styles/styles.css',
+      'starv-site/src/scripts/main.js',
+      'starv-site/README.md',
+    ],
+    runInstruction: 'Open starv-site/index.html in a browser and exercise at least one interactive state.',
+    presetId: 'app_site_expanded',
+    frontendMode: 'strict_ui',
+    frontendCategory: 'marketing_site',
+    frontendDirection: STARV_EXPANDED_THEME_DIRECTION,
+    specProfile: 'frontend_three_file',
+    agents: [
+      prompt06Agent('frontend_product', 'frontend_product', 'Product Agent', 'Create PRD.md and workspace product decisions for the Starv marketing/product website.', 'codex'),
+      prompt06Agent('frontend_designer', 'frontend_designer', 'Designer', 'Create DESIGN.md with concrete visual tokens, layout rules, responsive rules, and accessibility constraints.', 'codex'),
+      prompt06Agent('frontend_architect', 'frontend_architect', 'Architecture Agent', 'Create structure.md with file ownership, data model, implementation plan, and verification commands only.', 'codex'),
+      prompt06Agent('frontend_builder_core', 'frontend_builder', 'Core Builder', 'Create the first complete runnable implementation in starv-site with index.html, src/styles/styles.css, src/scripts/main.js, and README.md.', 'codex'),
+      prompt06Agent('frontend_builder_states', 'frontend_builder', 'State Builder', 'Patch only the existing starv-site folder for interactions, empty/loading/error/success states, focus states, and stateful copy.', 'claude'),
+      prompt06Agent('frontend_builder_responsive', 'frontend_builder', 'Responsive Builder', 'Patch only the existing starv-site folder for responsive layout, first-viewport fit, text overflow, and reduced motion.', 'codex'),
+      prompt06Agent('interaction_qa', 'interaction_qa', 'Interaction QA', 'Verify Starv interaction behavior and responsive behavior; patch only a narrow issue if needed.', 'codex'),
+      prompt06Agent('accessibility_reviewer', 'accessibility_reviewer', 'Accessibility Reviewer', 'Review labels, contrast, keyboard affordances, focus states, non-color-only indicators, and text fit.', 'codex'),
+      prompt06Agent('visual_polish_reviewer', 'visual_polish_reviewer', 'Visual Polish Reviewer', 'Review visible quality, marketing-site specificity, first viewport, assets, spacing, and responsive polish.', 'codex'),
+      prompt06Agent('reviewer_final', 'reviewer', 'Final Reviewer', 'Verify required files, README open instructions, and final readiness, then complete with a concise verdict.', 'codex'),
+    ],
+    edges: [
+      prompt06Edge('frontend_product', 'frontend_designer'),
+      prompt06Edge('frontend_designer', 'frontend_architect'),
+      prompt06Edge('frontend_architect', 'frontend_builder_core'),
+      prompt06Edge('frontend_builder_core', 'frontend_builder_states'),
+      prompt06Edge('frontend_builder_states', 'frontend_builder_responsive'),
+      prompt06Edge('frontend_builder_responsive', 'interaction_qa'),
+      prompt06Edge('interaction_qa', 'accessibility_reviewer'),
+      prompt06Edge('interaction_qa', 'visual_polish_reviewer'),
+      prompt06Edge('accessibility_reviewer', 'reviewer_final'),
+      prompt06Edge('visual_polish_reviewer', 'reviewer_final'),
     ],
   },
 ];
@@ -2859,6 +2971,9 @@ function buildPrompt06Mission(
     `LIVE_PROMPT_${promptNumber} workflow=${spec.name}.`,
     `Workspace/output directory: ${outputDir}.`,
     spec.task,
+    spec.frontendDirection
+      ? `Use this App/Site theme picker direction as binding visual intent: ${spec.frontendDirection.summary}.`
+      : '',
     `Create or update only files inside ${outputDir}.`,
     `Expected concrete project files: ${spec.expectedFiles.join(', ')}.`,
     `Runnable verification: ${spec.runInstruction}`,
@@ -2878,7 +2993,7 @@ function buildPrompt06Mission(
     'Keep the project compact and bounded: no large embedded assets, no long generated data dumps, and target small text/source files.',
     'Do not create screenshots, preview images, generated media, or dev-server evidence unless this node is explicitly the tester and the project cannot be verified from files alone.',
     'This is a reliability test, so finish the assigned role promptly and do not continue polishing after the expected files exist.',
-    'Each agent must call get_task_details, inspect upstream context if present, perform its role, then complete the node with complete_task or handoff_task.',
+    'Each agent must inspect the current task details, inspect upstream context if present, perform its role, then complete the node with complete_task or handoff_task.',
     'Do not stop after a normal final answer; the workflow only progresses after the MCP completion or handoff tool succeeds.',
     'The final reviewer must ensure expected files exist, README contains the run/open instruction, and the output is ready for a user to open or run locally.',
     'Tester and reviewer nodes should not do extended polish once those checks pass; complete the MCP node promptly.',
@@ -2892,6 +3007,10 @@ function buildPrompt06Mission(
       prompt,
       mode: 'build',
       workspaceDir: outputDir,
+      frontendMode: spec.frontendMode ?? (promptNumber === '03' ? 'strict_ui' : undefined),
+      frontendCategory: spec.frontendCategory ?? (promptNumber === '03' ? 'saas_dashboard' : undefined),
+      frontendDirection: spec.frontendDirection,
+      specProfile: spec.specProfile,
     },
     metadata: {
       compiledAt: Date.now(),
@@ -2899,10 +3018,12 @@ function buildPrompt06Mission(
       startNodeIds,
       executionLayers: layers,
       authoringMode: 'graph',
-      presetId: `live:${suiteSlug}:${spec.name}`,
+      presetId: spec.presetId ?? `live:${suiteSlug}:${spec.name}`,
       runVersion: 1,
-      frontendMode: promptNumber === '03' ? 'strict_ui' : undefined,
-      frontendCategory: promptNumber === '03' ? 'saas_dashboard' : undefined,
+      frontendMode: spec.frontendMode ?? (promptNumber === '03' ? 'strict_ui' : undefined),
+      frontendCategory: spec.frontendCategory ?? (promptNumber === '03' ? 'saas_dashboard' : undefined),
+      frontendDirection: spec.frontendDirection,
+      specProfile: spec.specProfile,
     },
     nodes: spec.agents.map((agent, index) => {
       const cli = agent.cli ?? 'codex';
@@ -3003,9 +3124,16 @@ async function runPrompt06Workflow(
   const startedAt = Date.now();
   const suffix = `${index + 1}-${spec.name}-${Date.now().toString(36)}`;
   const suiteDir = joinWindowsPath(options.repoRoot, 'docks-testing', suiteDirName);
-  await ensureNestedDirectory(suiteDir);
-  const outputDir = await ensureWorkflowDirectory(suiteDir, `workflow-${String(index + 1).padStart(2, '0')}-${spec.name}-${suffix}`);
-  const mission = buildPrompt06Mission(spec, outputDir, suffix, promptNumber, suiteSlug);
+  const outputDir = options.directOutputDir
+    ? await ensureNestedDirectory(options.directOutputDir)
+    : await (async () => {
+        await ensureNestedDirectory(suiteDir);
+        return ensureWorkflowDirectory(suiteDir, `workflow-${String(index + 1).padStart(2, '0')}-${spec.name}-${suffix}`);
+      })();
+  const effectiveSpec = options.frontendDirection && isAppSitePresetId(spec.presetId)
+    ? { ...spec, frontendDirection: options.frontendDirection }
+    : spec;
+  const mission = buildPrompt06Mission(effectiveSpec, outputDir, suffix, promptNumber, suiteSlug);
   const missionCliSequence = mission.nodes.map(node => node.terminal.cli);
   const missionCliLabel = missionCliSequence.join('>');
   const screenwatchDir = joinWindowsPath(options.screenwatchDir, mission.missionId);
@@ -3678,7 +3806,7 @@ async function runPrompt05ManualWorkflow(
       durationMs: Date.now() - startedAt,
       outputDir,
       actionResult,
-      nodeFinalStates: Object.values(finalRun.nodeStates).map((nodeState: any) => ({
+      nodeFinalStates: Object.values(finalRun.nodeStates).map(nodeState => ({
         nodeId: nodeState.nodeId,
         state: nodeState.state,
         attempt: nodeState.attempt,
@@ -3695,7 +3823,7 @@ async function runPrompt05ManualWorkflow(
       durationMs: Date.now() - startedAt,
       outputDir,
       error: error instanceof Error ? error.message : String(error),
-      nodeFinalStates: finalRun ? Object.values(finalRun.nodeStates).map((nodeState: any) => ({
+      nodeFinalStates: finalRun ? Object.values(finalRun.nodeStates).map(nodeState => ({
         nodeId: nodeState.nodeId,
         state: nodeState.state,
         attempt: nodeState.attempt,
@@ -3939,6 +4067,19 @@ export async function runLiveWorkflowHarness(options: LiveWorkflowHarnessOptions
     return;
   }
 
+  if (options.suiteName === 'app_site_expanded_preset') {
+    await runPromptSpecSuiteHarness(
+      { ...options, workflowTimeoutMs: Math.max(options.workflowTimeoutMs, 600_000) },
+      EXPANDED_APP_SITE_PRESET_WORKFLOWS,
+      'app_site_expanded_preset',
+      'expanded-app-site',
+      'app-site-expanded',
+      'app-site-expanded',
+      'Runs the exact expanded App/Site preset shape through MissionOrchestrator, WorkflowOrchestrator, RuntimeManager, and PTY-backed frontend-role sessions in a fresh workspace.',
+    );
+    return;
+  }
+
   if (options.suiteName === 'prompt05_manual_intervention') {
     await runPrompt05ManualInterventionHarness(options);
     return;
@@ -4042,6 +4183,8 @@ export async function runLiveWorkflowHarness(options: LiveWorkflowHarnessOptions
       roleSequences: options.roleSequences,
       taskTypes: options.taskTypes,
       workflowTimeoutMs: options.workflowTimeoutMs,
+      directOutputDir: options.directOutputDir ?? null,
+      frontendDirection: options.frontendDirection ?? null,
     },
     results: [] as LiveWorkflowResult[],
   };
@@ -4088,10 +4231,12 @@ export function liveWorkflowHarnessOptionsFromEnv(): LiveWorkflowHarnessOptions 
   return {
     suiteName: env.VITE_LIVE_WORKFLOW_SUITE || null,
     repoRoot,
+    directOutputDir: env.VITE_LIVE_WORKFLOW_OUTPUT_DIR || null,
     outputPath: env.VITE_LIVE_WORKFLOW_REPORT || `${repoRoot}\\.tmp-tests\\live-workflow-report.json`,
     screenwatchDir: env.VITE_LIVE_WORKFLOW_SCREENWATCH_DIR || `${repoRoot}\\.tmp-tests\\ui-screenwatch`,
     screenwatchEnabled: env.VITE_LIVE_WORKFLOW_SCREENWATCH !== '0',
     screenwatchIntervalMs: Math.max(1_000, Number(env.VITE_LIVE_WORKFLOW_SCREENWATCH_INTERVAL_MS || 5_000)),
+    frontendDirection: parseLiveWorkflowFrontendDirection(env.VITE_LIVE_WORKFLOW_FRONTEND_DIRECTION_JSON),
     clis: parseCsv(env.VITE_LIVE_WORKFLOW_CLIS, VALID_CLIS, VALID_CLIS),
     phases: parseCsv(env.VITE_LIVE_WORKFLOW_PHASES, VALID_PHASES, VALID_PHASES),
     cliSequences: parseCliSequences(env.VITE_LIVE_WORKFLOW_COMBOS),

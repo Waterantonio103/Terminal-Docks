@@ -1,3 +1,6 @@
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { db } from '../db/index.mjs';
 import { parseJsonSafe } from '../utils/index.mjs';
 import { getMissionNode, getMissionNodeRuntime, getRuntimeSessionByAttempt, getLegalOutgoingTargets, loadCompiledMissionRecord } from '../utils/workflow.mjs';
@@ -8,6 +11,60 @@ const FINAL_README_INSTRUCTION =
   'Final README instruction: before completing, create one very short human guidance file for the work produced by this workflow. Prefer the generated app/target folder, and make the run commands start by changing into that folder. If README.md does not exist there, create README.md. If README.md already exists, do not overwrite or append to it by default; create INSTRUCTIONS.md instead. If both files already exist, update workspace context or the completion payload instead of creating another markdown file. Keep it concise: summarize the files and folders created or changed, note the main entry points, and include only the concrete run/test commands the user needs, such as cd into the created app folder and npm run dev. Do not write a long architecture rundown.';
 
 const APP_SITE_PRESET_IDS = new Set(['app_site_small', 'frontend_ui_delivery', 'app_site_expanded']);
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const NEUFORM_INDEX_PATH = join(__dirname, '..', 'resources', 'frontend-patterns', 'neuform', 'index.json');
+
+let neuformEffectCache = null;
+
+function pathSlug(path) {
+  return String(path ?? '').split('/').pop()?.replace(/\.md$/, '') ?? String(path ?? '');
+}
+
+function unsuffixedSlug(id) {
+  return String(id ?? '').replace(/-[a-z0-9]{6}$/, '');
+}
+
+function getNeuformEffectMap() {
+  if (neuformEffectCache) return neuformEffectCache;
+  const map = new Map();
+  try {
+    const index = JSON.parse(readFileSync(NEUFORM_INDEX_PATH, 'utf8'));
+    for (const entry of Array.isArray(index?.entries) ? index.entries : []) {
+      if (!entry?.themePickerReady || !entry?.path) continue;
+      const originId = entry?.source?.originId ?? pathSlug(entry.path);
+      const metadata = {
+        id: entry.id ?? `neuform_${originId}`,
+        title: entry.title ?? originId,
+        path: entry.path,
+        resourceUri: `frontend-patterns://neuform/${pathSlug(entry.path)}`,
+        group: entry?.effectPicker?.group ?? entry?.pickerGroup ?? 'Effects',
+        intensity: entry?.effectPicker?.intensity ?? 'balanced',
+        technicalComplexity: entry?.effectPicker?.technicalComplexity ?? 'medium',
+      };
+      for (const alias of [metadata.id, metadata.id.replace(/^neuform_/, ''), originId, pathSlug(entry.path), unsuffixedSlug(originId), unsuffixedSlug(pathSlug(entry.path))]) {
+        map.set(alias, metadata);
+        map.set(alias.replace(/_/g, '-'), metadata);
+      }
+    }
+  } catch {
+    // Keep task details available even if optional frontend resources are missing.
+  }
+  neuformEffectCache = map;
+  return neuformEffectCache;
+}
+
+function selectedNeuformEffects(effectIds) {
+  const effectMap = getNeuformEffectMap();
+  const selected = [];
+  const seen = new Set();
+  for (const rawId of Array.isArray(effectIds) ? effectIds : []) {
+    const effect = effectMap.get(String(rawId)) ?? effectMap.get(String(rawId).replace(/_/g, '-'));
+    if (!effect || seen.has(effect.id)) continue;
+    selected.push(effect);
+    seen.add(effect.id);
+  }
+  return selected;
+}
 
 function isAppSiteMission(mission) {
   const presetId = mission?.metadata?.presetId ?? mission?.task?.presetId;
@@ -22,20 +79,31 @@ function getFrontendDirection(mission) {
   return candidate;
 }
 
-function buildFrontendDirectionInstruction(frontendDirection) {
+function buildFrontendDirectionInstruction(frontendDirection, selectedEffects = selectedNeuformEffects(frontendDirection?.effects)) {
   if (!frontendDirection) return '';
   const delegated = Array.isArray(frontendDirection.delegatedSections) && frontendDirection.delegatedSections.length > 0
     ? ` Delegated sections: ${frontendDirection.delegatedSections.join(', ')}. For those sections, choose a fitting concrete decision and record a one-sentence reason in shared context or completion payload so the final README can include a numbered Agent Decisions section.`
     : '';
-  return `App/Site theme picker direction: treat this as binding user intent for PRD.md, DESIGN.md, structure.md, frontendSpecs/frontendPlan, implementation, and review. ${frontendDirection.summary ?? ''}.${delegated} The preview is low-fidelity and non-authoritative; use it only for broad layout, density, and composition.`;
+  const doGuidance = Array.isArray(frontendDirection.agentGuidance?.do) && frontendDirection.agentGuidance.do.length > 0
+    ? ` Do: ${frontendDirection.agentGuidance.do.join(' ')}`
+    : '';
+  const avoidGuidance = Array.isArray(frontendDirection.agentGuidance?.avoid) && frontendDirection.agentGuidance.avoid.length > 0
+    ? ` Avoid: ${frontendDirection.agentGuidance.avoid.join(' ')}`
+    : '';
+  const effectResources = selectedEffects.length > 0
+    ? ` Selected Neuform effect resources: ${selectedEffects.map(effect => `${effect.title} (${effect.resourceUri}; group: ${effect.group}; intensity: ${effect.intensity}; complexity: ${effect.technicalComplexity})`).join('; ')}. Load only these selected effect docs and implement their Intent, Pattern Guidance, DESIGN.md Translation, and Implementation Guardrails.`
+    : '';
+  return `App/Site theme picker direction: treat this as binding user intent for PRD.md, DESIGN.md, structure.md, frontendSpecs/frontendPlan, implementation, and review. ${frontendDirection.summary ?? ''}.${delegated}${effectResources}${doGuidance}${avoidGuidance} The preview is low-fidelity and non-authoritative; use it only for broad layout, density, and composition.`;
 }
 
-function buildFrontendDirectionReviewChecklist(frontendDirection) {
+function buildFrontendDirectionReviewChecklist(frontendDirection, selectedEffects = selectedNeuformEffects(frontendDirection?.effects)) {
   if (!frontendDirection) return null;
   return {
     expectation: 'Review generated output against every App/Site theme picker section.',
     sections: ['layout', 'density', 'palette', 'shape', 'effects', 'assets', 'interaction', 'tone'],
     allowedResults: ['pass', 'fail', 'delegated'],
+    selectedEffects: Array.isArray(frontendDirection.effects) ? frontendDirection.effects : [],
+    selectedEffectResources: selectedEffects,
     failConcreteMismatches: true,
     flagDelegatedWithoutReason: true,
     previewUse: 'secondary_only',
@@ -94,6 +162,96 @@ function joinInstructionParts(...parts) {
     .map(part => (typeof part === 'string' ? part.trim() : ''))
     .filter(Boolean)
     .join('\n\n');
+}
+
+function readWorkspaceContext(missionId, keys = null) {
+  const scopedMissionId = typeof missionId === 'string' && missionId.trim() ? missionId.trim() : '__global__';
+  const rows = Array.isArray(keys) && keys.length > 0
+    ? db.prepare(
+        `SELECT mission_id, key, value, updated_by, datetime(updated_at, 'localtime') AS updated_at
+           FROM workspace_context
+          WHERE mission_id = ? AND key IN (${keys.map(() => '?').join(',')})
+          ORDER BY key`
+      ).all(scopedMissionId, ...keys)
+    : db.prepare(
+        `SELECT mission_id, key, value, updated_by, datetime(updated_at, 'localtime') AS updated_at
+           FROM workspace_context
+          WHERE mission_id = ?
+          ORDER BY key`
+      ).all(scopedMissionId);
+
+  const context = {};
+  for (const row of rows) {
+    context[row.key] = {
+      value: parseJsonSafe(row.value, row.value),
+      updatedBy: row.updated_by,
+      updatedAt: row.updated_at,
+      missionId: row.mission_id,
+    };
+  }
+  return context;
+}
+
+function buildFrontendRuntimeGuidance(node, mission) {
+  const roleId = node?.roleId ?? '';
+  const nodeId = node?.id ?? '';
+  const presetId = mission?.metadata?.presetId ?? mission?.task?.presetId ?? null;
+  const parts = [
+    'Runtime efficiency: use get_task_details as the primary source of truth. Use get_workspace_context only for keys you still need; do not search .terminal-docks caches for tool/resource names.',
+    'For strict UI spec files, keep durable handoffs concise and complete: PRD.md about 90-140 lines, DESIGN.md about 110-170 lines, structure.md about 90-150 lines. Validate once after writing, then make only narrow patches.',
+    'Use update_workspace_context for frontendSpecs/frontendPlan summaries and write_artifact only when a durable artifact is useful; submit_summary is optional.',
+  ];
+
+  if (roleId === 'frontend_product') {
+    parts.push('Product lane: write only product decisions in PRD.md. Prefer a compact, reviewer-usable brief over a long narrative.');
+  } else if (roleId === 'frontend_designer') {
+    parts.push('Design lane: write exact tokens and component recipes without a large inspiration essay. Pick at most two optional pattern/reference resources.');
+  } else if (roleId === 'frontend_architect') {
+    parts.push('Architecture lane: write implementation structure, file ownership, data model, and verification commands only. Do not include product or visual-spec prose already owned upstream.');
+  } else if (roleId === 'frontend_builder' && presetId === 'app_site_expanded') {
+    if (nodeId.includes('frontend_builder_core')) {
+      parts.push('Expanded builder lane: CORE owns the initial generated app folder and first complete runnable implementation. Create one app folder and complete after a focused desktop/mobile smoke check. Do not wait for other builders.');
+    } else if (nodeId.includes('frontend_builder_states')) {
+      parts.push('Expanded builder lane: STATES is a follow-up patch pass on the existing app from CORE. Do not create a second app folder. Add or improve interactions, empty/loading/error/success states, focus states, and stateful copy, then complete.');
+    } else if (nodeId.includes('frontend_builder_responsive')) {
+      parts.push('Expanded builder lane: RESPONSIVE is a follow-up patch pass on the same app after STATES. Do not create a second app folder. Focus responsive layout, first-viewport fit, text overflow, reduced motion, and final screenshot evidence, then complete.');
+    }
+  }
+
+  return parts.join(' ');
+}
+
+function buildFrontendToolHints(frontendFramework, selectedFrontendEffects) {
+  if (!frontendFramework) return null;
+  return {
+    exactTools: [
+      'get_task_details',
+      'read_inbox',
+      'get_workspace_context',
+      'update_workspace_context',
+      'get_frontend_spec_framework',
+      'evaluate_frontend_spec_intake',
+      'request_file_lock',
+      'validated_write',
+      'validated_patch',
+      'release_file_lock',
+      'write_artifact',
+      'complete_task',
+    ],
+    resourceUris: [
+      'frontend-library://index',
+      'frontend-patterns://neuform/index',
+      'frontend-reference://ui/index',
+      ...selectedFrontendEffects.map(effect => effect.resourceUri),
+    ],
+    outputBudgets: {
+      'PRD.md': '90-140 lines',
+      'DESIGN.md': '110-170 lines',
+      'structure.md': '90-150 lines',
+      builderCompletion: 'concise payload listing generated app folder and changed files',
+    },
+    validationPolicy: 'Validate once after writing required spec files; if accepted, do not re-run the same full-text validation.',
+  };
 }
 
 function isFinalReadmeEnabled(mission) {
@@ -274,8 +432,9 @@ export function buildTaskDetails(missionId, nodeId) {
   const frontendCategory = record.mission.metadata?.frontendCategory ?? 'marketing_site';
   const specProfile = record.mission.metadata?.specProfile ?? 'none';
   const frontendDirection = getFrontendDirection(record.mission);
-  const frontendDirectionInstruction = buildFrontendDirectionInstruction(frontendDirection);
-  const frontendDirectionReview = buildFrontendDirectionReviewChecklist(frontendDirection);
+  const selectedFrontendEffects = frontendDirection ? selectedNeuformEffects(frontendDirection.effects) : [];
+  const frontendDirectionInstruction = buildFrontendDirectionInstruction(frontendDirection, selectedFrontendEffects);
+  const frontendDirectionReview = buildFrontendDirectionReviewChecklist(frontendDirection, selectedFrontendEffects);
   const frontendFramework = frontendMode !== 'off' || specProfile === 'frontend_three_file'
     ? buildFrontendSpecFramework({ categoryId: frontendCategory, mode: frontendMode === 'off' ? 'aligned' : frontendMode })
     : null;
@@ -285,8 +444,11 @@ export function buildTaskDetails(missionId, nodeId) {
   const nodeInstructionOverride = joinInstructionParts(
     node.instructionOverride ?? '',
     frontendDirectionInstruction,
+    buildFrontendRuntimeGuidance(node, record.mission),
     isFinalReadmeOwner ? FINAL_README_INSTRUCTION : '',
   );
+  const workspaceContext = readWorkspaceContext(missionId);
+  const frontendToolHints = buildFrontendToolHints(frontendFramework, selectedFrontendEffects);
 
   return {
     missionId,
@@ -338,6 +500,8 @@ export function buildTaskDetails(missionId, nodeId) {
     inbox,
     pendingPushes,
     upstreamContext,
+    workspaceContext,
+    frontendToolHints,
     completionContract: {
       requiredTool: 'complete_task',
       authority: 'MCP task:completed event',
@@ -363,6 +527,8 @@ export function buildTaskDetails(missionId, nodeId) {
       frontendDirection,
       frontendDirectionReview,
       frontendFramework,
+      frontendToolHints,
+      workspaceContext,
     },
   };
 }

@@ -135,7 +135,35 @@ fn codex_project_key(path: &std::path::Path) -> String {
     path.to_string_lossy()
         .replace('/', "\\")
         .trim_end_matches('\\')
-        .to_lowercase()
+        .to_string()
+}
+
+fn append_codex_trust_entry(next: &mut String, project_key: &str) {
+    let table_header = format!("[projects.'{}']", project_key);
+    if next.contains(&table_header) {
+        return;
+    }
+    if !next.is_empty() && !next.ends_with('\n') {
+        next.push('\n');
+    }
+    next.push('\n');
+    next.push_str(&table_header);
+    next.push_str("\ntrust_level = \"trusted\"\n");
+}
+
+fn seed_codex_noninteractive_config(next: &mut String) {
+    if !next.contains("approval_policy") {
+        if !next.is_empty() && !next.ends_with('\n') {
+            next.push('\n');
+        }
+        next.push_str("\napproval_policy = \"never\"\n");
+    }
+    if !next.contains("sandbox_mode") {
+        if !next.is_empty() && !next.ends_with('\n') {
+            next.push('\n');
+        }
+        next.push_str("sandbox_mode = \"danger-full-access\"\n");
+    }
 }
 
 fn seed_codex_trust_if_needed(
@@ -162,20 +190,11 @@ fn seed_codex_trust_if_needed(
 
     fs::create_dir_all(&codex_home).map_err(|e| e.to_string())?;
     let config_path = codex_home.join("config.toml");
-    let project_key = codex_project_key(&find_project_trust_root(cwd));
-    let table_header = format!("[projects.'{}']", project_key);
     let existing = fs::read_to_string(&config_path).unwrap_or_default();
-    if existing.contains(&table_header) {
-        return Ok(());
-    }
-
     let mut next = existing;
-    if !next.is_empty() && !next.ends_with('\n') {
-        next.push('\n');
-    }
-    next.push('\n');
-    next.push_str(&table_header);
-    next.push_str("\ntrust_level = \"trusted\"\n");
+    append_codex_trust_entry(&mut next, &codex_project_key(&PathBuf::from(cwd)));
+    append_codex_trust_entry(&mut next, &codex_project_key(&find_project_trust_root(cwd)));
+    seed_codex_noninteractive_config(&mut next);
     fs::write(config_path, next).map_err(|e| e.to_string())
 }
 

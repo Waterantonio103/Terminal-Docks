@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useWorkspaceStore } from '../../store/workspace';
 import { open } from '@tauri-apps/plugin-dialog';
-import { Folder, File as FileIcon, ChevronRight, ChevronDown, Lock, FilePlus, FolderPlus, Trash2, Edit2, Copy, Scissors, Clipboard, ExternalLink, Search, FileText } from 'lucide-react';
+import { Folder, File as FileIcon, ChevronRight, ChevronDown, Lock, FilePlus, FolderPlus, Trash2, Edit2, Copy, Scissors, Clipboard, ExternalLink, Search, FileText, Terminal as TerminalIcon } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
 import { writeText } from '@tauri-apps/plugin-clipboard-manager';
 import { FileTypeIcon } from '../../lib/fileIcons';
@@ -76,7 +76,10 @@ function TreeNode({ file, parentPath, locks, refreshSignal, onContextMenu }: { f
     <div className="pl-2">
       <div
         onMouseDown={onDragStart}
-        onContextMenu={(e) => onContextMenu(e, file, parentPath)}
+        onContextMenu={(e) => {
+          e.stopPropagation();
+          onContextMenu(e, file, parentPath);
+        }}
         className="flex items-center gap-1 py-0.5 hover:background-bg-surface cursor-pointer rounded px-1 text-xs transition-colors group select-none"
         onClick={handleClick}
       >
@@ -183,6 +186,7 @@ export function FileTree() {
   }, []);
 
   const getFullPath = (file: DirEntry, parent: string) => {
+    if (!file.name) return parent;
     return parent + (parent.endsWith('/') || parent.endsWith('\\') ? '' : '/') + file.name;
   };
 
@@ -296,6 +300,14 @@ export function FileTree() {
     }
   };
 
+  const handleOpenTerminalHere = () => {
+    if (!contextMenu) return;
+    const targetPath = contextMenu.file.isDirectory ? getFullPath(contextMenu.file, contextMenu.parentPath) : contextMenu.parentPath;
+    const folderName = targetPath.split(/[\\/]/).filter(Boolean).pop() || 'Workspace';
+    closeContextMenu();
+    addPane('terminal', `Terminal: ${folderName}`, { cwd: targetPath });
+  };
+
   const submitPrompt = async () => {
     if (!promptState || !promptValue.trim()) return;
 
@@ -374,6 +386,7 @@ export function FileTree() {
               <ContextMenuItem icon={<FolderPlus size={12}/>} label="New Folder" onClick={handleCreateFolder} />
               <div className="h-px bg-border-panel my-1" />
               <ContextMenuItem icon={<Search size={12}/>} label="Find in Folder..." onClick={handleFindInFolder} />
+              <ContextMenuItem icon={<TerminalIcon size={12}/>} label="Open Terminal Here" onClick={handleOpenTerminalHere} />
               <div className="h-px bg-border-panel my-1" />
             </>
           ) : null}

@@ -219,6 +219,8 @@ export function activateNode(
   nodeState.state = 'queued';
   nodeState.activatedAt = Date.now();
   nodeState.completedAt = undefined;
+  nodeState.runtimeSession = undefined;
+  nodeState.activePermission = undefined;
 
   nodeState.attempts = [
     ...nodeState.attempts,

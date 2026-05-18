@@ -75,6 +75,20 @@ run('claude visible input prompt wins over stale spinner glyphs', () => {
   assert.equal(claudeAdapter.detectReady(promptReady).ready, true);
 });
 
+run('claude active OSC title counts as high-confidence processing', () => {
+  const activeOutput = [
+    '\u001b]0;⠐ Connect to MCP and execute frontend design task\u0007',
+    '\u001b[38;2;215;119;87m\r✽\u001b[m',
+    'Determining… (2m 7s · ↓ 5.9k tokens · thought for 4s)',
+  ].join('\n');
+
+  const status = claudeAdapter.detectStatus(activeOutput);
+  assert.equal(status.status, 'processing', status.detail);
+  assert.equal(status.confidence, 'high');
+  assert.match(status.detail, /active work/i);
+  assert.equal(claudeAdapter.detectReady(activeOutput).ready, false);
+});
+
 run('claude empty visible prompt with footer chrome maps to idle', () => {
   const promptReady = [
     'Claude Code v2.1.131',

@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { db } from '../db/index.mjs';
 import { makeToolText, appendWorkflowEvent } from '../utils/index.mjs';
 import { emitAgentEvent } from '../state.mjs';
+import { persistArtifact } from './artifacts.mjs';
 import {
   buildFrontendSpecFramework,
   classifyFrontendCategory,
@@ -22,13 +23,14 @@ export function registerQualityTools(server, getSessionId) {
       details: z.string().optional(),
     }
   }, async (args) => {
-    return server.callTool('write_artifact', {
+    const sid = getSessionId() ?? 'unknown';
+    return persistArtifact({
       ...args,
       kind: 'test_result',
       title: `Test Result: ${args.testName} (${args.passed ? 'PASS' : 'FAIL'})`,
       contentText: args.details,
       metadataJson: { testName: args.testName, passed: args.passed }
-    });
+    }, sid);
   });
 
   server.registerTool('submit_risk_report', {
@@ -42,13 +44,14 @@ export function registerQualityTools(server, getSessionId) {
       mitigation: z.string().optional(),
     }
   }, async (args) => {
-    return server.callTool('write_artifact', {
+    const sid = getSessionId() ?? 'unknown';
+    return persistArtifact({
       ...args,
       kind: 'risk_report',
       title: `Risk Report: ${args.severity.toUpperCase()}`,
       contentText: `${args.risk}${args.mitigation ? `\n\nMitigation: ${args.mitigation}` : ''}`,
       metadataJson: { severity: args.severity }
-    });
+    }, sid);
   });
 
   server.registerTool('submit_quality_signal', {

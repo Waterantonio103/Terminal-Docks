@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -10,7 +10,9 @@ process.env.MCP_DISABLE_HTTP = '1';
 const { db } = await import('../mcp-server/src/db/index.mjs');
 const { buildTaskDetails, ackAndEmitTaskFetch } = await import('../mcp-server/src/tools/task-details.mjs');
 const { executeHandoffTask, executeCompleteTask } = await import('../mcp-server/src/tools/handoff-complete.mjs');
-const { executeGetCurrentTask } = await import('../mcp-server/src/tools/tasks.mjs');
+const { executeGetCurrentTask, executeGetTaskDetails } = await import('../mcp-server/src/tools/tasks.mjs');
+const { registerArtifactTools } = await import('../mcp-server/src/tools/artifacts.mjs');
+const { registerWorkspaceTools } = await import('../mcp-server/src/tools/workspace.mjs');
 const {
   validateGraphHandoff,
   executeReceiveMessages,
@@ -162,6 +164,12 @@ try {
     mission.metadata.frontendCategory = 'admin_internal_tool';
     mission.metadata.specProfile = 'frontend_three_file';
     seedCompiledMission(mission);
+    db.prepare(
+      'INSERT INTO workspace_context (mission_id, key, value, updated_by) VALUES (?, ?, ?, ?)'
+    ).run('mission-graph', 'frontendSpecs', JSON.stringify({ acceptedProduct: 'PRD.md' }), 'frontend_product');
+    db.prepare(
+      'INSERT INTO workspace_context (mission_id, key, value, updated_by) VALUES (?, ?, ?, ?)'
+    ).run('other-mission', 'architecture', JSON.stringify({ stale: true }), 'old_agent');
     seedMissionNodeRuntime({
       missionId: 'mission-graph',
       nodeId: 'builder',
@@ -178,6 +186,77 @@ try {
     assert.deepEqual(details.frontendFramework.modeConfig.durableArtifacts, ['PRD.md', 'DESIGN.md', 'structure.md', 'README.md']);
     assert.ok(details.frontendFramework.schemas['PRD.md'].requiredSections.includes('Target Users'));
     assert.equal(details.assignment.frontendFramework.categoryId, 'admin_internal_tool');
+    assert.ok(details.frontendToolHints.exactTools.includes('update_workspace_context'));
+    assert.equal(details.frontendToolHints.outputBudgets['DESIGN.md'], '110-170 lines');
+    assert.equal(details.assignment.frontendToolHints.validationPolicy, 'Validate once after writing required spec files; if accepted, do not re-run the same full-text validation.');
+    assert.equal(details.workspaceContext.frontendSpecs.value.acceptedProduct, 'PRD.md');
+    assert.equal(details.assignment.workspaceContext.frontendSpecs.updatedBy, 'frontend_product');
+    assert.equal(details.workspaceContext.architecture, undefined);
+  });
+
+  await run('submit_summary persists an artifact without server.callTool support', async () => {
+    resetStarlinkState();
+    const tools = new Map();
+    registerArtifactTools({
+      registerTool(name, _config, handler) {
+        tools.set(name, handler);
+      },
+    }, () => 'session-summary');
+
+    const result = await tools.get('submit_summary')({
+      missionId: 'mission-graph',
+      nodeId: 'builder',
+      summary: 'Progress is recorded.',
+      isFinal: true,
+    });
+    assert.equal(result.isError, undefined);
+
+    const row = db.prepare(
+      "SELECT kind, title, content_text FROM artifacts WHERE mission_id = ? AND node_id = ?"
+    ).get('mission-graph', 'builder');
+    assert.equal(row.kind, 'summary');
+    assert.equal(row.title, 'Final Summary');
+    assert.equal(row.content_text, 'Progress is recorded.');
+  });
+
+  await run('workspace context tools scope rows to the caller mission', async () => {
+    resetStarlinkState();
+    seedConnectedSession('session-a', {
+      runtimeSessionId: 'session-a',
+      missionId: 'mission-a',
+      nodeId: 'node-a',
+    });
+    seedConnectedSession('session-b', {
+      runtimeSessionId: 'session-b',
+      missionId: 'mission-b',
+      nodeId: 'node-b',
+    });
+    const tools = new Map();
+    let callerSessionId = 'session-a';
+    registerWorkspaceTools({
+      registerTool(name, _config, handler) {
+        tools.set(name, handler);
+      },
+    }, () => callerSessionId);
+
+    await tools.get('update_workspace_context')({
+      key: 'frontendSpecs',
+      value: { product: 'A' },
+      updatedBy: 'node-a',
+    });
+    callerSessionId = 'session-b';
+    await tools.get('update_workspace_context')({
+      key: 'frontendSpecs',
+      value: { product: 'B' },
+      updatedBy: 'node-b',
+    });
+
+    const scopedA = JSON.parse((await tools.get('get_workspace_context')({ missionId: 'mission-a' })).content[0].text);
+    const scopedB = JSON.parse((await tools.get('get_workspace_context')({ missionId: 'mission-b' })).content[0].text);
+    assert.equal(scopedA.frontendSpecs.value.product, 'A');
+    assert.equal(scopedA.frontendSpecs.missionId, 'mission-a');
+    assert.equal(scopedB.frontendSpecs.value.product, 'B');
+    assert.equal(scopedB.frontendSpecs.missionId, 'mission-b');
   });
 
   await run('get_task_details exposes theme picker direction only for App/Site presets', async () => {
@@ -308,6 +387,81 @@ try {
     assert.equal(details.missionId, 'mission-graph');
     assert.equal(details.nodeId, 'builder');
     assert.equal(details.completionContract.requiredTool, 'complete_task');
+  });
+
+  await run('get_current_task always returns compact frontend framework', async () => {
+    resetStarlinkState();
+    const mission = demoMission();
+    mission.metadata.frontendMode = 'strict_ui';
+    mission.metadata.frontendCategory = 'marketing_site';
+    mission.metadata.specProfile = 'frontend_three_file';
+    mission.task.frontendFramework = {
+      schemas: {
+        'DESIGN.md': {
+          canonicalTemplate: { frontmatter: { colors: { primary: 'Exact hex' } } },
+        },
+      },
+    };
+    seedCompiledMission(mission);
+    seedMissionNodeRuntime({
+      missionId: 'mission-graph',
+      nodeId: 'builder',
+      roleId: 'builder',
+      status: 'running',
+      attempt: 1,
+      currentWaveId: 'root:mission-graph',
+    });
+    seedAgentRuntimeSession({
+      sessionId: 'session:mission-graph:builder:1',
+      agentId: 'agent:mission-graph:builder:term-builder',
+      missionId: 'mission-graph',
+      nodeId: 'builder',
+      attempt: 1,
+      terminalId: 'term-builder',
+      status: 'running',
+    });
+
+    const result = executeGetCurrentTask({
+      sessionId: 'session:mission-graph:builder:1',
+      includeFullFramework: true,
+    }, 'transport-session');
+    const details = JSON.parse(result.content[0].text);
+    assert.equal(details.frontendFramework.schemas['DESIGN.md'].outputBudget, '110-170 concise lines for generated App/Site handoffs.');
+    assert.equal(details.frontendFramework.schemas['DESIGN.md'].canonicalTemplate, undefined);
+    assert.equal(details.task.frontendFramework.schemas['DESIGN.md'].canonicalTemplate, undefined);
+    assert.equal(details.recentTasks, undefined);
+    assert.equal(details.relevantEvents, undefined);
+  });
+
+  await run('get_task_details tool defaults to compact frontend framework', async () => {
+    resetStarlinkState();
+    const mission = demoMission();
+    mission.metadata.frontendMode = 'strict_ui';
+    mission.metadata.frontendCategory = 'marketing_site';
+    mission.metadata.specProfile = 'frontend_three_file';
+    seedCompiledMission(mission);
+    seedMissionNodeRuntime({
+      missionId: 'mission-graph',
+      nodeId: 'builder',
+      roleId: 'builder',
+      status: 'running',
+      attempt: 1,
+      currentWaveId: 'root:mission-graph',
+    });
+
+    const compact = JSON.parse(executeGetTaskDetails({
+      missionId: 'mission-graph',
+      nodeId: 'builder',
+    }, 'transport-session').content[0].text);
+    assert.equal(compact.frontendFramework.schemas['DESIGN.md'].canonicalTemplate, undefined);
+    assert.equal(compact.relevantEvents, undefined);
+
+    const full = JSON.parse(executeGetTaskDetails({
+      missionId: 'mission-graph',
+      nodeId: 'builder',
+      includeFullFramework: true,
+    }, 'transport-session').content[0].text);
+    assert.ok(full.frontendFramework.schemas['DESIGN.md'].canonicalTemplate);
   });
 
   await run('get_task_details ack persists activation state', async () => {
@@ -546,6 +700,68 @@ try {
     assert.equal(runtimeRow.status, 'completed');
     assert.ok(runtimeRow.ended_at, 'complete_task should stamp runtime end time for run history');
     assert.equal(runtimeRow.failure_reason, null);
+  });
+
+  await run('strict UI complete_task rejects success without required durable output', async () => {
+    resetStarlinkState();
+    const workspace = mkdtempSync(join(tempRoot, 'strict-ui-workspace-'));
+    const mission = demoMission();
+    mission.task.workspaceDir = workspace;
+    mission.metadata.presetId = 'app_site_expanded';
+    mission.metadata.frontendMode = 'strict_ui';
+    mission.metadata.specProfile = 'frontend_three_file';
+    mission.nodes[0].id = 'frontend_product';
+    mission.nodes[0].roleId = 'frontend_product';
+    mission.nodes[1].id = 'frontend_designer';
+    mission.nodes[1].roleId = 'frontend_designer';
+    mission.nodes[2].id = 'frontend_architect';
+    mission.nodes[2].roleId = 'frontend_architect';
+    mission.edges = [{
+      id: 'edge:frontend_product:on_success:frontend_designer',
+      fromNodeId: 'frontend_product',
+      toNodeId: 'frontend_designer',
+      condition: 'on_success',
+    }];
+    seedCompiledMission(mission);
+    seedMissionNodeRuntime({
+      missionId: 'mission-graph',
+      nodeId: 'frontend_product',
+      roleId: 'frontend_product',
+      status: 'running',
+      attempt: 1,
+      currentWaveId: 'root:mission-graph',
+    });
+    seedAgentRuntimeSession({
+      sessionId: 'session:mission-graph:frontend_product:1',
+      agentId: 'agent:mission-graph:frontend_product:term-builder',
+      missionId: 'mission-graph',
+      nodeId: 'frontend_product',
+      attempt: 1,
+      terminalId: 'term-builder',
+      status: 'running',
+    });
+
+    const blocked = executeCompleteTask({
+      missionId: 'mission-graph',
+      nodeId: 'frontend_product',
+      attempt: 1,
+      outcome: 'success',
+      summary: 'Product accepted.',
+    }, 'session:mission-graph:frontend_product:1');
+    assert.equal(blocked.isError, true);
+    assert.match(blocked.content[0].text, /requires durable PRD\.md/);
+
+    writeFileSync(join(workspace, 'PRD.md'), '# StarV PRD\n');
+    const accepted = executeCompleteTask({
+      missionId: 'mission-graph',
+      nodeId: 'frontend_product',
+      attempt: 1,
+      outcome: 'success',
+      summary: 'Product accepted.',
+      filesChanged: ['PRD.md'],
+    }, 'session:mission-graph:frontend_product:1');
+    assert.equal(accepted.isError, undefined);
+    assert.match(accepted.content[0].text, /completed/);
   });
 
   await run('handoff_task rejects graph-mode role-only handoffs', async () => {

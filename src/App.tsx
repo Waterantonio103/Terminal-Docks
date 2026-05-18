@@ -1,8 +1,3 @@
-import { Sidebar } from './components/Sidebar/Sidebar';
-import { WorkspaceGrid } from './components/Layout/WorkspaceGrid';
-import { QuickOpen } from './components/QuickOpen/QuickOpen';
-import { NodeTreePane } from './components/NodeTree/NodeTreePane';
-import { RuntimeView } from './components/Runtime/RuntimeView';
 import { useWorkspaceStore, PaneType, McpMessage, DbTask, type AppMode } from './store/workspace';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
@@ -10,20 +5,25 @@ import { defaultWindowIcon } from '@tauri-apps/api/app';
 import { homeDir } from '@tauri-apps/api/path';
 import { Window } from '@tauri-apps/api/window';
 import { TerminalSquare, FileCode2, KanbanSquare, Activity, Rocket, Monitor, Minus, Square, X, Network, FolderTree, Settings, Bell, Toolbox } from 'lucide-react';
-import React, { useState, useEffect, useRef, useMemo } from 'react';
+import React, { Suspense, lazy, useState, useEffect, useRef, useMemo } from 'react';
 import { detectRoleFromText, normalizeCli } from './lib/cliDetection';
 import { refreshCliDetectionForTerminals } from './lib/terminalCliRuntime';
 import { ErrorBoundary } from './components/Diagnostics/ErrorBoundary';
 import { FatalErrorOverlay } from './components/Diagnostics/FatalErrorOverlay';
-import { SettingsOverlay } from './components/Settings/SettingsOverlay';
 import { clearLastFatalReport, readBreadcrumbs, readLastFatalReport, recordBreadcrumb, stringifyUnknownError, writeFatalReport, type FatalErrorReport } from './lib/diagnostics';
 import { useActionCenterItems } from './components/ActionCenter/useActionCenterItems';
-import { ActionCenterPane } from './components/ActionCenter/ActionCenterPane';
-import { McpToolboxPage } from './components/McpToolbox/McpToolboxPage';
 import { missionRepository } from './lib/missionRepository';
-import { missionOrchestrator } from './lib/workflow/MissionOrchestrator';
 import type { ActionCenterActionId, ActionCenterItem } from './lib/actionCenter';
 import './App.css';
+
+const WorkspaceGrid = lazy(() => import('./components/Layout/WorkspaceGrid').then(module => ({ default: module.WorkspaceGrid })));
+const Sidebar = lazy(() => import('./components/Sidebar/Sidebar').then(module => ({ default: module.Sidebar })));
+const QuickOpen = lazy(() => import('./components/QuickOpen/QuickOpen').then(module => ({ default: module.QuickOpen })));
+const NodeTreePane = lazy(() => import('./components/NodeTree/NodeTreePane').then(module => ({ default: module.NodeTreePane })));
+const RuntimeView = lazy(() => import('./components/Runtime/RuntimeView').then(module => ({ default: module.RuntimeView })));
+const ActionCenterPane = lazy(() => import('./components/ActionCenter/ActionCenterPane').then(module => ({ default: module.ActionCenterPane })));
+const McpToolboxPage = lazy(() => import('./components/McpToolbox/McpToolboxPage').then(module => ({ default: module.McpToolboxPage })));
+const SettingsOverlay = lazy(() => import('./components/Settings/SettingsOverlay').then(module => ({ default: module.SettingsOverlay })));
 
 // Safe access to the Tauri window. Plain browser automation does not expose
 // Tauri internals, so avoid resolving the current window outside that runtime.
@@ -55,12 +55,15 @@ const PANE_ICONS: Record<PaneType, React.ReactNode> = {
   inbox:          <Bell size={13} />,
 };
 
-import { runtimeManager } from './lib/runtime/RuntimeManager';
-import { runtimeExecutor } from './lib/runtime/RuntimeExecutor';
-import { terminalOutputBus } from './lib/runtime/TerminalOutputBus';
-import { workflowOrchestrator } from './lib/workflow/WorkflowOrchestrator';
-
 let liveWorkflowHarnessStarted = false;
+
+function PaneLoadingFallback({ label = 'Loading' }: { label?: string }) {
+  return (
+    <div className="w-full h-full flex items-center justify-center text-xs text-text-muted">
+      {label}
+    </div>
+  );
+}
 
 function sendFrontendErrorToDebugMcp(report: FatalErrorReport, name?: string) {
   invoke<string>('get_mcp_base_url')
@@ -89,9 +92,18 @@ function MainApp() {
         })
         .catch(() => {});
     }
-    terminalOutputBus.start().catch(console.error);
-    workflowOrchestrator.setRuntimeManager(runtimeExecutor);
-    runtimeManager.startListening().catch(console.error);
+    Promise.all([
+      import('./lib/runtime/TerminalOutputBus'),
+      import('./lib/runtime/RuntimeExecutor'),
+      import('./lib/runtime/RuntimeManager'),
+      import('./lib/workflow/WorkflowOrchestrator'),
+    ])
+      .then(([terminalOutputBusModule, runtimeExecutorModule, runtimeManagerModule, workflowOrchestratorModule]) => {
+        terminalOutputBusModule.terminalOutputBus.start().catch(console.error);
+        workflowOrchestratorModule.workflowOrchestrator.setRuntimeManager(runtimeExecutorModule.runtimeExecutor);
+        runtimeManagerModule.runtimeManager.startListening().catch(console.error);
+      })
+      .catch(console.error);
     if (import.meta.env.DEV && import.meta.env.VITE_LIVE_WORKFLOW_DEBUG === '1' && !liveWorkflowHarnessStarted) {
       liveWorkflowHarnessStarted = true;
       import('./lib/debug/liveWorkflowHarness')
@@ -259,24 +271,52 @@ function MainApp() {
 
       <div className="flex-1 flex overflow-hidden relative">
         <ModeRail />
-        {appMode === 'workspace' && <Sidebar />}
+        {appMode === 'workspace' && (
+          <Suspense fallback={null}>
+            <Sidebar />
+          </Suspense>
+        )}
         <main className="flex-1 flex flex-col min-w-0 bg-bg-app relative">
           {appMode === 'workflow' ? (
             <div className="flex-1 min-h-0 flex overflow-hidden">
               <div className="flex-1 min-w-0 overflow-hidden">
-                <NodeTreePane graph={globalGraph} onGraphChange={setGlobalGraph} />
+                <Suspense fallback={<PaneLoadingFallback label="Loading workflow" />}>
+                  <NodeTreePane graph={globalGraph} onGraphChange={setGlobalGraph} />
+                </Suspense>
               </div>
             </div>
-          ) : appMode === 'runtime' ? <RuntimeView /> : appMode === 'actioncenter' ? <ActionCenterPane /> : appMode === 'mcptoolbox' ? <McpToolboxPage /> : (
-            <>
-              <div className="flex-1 flex flex-col overflow-hidden"><WorkspaceGrid /></div>
-            </>
+          ) : appMode === 'runtime' ? (
+            <Suspense fallback={<PaneLoadingFallback label="Loading runtime" />}>
+              <RuntimeView />
+            </Suspense>
+          ) : appMode === 'actioncenter' ? (
+            <Suspense fallback={<PaneLoadingFallback label="Loading action center" />}>
+              <ActionCenterPane />
+            </Suspense>
+          ) : appMode === 'mcptoolbox' ? (
+            <Suspense fallback={<PaneLoadingFallback label="Loading MCP toolbox" />}>
+              <McpToolboxPage />
+            </Suspense>
+          ) : (
+            <div className="flex-1 flex flex-col overflow-hidden">
+              <Suspense fallback={<PaneLoadingFallback label="Loading workspace" />}>
+                <WorkspaceGrid />
+              </Suspense>
+            </div>
           )}
-          {showQuickOpen && <QuickOpen onClose={() => setShowQuickOpen(false)} />}
+          {showQuickOpen && (
+            <Suspense fallback={null}>
+              <QuickOpen onClose={() => setShowQuickOpen(false)} />
+            </Suspense>
+          )}
         </main>
       </div>
 
-      {showSettings && <SettingsOverlay />}
+      {showSettings && (
+        <Suspense fallback={null}>
+          <SettingsOverlay />
+        </Suspense>
+      )}
       <GlobalNotificationOverlay />
       {draggingNew && (
         <div className="fixed pointer-events-none z-[9999] bg-accent-primary/20 border-2 border-accent-primary rounded-lg px-3 py-1.5 flex items-center gap-2 text-accent-primary font-bold shadow-2xl backdrop-blur-sm" style={{ left: draggingNew.x + 10, top: draggingNew.y + 10 }}>
@@ -329,12 +369,15 @@ function GlobalNotificationOverlay() {
 
   const runAction = async (actionId: ActionCenterActionId, target: ActionCenterItem) => {
     if (actionId === 'approve_permission' && target.kind === 'permission') {
+      const { runtimeManager } = await import('./lib/runtime/RuntimeManager');
       await runtimeManager.resolvePermission({ sessionId: target.sessionId!, permissionId: target.permissionId, decision: 'approve' });
       setDismissed(prev => new Set(prev).add(target.id));
     } else if (actionId === 'deny_permission' && target.kind === 'permission') {
+      const { runtimeManager } = await import('./lib/runtime/RuntimeManager');
       await runtimeManager.resolvePermission({ sessionId: target.sessionId!, permissionId: target.permissionId, decision: 'deny' });
       setDismissed(prev => new Set(prev).add(target.id));
     } else if (actionId === 'retry_runtime' && target.missionId && target.nodeId) {
+      const { missionOrchestrator } = await import('./lib/workflow/MissionOrchestrator');
       await missionOrchestrator.retryNode(target.missionId, target.nodeId);
       setDismissed(prev => new Set(prev).add(target.id));
     } else if (actionId === 'approve_delegation' && target.kind === 'delegation') {

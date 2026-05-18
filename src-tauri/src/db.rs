@@ -144,10 +144,12 @@ pub fn init_db(app: &AppHandle) -> Result<(), String> {
 
     conn.execute(
         "CREATE TABLE IF NOT EXISTS workspace_context (
-            key TEXT PRIMARY KEY,
+            mission_id TEXT NOT NULL DEFAULT '__global__',
+            key TEXT NOT NULL,
             value TEXT,
             updated_by TEXT,
-            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (mission_id, key)
         )",
         (),
     )

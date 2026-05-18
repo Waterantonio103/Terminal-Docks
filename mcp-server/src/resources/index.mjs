@@ -3,28 +3,29 @@ import { loadAgentRoster } from '../utils/index.mjs';
 import { sessions } from '../state.mjs';
 import { buildFrontendSpecFramework } from '../utils/frontend-spec-framework.mjs';
 import { registerFrontendLibraryResources } from './frontend-library.mjs';
+import { ResourceTemplate } from '@modelcontextprotocol/sdk/server/mcp.js';
 
 export function registerResources(server) {
-  server.registerResource('mission', 'mission://{missionId}', {
+  server.registerResource('mission', new ResourceTemplate('mission://{missionId}', { list: undefined }), {
     title: 'Mission Data',
     description: 'Full record of a mission including graph and status.',
-  }, async ({ missionId }) => {
+  }, async (_uri, { missionId }) => {
     const row = db.prepare('SELECT * FROM compiled_missions WHERE mission_id = ?').get(missionId);
     return { contents: [{ uri: `mission://${missionId}`, mimeType: 'application/json', text: JSON.stringify(row, null, 2) }] };
   });
 
-  server.registerResource('node', 'node://{missionId}/{nodeId}', {
+  server.registerResource('node', new ResourceTemplate('node://{missionId}/{nodeId}', { list: undefined }), {
     title: 'Node Status',
     description: 'Runtime status of a specific node in a mission.',
-  }, async ({ missionId, nodeId }) => {
+  }, async (_uri, { missionId, nodeId }) => {
     const row = db.prepare('SELECT * FROM mission_node_runtime WHERE mission_id = ? AND node_id = ?').get(missionId, nodeId);
     return { contents: [{ uri: `node://${missionId}/${nodeId}`, mimeType: 'application/json', text: JSON.stringify(row, null, 2) }] };
   });
 
-  server.registerResource('artifact', 'artifact://{artifactId}', {
+  server.registerResource('artifact', new ResourceTemplate('artifact://{artifactId}', { list: undefined }), {
     title: 'Artifact Content',
     description: 'Read the full content of an artifact.',
-  }, async ({ artifactId }) => {
+  }, async (_uri, { artifactId }) => {
     const row = db.prepare('SELECT * FROM artifacts WHERE id = ?').get(artifactId);
     return { contents: [{ uri: `artifact://${artifactId}`, mimeType: 'application/json', text: JSON.stringify(row, null, 2) }] };
   });

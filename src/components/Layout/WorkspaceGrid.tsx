@@ -1,14 +1,15 @@
 import { TerminalSquare, FileCode2, KanbanSquare, Activity, Rocket, Monitor, X, Network, Bell } from 'lucide-react';
 import { useWorkspaceStore, PaneType, Pane, selectActivePanes, GridPos, resolveCollisions } from '../../store/workspace';
-import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
-import { TerminalPane } from '../Terminal/TerminalPane';
-import { EditorPane } from '../Editor/EditorPane';
-import { TaskBoardPane } from '../TaskBoard/TaskBoardPane';
-import { ActivityFeedPane } from '../ActivityFeed/ActivityFeedPane';
-import { LauncherPane } from '../Launcher/LauncherPane';
-import { MissionControlPane } from '../MissionControl/MissionControlPane';
-import { ActionCenterPane } from '../ActionCenter/ActionCenterPane';
+import React, { Suspense, lazy, useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { FileTypeIcon } from '../../lib/fileIcons';
+
+const TerminalPane = lazy(() => import('../Terminal/TerminalPane').then(module => ({ default: module.TerminalPane })));
+const EditorPane = lazy(() => import('../Editor/EditorPane').then(module => ({ default: module.EditorPane })));
+const TaskBoardPane = lazy(() => import('../TaskBoard/TaskBoardPane').then(module => ({ default: module.TaskBoardPane })));
+const ActivityFeedPane = lazy(() => import('../ActivityFeed/ActivityFeedPane').then(module => ({ default: module.ActivityFeedPane })));
+const LauncherPane = lazy(() => import('../Launcher/LauncherPane').then(module => ({ default: module.LauncherPane })));
+const MissionControlPane = lazy(() => import('../MissionControl/MissionControlPane').then(module => ({ default: module.MissionControlPane })));
+const ActionCenterPane = lazy(() => import('../ActionCenter/ActionCenterPane').then(module => ({ default: module.ActionCenterPane })));
 
 const PANE_ICONS: Record<PaneType, React.ReactNode> = {
   terminal:       <TerminalSquare size={13} />,
@@ -26,6 +27,24 @@ function getPaneIcon(pane: Pane, size = 13) {
     return <FileTypeIcon fileName={(pane.data?.filePath as string | undefined) ?? pane.title} size={size} />;
   }
   return PANE_ICONS[pane.type];
+}
+
+function PaneLoadingFallback() {
+  return <div className="w-full h-full flex items-center justify-center text-xs text-text-muted">Loading</div>;
+}
+
+function PaneBody({ pane, dragEndSeq }: { pane: Pane; dragEndSeq: number }) {
+  return (
+    <Suspense fallback={<PaneLoadingFallback />}>
+      {pane.type === 'terminal'       && <TerminalPane pane={pane} dragEndSeq={dragEndSeq} />}
+      {pane.type === 'editor'         && <EditorPane pane={pane} />}
+      {pane.type === 'taskboard'      && <TaskBoardPane />}
+      {pane.type === 'activityfeed'   && <ActivityFeedPane />}
+      {pane.type === 'launcher'       && <LauncherPane />}
+      {pane.type === 'missioncontrol' && <MissionControlPane pane={pane} />}
+      {pane.type === 'inbox'          && <ActionCenterPane />}
+    </Suspense>
+  );
 }
 
 const CELL_HEIGHT = 4;
@@ -130,13 +149,7 @@ const DashboardPanel = React.memo(function DashboardPanel({ pane, onDragStart, o
 
         {/* Body */}
         <div ref={bodyRef} className="flex-1 overflow-hidden relative">
-          {pane.type === 'terminal'       && <TerminalPane pane={pane} dragEndSeq={dragEndSeq} />}
-          {pane.type === 'editor'         && <EditorPane pane={pane} />}
-          {pane.type === 'taskboard'      && <TaskBoardPane />}
-          {pane.type === 'activityfeed'   && <ActivityFeedPane />}
-          {pane.type === 'launcher'       && <LauncherPane />}
-          {pane.type === 'missioncontrol' && <MissionControlPane pane={pane} />}
-          {pane.type === 'inbox'          && <ActionCenterPane />}
+          <PaneBody pane={pane} dragEndSeq={dragEndSeq} />
         </div>
 
         {/* Resize Handle */}
@@ -197,13 +210,7 @@ function TabsView({ panes }: { panes: Pane[] }) {
       <div className="flex-1 overflow-hidden relative">
         {activePane ? (
           <div className="w-full h-full flex flex-col">
-            {activePane.type === 'terminal'       && <TerminalPane pane={activePane} dragEndSeq={0} />}
-            {activePane.type === 'editor'         && <EditorPane pane={activePane} />}
-            {activePane.type === 'taskboard'      && <TaskBoardPane />}
-            {activePane.type === 'activityfeed'   && <ActivityFeedPane />}
-            {activePane.type === 'launcher'       && <LauncherPane />}
-            {activePane.type === 'missioncontrol' && <MissionControlPane pane={activePane} />}
-            {activePane.type === 'inbox'          && <ActionCenterPane />}
+            <PaneBody pane={activePane} dragEndSeq={0} />
           </div>
         ) : (
           <div className="w-full h-full flex flex-col items-center justify-center text-text-muted">

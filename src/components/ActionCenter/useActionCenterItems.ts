@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { missionRepository } from '../../lib/missionRepository.js';
-import { runtimeManager } from '../../lib/runtime/RuntimeManager.js';
+import type { RuntimeManager } from '../../lib/runtime/RuntimeManager.js';
 import type { RuntimeManagerEvent } from '../../lib/runtime/RuntimeTypes.js';
-import { workflowOrchestrator } from '../../lib/workflow/WorkflowOrchestrator.js';
+import type { WorkflowOrchestrator } from '../../lib/workflow/WorkflowOrchestrator.js';
 import {
   countNeedsYou,
   deriveActionCenterItems,
@@ -15,8 +15,12 @@ import {
 
 const MAX_RECENT_EVENTS = 50;
 
-function titleForRuntimeEvent(event: RuntimeManagerEvent): string | null {
-  const completedLabel = runtimeAgentProgressLabel(event);
+function titleForRuntimeEvent(
+  event: RuntimeManagerEvent,
+  runtimeManager: RuntimeManager,
+  workflowOrchestrator: WorkflowOrchestrator,
+): string | null {
+  const completedLabel = runtimeAgentProgressLabel(event, runtimeManager, workflowOrchestrator);
   switch (event.type) {
     case 'permission_resolved':
       return `Permission ${event.decision === 'approve' ? 'approved' : 'denied'}`;
@@ -31,7 +35,11 @@ function titleForRuntimeEvent(event: RuntimeManagerEvent): string | null {
   }
 }
 
-function runtimeAgentProgressLabel(event: RuntimeManagerEvent): string {
+function runtimeAgentProgressLabel(
+  event: RuntimeManagerEvent,
+  runtimeManager: RuntimeManager,
+  workflowOrchestrator: WorkflowOrchestrator,
+): string {
   if (!('sessionId' in event)) return 'Runtime';
   const snapshot = runtimeManager.snapshot();
   const session = snapshot.sessions.find(candidate => candidate.sessionId === event.sessionId);
@@ -46,8 +54,12 @@ function runtimeAgentProgressLabel(event: RuntimeManagerEvent): string {
   return `${agentName}${position}`;
 }
 
-function runtimeRecentEvent(event: RuntimeManagerEvent): ActionCenterRecentInput | null {
-  const title = titleForRuntimeEvent(event);
+function runtimeRecentEvent(
+  event: RuntimeManagerEvent,
+  runtimeManager: RuntimeManager,
+  workflowOrchestrator: WorkflowOrchestrator,
+): ActionCenterRecentInput | null {
+  const title = titleForRuntimeEvent(event, runtimeManager, workflowOrchestrator);
   if (!title) return null;
   const session = 'sessionId' in event
     ? runtimeManager.snapshot().sessions.find(candidate => candidate.sessionId === event.sessionId)
@@ -71,7 +83,7 @@ function runtimeRecentEvent(event: RuntimeManagerEvent): ActionCenterRecentInput
   };
 }
 
-function snapshotSessions(): ActionCenterRuntimeSessionInput[] {
+function snapshotSessions(runtimeManager: RuntimeManager): ActionCenterRuntimeSessionInput[] {
   return runtimeManager.snapshot().sessions.map(session => ({
     nodeId: session.nodeId,
     terminalId: session.terminalId,
@@ -107,7 +119,7 @@ export function useActionCenterItems(): {
   clearAllRecent: () => void;
   sessions: ActionCenterRuntimeSessionInput[];
 } {
-  const [sessions, setSessions] = useState<ActionCenterRuntimeSessionInput[]>(() => snapshotSessions());
+  const [sessions, setSessions] = useState<ActionCenterRuntimeSessionInput[]>([]);
   const [inboxItems, setInboxItems] = useState<ActionCenterInboxInput[]>([]);
   const [recentEvents, setRecentEvents] = useState<ActionCenterRecentInput[]>([]);
   const [loadingInbox, setLoadingInbox] = useState(false);
@@ -142,35 +154,50 @@ export function useActionCenterItems(): {
       }
     }).catch(() => {});
 
-    const unlistenRuntime = runtimeManager.subscribe((event) => {
-      const recent = runtimeRecentEvent(event);
-      if (!recent) return;
-      setRecentEvents(prev => [recent, ...prev].slice(0, MAX_RECENT_EVENTS));
-    });
-    const unlistenWorkflow = workflowOrchestrator.subscribe((event) => {
-      if (event.type !== 'run_completed') return;
-      const recent: ActionCenterRecentInput = {
-        id: `workflow-completed:${event.runId}:${Date.now()}`,
-        source: 'workflow',
-        eventType: 'run_completed',
-        title: 'Workflow completed',
-        detail: `Mission ${event.runId.slice(0, 8)} finished with ${event.outcome}.`,
-        createdAt: Date.now(),
-        severity: event.outcome === 'success' ? 'success' : 'warning',
-        missionId: event.runId,
+    let cleanupManagers: (() => void) | undefined;
+    Promise.all([
+      import('../../lib/runtime/RuntimeManager.js'),
+      import('../../lib/workflow/WorkflowOrchestrator.js'),
+    ]).then(([runtimeManagerModule, workflowOrchestratorModule]) => {
+      const runtimeManager = runtimeManagerModule.runtimeManager;
+      const workflowOrchestrator = workflowOrchestratorModule.workflowOrchestrator;
+      if (cancelled) return;
+      setSessions(snapshotSessions(runtimeManager));
+      const unlistenRuntime = runtimeManager.subscribe((event) => {
+        const recent = runtimeRecentEvent(event, runtimeManager, workflowOrchestrator);
+        if (!recent) return;
+        setRecentEvents(prev => [recent, ...prev].slice(0, MAX_RECENT_EVENTS));
+      });
+      const unlistenWorkflow = workflowOrchestrator.subscribe((event) => {
+        if (event.type !== 'run_completed') return;
+        const recent: ActionCenterRecentInput = {
+          id: `workflow-completed:${event.runId}:${Date.now()}`,
+          source: 'workflow',
+          eventType: 'run_completed',
+          title: 'Workflow completed',
+          detail: `Mission ${event.runId.slice(0, 8)} finished with ${event.outcome}.`,
+          createdAt: Date.now(),
+          severity: event.outcome === 'success' ? 'success' : 'warning',
+          missionId: event.runId,
+        };
+        setRecentEvents(prev => [recent, ...prev].slice(0, MAX_RECENT_EVENTS));
+      });
+      const unlistenSnapshot = runtimeManager.subscribeSnapshot(() => {
+        setSessions(snapshotSessions(runtimeManager));
+      });
+      cleanupManagers = () => {
+        unlistenRuntime();
+        unlistenWorkflow.unsubscribe();
+        unlistenSnapshot();
       };
-      setRecentEvents(prev => [recent, ...prev].slice(0, MAX_RECENT_EVENTS));
-    });
-    const unlistenSnapshot = runtimeManager.subscribeSnapshot(() => {
-      setSessions(snapshotSessions());
+    }).catch((error) => {
+      console.error('Failed to initialize action center runtime subscriptions', error);
     });
 
     return () => {
       cancelled = true;
       if (unlistenInbox) unlistenInbox();
-      unlistenRuntime();
-      unlistenWorkflow.unsubscribe();
-      unlistenSnapshot();
+      cleanupManagers?.();
     };
   }, [refreshInbox]);
 

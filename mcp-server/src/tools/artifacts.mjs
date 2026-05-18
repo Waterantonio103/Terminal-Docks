@@ -4,6 +4,48 @@ import { makeToolText, appendWorkflowEvent } from '../utils/index.mjs';
 import { broadcast, emitAgentEvent } from '../state.mjs';
 import { randomUUID } from 'crypto';
 
+export function persistArtifact(args, sid = 'unknown') {
+  const { missionId, nodeId, kind, title, contentText, contentJson, metadataJson } = args;
+  const id = randomUUID();
+
+  db.prepare(
+    `INSERT INTO artifacts (id, mission_id, node_id, session_id, kind, title, content_text, content_json, metadata_json)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run(
+    id,
+    missionId,
+    nodeId ?? null,
+    sid,
+    kind,
+    title,
+    contentText ?? null,
+    contentJson ? JSON.stringify(contentJson) : null,
+    metadataJson ? JSON.stringify(metadataJson) : null
+  );
+
+  appendWorkflowEvent({
+    missionId,
+    nodeId,
+    sessionId: sid,
+    type: 'artifact_created',
+    message: `Artifact "${title}" (${kind}) created.`,
+    payload: { id, kind, title }
+  });
+
+  emitAgentEvent({
+    type: 'agent:artifact',
+    sessionId: sid,
+    at: Date.now(),
+    missionId,
+    nodeId,
+    artifactType: kind === 'file' ? 'file_change' : (kind === 'reference' ? 'reference' : 'summary'),
+    label: title,
+    content: contentText ?? (contentJson ? JSON.stringify(contentJson) : null),
+  });
+
+  return { content: [{ type: 'text', text: JSON.stringify({ id, status: 'created' }) }] };
+}
+
 export function registerArtifactTools(server, getSessionId) {
   server.registerTool('write_artifact', {
     title: 'Write Artifact',
@@ -19,44 +61,7 @@ export function registerArtifactTools(server, getSessionId) {
     }
   }, async ({ missionId, nodeId, kind, title, contentText, contentJson, metadataJson }) => {
     const sid = getSessionId() ?? 'unknown';
-    const id = randomUUID();
-    
-    db.prepare(
-      `INSERT INTO artifacts (id, mission_id, node_id, session_id, kind, title, content_text, content_json, metadata_json)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
-    ).run(
-      id,
-      missionId,
-      nodeId ?? null,
-      sid,
-      kind,
-      title,
-      contentText ?? null,
-      contentJson ? JSON.stringify(contentJson) : null,
-      metadataJson ? JSON.stringify(metadataJson) : null
-    );
-
-    appendWorkflowEvent({
-      missionId,
-      nodeId,
-      sessionId: sid,
-      type: 'artifact_created',
-      message: `Artifact "${title}" (${kind}) created.`,
-      payload: { id, kind, title }
-    });
-
-    emitAgentEvent({
-      type: 'agent:artifact',
-      sessionId: sid,
-      at: Date.now(),
-      missionId,
-      nodeId,
-      artifactType: kind === 'file' ? 'file_change' : (kind === 'reference' ? 'reference' : 'summary'),
-      label: title,
-      content: contentText ?? (contentJson ? JSON.stringify(contentJson) : null),
-    });
-
-    return { content: [{ type: 'text', text: JSON.stringify({ id, status: 'created' }) }] };
+    return persistArtifact({ missionId, nodeId, kind, title, contentText, contentJson, metadataJson }, sid);
   });
 
   server.registerTool('list_artifacts', {
@@ -99,13 +104,13 @@ export function registerArtifactTools(server, getSessionId) {
       description: z.string().optional(),
     }
   }, async (args) => {
-    // Convenience wrapper around write_artifact
-    return server.callTool('write_artifact', {
+    const sid = getSessionId() ?? 'unknown';
+    return persistArtifact({
       ...args,
       kind: 'patch',
       contentText: args.diff,
       metadataJson: { description: args.description }
-    });
+    }, sid);
   });
 
   server.registerTool('submit_summary', {
@@ -118,13 +123,14 @@ export function registerArtifactTools(server, getSessionId) {
       isFinal: z.boolean().optional(),
     }
   }, async (args) => {
-    return server.callTool('write_artifact', {
+    const sid = getSessionId() ?? 'unknown';
+    return persistArtifact({
       ...args,
       kind: 'summary',
       title: args.isFinal ? 'Final Summary' : 'Progress Summary',
       contentText: args.summary,
       metadataJson: { isFinal: args.isFinal }
-    });
+    }, sid);
   });
 
   server.registerTool('submit_review_verdict', {
@@ -138,11 +144,13 @@ export function registerArtifactTools(server, getSessionId) {
       patchArtifactId: z.string().optional(),
     }
   }, async (args) => {
-    return server.callTool('write_artifact', {
+    const sid = getSessionId() ?? 'unknown';
+    return persistArtifact({
       ...args,
       kind: 'review_verdict',
+      title: `Review Verdict: ${args.verdict}`,
       contentText: args.comment,
       metadataJson: { verdict: args.verdict, patchArtifactId: args.patchArtifactId }
-    });
+    }, sid);
   });
 }

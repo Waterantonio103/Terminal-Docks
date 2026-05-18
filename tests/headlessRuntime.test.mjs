@@ -290,6 +290,10 @@ run('codex interactive argv normalizes model and places yolo before final prompt
     '-c',
     'mcp_servers.excalidraw.enabled=false',
     '-c',
+    'approval_policy="never"',
+    '-c',
+    'sandbox_mode="danger-full-access"',
+    '-c',
     'mcp_servers.terminal-docks.url="http://127.0.0.1:3741/mcp?token=abc"',
     '-c',
     'mcp_servers.terminal-docks.enabled=true',
@@ -318,6 +322,8 @@ run('codex interactive argv can omit global MCP disables for isolated CODEX_HOME
 
   assert.equal(args.includes('mcp_servers.pencil.enabled=false'), false);
   assert.equal(args.includes('mcp_servers.excalidraw.enabled=false'), false);
+  assert.equal(args.includes('approval_policy="never"'), true);
+  assert.equal(args.includes('sandbox_mode="danger-full-access"'), true);
   assert.equal(args.includes('mcp_servers.terminal-docks.enabled=true'), true);
   assert.equal(args.at(-1), 'Connect only to terminal docks.');
 });
@@ -347,6 +353,10 @@ run('codex interactive argv preserves complex prompt as final argument', () => {
     'mcp_servers.pencil.enabled=false',
     '-c',
     'mcp_servers.excalidraw.enabled=false',
+    '-c',
+    'approval_policy="never"',
+    '-c',
+    'sandbox_mode="danger-full-access"',
     '--no-alt-screen',
     prompt,
   ]);
@@ -362,7 +372,7 @@ run('codex shell fallback flattens the bootstrap prompt before shell quoting', (
 
   assert.equal(
     command.startsWith(
-      'codex -c mcp_servers.pencil.enabled=false -c mcp_servers.excalidraw.enabled=false --model gpt-5.4-mini --no-alt-screen ',
+      'codex -c mcp_servers.pencil.enabled=false -c mcp_servers.excalidraw.enabled=false -c approval_policy="never" -c sandbox_mode="danger-full-access" --model gpt-5.4-mini --no-alt-screen ',
     ),
     true,
   );
@@ -373,15 +383,15 @@ run('codex shell fallback flattens the bootstrap prompt before shell quoting', (
 run('codex follow-up task signal is tiny and session-aware', () => {
   assert.equal(
     buildCodexFollowupTaskSignal(),
-    'NEW_TASK. call get_current_task(), execute the active task it returns, then call complete_task as the final MCP action. Do not stop after connecting, after reading task details, or after a normal final answer.',
+    'NEW_TASK. call get_current_task(); the returned objective, assignment, roleInstructions, inbox, and legal targets are the actual task payload, even if no separate inbox payload exists. Execute that task, create the required output, then call complete_task as the final MCP action. Do not stop after connecting, after reading task details, or after a normal final answer.',
   );
   assert.equal(
     buildCodexFollowupTaskSignal({ sessionId: 'session-123' }),
-    'NEW_TASK. call get_current_task({ sessionId: "session-123" }), execute the active task it returns, then call complete_task as the final MCP action. Do not stop after connecting, after reading task details, or after a normal final answer.',
+    'NEW_TASK. call get_current_task({ sessionId: "session-123" }); the returned objective, assignment, roleInstructions, inbox, and legal targets are the actual task payload, even if no separate inbox payload exists. Execute that task, create the required output, then call complete_task as the final MCP action. Do not stop after connecting, after reading task details, or after a normal final answer.',
   );
   assert.equal(
     buildCodexFollowupTaskSignal({ sessionId: 'session-123', missionId: 'mission-1', nodeId: 'builder', attempt: 2 }),
-    'NEW_TASK. call get_task_details({ missionId: "mission-1", nodeId: "builder" }), execute the actual task from that payload, then call complete_task({ missionId: "mission-1", nodeId: "builder", attempt: 2, outcome: "success" or "failure", summary: "<concise summary>" }) as the final MCP action. Do not stop after connecting, after reading task details, or after a normal final answer.',
+    'NEW_TASK. call get_task_details({ missionId: "mission-1", nodeId: "builder" }); the returned objective, assignment, roleInstructions, inbox, and legal targets are the actual task payload, even if no separate inbox payload exists. Execute that task, create the required output, then call complete_task({ missionId: "mission-1", nodeId: "builder", attempt: 2, outcome: "success" or "failure", summary: "<concise summary>" }) as the final MCP action. Do not stop after connecting, after reading task details, or after a normal final answer.',
   );
 });
 
