@@ -65,13 +65,29 @@ const TEXT_FILE_EXTENSIONS = new Set([
   'lock',
 ]);
 
-const CONFIG_FILE_EXTENSIONS = new Set(['json', 'jsonc', 'xml', 'env']);
+const CONFIG_FILE_EXTENSIONS = new Set([
+  'dockerignore',
+  'editorconfig',
+  'env',
+  'gitignore',
+  'json',
+  'jsonc',
+  'npmrc',
+  'prettierignore',
+  'prettierrc',
+  'xml',
+  'yarnrc',
+]);
 
 export function getFileExtension(pathOrName?: string | null): string {
-  const name = (pathOrName ?? '').split(/[\\/]/).pop() ?? '';
+  const name = ((pathOrName ?? '').replace(/\0/g, '').trim().split(/[\\/]/).pop() ?? '')
+    .replace(/[?#].*$/, '');
+  const lowerName = name.toLowerCase();
+  if (lowerName === '.env' || lowerName.startsWith('.env.') || lowerName.startsWith('.env-')) return 'env';
+  if (lowerName.startsWith('.') && !lowerName.slice(1).includes('.')) return lowerName.slice(1);
   const index = name.lastIndexOf('.');
   if (index <= 0 || index === name.length - 1) return '';
-  return name.slice(index + 1).toLowerCase();
+  return name.slice(index + 1).trim().toLowerCase();
 }
 
 export function isImageFile(pathOrName?: string | null): boolean {

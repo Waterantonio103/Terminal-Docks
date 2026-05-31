@@ -4,6 +4,8 @@ import {
   buildPtyLaunchCommand,
   buildPtyLaunchCommandParts,
   formatLaunchArgsForLog,
+  isModelCompatibleWithCli,
+  normalizeCodexModelId,
 } from '../.tmp-tests/lib/cliCommandBuilders.js';
 import { claudeAdapter } from '../.tmp-tests/lib/runtime/adapters/claude.js';
 import { codexAdapter } from '../.tmp-tests/lib/runtime/adapters/codex.js';
@@ -56,6 +58,28 @@ run('codex PTY launch preserves workspace, no alt screen, and supported yolo fla
   assert.equal(args.includes('--yolo'), false);
 });
 
+run('codex shell launch overrides stale CODEX_HOME inline', () => {
+  assert.equal(
+    buildPtyLaunchCommand('codex', {
+      model: 'gpt-5.5',
+      workspaceDir: 'C:/workspace',
+    }),
+    'set "CODEX_HOME=%USERPROFILE%\\.codex" && codex --model gpt-5.5 --cd C:/workspace --no-alt-screen',
+  );
+});
+
+run('codex launch drops stale Claude model ids', () => {
+  const { args } = buildPtyLaunchCommandParts('codex', {
+    model: 'claude-opus-4-7',
+    workspaceDir: 'C:/workspace',
+  });
+
+  assert.equal(args.includes('--model'), false);
+  assert.equal(normalizeCodexModelId('claude-opus-4-7'), null);
+  assert.equal(isModelCompatibleWithCli('codex', 'gpt-5.5'), true);
+  assert.equal(isModelCompatibleWithCli('codex', 'claude-opus-4-7'), false);
+});
+
 run('codex adapter launch preserves MCP config shape without unsupported yolo alias', () => {
   const launch = codexAdapter.buildLaunchCommand(launchContext({
     model: 'gpt-5.5',
@@ -68,9 +92,19 @@ run('codex adapter launch preserves MCP config shape without unsupported yolo al
   assert.equal(launch.args.includes('--cd'), true);
   assert.equal(launch.args.includes('--dangerously-bypass-approvals-and-sandbox'), true);
   assert.equal(launch.args.includes('--yolo'), false);
-  assert.equal(launch.args.some(arg => arg.startsWith('mcp_servers.terminal-docks.url=')), true);
-  assert.equal(launch.args.includes('mcp_servers.terminal-docks.startup_timeout_sec=30'), true);
-  assert.equal(launch.args.includes('mcp_servers.terminal-docks.tool_timeout_sec=120'), true);
+  assert.equal(launch.args.some(arg => arg.startsWith('mcp_servers.starlink.url=')), true);
+  assert.equal(launch.args.includes('mcp_servers.starlink.startup_timeout_sec=30'), true);
+  assert.equal(launch.args.includes('mcp_servers.starlink.tool_timeout_sec=120'), true);
+});
+
+run('codex adapter launch does not forward stale Claude model ids', () => {
+  const launch = codexAdapter.buildLaunchCommand(launchContext({
+    model: 'claude-opus-4-7',
+  }));
+
+  assert.equal(launch.command, 'codex');
+  assert.equal(launch.args.includes('--model'), false);
+  assert.equal(launch.args.includes('claude-opus-4-7'), false);
 });
 
 run('opencode TUI launch uses project positional and avoids invented stability flags', () => {
@@ -150,7 +184,7 @@ run('gemini prompt-interactive launch quotes startup prompt and preserves yolo m
 run('runtime launch arg logging redacts MCP secrets and startup prompt', () => {
   const formatted = formatLaunchArgsForLog([
     '-c',
-    'mcp_servers.terminal-docks.url="http://127.0.0.1:3741/mcp?token=abc&api_key=secret"',
+    'mcp_servers.starlink.url="http://127.0.0.1:3741/mcp?token=abc&api_key=secret"',
     'initial prompt',
   ], { redactLastArg: true });
 

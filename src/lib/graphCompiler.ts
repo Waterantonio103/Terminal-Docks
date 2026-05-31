@@ -21,6 +21,7 @@ import type {
 import { deriveExecutionLayers } from './graphUtils.js';
 import { normalizeCliId, supportsHeadless } from './cliIdentity.js';
 import agentsConfig from '../config/agents.js';
+import { getWorkflowAgentRole } from '../config/agentRoles.js';
 import { resolveFrontendCategory } from './frontendWorkflow.js';
 import type { FrontendDirectionSpec } from './frontendDirection.js';
 import { isAppSitePresetId } from './frontendDirection.js';
@@ -51,6 +52,10 @@ const WORKER_CAPABILITY_IDS: WorkerCapabilityId[] = ['planning', 'coding', 'test
 const CORE_INSTRUCTION_BY_ROLE = new Map<string, string>(
   agentsConfig.agents.map(agent => [agent.id, agent.coreInstructions ?? ''])
 );
+
+function getCoreInstructionForRole(roleId: string): string {
+  return CORE_INSTRUCTION_BY_ROLE.get(roleId) ?? getWorkflowAgentRole(roleId)?.coreInstructions ?? '';
+}
 
 function asString(value: unknown): string | undefined {
   return typeof value === 'string' ? value : undefined;
@@ -747,7 +752,7 @@ export function compileMission({
 
     const roleId = trimToUndefined(node.data?.roleId) ?? 'agent';
     const instructionOverride = asString(node.data?.instructionOverride) ?? '';
-    const roleInstructions = instructionOverride.trim() || CORE_INSTRUCTION_BY_ROLE.get(roleId)?.trim() || '';
+    const roleInstructions = instructionOverride.trim() || getCoreInstructionForRole(roleId).trim() || '';
 
     const cli = terminalClis[terminalId] ?? normalizeAgentCli(node.data?.cli);
     let executionMode = normalizeExecutionMode(node.data?.executionMode);

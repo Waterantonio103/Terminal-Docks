@@ -1,5 +1,7 @@
 import type { RuntimeActivationPayload } from './missionRuntime.js';
 import { normalizeCliId, supportsHeadless } from './cliIdentity.js';
+import { buildCometRuntimeEnv, readCometEnv } from './runtimeEnv.js';
+import { scopedDebugLog } from './debugLog.js';
 
 export type PromptDelivery = 'arg_file' | 'arg_text' | 'stdin' | 'unsupported';
 
@@ -24,18 +26,17 @@ export interface CliCommandBuilderOptions {
 }
 
 function baseEnv(payload: RuntimeActivationPayload, mcpUrl?: string | null): Record<string, string> {
-  const env: Record<string, string> = {
-    TD_SESSION_ID: payload.sessionId,
-    TD_AGENT_ID: payload.agentId,
-    TD_MISSION_ID: payload.missionId,
-    TD_NODE_ID: payload.nodeId,
-    TD_ATTEMPT: String(payload.attempt),
-    TD_RUN_ID: payload.runId,
-    TD_EXECUTION_MODE: payload.executionMode,
-  };
-  if (mcpUrl) env.TD_MCP_URL = mcpUrl;
-  if (payload.workspaceDir) env.TD_WORKSPACE = payload.workspaceDir;
-  return env;
+  return buildCometRuntimeEnv({
+    sessionId: payload.sessionId,
+    agentId: payload.agentId,
+    missionId: payload.missionId,
+    nodeId: payload.nodeId,
+    attempt: payload.attempt,
+    runId: payload.runId,
+    executionMode: payload.executionMode,
+    mcpUrl,
+    workspaceDir: payload.workspaceDir,
+  });
 }
 
 function unsupported(reason: string, env: Record<string, string>): CliRunCommand {
@@ -56,9 +57,10 @@ function normalizeOpenCodeMcpUrl(value?: string | null): string | null {
     const url = new URL(trimmed);
     const currentPath = url.pathname.replace(/\/+$/, '');
     url.pathname = currentPath.endsWith('/mcp') ? currentPath : `${currentPath || ''}/mcp`;
+    url.hash = '';
     return url.toString();
   } catch {
-    const base = trimmed.replace(/\/+$/, '');
+    const base = trimmed.split('#')[0]?.replace(/\/+$/, '') ?? '';
     return base.endsWith('/mcp') ? base : `${base}/mcp`;
   }
 }
@@ -70,15 +72,15 @@ export function buildOpenCodeWorkflowConfigContent(mcpUrl?: string | null): stri
     ...(normalizedMcpUrl
       ? {
           mcp: {
-            'terminal-docks': {
+            starlink: {
               type: 'remote',
               url: normalizedMcpUrl,
               enabled: true,
             },
           },
           tools: {
-            'terminal-docks*': true,
-            'terminal-docks_*': true,
+            'starlink*': true,
+            'starlink_*': true,
           },
         }
       : {}),
@@ -149,29 +151,33 @@ export function buildCliRunCommand(
       ? 'http://localhost:11434/v1/chat/completions'
       : 'http://localhost:1234/v1/chat/completions';
     const defaultModel = cli === 'ollama' ? 'llama3.1' : 'local-model';
+    const localHttpUrl =
+      options.localHttpUrl ??
+      readCometEnv(options.customEnv, 'LOCAL_HTTP_URL', 'LOCAL_HTTP_URL') ??
+      defaultUrl;
+    const localHttpModel =
+      options.localHttpModel ??
+      readCometEnv(options.customEnv, 'LOCAL_HTTP_MODEL', 'LOCAL_HTTP_MODEL') ??
+      defaultModel;
+    const localHttpApiKey =
+      options.localHttpApiKey ??
+      readCometEnv(options.customEnv, 'LOCAL_HTTP_API_KEY', 'LOCAL_HTTP_API_KEY') ??
+      '';
     return {
-      command: '__terminal_docks_local_http__',
+      command: '__comet_ai_local_http__',
       args: [],
       env: {
         ...env,
+        COMET_LOCAL_HTTP_PROVIDER: cli,
         TD_LOCAL_HTTP_PROVIDER: cli,
-        TD_LOCAL_HTTP_URL:
-          options.localHttpUrl ??
-          options.customEnv?.TD_LOCAL_HTTP_URL ??
-          options.customEnv?.LOCAL_HTTP_URL ??
-          defaultUrl,
-        TD_LOCAL_HTTP_MODEL:
-          options.localHttpModel ??
-          options.customEnv?.TD_LOCAL_HTTP_MODEL ??
-          options.customEnv?.LOCAL_HTTP_MODEL ??
-          defaultModel,
-        ...(options.localHttpApiKey ?? options.customEnv?.TD_LOCAL_HTTP_API_KEY ?? options.customEnv?.LOCAL_HTTP_API_KEY
+        COMET_LOCAL_HTTP_URL: localHttpUrl,
+        TD_LOCAL_HTTP_URL: localHttpUrl,
+        COMET_LOCAL_HTTP_MODEL: localHttpModel,
+        TD_LOCAL_HTTP_MODEL: localHttpModel,
+        ...(localHttpApiKey
           ? {
-              TD_LOCAL_HTTP_API_KEY:
-                options.localHttpApiKey ??
-                options.customEnv?.TD_LOCAL_HTTP_API_KEY ??
-                options.customEnv?.LOCAL_HTTP_API_KEY ??
-                '',
+              COMET_LOCAL_HTTP_API_KEY: localHttpApiKey,
+              TD_LOCAL_HTTP_API_KEY: localHttpApiKey,
             }
           : {}),
       },
@@ -232,6 +238,16 @@ function quoteShellArgumentIfNeeded(value: string, shellKind: ShellKind): string
   return needsShellQuoting(value) ? quoteShellArgument(value, shellKind) : value;
 }
 
+export function withCodexHomeForShell(command: string, shellKind: ShellKind = 'windows'): string {
+  if (shellKind === 'powershell') {
+    return `$env:CODEX_HOME = "$env:USERPROFILE\\.codex"; ${command}`;
+  }
+  if (shellKind === 'unix') {
+    return `CODEX_HOME="$HOME/.codex" ${command}`;
+  }
+  return `set "CODEX_HOME=%USERPROFILE%\\.codex" && ${command}`;
+}
+
 export function redactSensitiveLaunchValue(value: string): string {
   let redacted = value.replace(
     /https?:\/\/[^\s"'<>]+/gi,
@@ -265,16 +281,43 @@ export function formatLaunchArgsForLog(args: string[], options: { redactLastArg?
   }).join(', ')}]`;
 }
 
+export function cliDebugLog(...args: unknown[]): void {
+  scopedDebugLog('cli', 'VITE_CLI_DEBUG', ...args);
+}
+
 // Cached result of resolveCodexYoloFlag — undefined means not yet probed.
 let _cachedCodexYoloFlag: string | null | undefined = undefined;
 
 export function normalizeCodexModelId(modelId: string | null | undefined): string | null {
   const trimmed = typeof modelId === 'string' ? modelId.trim() : '';
   if (!trimmed) return null;
+  if (!isModelCompatibleWithCli('codex', trimmed)) return null;
   if (/^gpt-\d/i.test(trimmed) || /^o\d/i.test(trimmed) || /^codex/i.test(trimmed)) {
     return trimmed.toLowerCase();
   }
   return trimmed;
+}
+
+export function isModelCompatibleWithCli(cliId: string, modelId: string | null | undefined): boolean {
+  const model = typeof modelId === 'string' ? modelId.trim().toLowerCase() : '';
+  if (!model) return true;
+  const cli = normalizeCliId(cliId);
+
+  const looksClaude = model.startsWith('anthropic/')
+    || model.startsWith('claude-')
+    || /\b(?:sonnet|opus|haiku)\b/.test(model);
+  const looksGemini = model.startsWith('google/')
+    || model.startsWith('gemini-')
+    || model.includes('/gemini-');
+  const looksOpenAi = model.startsWith('openai/')
+    || /^gpt-\d/.test(model)
+    || /^o\d/.test(model)
+    || model.startsWith('codex');
+
+  if (cli === 'codex') return looksOpenAi && !looksClaude && !looksGemini;
+  if (cli === 'claude') return looksClaude && !looksOpenAi && !looksGemini;
+  if (cli === 'gemini') return looksGemini && !looksOpenAi && !looksClaude;
+  return true;
 }
 
 /**
@@ -305,7 +348,7 @@ export async function resolveCodexYoloFlag(): Promise<string | null> {
     _cachedCodexYoloFlag = '--dangerously-bypass-approvals-and-sandbox';
   }
 
-  console.log(`[codex] resolved yolo flag=${_cachedCodexYoloFlag ?? '<none>'}`);
+  cliDebugLog(`[codex] resolved yolo flag=${_cachedCodexYoloFlag ?? '<none>'}`);
   return _cachedCodexYoloFlag;
 }
 
@@ -330,9 +373,9 @@ function buildCodexInteractiveFlagArgs({
   const normalizedModelId = normalizeCodexModelId(modelId);
   const trustedProject = trustedProjectDir?.trim();
   const trustedProjectKey = trustedProject ? trustedProject.replace(/"/g, '\\"') : null;
-  console.log(`[codex] buildCodexInteractiveFlagArgs: resolved yolo flag=${yoloFlag ?? '<none>'}`);
+  cliDebugLog(`[codex] buildCodexInteractiveFlagArgs: resolved yolo flag=${yoloFlag ?? '<none>'}`);
   const args = [
-    // Keep workflow-launched Codex sessions focused on Terminal Docks. The
+    // Keep workflow-launched Codex sessions focused on Comet-AI. The
     // user's Codex config may include unrelated MCP servers that add startup
     // latency or fail independently of the workflow under test.
     ...(disableKnownGlobalMcps ? [
@@ -351,20 +394,20 @@ function buildCodexInteractiveFlagArgs({
     'sandbox_mode="danger-full-access"',
     ...(mcpUrl?.trim() ? [
       '-c',
-      `mcp_servers.terminal-docks.url="${mcpUrl.trim()}"`,
+      `mcp_servers.starlink.url="${mcpUrl.trim()}"`,
       '-c',
-      'mcp_servers.terminal-docks.enabled=true',
+      'mcp_servers.starlink.enabled=true',
       '-c',
-      'mcp_servers.terminal-docks.startup_timeout_sec=30',
+      'mcp_servers.starlink.startup_timeout_sec=30',
       '-c',
-      'mcp_servers.terminal-docks.tool_timeout_sec=120',
+      'mcp_servers.starlink.tool_timeout_sec=120',
     ] : []),
     ...(normalizedModelId ? ['--model', normalizedModelId] : []),
     ...(workspaceDir?.trim() ? ['--cd', workspaceDir.trim()] : []),
     '--no-alt-screen',
     ...(yoloFlag ? [yoloFlag] : []),
   ];
-  console.log(`[codex] final codex args (no prompt)=${formatLaunchArgsForLog(args)}`);
+  cliDebugLog(`[codex] final codex args (no prompt)=${formatLaunchArgsForLog(args)}`);
   return args;
 }
 
@@ -392,7 +435,7 @@ export function buildCodexInteractiveLaunchCommand({
   const normalizedPrompt = bootstrapPrompt.replace(/\s+/g, ' ').trim();
   const parts: string[] = ['codex', ...buildCodexInteractiveFlagArgs({ modelId, yolo, workspaceDir, mcpUrl, resolvedYoloFlag, disableKnownGlobalMcps, trustedProjectDir })];
   parts.push(quoteShellArgument(normalizedPrompt, shellKind));
-  return parts.join(' ');
+  return withCodexHomeForShell(parts.join(' '), shellKind);
 }
 
 export function buildCodexInteractiveLaunchArgs({
@@ -484,7 +527,10 @@ export interface PtyLaunchOptions {
 export function buildPtyLaunchCommand(cliId: string, options: PtyLaunchOptions = {}): string {
   const { command, args } = buildPtyLaunchCommandParts(cliId, options);
   const shellKind = options.shellKind ?? 'windows';
-  return [command, ...args.map(arg => quoteShellArgumentIfNeeded(arg, shellKind))].join(' ');
+  const shellCommand = [command, ...args.map(arg => quoteShellArgumentIfNeeded(arg, shellKind))].join(' ');
+  return normalizeCliId(cliId) === 'codex'
+    ? withCodexHomeForShell(shellCommand, shellKind)
+    : shellCommand;
 }
 
 export interface PtyLaunchParts {

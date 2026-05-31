@@ -3,9 +3,9 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-const tempRoot = mkdtempSync(join(tmpdir(), 'terminal-docks-debug-workflows-'));
+const tempRoot = mkdtempSync(join(tmpdir(), 'comet-ai-debug-workflows-'));
 process.env.MCP_DB_PATH = join(tempRoot, 'tasks.db');
-const concreteOutputRoot = join(process.cwd(), 'docks-testing', 'debug-validator-test');
+const concreteOutputRoot = join(process.cwd(), 'comet-testing', 'debug-validator-test');
 
 function textPayload(result) {
   assert.equal(result.isError, undefined);
@@ -215,7 +215,7 @@ try {
   const runnableValidation = textPayload(await tools.get('debug_validate_concrete_output').handler({
     debugRunId,
     missionId: customWorkflow.missionId,
-    outputPath: 'docks-testing/debug-validator-test',
+    outputPath: 'comet-testing/debug-validator-test',
     expectedFiles: ['index.html', 'README.md'],
     mustBeRunnable: true,
     disallowMarkdownOnly: true,
@@ -230,7 +230,7 @@ try {
   const markdownOnlyValidation = textPayload(await tools.get('debug_validate_concrete_output').handler({
     debugRunId,
     missionId: customWorkflow.missionId,
-    outputPath: 'docks-testing/debug-validator-test',
+    outputPath: 'comet-testing/debug-validator-test',
     expectedFiles: ['result.md'],
     mustBeRunnable: true,
     disallowMarkdownOnly: true,

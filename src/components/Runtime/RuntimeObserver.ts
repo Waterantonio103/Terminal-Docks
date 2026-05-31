@@ -13,6 +13,8 @@
 
 import type { MissionArtifact, WorkflowNodeStatus } from '../../store/workspace';
 import { runtimeManager } from '../../lib/runtime/RuntimeManager';
+import { runtimeSessionStateToWorkflowNodeStatus } from '../../lib/runtime/RuntimeTypes';
+import { normalizeTerminalId } from '../../lib/terminalIds';
 
 // ──────────────────────────────────────────────
 // Types
@@ -40,6 +42,12 @@ export interface LiveRuntimeSession {
 }
 
 export type RuntimeSessionListener = (sessions: LiveRuntimeSession[]) => void;
+
+function normalizeRuntimeNodeId(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const normalized = value.replace(/\0/g, '').trim();
+  return normalized || null;
+}
 
 // ──────────────────────────────────────────────
 // RuntimeObserver singleton
@@ -82,11 +90,15 @@ class RuntimeObserver {
   }
 
   getSessionByNodeId(nodeId: string): LiveRuntimeSession | undefined {
-    return this.getSessions().find(s => s.nodeId === nodeId);
+    const normalizedNodeId = normalizeRuntimeNodeId(nodeId);
+    if (!normalizedNodeId) return undefined;
+    return this.getSessions().find(s => normalizeRuntimeNodeId(s.nodeId) === normalizedNodeId);
   }
 
   getSessionByTerminal(terminalId: string): LiveRuntimeSession | undefined {
-    return this.getSessions().find(s => s.terminalId === terminalId);
+    const normalizedTerminalId = normalizeTerminalId(terminalId);
+    if (!normalizedTerminalId) return undefined;
+    return this.getSessions().find(s => normalizeTerminalId(s.terminalId) === normalizedTerminalId);
   }
 
   // ──────────────────────────────────────────────
@@ -111,7 +123,7 @@ class RuntimeObserver {
       executionMode: s.executionMode,
       roleId: s.role,
       title: `${s.role || 'Agent'} — ${s.nodeId}`,
-      status: this.mapRuntimeStateToNodeStatus(s.state),
+      status: runtimeSessionStateToWorkflowNodeStatus(s.state),
       attempt: s.attempt,
       artifacts: [],
       startedAt: s.createdAt,
@@ -121,38 +133,6 @@ class RuntimeObserver {
         : s.activePermission ? 'Awaiting Permission' : (s.lastError ? 'Failed' : undefined),
       activePermission: s.activePermission
     }));
-  }
-
-  private mapRuntimeStateToNodeStatus(state: string): WorkflowNodeStatus {
-    switch (state) {
-      case 'creating':
-      case 'launching_cli':
-      case 'awaiting_cli_ready':
-      case 'waiting_auth':
-      case 'registering_mcp':
-      case 'bootstrap_injecting':
-      case 'bootstrap_sent':
-      case 'awaiting_mcp_ready':
-        return 'launching';
-      case 'ready':
-        return 'ready';
-      case 'injecting_task':
-      case 'awaiting_ack':
-        return 'activation_pending';
-      case 'running':
-      case 'awaiting_permission':
-        return 'running';
-      case 'manual_takeover':
-        return 'manual_takeover';
-      case 'completed':
-        return 'completed';
-      case 'failed':
-      case 'cancelled':
-      case 'disconnected':
-        return 'failed';
-      default:
-        return 'idle';
-    }
   }
 }
 

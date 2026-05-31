@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-const tempRoot = mkdtempSync(join(tmpdir(), 'terminal-docks-smoke-'));
+const tempRoot = mkdtempSync(join(tmpdir(), 'comet-ai-smoke-'));
 process.env.MCP_DB_PATH = join(tempRoot, 'tasks.db');
 process.env.MCP_DISABLE_HTTP = '1';
 

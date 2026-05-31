@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { missionRepository } from '../lib/missionRepository.js';
+import { normalizeWorkflowEventRecords } from '../lib/workflowEvents.js';
 
 export interface MissionSnapshotNode {
   nodeId: string;
@@ -116,7 +117,12 @@ export function useMissionSnapshot(missionId: string | null) {
     const fetchSnapshot = async () => {
       try {
         const data = await missionRepository.getMissionSnapshot(missionId);
-        if (mounted) setSnapshot(data);
+        if (mounted) {
+          setSnapshot({
+            ...data,
+            recentEvents: normalizeWorkflowEventRecords(data.recentEvents, missionId),
+          });
+        }
       } catch (err) {
         console.error('Failed to fetch mission snapshot:', err);
       }
@@ -131,7 +137,7 @@ export function useMissionSnapshot(missionId: string | null) {
     }).then(fn => {
       if (!mounted) fn();
       else unlistenUpdate = fn;
-    });
+    }).catch(() => {});
 
     return () => {
       mounted = false;

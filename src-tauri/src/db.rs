@@ -344,11 +344,7 @@ pub fn init_db(app: &AppHandle) -> Result<(), String> {
     )
     .map_err(|e| e.to_string())?;
 
-    for col in [
-        "session_id TEXT",
-        "content_uri TEXT",
-        "content_json TEXT",
-    ] {
+    for col in ["session_id TEXT", "content_uri TEXT", "content_json TEXT"] {
         let sql = format!("ALTER TABLE artifacts ADD COLUMN {}", col);
         if let Err(e) = conn.execute(&sql, ()) {
             let s = e.to_string();
@@ -394,6 +390,35 @@ pub fn init_db(app: &AppHandle) -> Result<(), String> {
 
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_workflow_events_mission_id ON workflow_events(mission_id, id)",
+        (),
+    )
+    .map_err(|e| e.to_string())?;
+
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS follow_up_messages (
+            id TEXT PRIMARY KEY,
+            mission_id TEXT NOT NULL,
+            thread_id TEXT NOT NULL,
+            run_id TEXT,
+            role TEXT NOT NULL,
+            cli TEXT,
+            model TEXT,
+            runtime_session_id TEXT,
+            content TEXT NOT NULL,
+            attachments_json TEXT,
+            artifact_ids_json TEXT,
+            file_paths_json TEXT,
+            status TEXT,
+            created_at INTEGER NOT NULL,
+            completed_at INTEGER
+        )",
+        (),
+    )
+    .map_err(|e| e.to_string())?;
+
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_follow_up_messages_mission_thread
+         ON follow_up_messages(mission_id, thread_id, created_at)",
         (),
     )
     .map_err(|e| e.to_string())?;
@@ -857,6 +882,26 @@ pub struct WorkflowEventRecord {
     pub message: String,
     pub payload_json: Option<String>,
     pub created_at: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct FollowUpMessageRecord {
+    pub id: String,
+    pub mission_id: String,
+    pub thread_id: String,
+    pub run_id: Option<String>,
+    pub role: String,
+    pub cli: Option<String>,
+    pub model: Option<String>,
+    pub runtime_session_id: Option<String>,
+    pub content: String,
+    pub attachments_json: Option<String>,
+    pub artifact_ids_json: Option<String>,
+    pub file_paths_json: Option<String>,
+    pub status: Option<String>,
+    pub created_at: i64,
+    pub completed_at: Option<i64>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -1744,6 +1789,135 @@ pub fn get_workflow_events(
     let mut events: Vec<WorkflowEventRecord> = iter.filter_map(|r| r.ok()).collect();
     events.reverse();
     Ok(events)
+}
+
+#[tauri::command]
+pub fn upsert_follow_up_message(
+    id: String,
+    mission_id: String,
+    thread_id: String,
+    run_id: Option<String>,
+    role: String,
+    cli: Option<String>,
+    model: Option<String>,
+    runtime_session_id: Option<String>,
+    content: String,
+    attachments_json: Option<String>,
+    artifact_ids_json: Option<String>,
+    file_paths_json: Option<String>,
+    status: Option<String>,
+    created_at: i64,
+    completed_at: Option<i64>,
+    state: State<'_, DbState>,
+) -> Result<(), String> {
+    let db_lock = state
+        .db
+        .lock()
+        .map_err(|_| "Failed to lock database".to_string())?;
+    let conn = db_lock.as_ref().ok_or("Database not initialized")?;
+    conn.execute(
+        "INSERT INTO follow_up_messages
+           (id, mission_id, thread_id, run_id, role, cli, model, runtime_session_id, content,
+            attachments_json, artifact_ids_json, file_paths_json, status, created_at, completed_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+         ON CONFLICT(id) DO UPDATE SET
+           run_id = excluded.run_id,
+           cli = excluded.cli,
+           model = excluded.model,
+           runtime_session_id = excluded.runtime_session_id,
+           content = excluded.content,
+           attachments_json = excluded.attachments_json,
+           artifact_ids_json = excluded.artifact_ids_json,
+           file_paths_json = excluded.file_paths_json,
+           status = excluded.status,
+           completed_at = excluded.completed_at",
+        params![
+            id,
+            mission_id,
+            thread_id,
+            run_id,
+            role,
+            cli,
+            model,
+            runtime_session_id,
+            content,
+            attachments_json,
+            artifact_ids_json,
+            file_paths_json,
+            status,
+            created_at,
+            completed_at,
+        ],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn list_follow_up_messages(
+    mission_id: String,
+    thread_id: Option<String>,
+    limit: Option<i64>,
+    state: State<'_, DbState>,
+) -> Result<Vec<FollowUpMessageRecord>, String> {
+    let db_lock = state
+        .db
+        .lock()
+        .map_err(|_| "Failed to lock database".to_string())?;
+    let conn = db_lock.as_ref().ok_or("Database not initialized")?;
+    let lim = limit.unwrap_or(200).clamp(1, 1000);
+    let rows = if let Some(thread) = thread_id {
+        let mut stmt = conn.prepare(
+            "SELECT id, mission_id, thread_id, run_id, role, cli, model, runtime_session_id,
+                    content, attachments_json, artifact_ids_json, file_paths_json, status, created_at, completed_at
+               FROM follow_up_messages
+              WHERE mission_id = ?1 AND thread_id = ?2
+              ORDER BY created_at ASC
+              LIMIT ?3",
+        ).map_err(|e| e.to_string())?;
+        let mapped = stmt
+            .query_map(params![mission_id, thread, lim], row_to_follow_up_message)
+            .map_err(|e| e.to_string())?
+            .filter_map(|r| r.ok())
+            .collect();
+        mapped
+    } else {
+        let mut stmt = conn.prepare(
+            "SELECT id, mission_id, thread_id, run_id, role, cli, model, runtime_session_id,
+                    content, attachments_json, artifact_ids_json, file_paths_json, status, created_at, completed_at
+               FROM follow_up_messages
+              WHERE mission_id = ?1
+              ORDER BY created_at ASC
+              LIMIT ?2",
+        ).map_err(|e| e.to_string())?;
+        let mapped = stmt
+            .query_map(params![mission_id, lim], row_to_follow_up_message)
+            .map_err(|e| e.to_string())?
+            .filter_map(|r| r.ok())
+            .collect();
+        mapped
+    };
+    Ok(rows)
+}
+
+fn row_to_follow_up_message(row: &rusqlite::Row<'_>) -> rusqlite::Result<FollowUpMessageRecord> {
+    Ok(FollowUpMessageRecord {
+        id: row.get(0)?,
+        mission_id: row.get(1)?,
+        thread_id: row.get(2)?,
+        run_id: row.get(3)?,
+        role: row.get(4)?,
+        cli: row.get(5)?,
+        model: row.get(6)?,
+        runtime_session_id: row.get(7)?,
+        content: row.get(8)?,
+        attachments_json: row.get(9)?,
+        artifact_ids_json: row.get(10)?,
+        file_paths_json: row.get(11)?,
+        status: row.get(12)?,
+        created_at: row.get(13)?,
+        completed_at: row.get(14)?,
+    })
 }
 
 #[tauri::command]

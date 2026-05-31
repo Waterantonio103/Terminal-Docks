@@ -12,7 +12,8 @@ import type {
   StatusDetectionResult,
   TaskContext,
 } from './CliAdapter.js';
-import { formatLaunchArgsForLog } from '../../cliCommandBuilders.js';
+import { cliDebugLog, formatLaunchArgsForLog, normalizeCodexModelId } from '../../cliCommandBuilders.js';
+import { buildCometRuntimeEnv } from '../../runtimeEnv.js';
 
 const ANSI_RE =
   /\x1b\][^\x07]*(?:\x07|\x1b\\)|\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])/g;
@@ -81,13 +82,15 @@ export const codexAdapter: CliAdapter = {
 
   buildLaunchCommand(context: LaunchContext): LaunchCommand {
     const env: Record<string, string> = {
-      TD_SESSION_ID: context.sessionId,
-      TD_AGENT_ID: context.agentId,
-      TD_MISSION_ID: context.missionId,
-      TD_NODE_ID: context.nodeId,
-      TD_MCP_URL: context.mcpUrl,
-      TD_WORKSPACE: context.workspaceDir ?? '',
-      TD_KIND: 'codex',
+      ...buildCometRuntimeEnv({
+        sessionId: context.sessionId,
+        agentId: context.agentId,
+        missionId: context.missionId,
+        nodeId: context.nodeId,
+        mcpUrl: context.mcpUrl,
+        workspaceDir: context.workspaceDir ?? '',
+        kind: 'codex',
+      }),
       ...(context.envOverrides ?? {}),
     };
 
@@ -108,30 +111,31 @@ export const codexAdapter: CliAdapter = {
       'mcp_servers.excalidraw.enabled=false',
       ...(context.mcpUrl?.trim() ? [
         '-c',
-        `mcp_servers.terminal-docks.url="${context.mcpUrl.trim()}"`,
+        `mcp_servers.starlink.url="${context.mcpUrl.trim()}"`,
         '-c',
-        'mcp_servers.terminal-docks.enabled=true',
+        'mcp_servers.starlink.enabled=true',
         '-c',
-        'mcp_servers.terminal-docks.startup_timeout_sec=30',
+        'mcp_servers.starlink.startup_timeout_sec=30',
         '-c',
-        'mcp_servers.terminal-docks.tool_timeout_sec=120',
+        'mcp_servers.starlink.tool_timeout_sec=120',
       ] : []),
       '-c',
       'approval_policy="never"',
       '-c',
       'sandbox_mode="danger-full-access"',
     ];
-    if (context.model?.trim()) args.push('--model', context.model.trim());
+    const model = normalizeCodexModelId(context.model);
+    if (model) args.push('--model', model);
     if (context.workspaceDir?.trim()) args.push('--cd', context.workspaceDir.trim());
     args.push('--no-alt-screen');
     const yoloFlag = '--dangerously-bypass-approvals-and-sandbox';
     if (context.yolo) {
       args.push(yoloFlag);
-      console.log(`[codex] resolved yolo flag=${yoloFlag}`);
+      cliDebugLog(`[codex] resolved yolo flag=${yoloFlag}`);
     } else {
-      console.log('[codex] resolved yolo flag=<none> (yolo=false)');
+      cliDebugLog('[codex] resolved yolo flag=<none> (yolo=false)');
     }
-    console.log(`[codex] final codex args (no prompt)=${formatLaunchArgsForLog(args)}`);
+    cliDebugLog(`[codex] final codex args (no prompt)=${formatLaunchArgsForLog(args)}`);
     return {
       command: 'codex',
       args,

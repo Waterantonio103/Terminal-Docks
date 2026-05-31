@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-const tempRoot = mkdtempSync(join(tmpdir(), 'terminal-docks-debug-'));
+const tempRoot = mkdtempSync(join(tmpdir(), 'comet-ai-debug-'));
 process.env.MCP_DB_PATH = join(tempRoot, 'tasks.db');
 
 try {

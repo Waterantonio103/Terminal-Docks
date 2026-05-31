@@ -141,6 +141,29 @@ run('readiness diagnostics include status, gate state, ids, and redacted tail', 
   assert.doesNotMatch(diagnostic, /Bearer abc123/);
 });
 
+run('readiness diagnostics redact detail secrets and URL credentials', () => {
+  const diagnostic = buildCliReadinessDiagnostic({
+    cliId: 'codex',
+    terminalId: 'term-secret',
+    nodeId: 'node-secret',
+    strictGateEnabled: true,
+    status: {
+      status: 'error',
+      confidence: 'high',
+      detail: 'Failed for API_KEY=abc123\nat http://user:pass@127.0.0.1:11434',
+    },
+    recentOutput: 'retry http://me:secret@localhost:3000/?secret=tail-value',
+  });
+
+  assert.match(diagnostic, /detail="Failed for API_KEY=<redacted> at http:\/\/<redacted>@127\.0\.0\.1:11434"/);
+  assert.match(diagnostic, /recentTail="retry http:\/\/<redacted>@localhost:3000\/\?secret=<redacted>"/);
+  assert.doesNotMatch(diagnostic, /abc123/);
+  assert.doesNotMatch(diagnostic, /tail-value/);
+  assert.doesNotMatch(diagnostic, /user:pass/);
+  assert.doesNotMatch(diagnostic, /me:secret/);
+  assert.doesNotMatch(diagnostic, /\n/);
+});
+
 run('waiting_auth is blocked for managed injection with explicit diagnostics', () => {
   const diagnostic = buildCliReadinessDiagnostic({
     cliId: 'gemini',

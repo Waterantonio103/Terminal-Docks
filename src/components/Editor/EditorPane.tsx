@@ -1,13 +1,29 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect } from 'react';
 import CodeMirror from '@uiw/react-codemirror';
-import { javascript } from '@codemirror/lang-javascript';
-import { open } from '@tauri-apps/plugin-dialog';
-import { FolderOpen } from 'lucide-react';
+import { open, save as saveDialog } from '@tauri-apps/plugin-dialog';
+import { FolderOpen, RotateCw, Save } from 'lucide-react';
 import { Pane, useWorkspaceStore } from '../../store/workspace';
 import { invoke } from '@tauri-apps/api/core';
-import { HighlightStyle, syntaxHighlighting } from "@codemirror/language";
+import { autocompletion, closeBrackets, closeBracketsKeymap } from '@codemirror/autocomplete';
+import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands';
+import { bracketMatching, HighlightStyle, indentOnInput, syntaxHighlighting } from "@codemirror/language";
+import { searchKeymap, highlightSelectionMatches } from '@codemirror/search';
+import type { Extension } from '@codemirror/state';
+import { EditorView, highlightActiveLine, highlightActiveLineGutter, keymap, lineNumbers, type ViewUpdate } from '@codemirror/view';
 import { tags } from "@lezer/highlight";
-import { FileTypeIcon, getImageMimeType, isImageFile } from '../../lib/fileIcons';
+import { getImageMimeType, isImageFile } from '../../lib/fileIcons';
+import { fileNameFromPath, languageLabelForPath } from '../../lib/editorLanguage';
+import { loadLanguageExtensionForPath } from '../../lib/editorLanguageExtensions';
+import { defaultEditorSavePath } from '../../lib/editorSavePath';
+import {
+  clearCachedEditorDirty,
+  getCachedEditorContent,
+  getCachedEditorViewState,
+  markCachedEditorDirty,
+  setCachedEditorContent,
+  setCachedEditorViewState,
+} from '../../lib/editorSessionCache';
+import { dirname } from '../../lib/workspacePaths';
 
 const WELCOME = '// Welcome to the Editor\nconsole.log("Hello, world!");';
 
@@ -26,51 +42,86 @@ const dynamicSyntaxStyle = HighlightStyle.define([
   { tag: tags.constant(tags.variableName), color: "var(--syntax-constant)" },
 ]);
 
-// Global cache to prevent blank flashes on re-mount during layout shifts
-const contentCache = new Map<string, string>();
-
 export function EditorPane({ pane }: { pane: Pane }) {
   const { id, title, data } = pane;
   const filePath = data?.filePath as string | undefined;
+  const reloadToken = data?.editorReloadToken as string | undefined;
+  const isUntitled = data?.untitled === true && !filePath;
+  const untitledContent = typeof data?.untitledContent === 'string' ? data.untitledContent : '';
   const updatePaneData = useWorkspaceStore(s => s.updatePaneData);
+  const renamePane = useWorkspaceStore(s => s.renamePane);
+  const workspaceDir = useWorkspaceStore(s => s.tabs.find(tab => tab.id === s.activeTabId)?.workspaceDir ?? s.workspaceDir);
   const isImage = isImageFile(filePath);
   
   const [content, setContent] = useState(() => {
+    if (isUntitled) return untitledContent;
     if (data?.initialContent) return data.initialContent;
     if (!filePath) return WELCOME;
-    return contentCache.get(filePath) ?? '';
+    return getCachedEditorContent(filePath) ?? '';
   });
 
   const [isDirty, setIsDirty] = useState(false);
   const [loading, setLoading] = useState(false);
   const [imageUrl, setImageUrl] = useState<string | null>(null);
-  const lastLoadedPathRef = useRef<string | undefined>(undefined);
+  const [cursorPosition, setCursorPosition] = useState({ line: 1, col: 1 });
+  const [languageExtension, setLanguageExtension] = useState<Extension>([]);
+  const editorDirtyRef = React.useRef(Boolean(data?.editorDirty));
+
+  useEffect(() => {
+    editorDirtyRef.current = Boolean(data?.editorDirty);
+    setIsDirty(Boolean(data?.editorDirty));
+  }, [data?.editorDirty]);
+
+  const setDirtyState = React.useCallback((dirty: boolean) => {
+    setIsDirty(dirty);
+    if ((filePath || isUntitled) && editorDirtyRef.current !== dirty) {
+      editorDirtyRef.current = dirty;
+      updatePaneData(id, { editorDirty: dirty });
+    }
+  }, [filePath, id, isUntitled, updatePaneData]);
 
   useEffect(() => {
     let cancelled = false;
+    loadLanguageExtensionForPath(filePath)
+      .then(extension => {
+        if (!cancelled) setLanguageExtension(extension);
+      })
+      .catch(error => {
+        console.warn('Failed to load editor language extension:', filePath, error);
+        if (!cancelled) setLanguageExtension([]);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [filePath]);
+
+  const loadFile = React.useCallback(() => {
+    let cancelled = false;
+
+    if (isUntitled) {
+      setContent(untitledContent);
+      setImageUrl(null);
+      setLoading(false);
+      return;
+    }
 
     if (data?.initialContent && !filePath) {
       setContent(data.initialContent);
       setImageUrl(null);
+      setLoading(false);
       return;
     }
 
     if (!filePath) {
-
-      if (lastLoadedPathRef.current !== undefined) {
-        setContent(WELCOME);
-        setIsDirty(false);
-        setImageUrl(null);
-        lastLoadedPathRef.current = undefined;
-      }
+      setContent(WELCOME);
+      setDirtyState(false);
+      setImageUrl(null);
+      setLoading(false);
       return;
     }
-    
-    // If we have cached content and it's the same path, skip the disk read
-    if (filePath === lastLoadedPathRef.current) return;
 
     setLoading(true);
-    lastLoadedPathRef.current = filePath;
 
     if (isImageFile(filePath)) {
       setImageUrl(null);
@@ -79,7 +130,7 @@ export function EditorPane({ pane }: { pane: Pane }) {
           if (cancelled) return;
           setImageUrl(`data:${getImageMimeType(filePath)};base64,${encoded}`);
           setContent('');
-          setIsDirty(false);
+          setDirtyState(false);
         })
         .catch(err => {
           console.error('Failed to read image:', filePath, err);
@@ -93,9 +144,10 @@ export function EditorPane({ pane }: { pane: Pane }) {
       invoke<string>('workspace_read_text_file', { path: filePath })
         .then(val => {
           if (cancelled) return;
-          contentCache.set(filePath, val);
+          setCachedEditorContent(filePath, val);
           setContent(val);
-          setIsDirty(false);
+          clearCachedEditorDirty(filePath);
+          setDirtyState(false);
         })
         .catch(err => {
           console.error('Failed to read file:', filePath, err);
@@ -109,30 +161,77 @@ export function EditorPane({ pane }: { pane: Pane }) {
     return () => {
       cancelled = true;
     };
-  }, [data?.initialContent, filePath]);
+  }, [data?.initialContent, filePath, id, isUntitled, reloadToken, setDirtyState]);
 
-    const handleOpenFile = async () => {
+  useEffect(() => loadFile(), [loadFile]);
+
+  const handleOpenFile = async () => {
+    if (isDirty && !window.confirm('Open another file and discard unsaved changes in this editor?')) return;
+
     try {
       const selected = await open({ multiple: false, directory: false });
       const path = Array.isArray(selected) ? selected[0] : selected;
       if (path) {
-        updatePaneData(id, { filePath: path });
+        updatePaneData(id, {
+          filePath: path,
+          initialContent: undefined,
+          untitled: false,
+          untitledContent: undefined,
+          editorDirty: false,
+        });
+        renamePane(id, fileNameFromPath(path));
       }
     } catch (err) {
       console.error('File dialog error:', err);
     }
-    };
+  };
 
-    const handleSave = async () => {
-    if (filePath && !isImage) {
-      try {
-        await invoke('workspace_write_text_file', { path: filePath, content });
-        setIsDirty(false);
-      } catch (err) {
-        console.error('Failed to save file', err);
-      }
+  const handleOpenCurrentDirectory = async () => {
+    if (!filePath) {
+      await handleOpenFile();
+      return;
     }
-    };
+
+    try {
+      await invoke('reveal_in_explorer', { path: dirname(filePath) });
+    } catch (err) {
+      console.error('Failed to open current directory:', filePath, err);
+    }
+  };
+
+  const handleSave = async () => {
+    if (isImage) return;
+
+    try {
+      let targetPath = filePath;
+      const savingUntitled = !targetPath;
+      if (!targetPath) {
+        targetPath = await saveDialog({
+          title: 'Save editor file',
+          defaultPath: defaultEditorSavePath(workspaceDir, title),
+          filters: [{ name: 'Text files', extensions: ['txt', 'md', 'json', 'js', 'ts', 'tsx', 'css', 'html', 'rs'] }],
+        }) ?? undefined;
+        if (!targetPath) return;
+      }
+
+      await invoke('workspace_write_text_file', { path: targetPath, content });
+      setCachedEditorContent(targetPath, content);
+      clearCachedEditorDirty(targetPath);
+      if (savingUntitled) {
+        updatePaneData(id, {
+          filePath: targetPath,
+          initialContent: undefined,
+          untitled: false,
+          untitledContent: undefined,
+          editorDirty: false,
+        });
+        renamePane(id, fileNameFromPath(targetPath));
+      }
+      setDirtyState(false);
+    } catch (err) {
+      console.error('Failed to save file', err);
+    }
+  };
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if ((e.ctrlKey || e.metaKey) && e.key === 's') {
       e.preventDefault();
@@ -140,33 +239,43 @@ export function EditorPane({ pane }: { pane: Pane }) {
     }
   };
 
+  const handleReload = () => {
+    if (!filePath || isImage) return;
+    if (isDirty && !window.confirm('Reload this file and discard unsaved changes?')) return;
+    updatePaneData(id, { editorReloadToken: `${Date.now()}` });
+  };
+
+  const handleEditorUpdate = (update: ViewUpdate) => {
+    if (update.selectionSet || update.docChanged) {
+      const head = update.state.selection.main.head;
+      const line = update.state.doc.lineAt(head);
+      setCursorPosition({ line: line.number, col: head - line.from + 1 });
+    }
+
+    if (filePath && update.view.scrollDOM) {
+      setCachedEditorViewState(filePath, {
+        cursor: update.state.selection.main.head,
+        scrollTop: update.view.scrollDOM.scrollTop,
+        scrollLeft: update.view.scrollDOM.scrollLeft,
+      });
+    }
+  };
+
+  const restoreViewState = (view: EditorView) => {
+    if (!filePath) return;
+    const cached = getCachedEditorViewState(filePath);
+    if (!cached) return;
+    const cursor = Math.min(cached.cursor, view.state.doc.length);
+    view.dispatch({ selection: { anchor: cursor }, scrollIntoView: true });
+    window.requestAnimationFrame(() => {
+      view.scrollDOM.scrollTop = cached.scrollTop;
+      view.scrollDOM.scrollLeft = cached.scrollLeft;
+    });
+  };
+
   return (
     <div className="flex flex-col h-full bg-bg-panel" onKeyDown={handleKeyDown}>
-      <div className="flex items-center justify-between px-3 py-1.5 text-xs border-b border-border-panel shrink-0 bg-bg-titlebar">
-        <span className="text-text-muted truncate max-w-[70%] flex items-center gap-2">
-          {filePath && <FileTypeIcon fileName={filePath} size={13} />}
-          <span className="truncate">{loading ? 'Loading…' : filePath ? filePath.split(/[\\/]/).pop() : title}</span>
-          {isDirty && <span className="ml-1 text-accent-primary">●</span>}
-        </span>
-        <div className="flex items-center gap-2 shrink-0">
-          <button
-            onClick={handleOpenFile}
-            className="text-text-muted hover:text-accent-primary transition-colors"
-            title="Open file"
-          >
-            <FolderOpen size={13} />
-          </button>
-          {filePath && !isImage && (
-            <button
-              onClick={handleSave}
-              className="text-text-muted hover:text-accent-primary text-xs transition-colors"
-            >
-              Save
-            </button>
-          )}
-        </div>
-      </div>
-      <div className="flex-1 overflow-auto h-full bg-bg-panel">
+      <div className="flex-1 min-h-0 overflow-auto bg-bg-panel">
         {isImage ? (
           <div className="h-full w-full flex items-center justify-center p-6 bg-bg-app">
             {loading ? (
@@ -183,22 +292,93 @@ export function EditorPane({ pane }: { pane: Pane }) {
             )}
           </div>
         ) : (
-          <CodeMirror
-            key={filePath || '__welcome__'}
-            value={content}
-            height="100%"
-            theme="dark"
-            extensions={[
-              javascript({ jsx: true }),
-              syntaxHighlighting(dynamicSyntaxStyle)
-            ]}
-            onChange={(val) => {
-              setContent(val);
-              if (filePath) contentCache.set(filePath, val);
-              if (filePath && !isDirty) setIsDirty(true);
-            }}
-            className="h-full text-sm cm-theme-custom"
-          />
+          loading ? (
+            <div className="h-full flex items-center justify-center text-xs text-text-muted">Loading file...</div>
+          ) : (
+            <CodeMirror
+              key={filePath || id}
+              value={content}
+              height="100%"
+              theme="dark"
+              extensions={[
+                lineNumbers(),
+                highlightActiveLineGutter(),
+                history(),
+                indentOnInput(),
+                bracketMatching(),
+                closeBrackets(),
+                autocompletion(),
+                highlightActiveLine(),
+                highlightSelectionMatches(),
+                languageExtension,
+                syntaxHighlighting(dynamicSyntaxStyle),
+                keymap.of([
+                  indentWithTab,
+                  ...closeBracketsKeymap,
+                  ...defaultKeymap,
+                  ...historyKeymap,
+                  ...searchKeymap,
+                ]),
+              ]}
+              onCreateEditor={restoreViewState}
+              onUpdate={handleEditorUpdate}
+              onChange={(val) => {
+                setContent(val);
+                if (filePath) {
+                  markCachedEditorDirty(filePath, val);
+                  if (!isDirty) setDirtyState(true);
+                } else if (isUntitled) {
+                  const dirty = val.length > 0;
+                  editorDirtyRef.current = dirty;
+                  setIsDirty(dirty);
+                  updatePaneData(id, { untitledContent: val, editorDirty: dirty });
+                }
+              }}
+              className="h-full text-sm cm-theme-custom"
+            />
+          )
+        )}
+      </div>
+      <div className="flex h-7 shrink-0 items-center gap-3 border-t border-border-panel bg-bg-titlebar px-3 text-[10px] text-text-muted">
+        {loading ? (
+          <span className="shrink-0">Loading</span>
+        ) : filePath && !isImage ? (
+          <>
+            <span className="shrink-0">Ln {cursorPosition.line}</span>
+            <span className="shrink-0">Col {cursorPosition.col}</span>
+            <span className="hidden shrink-0 md:inline">{languageLabelForPath(filePath)}</span>
+          </>
+        ) : (
+          <span className="shrink-0">{isImage ? 'Image preview' : 'Ready'}</span>
+        )}
+        {isDirty && <span className="shrink-0 text-accent-primary">Unsaved</span>}
+        <button
+          onClick={handleOpenCurrentDirectory}
+          className="text-text-muted hover:text-accent-primary transition-colors"
+          title={filePath ? "Open current directory" : "Open file"}
+          aria-label={filePath ? "Open current directory" : "Open file"}
+        >
+          <FolderOpen size={13} />
+        </button>
+        {filePath && !isImage && (
+          <button
+            onClick={handleReload}
+            className="text-text-muted hover:text-accent-primary transition-colors"
+            title="Reload file"
+            aria-label="Reload file"
+          >
+            <RotateCw size={13} />
+          </button>
+        )}
+        {(filePath || isUntitled) && !isImage && (
+          <button
+            onClick={handleSave}
+            className="text-text-muted hover:text-accent-primary transition-colors"
+            title={filePath ? 'Save' : 'Save as'}
+            aria-label={filePath ? 'Save' : 'Save as'}
+          >
+            <Save size={13} />
+          </button>
         )}
       </div>
       <style>{`

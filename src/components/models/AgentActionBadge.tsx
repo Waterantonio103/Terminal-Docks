@@ -1,4 +1,5 @@
 import { type FC, useEffect, useRef, useState } from 'react';
+import { normalizeCliId } from '../../lib/cliIdentity';
 
 export interface AgentActionBadgeProps {
   cli?: string | null;
@@ -7,12 +8,13 @@ export interface AgentActionBadgeProps {
 }
 
 function normalizeCli(value: unknown): string {
+  const canonical = normalizeCliId(value);
+  if (canonical === 'claude' || canonical === 'gemini' || canonical === 'codex' || canonical === 'opencode') {
+    return canonical;
+  }
   if (typeof value !== 'string') return 'default';
-  const key = value.trim().toLowerCase().replace(/[_-]/g, '');
-  if (key === 'claude' || key === 'claudecode') return 'claude';
-  if (key === 'gemini') return 'gemini';
-  if (key === 'codex') return 'codex';
-  if (key === 'opencode') return 'opencode';
+  const key = value.replace(/[\x00-\x1F\x7F]/g, '').trim().toLowerCase().replace(/[\s_-]+/g, '');
+  if (key === 'claudecode') return 'claude';
   return 'default';
 }
 

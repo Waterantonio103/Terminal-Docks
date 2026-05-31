@@ -10,7 +10,7 @@
 import type { CliId, ExecutionMode, PermissionCategory, PermissionDecision } from '../workflow/WorkflowTypes.js';
 import type { RuntimeActivationPayload } from '../missionRuntime.js';
 import type { PostAckProgressSnapshot, PostAckWatchdogAction, PostAckWatchdogReason } from './RuntimeProgressWatchdog.js';
-
+import type { WorkflowNodeStatus } from '../../store/workspace.js';
 
 // ──────────────────────────────────────────────
 // Session Lifecycle States
@@ -45,6 +45,36 @@ export const RUNTIME_SESSION_TERMINAL_STATES: ReadonlySet<RuntimeSessionState> =
 
 export function isRuntimeSessionTerminal(state: RuntimeSessionState): boolean {
   return RUNTIME_SESSION_TERMINAL_STATES.has(state);
+}
+
+export function runtimeSessionStateToWorkflowNodeStatus(state: RuntimeSessionState): WorkflowNodeStatus {
+  switch (state) {
+    case 'creating':
+    case 'launching_cli':
+    case 'awaiting_cli_ready':
+    case 'waiting_auth':
+    case 'registering_mcp':
+    case 'bootstrap_injecting':
+    case 'bootstrap_sent':
+    case 'awaiting_mcp_ready':
+      return 'launching';
+    case 'ready':
+      return 'ready';
+    case 'injecting_task':
+    case 'awaiting_ack':
+      return 'activation_pending';
+    case 'running':
+    case 'awaiting_permission':
+      return 'running';
+    case 'manual_takeover':
+      return 'manual_takeover';
+    case 'completed':
+      return 'completed';
+    case 'failed':
+    case 'cancelled':
+    case 'disconnected':
+      return 'failed';
+  }
 }
 
 // ──────────────────────────────────────────────

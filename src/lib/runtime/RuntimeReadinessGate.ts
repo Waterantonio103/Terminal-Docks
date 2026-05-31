@@ -59,15 +59,24 @@ export function evaluateCliReadiness(
 
 export function redactCliDiagnosticText(value: string): string {
   return value
+    .replace(/\b(https?:\/\/)[^:\s/@]+:[^@\s/]+@/gi, '$1<redacted>@')
     .replace(/([?&](?:token|access_token|api_key|key|secret)=)[^&\s'"]+/gi, '$1<redacted>')
     .replace(/\b(Bearer\s+)[A-Za-z0-9._~+/=-]+/gi, '$1<redacted>')
     .replace(/\b([A-Za-z0-9_]*(?:TOKEN|API_KEY|SECRET|PASSWORD)[A-Za-z0-9_]*=)[^\s'"]+/g, '$1<redacted>');
 }
 
+function cleanCliDiagnosticField(value: string): string {
+  return redactCliDiagnosticText(value)
+    .replace(/[\x00-\x1F\x7F]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 export function buildCliReadinessDiagnostic(context: CliReadinessDiagnosticContext): string {
   const sessionPart = context.sessionId ? ` sessionId=${context.sessionId}` : '';
   const timeoutPart = typeof context.timeoutMs === 'number' ? ` timeoutMs=${context.timeoutMs}` : '';
-  const tail = redactCliDiagnosticText(context.recentOutput.trim() || '<empty>');
+  const detail = cleanCliDiagnosticField(context.status.detail);
+  const tail = cleanCliDiagnosticField(context.recentOutput.trim()) || '<empty>';
 
   return [
     `CLI readiness gate blocked injection: cli=${context.cliId}`,
@@ -76,7 +85,7 @@ export function buildCliReadinessDiagnostic(context: CliReadinessDiagnosticConte
     `${sessionPart.trim()}`,
     `status=${context.status.status}`,
     `confidence=${context.status.confidence}`,
-    `detail="${context.status.detail}"`,
+    `detail="${detail}"`,
     `strictGateEnabled=${context.strictGateEnabled}`,
     `${timeoutPart.trim()}`,
     `recentTail="${tail}"`,

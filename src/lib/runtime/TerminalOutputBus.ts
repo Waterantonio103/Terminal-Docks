@@ -12,6 +12,7 @@
  */
 
 import { listen } from '@tauri-apps/api/event';
+import { normalizeTerminalId } from '../terminalIds.js';
 
 export interface PtyChunk {
   terminalId: string;
@@ -34,12 +35,21 @@ interface TerminalBuffer {
   maxChars: number;
 }
 
-function decodePtyBytes(data: number[] | Uint8Array): { bytes: Uint8Array; text: string } {
+function bytesFromPtyData(data: number[] | Uint8Array): Uint8Array {
+  return data instanceof Uint8Array ? data : new Uint8Array(data);
+}
+
+function decodePtyBytes(data: number[] | Uint8Array, decoder = new TextDecoder()): { bytes: Uint8Array; text: string } {
   const bytes = data instanceof Uint8Array ? data : new Uint8Array(data);
   return {
     bytes,
-    text: new TextDecoder().decode(bytes),
+    text: decoder.decode(bytes, { stream: true }),
   };
+}
+
+function normalizePositiveInteger(value: number, fallback: number): number {
+  if (!Number.isFinite(value) || value <= 0) return fallback;
+  return Math.max(1, Math.floor(value));
 }
 
 function trimBuffer(buf: TerminalBuffer): void {
@@ -58,44 +68,66 @@ export class TerminalOutputBus {
   private listeners = new Map<string, Set<TerminalOutputListener>>();
   private startPromise: Promise<void> | null = null;
   private unlisten: (() => void) | null = null;
+  private decoders = new Map<string, TextDecoder>();
+  private readonly maxBufferChunks: number;
+  private readonly maxBufferChars: number;
 
   constructor(
-    private maxChunks = DEFAULT_MAX_CHUNKS,
-    private maxChars = DEFAULT_MAX_CHARS,
-  ) {}
+    maxChunks = DEFAULT_MAX_CHUNKS,
+    maxChars = DEFAULT_MAX_CHARS,
+  ) {
+    this.maxBufferChunks = normalizePositiveInteger(maxChunks, DEFAULT_MAX_CHUNKS);
+    this.maxBufferChars = normalizePositiveInteger(maxChars, DEFAULT_MAX_CHARS);
+  }
 
   start(): Promise<void> {
     if (this.startPromise) return this.startPromise;
 
     this.startPromise = listen<{ id: string; data: number[] }>('pty-out', event => {
-      const { bytes, text } = decodePtyBytes(event.payload.data);
-      this.append({
-        terminalId: event.payload.id,
-        bytes,
-        text,
-        at: Date.now(),
-      });
+      this.appendBytes(event.payload.id, event.payload.data);
     }).then(unlisten => {
       this.unlisten = unlisten;
+    }).catch(error => {
+      this.startPromise = null;
+      throw error;
     });
 
     return this.startPromise;
   }
 
+  appendBytes(terminalId: string, data: number[] | Uint8Array, at = Date.now()): void {
+    const normalizedTerminalId = normalizeTerminalId(terminalId);
+    if (!normalizedTerminalId) return;
+    const bytes = bytesFromPtyData(data);
+    if (bytes.length === 0) return;
+    const decoder = this.decoders.get(normalizedTerminalId) ?? new TextDecoder();
+    this.decoders.set(normalizedTerminalId, decoder);
+    const { text } = decodePtyBytes(bytes, decoder);
+    this.append({
+      terminalId: normalizedTerminalId,
+      bytes,
+      text,
+      at,
+    });
+  }
+
   append(chunk: Omit<PtyChunk, 'seq'>): void {
-    let buf = this.buffers.get(chunk.terminalId);
+    const terminalId = normalizeTerminalId(chunk.terminalId);
+    if (!terminalId) return;
+
+    let buf = this.buffers.get(terminalId);
     if (!buf) {
-      buf = { chunks: [], totalChars: 0, seq: 0, maxChunks: this.maxChunks, maxChars: this.maxChars };
-      this.buffers.set(chunk.terminalId, buf);
+      buf = { chunks: [], totalChars: 0, seq: 0, maxChunks: this.maxBufferChunks, maxChars: this.maxBufferChars };
+      this.buffers.set(terminalId, buf);
     }
 
     buf.seq += 1;
-    const seqChunk: PtyChunk = { ...chunk, seq: buf.seq };
+    const seqChunk: PtyChunk = { ...chunk, terminalId, seq: buf.seq };
     buf.chunks.push(seqChunk);
     buf.totalChars += chunk.text.length;
     trimBuffer(buf);
 
-    for (const listener of this.listeners.get(chunk.terminalId) ?? []) {
+    for (const listener of this.listeners.get(terminalId) ?? []) {
       try {
         listener(seqChunk);
       } catch {
@@ -105,41 +137,67 @@ export class TerminalOutputBus {
   }
 
   subscribe(terminalId: string, cb: TerminalOutputListener): () => void {
+    const normalizedTerminalId = normalizeTerminalId(terminalId);
+    if (!normalizedTerminalId) return () => {};
+
     void this.start();
-    const listeners = this.listeners.get(terminalId) ?? new Set<TerminalOutputListener>();
+    const listeners = this.listeners.get(normalizedTerminalId) ?? new Set<TerminalOutputListener>();
     listeners.add(cb);
-    this.listeners.set(terminalId, listeners);
+    this.listeners.set(normalizedTerminalId, listeners);
 
     return () => {
-      const current = this.listeners.get(terminalId);
+      const current = this.listeners.get(normalizedTerminalId);
       if (!current) return;
       current.delete(cb);
       if (current.size === 0) {
-        this.listeners.delete(terminalId);
+        this.listeners.delete(normalizedTerminalId);
       }
     };
   }
 
   getSequence(terminalId: string): number {
-    return this.buffers.get(terminalId)?.seq ?? 0;
+    const normalizedTerminalId = normalizeTerminalId(terminalId);
+    if (!normalizedTerminalId) return 0;
+    return this.buffers.get(normalizedTerminalId)?.seq ?? 0;
   }
 
   getText(terminalId: string): string {
-    const buf = this.buffers.get(terminalId);
+    const normalizedTerminalId = normalizeTerminalId(terminalId);
+    if (!normalizedTerminalId) return '';
+    const buf = this.buffers.get(normalizedTerminalId);
     if (!buf || buf.chunks.length === 0) return '';
     return buf.chunks.map(c => c.text).join('');
   }
 
   getTail(terminalId: string, maxChars: number): string {
-    const text = this.getText(terminalId);
-    if (text.length <= maxChars) return text;
-    return text.slice(text.length - maxChars);
+    if (!Number.isFinite(maxChars) || maxChars <= 0) return '';
+    const normalizedTerminalId = normalizeTerminalId(terminalId);
+    if (!normalizedTerminalId) return '';
+    const buf = this.buffers.get(normalizedTerminalId);
+    if (!buf || buf.chunks.length === 0) return '';
+
+    const targetChars = Math.floor(maxChars);
+    const parts: string[] = [];
+    let remaining = targetChars;
+    for (let index = buf.chunks.length - 1; index >= 0 && remaining > 0; index -= 1) {
+      const text = buf.chunks[index].text;
+      if (text.length <= remaining) {
+        parts.push(text);
+        remaining -= text.length;
+        continue;
+      }
+      parts.push(text.slice(text.length - remaining));
+      break;
+    }
+    return parts.reverse().join('');
   }
 
   getChunksSince(terminalId: string, afterSeq: number): PtyChunk[] {
-    const buf = this.buffers.get(terminalId);
+    const normalizedTerminalId = normalizeTerminalId(terminalId);
+    if (!normalizedTerminalId) return [];
+    const buf = this.buffers.get(normalizedTerminalId);
     if (!buf || buf.chunks.length === 0) return [];
-    if (afterSeq <= 0) return [...buf.chunks];
+    if (!Number.isFinite(afterSeq) || afterSeq <= 0) return [...buf.chunks];
     const idx = buf.chunks.findIndex(c => c.seq > afterSeq);
     if (idx === -1) return [];
     return buf.chunks.slice(idx);
@@ -154,11 +212,16 @@ export class TerminalOutputBus {
   }
 
   clear(terminalId: string): void {
-    this.buffers.delete(terminalId);
+    const normalizedTerminalId = normalizeTerminalId(terminalId);
+    if (!normalizedTerminalId) return;
+    this.buffers.delete(normalizedTerminalId);
+    this.decoders.delete(normalizedTerminalId);
   }
 
   getBufferInfo(terminalId: string): { chunkCount: number; totalChars: number; seq: number } {
-    const buf = this.buffers.get(terminalId);
+    const normalizedTerminalId = normalizeTerminalId(terminalId);
+    if (!normalizedTerminalId) return { chunkCount: 0, totalChars: 0, seq: 0 };
+    const buf = this.buffers.get(normalizedTerminalId);
     if (!buf) return { chunkCount: 0, totalChars: 0, seq: 0 };
     return { chunkCount: buf.chunks.length, totalChars: buf.totalChars, seq: buf.seq };
   }
@@ -169,6 +232,7 @@ export class TerminalOutputBus {
     this.startPromise = null;
     this.buffers.clear();
     this.listeners.clear();
+    this.decoders.clear();
   }
 }
 

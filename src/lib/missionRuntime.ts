@@ -1,6 +1,11 @@
 import { invoke } from '@tauri-apps/api/core';
 import { notifyTaskCompleted } from './workers/bootstrap.js';
 import type { WorkerAdapter, WorkerSession } from './workers/types.js';
+import { scopedDebugLog } from './debugLog.js';
+
+function missionRuntimeDebugLog(...args: unknown[]): void {
+  scopedDebugLog('mission-runtime', 'VITE_MISSION_RUNTIME_DEBUG', ...args);
+}
 
 async function captureTerminalOutput(terminalId: string): Promise<string> {
   try {
@@ -367,7 +372,7 @@ export function attachExitDetector(
         const finalOutput = await captureTerminalOutput(session.terminalId);
         const { outcome, summary } = analyzeOutput(finalOutput);
         
-        console.log(`[ExitDetector] Auto-completing ${options.nodeId} with outcome: ${outcome}`);
+        missionRuntimeDebugLog(`[ExitDetector] Auto-completing ${options.nodeId} with outcome: ${outcome}`);
         
         await notifyTaskCompleted({
           sessionId: session.sessionId,

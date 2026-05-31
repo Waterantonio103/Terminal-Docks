@@ -86,7 +86,7 @@ run('gemini queued watchdog text keeps managed injection blocked', () => {
     'Gemini CLI v0.41.1',
     '*   Type your message or @path/to/file',
     'Queued (press ↑ to edit):',
-    'Terminal Docks still has missionId="mission-1" nodeId="builder-data" marked running.',
+    'Comet-AI still has missionId="mission-1" nodeId="builder-data" marked running.',
     '⠋ Confirming Completion Time Logic (esc to cancel, 2m 43s)',
   ].join('\n');
   const status = geminiAdapter.detectStatus(prompt);

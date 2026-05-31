@@ -1,4 +1,5 @@
 import agentsConfig from '../config/agents.js';
+import { getWorkflowAgentRole } from '../config/agentRoles.js';
 import type { FrontendSpecCategory, FrontendWorkflowMode, PresetSpecProfile, WorkflowAuthoringMode } from '../store/workspace.js';
 import type { FrontendDirectionSpec } from './frontendDirection.js';
 import { FINAL_README_INSTRUCTION } from './workflowReadme.js';
@@ -93,7 +94,7 @@ function frontendDirectionGuidance(spec?: FrontendDirectionSpec): string {
 }
 
 export function buildLaunchPrompt(agentId: string, ctx: LaunchContext, instructionOverride?: string): string {
-  const agent = agentsConfig.agents.find((a: AgentDef) => a.id === agentId);
+  const agent = getWorkflowAgentRole(agentId) as AgentDef | undefined;
   if (!agent) return '';
 
   const lines: string[] = [];
@@ -156,9 +157,9 @@ export function buildLaunchPrompt(agentId: string, ctx: LaunchContext, instructi
 
   lines.push(`Objective: ${ctx.task}.`);
 
-  const modeDefault = ctx.mode === 'edit' ? EDIT_INSTRUCTIONS[agentId] : undefined;
+  const modeDefault = ctx.mode === 'edit' ? EDIT_INSTRUCTIONS[agent.id] : undefined;
   lines.push(instructionOverride ?? modeDefault ?? agent.coreInstructions);
-  if (agentId === 'coordinator') {
+  if (agent.id === 'coordinator') {
     lines.push('Coordinator routing default: use `assign_task_by_requirements` after `delegate_task` for capability-based worker selection. Call `list_sessions({ detailed: true })` when you need to inspect worker capabilities. Use explicit `assign_task` only for forced pinning.');
   }
 

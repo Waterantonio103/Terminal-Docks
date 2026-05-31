@@ -31,7 +31,7 @@ import type {
   StopRuntimeArgs,
   ResolvePermissionArgs,
 } from './RuntimeTypes.js';
-import { isRuntimeSessionTerminal } from './RuntimeTypes.js';
+import { isRuntimeSessionTerminal, runtimeSessionStateToWorkflowNodeStatus } from './RuntimeTypes.js';
 import { getCliAdapter } from './adapters/index.js';
 import type { CompletionDetectionResult, StatusDetectionResult } from './adapters/CliAdapter.js';
 import {
@@ -39,6 +39,7 @@ import {
   evaluateCliReadiness,
   isStrictCliStatusGateEnabled,
 } from './RuntimeReadinessGate.js';
+import type { CliId } from '../workflow/WorkflowTypes.js';
 
 import {
   checkMcpHealthDetailed,
@@ -83,6 +84,8 @@ import { emit } from '@tauri-apps/api/event';
 import { terminalOutputBus } from './TerminalOutputBus.js';
 import { missionRepository } from '../missionRepository.js';
 import { FINAL_README_INSTRUCTION } from '../workflowReadme.js';
+import { buildCometRuntimeEnv } from '../runtimeEnv.js';
+import { scopedDebugLog } from '../debugLog.js';
 import {
   assessPostAckTerminalProgress,
   evaluatePostAckWatchdog,
@@ -117,6 +120,7 @@ const BOOTSTRAP_EVENT_TIMEOUT_MS = 8_000;
 const MCP_HEALTH_TIMEOUT_MS = 5_000;
 const MCP_HEALTH_RETRY_ATTEMPTS = 3;
 const MCP_HEALTH_RETRY_DELAY_MS = 1_000;
+const MCP_HEALTH_OK_CACHE_MS = 10 * 60_000;
 const MCP_REGISTRATION_TIMEOUT_MS = 8_000;
 const TASK_ACK_TIMEOUT_MS = readRuntimeEnvNumber('VITE_RUNTIME_TASK_ACK_TIMEOUT_MS', 60_000, 30_000);
 const CODEX_TASK_ACK_TIMEOUT_MS = readRuntimeEnvNumber(
@@ -138,7 +142,7 @@ const BOOTSTRAP_INJECTION_TIMEOUT_MS = 10_000;
 const MISSING_MCP_COMPLETION_RENUDGE_MS = 4_000;
 const PERMISSION_REDETECT_SUPPRESSION_MS = 2_500;
 const MISSING_MCP_COMPLETION_FAIL_MS = 90_000;
-const POST_ACK_NO_PROGRESS_WINDOW_MS = readRuntimeEnvNumber('VITE_RUNTIME_POST_ACK_NO_PROGRESS_WINDOW_MS', 60_000, 1_000);
+const POST_ACK_NO_PROGRESS_WINDOW_MS = readRuntimeEnvNumber('VITE_RUNTIME_POST_ACK_NO_PROGRESS_WINDOW_MS', 180_000, 1_000);
 const POST_ACK_NO_MCP_COMPLETION_MAX_MS = readRuntimeEnvNumber('VITE_RUNTIME_POST_ACK_NO_MCP_COMPLETION_MAX_MS', 600_000, 60_000);
 const MAX_RETAINED_RUNTIME_VIEW_SESSIONS = readRuntimeEnvNumber('VITE_RUNTIME_RETAINED_VIEW_SESSIONS', 16, 0);
 const RUNTIME_COMPLETION_POLL_MS = 2_000;
@@ -152,10 +156,29 @@ const PTY_DESTROY_POLL_MS = 100;
 const CLI_AUTH_WAIT_MS = readRuntimeEnvNumber('VITE_RUNTIME_AUTH_WAIT_MS', 120_000, CLI_READY_WAIT_MS);
 const APP_REGISTERED_BOOTSTRAP_CLIS = new Set(['gemini', 'opencode']);
 
+let recentMcpHealthOkUntil = 0;
+let inFlightMcpHealthCheck: Promise<Awaited<ReturnType<typeof checkMcpHealthDetailed>>> | null = null;
+
 function readRuntimeEnvNumber(key: string, fallback: number, minimum = 0): number {
   const env = (import.meta as ImportMeta & { env?: Record<string, string | undefined> }).env;
   const value = Number(env?.[key] ?? fallback);
   return Number.isFinite(value) ? Math.max(minimum, value) : fallback;
+}
+
+function runtimeDebugLog(...args: unknown[]): void {
+  scopedDebugLog('runtime', 'VITE_RUNTIME_DEBUG', ...args);
+}
+
+function buildSessionLaunchEnv(session: RuntimeSession): Record<string, string> {
+  return buildCometRuntimeEnv({
+    sessionId: session.sessionId,
+    agentId: session.agentId,
+    missionId: session.missionId,
+    nodeId: session.nodeId,
+    attempt: session.attempt,
+    workspaceDir: session.workspaceDir ?? '',
+    kind: session.cliId,
+  });
 }
 
 function pasteSubmitGapMsForCli(cliId: string): number {
@@ -168,17 +191,30 @@ function managedInjectionReadyWaitMsForCli(cliId: string): number {
   return CLI_READY_WAIT_MS;
 }
 
+async function checkMcpHealthForConcurrentLaunch(): Promise<Awaited<ReturnType<typeof checkMcpHealthDetailed>>> {
+  if (Date.now() < recentMcpHealthOkUntil) {
+    const baseUrl = await getMcpBaseUrl();
+    return { ok: true, baseUrl, timedOut: false, durationMs: 0 };
+  }
+
+  if (!inFlightMcpHealthCheck) {
+    inFlightMcpHealthCheck = checkMcpHealthDetailed({ timeoutMs: MCP_HEALTH_TIMEOUT_MS })
+      .then(result => {
+        if (result.ok) recentMcpHealthOkUntil = Date.now() + MCP_HEALTH_OK_CACHE_MS;
+        return result;
+      })
+      .finally(() => {
+        inFlightMcpHealthCheck = null;
+      });
+  }
+
+  return inFlightMcpHealthCheck;
+}
+
 function taskAckTimeoutMsForCli(cliId: string): number {
   if (cliId === 'codex') return CODEX_TASK_ACK_TIMEOUT_MS;
   if (cliId === 'claude') return CLAUDE_TASK_ACK_TIMEOUT_MS;
   return cliId === 'gemini' ? GEMINI_TASK_ACK_TIMEOUT_MS : TASK_ACK_TIMEOUT_MS;
-}
-
-function joinRuntimePath(...parts: string[]): string {
-  return parts
-    .filter(Boolean)
-    .join('\\')
-    .replace(/[\\\/]+/g, '\\');
 }
 
 function inferCodexTrustedProjectDir(workspaceDir: string | null | undefined): string | null {
@@ -190,7 +226,7 @@ function inferCodexTrustedProjectDir(workspaceDir: string | null | undefined): s
 function isManagedCliActiveWorkStatus(status: StatusDetectionResult | null | undefined): boolean {
   return status?.status === 'processing' &&
     status.confidence === 'high' &&
-    /active work|queued input|pending turn|completing current tasks/i.test(status.detail ?? '');
+    /active work|active work indicator|queued input|pending turn|completing current tasks/i.test(status.detail ?? '');
 }
 
 function escapeGeminiStartupPromptValue(value: string): string {
@@ -201,7 +237,7 @@ function escapeGeminiStartupPromptValue(value: string): string {
 // CLI Runtime Strategies
 // ──────────────────────────────────────────────
 
-const CLI_STRATEGIES: Record<string, CliRuntimeStrategy> = {
+const CLI_STRATEGIES: Partial<Record<CliId, CliRuntimeStrategy>> = {
   codex: {
     cliId: 'codex',
     workflowMode: 'fresh_process',
@@ -232,9 +268,9 @@ const CLI_STRATEGIES: Record<string, CliRuntimeStrategy> = {
   },
 };
 
-function getCliStrategy(cliId: string): CliRuntimeStrategy {
+function getCliStrategy(cliId: CliId): CliRuntimeStrategy {
   return CLI_STRATEGIES[cliId] ?? {
-    cliId: cliId as any,
+    cliId,
     workflowMode: 'fresh_process',
     supportsMcpHandshake: false,
     supportsPromptInjection: false,
@@ -337,10 +373,10 @@ class TerminalLock {
     this.locks.set(terminalId, next);
 
     if (existing) {
-      console.log(`[runtime] acquiring terminal lock terminal=${terminalId} op=${label} (waiting)`);
+      runtimeDebugLog(`[runtime] acquiring terminal lock terminal=${terminalId} op=${label} (waiting)`);
       await existing;
     } else {
-      console.log(`[runtime] acquiring terminal lock terminal=${terminalId} op=${label}`);
+      runtimeDebugLog(`[runtime] acquiring terminal lock terminal=${terminalId} op=${label}`);
     }
 
     return () => {
@@ -348,7 +384,7 @@ class TerminalLock {
         this.locks.delete(terminalId);
       }
       release();
-      console.log(`[runtime] released terminal lock terminal=${terminalId} op=${label}`);
+      runtimeDebugLog(`[runtime] released terminal lock terminal=${terminalId} op=${label}`);
     };
   }
 
@@ -488,7 +524,7 @@ class RuntimeManager {
       if (!session) return;
 
       if (!this.isCurrentOwner(session)) {
-        console.log(
+        runtimeDebugLog(
           `[runtime] stale agent-run-exit ignored session=${session.sessionId} terminal=${session.terminalId}`,
         );
         return;
@@ -591,7 +627,7 @@ class RuntimeManager {
       throw new Error(`No CLI adapter registered for "${args.cliId}"`);
     }
 
-    console.log(
+    runtimeDebugLog(
       `[runtime] create cli=${args.cliId} model=${normalizeModelForCli(args.cliId, args.modelId ?? args.model) ?? '<default>'} yolo=${Boolean(args.yolo)} executionMode=${args.executionMode} workspace=${args.workspaceDir ?? '<none>'}`,
     );
 
@@ -647,18 +683,19 @@ class RuntimeManager {
       });
 
       const existingBinding = getRuntimeNodeBinding(session.nodeId);
-      if (existingBinding?.adapterStatus !== to || existingBinding?.runtimeSessionId !== session.sessionId) {
+      const adapterStatus = runtimeSessionStateToWorkflowNodeStatus(to);
+      if (existingBinding?.adapterStatus !== adapterStatus || existingBinding?.runtimeSessionId !== session.sessionId) {
         const existingTerminalId = existingBinding?.terminalId;
         setRuntimeNodeBinding(session.nodeId, {
           terminalId: session.terminalId || existingTerminalId || '',
           runtimeSessionId: session.sessionId,
-          adapterStatus: to as any,
+          adapterStatus,
         });
       }
 
       emit('workflow-node-update', {
         id: session.nodeId,
-        status: to,
+        status: adapterStatus,
         attempt: session.attempt,
       }).catch(() => {});
 
@@ -680,7 +717,7 @@ class RuntimeManager {
     const session = this.getSession(sessionId);
     if (!session) throw new Error(`No runtime session: ${sessionId}`);
 
-    console.log(
+    runtimeDebugLog(
       `[RuntimeManager] launchCli: sessionId="${sessionId}", nodeId="${session.nodeId}", cliId="${session.cliId}", missionId="${session.missionId}", attempt=${session.attempt}`,
     );
 
@@ -702,6 +739,15 @@ class RuntimeManager {
         nodeId: session.nodeId,
         error: message,
       });
+      if (!session.missionId.startsWith('adhoc-')) {
+        await acknowledgeActivation({
+          missionId: session.missionId,
+          nodeId: session.nodeId,
+          attempt: session.attempt,
+          status: 'failed',
+          reason: message,
+        }).catch(() => {});
+      }
       throw error;
     }
   }
@@ -710,33 +756,64 @@ class RuntimeManager {
     const session = this.getSession(args.sessionId);
     if (!session) throw new Error(`No runtime session: ${args.sessionId}`);
 
-    console.log(
+    runtimeDebugLog(
       `[RuntimeManager] sendTask: sessionId="${args.sessionId}", nodeId="${session.nodeId}", promptLength=${args.prompt.length}`,
     );
 
     session.transitionTo('injecting_task');
 
-    const signal = args.prompt;
-    const adapter = session.adapter;
+    try {
+      const signal = args.prompt;
+      const adapter = session.adapter;
 
-    if (session.isHeadless) {
-      const launchCommand = adapter.buildLaunchCommand({
-        sessionId: session.sessionId,
-        missionId: session.missionId,
-        nodeId: session.nodeId,
-        role: session.role,
-        agentId: session.agentId,
-        profileId: session.profileId,
-        workspaceDir: session.workspaceDir,
-        mcpUrl: await getMcpBaseUrl(),
-        executionMode: session.executionMode,
-        model: session.model || null,
-        yolo: session.yolo,
-      });
+      if (session.isHeadless) {
+        const launchCommand = adapter.buildLaunchCommand({
+          sessionId: session.sessionId,
+          missionId: session.missionId,
+          nodeId: session.nodeId,
+          role: session.role,
+          agentId: session.agentId,
+          profileId: session.profileId,
+          workspaceDir: session.workspaceDir,
+          mcpUrl: await getMcpBaseUrl(),
+          executionMode: session.executionMode,
+          model: session.model || null,
+          yolo: session.yolo,
+        });
 
-      if (launchCommand.promptDelivery === 'unsupported') {
-        throw new Error(launchCommand.unsupportedReason ?? 'Headless execution unsupported');
+        if (launchCommand.promptDelivery === 'unsupported') {
+          throw new Error(launchCommand.unsupportedReason ?? 'Headless execution unsupported');
+        }
+
+        this.emit({
+          type: 'task_injected',
+          sessionId: session.sessionId,
+          nodeId: session.nodeId,
+          attempt: session.attempt,
+          promptBytes: new TextEncoder().encode(signal).length,
+          promptPreview: previewText(signal, 320) ?? '',
+        });
+        missionRepository.appendWorkflowEvent({
+          missionId: session.missionId,
+          nodeId: session.nodeId,
+          sessionId: session.sessionId,
+          eventType: 'task_injected',
+          severity: 'info',
+          message: `Task injected into session ${session.sessionId}`,
+        }).catch(() => {});
+        return;
       }
+
+      await this.waitForManagedInjectionReadyOrThrow(session, CLI_READY_WAIT_MS, 'sendTask');
+
+      const { preClear, paste, submit } = adapter.buildActivationInput(signal);
+      if (preClear) {
+        await this.writeToTerminalOrFail(session, preClear);
+        await sleep(PRE_CLEAR_SETTLE_MS);
+      }
+      await this.writeToTerminalOrFail(session, paste);
+      await sleep(pasteSubmitGapMsForCli(session.cliId));
+      await this.writeToTerminalOrFail(session, submit);
 
       this.emit({
         type: 'task_injected',
@@ -754,36 +831,10 @@ class RuntimeManager {
         severity: 'info',
         message: `Task injected into session ${session.sessionId}`,
       }).catch(() => {});
-      return;
+    } catch (error) {
+      this.failRuntimeForTaskInjection(session, error);
+      throw error;
     }
-
-    await this.waitForManagedInjectionReadyOrThrow(session, CLI_READY_WAIT_MS, 'sendTask');
-
-    const { preClear, paste, submit } = adapter.buildActivationInput(signal);
-    if (preClear) {
-      await this.writeToTerminalOrFail(session, preClear);
-      await sleep(PRE_CLEAR_SETTLE_MS);
-    }
-    await this.writeToTerminalOrFail(session, paste);
-    await sleep(pasteSubmitGapMsForCli(session.cliId));
-    await this.writeToTerminalOrFail(session, submit);
-
-    this.emit({
-      type: 'task_injected',
-      sessionId: session.sessionId,
-      nodeId: session.nodeId,
-      attempt: session.attempt,
-      promptBytes: new TextEncoder().encode(signal).length,
-      promptPreview: previewText(signal, 320) ?? '',
-    });
-    missionRepository.appendWorkflowEvent({
-      missionId: session.missionId,
-      nodeId: session.nodeId,
-      sessionId: session.sessionId,
-      eventType: 'task_injected',
-      severity: 'info',
-      message: `Task injected into session ${session.sessionId}`,
-    }).catch(() => {});
   }
 
   async sendInput(args: SendInputArgs): Promise<void> {
@@ -798,7 +849,7 @@ class RuntimeManager {
   }
 
   async writeBootstrapToTerminal(terminalId: string, data: string, caller: string): Promise<void> {
-    console.log(
+    runtimeDebugLog(
       `[RuntimeManager] writeBootstrapToTerminal: caller="${caller}", terminalId="${terminalId}", dataLength=${data.length}`,
     );
 
@@ -1002,7 +1053,7 @@ class RuntimeManager {
     const strategy = getCliStrategy(args.cliId);
     const terminalId = args.terminalId;
 
-    console.log(
+    runtimeDebugLog(
       `[runtime] ensureRuntimeReadyForTask: cli=${args.cliId} mode=${strategy.workflowMode} terminal=${terminalId} node=${args.nodeId}`,
     );
 
@@ -1040,7 +1091,7 @@ class RuntimeManager {
     if (existing && strategy.workflowMode === 'reusable_interactive' && !isWorkflowRun) {
       const validation = await this.validateSessionForReuse(existing.sessionId, expectedReuse);
       if (validation.status === 'reusable') {
-        console.log(
+        runtimeDebugLog(
           `[runtime] reusable runtime found; sending follow-up signal session=${existing.sessionId} terminal=${terminalId}`,
         );
         this.retireSession(existing);
@@ -1057,7 +1108,7 @@ class RuntimeManager {
       await this.stopRuntimeAndWait(existing, `Session not reusable: ${validation.details}`, strategy);
       needsPtyDestroy = true;
     } else if (existing) {
-      console.log(
+      runtimeDebugLog(
         `[runtime] existing session found; stopping for fresh launch cli=${args.cliId} strategy=${strategy.workflowMode}`,
       );
       await this.stopRuntimeAndWait(existing, `Strategy ${strategy.workflowMode} requires fresh process`, strategy);
@@ -1087,7 +1138,7 @@ class RuntimeManager {
         updateRuntimeTerminalPaneData(terminalId, {
           runtimeManaged: true,
         });
-        console.log(`[runtime] workflow run: unconditionally destroying terminal=${terminalId}`);
+        runtimeDebugLog(`[runtime] workflow run: unconditionally destroying terminal=${terminalId}`);
         await this.destroyAndWaitForTerminal(terminalId);
         terminalOutputBus.clear(terminalId);
       } else if (needsPtyDestroy) {
@@ -1112,7 +1163,7 @@ class RuntimeManager {
     const session = this.sessions.get(sessionId);
     if (!session) throw new Error(`No runtime session: ${sessionId}`);
 
-    console.log(
+    runtimeDebugLog(
       `[RuntimeManager] reinjectTask: sessionId="${sessionId}", nodeId="${session.nodeId}", cliId="${session.cliId}"`,
     );
 
@@ -1304,7 +1355,7 @@ class RuntimeManager {
 
     return mcpBus.subscribe(sessionId, event => {
       if (!this.isCurrentOwner(session)) {
-        console.log(
+        runtimeDebugLog(
           `[runtime] stale MCP event ignored type=${event.type} session=${sessionId}`,
         );
         return;
@@ -1453,7 +1504,7 @@ class RuntimeManager {
       if (event.payload.id !== terminalId) return;
 
       if (!this.isCurrentOwnerForTerminal(terminalId, sessionId)) {
-        console.log(
+        runtimeDebugLog(
           `[runtime] stale pty-exit ignored terminal=${terminalId} oldSession=${sessionId} (newer owner active)`,
         );
         return;
@@ -1946,7 +1997,7 @@ class RuntimeManager {
     idleMs: number,
   ): string {
     const seconds = Math.round(idleMs / 1000);
-    const base = `Terminal Docks still has missionId="${session.missionId}" nodeId="${session.nodeId}" attempt=${session.attempt} marked running.`;
+    const base = `Comet-AI still has missionId="${session.missionId}" nodeId="${session.nodeId}" attempt=${session.attempt} marked running.`;
     if (reason === 'post_ack_no_mcp_completion') {
       return [
         base,
@@ -2059,9 +2110,9 @@ class RuntimeManager {
 
     if (!session.isTerminal) return;
     const prompt = [
-      `Terminal Docks still has missionId="${session.missionId}" nodeId="${session.nodeId}" attempt=${session.attempt} marked running.`,
+      `Comet-AI still has missionId="${session.missionId}" nodeId="${session.nodeId}" attempt=${session.attempt} marked running.`,
       'A normal final answer does not complete a graph node.',
-      `Call the Terminal Docks MCP tool complete_task with missionId="${session.missionId}", nodeId="${session.nodeId}", attempt=${session.attempt}, outcome="success" or "failure", and a concise summary now.`,
+      `Call the Starlink MCP tool complete_task with missionId="${session.missionId}", nodeId="${session.nodeId}", attempt=${session.attempt}, outcome="success" or "failure", and a concise summary now.`,
     ].join(' ');
     await this.injectInteractivePrompt(session, prompt, true);
   }
@@ -2200,7 +2251,7 @@ class RuntimeManager {
   private claimTerminalOwnership(terminalId: string, sessionId: string): void {
     const prev = this.terminalOwners.get(terminalId);
     if (prev && prev !== sessionId) {
-      console.log(
+      runtimeDebugLog(
         `[runtime] terminal ownership transferred terminal=${terminalId} from=${prev.slice(0, 12)} to=${sessionId.slice(0, 12)}`,
       );
     }
@@ -2210,7 +2261,7 @@ class RuntimeManager {
   private releaseTerminalOwnership(terminalId: string, sessionId: string): void {
     if (this.terminalOwners.get(terminalId) === sessionId) {
       this.terminalOwners.delete(terminalId);
-      console.log(`[runtime] terminal ownership released terminal=${terminalId} session=${sessionId.slice(0, 12)}`);
+      runtimeDebugLog(`[runtime] terminal ownership released terminal=${terminalId} session=${sessionId.slice(0, 12)}`);
     }
   }
 
@@ -2237,7 +2288,7 @@ class RuntimeManager {
       await sleep(150);
     }
 
-    console.log(`[runtime] spawning CLI terminal=${terminalId} command=${opts.command ?? '<shell>'}`);
+    runtimeDebugLog(`[runtime] spawning CLI terminal=${terminalId} command=${opts.command ?? '<shell>'}`);
     missionRepository.appendWorkflowEvent({
       missionId: 'system',
       terminalId,
@@ -2267,11 +2318,11 @@ class RuntimeManager {
         throw err;
       }
     }
-    console.log(`[runtime] spawn success terminal=${terminalId}`);
+    runtimeDebugLog(`[runtime] spawn success terminal=${terminalId}`);
   }
 
   private async destroyAndWaitForTerminal(terminalId: string): Promise<void> {
-    console.log(`[runtime] destroying terminal terminal=${terminalId}`);
+    runtimeDebugLog(`[runtime] destroying terminal terminal=${terminalId}`);
     try {
       await destroyTerminal(terminalId);
     } catch (err) {
@@ -2283,7 +2334,7 @@ class RuntimeManager {
       try {
         const active = await isTerminalActive(terminalId);
         if (!active) {
-          console.log(`[runtime] PTY destroyed terminal=${terminalId}`);
+          runtimeDebugLog(`[runtime] PTY destroyed terminal=${terminalId}`);
           return;
         }
       } catch {
@@ -2362,7 +2413,27 @@ class RuntimeManager {
       if (session.isTerminal) {
         session.transitionTo('awaiting_cli_ready');
         this.bindRuntimeToTerminalPane(session);
-        const terminalReady = await this.waitForTerminalReady(session.terminalId, 5_000);
+        let terminalReady = await this.waitForTerminalReady(session.terminalId, 5_000);
+        if (!terminalReady) {
+          const { rows, cols } = this.getTerminalDimensions(session.terminalId);
+          const env = buildSessionLaunchEnv(session);
+          // Adhoc follow-up launches start a shell first and then type the CLI
+          // command into it. The native PTY Codex-home seeding path only runs
+          // for direct `command: codex` spawns, so keep shell-launched Codex on
+          // the user's normal Codex home instead of pointing at a missing
+          // workspace-local directory.
+
+          await this.safeSpawnTerminal(session.terminalId, {
+            rows,
+            cols,
+            cwd: session.workspaceDir ?? null,
+            env,
+          });
+          terminalReady = await this.waitForTerminalReady(session.terminalId, 5_000);
+          if (!terminalReady) {
+            throw new Error(`Terminal ${session.terminalId} did not become active after hidden follow-up spawn (node: ${session.nodeId}).`);
+          }
+        }
         if (terminalReady && await this.shouldLaunchCliInTerminal(session)) {
           await sleep(CLI_LAUNCH_DELAY_MS);
           try {
@@ -2422,7 +2493,7 @@ class RuntimeManager {
       status: 'mcp_connecting',
     });
 
-    let mcpHealth = await checkMcpHealthDetailed({ timeoutMs: MCP_HEALTH_TIMEOUT_MS });
+    let mcpHealth = await checkMcpHealthForConcurrentLaunch();
     for (let attempt = 1; !mcpHealth.ok && attempt < MCP_HEALTH_RETRY_ATTEMPTS; attempt += 1) {
       console.warn(
         `[runtime] MCP health check failed for node=${session.nodeId} session=${session.sessionId}; ` +
@@ -2430,7 +2501,7 @@ class RuntimeManager {
         mcpHealth,
       );
       await sleep(MCP_HEALTH_RETRY_DELAY_MS);
-      mcpHealth = await checkMcpHealthDetailed({ timeoutMs: MCP_HEALTH_TIMEOUT_MS });
+      mcpHealth = await checkMcpHealthForConcurrentLaunch();
     }
     if (!mcpHealth.ok) {
       const category = mcpHealth.timedOut ? 'mcp_health_timeout' : 'mcp_health_unavailable';
@@ -2450,7 +2521,7 @@ class RuntimeManager {
     }
 
     if (activationPayload.executionMode === 'manual') {
-      console.log(`[RuntimeManager] Manual takeover for node ${session.nodeId}`);
+      runtimeDebugLog(`[RuntimeManager] Manual takeover for node ${session.nodeId}`);
       session.transitionTo('manual_takeover');
       missionRepository.appendWorkflowEvent({
         missionId: session.missionId,
@@ -2500,7 +2571,7 @@ class RuntimeManager {
             yolo: session.yolo,
             workspaceDir: session.workspaceDir,
           });
-          console.log(`[runtime] launch command=${redactSensitiveLaunchValue(launchCmd)}`);
+          runtimeDebugLog(`[runtime] launch command=${redactSensitiveLaunchValue(launchCmd)}`);
           await this.writeToTerminalOrFail(session, `${launchCmd}\r`);
         }
         await sleep(CLI_STARTUP_WAIT_MS);
@@ -2524,7 +2595,7 @@ class RuntimeManager {
       }
     }
 
-    console.log(`[runtime] CLI ready cli=${session.cliId} terminal=${session.terminalId}`);
+    runtimeDebugLog(`[runtime] CLI ready cli=${session.cliId} terminal=${session.terminalId}`);
 
     // 4. Register session with MCP
     if (!contract || !bootstrapRequest) {
@@ -2532,7 +2603,7 @@ class RuntimeManager {
     }
 
     session.transitionTo('registering_mcp');
-    console.log(`[runtime] registering MCP session session=${session.sessionId}`);
+    runtimeDebugLog(`[runtime] registering MCP session session=${session.sessionId}`);
 
     const mcpReadyPromise = this.waitForMcpState(
       session.sessionId,
@@ -2553,7 +2624,7 @@ class RuntimeManager {
       const reason = registration?.message ?? registration?.error ?? 'Runtime registration was rejected by MCP.';
       throw new Error(reason.includes('mcp_registration_timeout') ? reason : `mcp_registration_failed: ${reason}`);
     }
-    console.log(`[runtime] MCP registration result session=${session.sessionId} ok=${registration.ok} message=${registration.message ?? ''}`);
+    runtimeDebugLog(`[runtime] MCP registration result session=${session.sessionId} ok=${registration.ok} message=${registration.message ?? ''}`);
 
     await acknowledgeActivation({
       missionId: session.missionId,
@@ -2583,7 +2654,7 @@ class RuntimeManager {
       if (bootstrapPrompt) {
         try {
           bootstrapPromptBody = bootstrapPrompt.replace(/\r$/, '');
-          console.log(`[runtime] injecting bootstrap prompt cli=${session.cliId} session=${session.sessionId}`);
+          runtimeDebugLog(`[runtime] injecting bootstrap prompt cli=${session.cliId} session=${session.sessionId}`);
           const injectResult = await Promise.race([
             this.injectInteractivePrompt(session, bootstrapPromptBody, false).then(() => true),
             sleep(BOOTSTRAP_INJECTION_TIMEOUT_MS).then(() => false),
@@ -2594,7 +2665,7 @@ class RuntimeManager {
               `Bootstrap prompt injection timed out (${BOOTSTRAP_INJECTION_TIMEOUT_MS}ms) for CLI "${session.cliId}" on node "${session.nodeId}".`,
             );
           }
-          console.log(`[runtime] bootstrap prompt injected cli=${session.cliId} session=${session.sessionId}`);
+          runtimeDebugLog(`[runtime] bootstrap prompt injected cli=${session.cliId} session=${session.sessionId}`);
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
           throw new Error(
@@ -2607,7 +2678,7 @@ class RuntimeManager {
     }
 
     session.transitionTo('awaiting_mcp_ready');
-    console.log(`[runtime] waiting for agent:ready session=${session.sessionId}`);
+    runtimeDebugLog(`[runtime] waiting for agent:ready session=${session.sessionId}`);
 
     try {
       if (session.cliId === 'codex' && session.isTerminal && bootstrapPromptBody) {
@@ -2620,7 +2691,7 @@ class RuntimeManager {
         }
       }
       await mcpReadyPromise;
-      console.log(`[runtime] agent ready received session=${session.sessionId}`);
+      runtimeDebugLog(`[runtime] agent ready received session=${session.sessionId}`);
     } catch {
       throw new Error(
         `Timed out waiting for "${contract.handshakeEvent}" from CLI "${session.cliId}" on node "${session.nodeId}" (${BOOTSTRAP_EVENT_TIMEOUT_MS}ms). ` +
@@ -2673,7 +2744,7 @@ class RuntimeManager {
         new Set(['activation_acked', 'running', 'completed', 'done']),
       );
       if (startupPromptDeliveredViaLaunch && session.cliId === 'gemini') {
-        console.log(
+        runtimeDebugLog(
           `[runtime] skipping task prompt injection cli=${session.cliId} session=${session.sessionId}; startup prompt carries MCP task context`,
         );
         this.emit({
@@ -2685,7 +2756,7 @@ class RuntimeManager {
           promptPreview: '<startup prompt carried task context>',
         });
       } else if (taskAlreadyFetched) {
-        console.log(
+        runtimeDebugLog(
           `[runtime] skipping task prompt injection cli=${session.cliId} session=${session.sessionId}; task already fetched from MCP`,
         );
         this.emit({
@@ -2697,7 +2768,7 @@ class RuntimeManager {
           promptPreview: '<task already fetched from MCP>',
         });
       } else {
-        console.log(`[runtime] injecting task prompt cli=${session.cliId} session=${session.sessionId}`);
+        runtimeDebugLog(`[runtime] injecting task prompt cli=${session.cliId} session=${session.sessionId}`);
         await this.injectInteractiveTask(session, signal, false);
       }
     }
@@ -2808,7 +2879,7 @@ class RuntimeManager {
       throw new Error(error ?? 'Headless execution is not configured for this node.');
     }
 
-    console.log(
+    runtimeDebugLog(
       `[runtime] launch command=${redactSensitiveLaunchValue(request.command)} args=${formatLaunchArgsForLog(request.args)} cli=${session.cliId} model=${session.model || '<default>'} yolo=${session.yolo} promptDelivery=${request.promptDelivery} mode=${request.executionMode}`,
     );
     await startHeadlessRun(request as import('./TerminalRuntime.js').HeadlessRunRequest);
@@ -2821,7 +2892,7 @@ class RuntimeManager {
     }
 
     if (session.cliId === 'codex' && !retry) {
-      console.log(
+      runtimeDebugLog(
         `[runtime] skipping follow-up task prompt injection cli=codex terminal=${session.terminalId}; startup prompt carries MCP task context`,
       );
       this.emit({
@@ -2837,7 +2908,7 @@ class RuntimeManager {
 
     await sleep(CLI_STARTUP_WAIT_MS);
     if (!retry && await this.hasRuntimeActivationStatus(session, new Set(['activation_acked', 'running', 'completed', 'done']))) {
-      console.log(
+      runtimeDebugLog(
         `[runtime] skipping task prompt injection cli=${session.cliId} terminal=${session.terminalId}; task already fetched from MCP`,
       );
       this.emit({
@@ -2850,7 +2921,7 @@ class RuntimeManager {
       });
       return;
     }
-    console.log(`[runtime] injecting task prompt cli=${session.cliId} terminal=${session.terminalId}`);
+    runtimeDebugLog(`[runtime] injecting task prompt cli=${session.cliId} terminal=${session.terminalId}`);
     await this.injectInteractivePrompt(session, signal, retry);
 
     this.emit({
@@ -2872,24 +2943,12 @@ class RuntimeManager {
     await this.destroyAndWaitForTerminal(session.terminalId);
 
     const { rows, cols } = this.getTerminalDimensions(session.terminalId);
-    const env: Record<string, string> = {
-      TD_SESSION_ID: session.sessionId,
-      TD_AGENT_ID: session.agentId,
-      TD_MISSION_ID: session.missionId,
-      TD_NODE_ID: session.nodeId,
-      TD_ATTEMPT: String(session.attempt),
-      TD_WORKSPACE: session.workspaceDir ?? '',
-      TD_KIND: session.cliId,
-    };
-    if (session.cliId === 'codex' && session.workspaceDir?.trim()) {
-      env.CODEX_HOME = joinRuntimePath(session.workspaceDir.trim(), '.terminal-docks', 'codex-home');
-    }
-
+    const env = buildSessionLaunchEnv(session);
     const launch = await this.buildInteractiveWorkflowShellLaunchCommand(session, activationPayload);
     const directLaunch = launch.command === 'codex' && launch.args?.length;
 
     if (directLaunch) {
-      console.log(`[runtime] spawning workflow CLI directly terminal=${session.terminalId} cli=${session.cliId} args=${formatLaunchArgsForLog(launch.args ?? [], { redactLastArg: true })}`);
+      runtimeDebugLog(`[runtime] spawning workflow CLI directly terminal=${session.terminalId} cli=${session.cliId} args=${formatLaunchArgsForLog(launch.args ?? [], { redactLastArg: true })}`);
       await this.safeSpawnTerminal(session.terminalId, {
         rows,
         cols,
@@ -2899,7 +2958,7 @@ class RuntimeManager {
         env,
       });
     } else {
-      console.log('[runtime] spawning workflow shell', {
+      runtimeDebugLog('[runtime] spawning workflow shell', {
         terminalId: session.terminalId,
         cli: session.cliId,
       });
@@ -2912,7 +2971,7 @@ class RuntimeManager {
       });
     }
 
-    console.log(`[runtime] ${directLaunch ? 'direct CLI' : 'shell'} spawn success terminal=${session.terminalId} cli=${session.cliId}`);
+    runtimeDebugLog(`[runtime] ${directLaunch ? 'direct CLI' : 'shell'} spawn success terminal=${session.terminalId} cli=${session.cliId}`);
     await resizeTerminal(session.terminalId, rows, cols).catch(() => {});
     await emit('terminal-refit-requested', { terminalId: session.terminalId }).catch(() => {});
 
@@ -2925,7 +2984,7 @@ class RuntimeManager {
       await sleep(SHELL_LAUNCH_SETTLE_MS);
       const launchCmd = launch.command;
 
-      console.log(`[runtime] writing CLI launch command: ${launch.promptDeliveredAtLaunch ? `${session.cliId} <startup-prompt:redacted>` : launchCmd}`);
+      runtimeDebugLog(`[runtime] writing CLI launch command: ${launch.promptDeliveredAtLaunch ? `${session.cliId} <startup-prompt:redacted>` : launchCmd}`);
       await this.writeToTerminalOrFail(session, `${launchCmd}\r`);
       await sleep(150);
     }
@@ -2943,7 +3002,7 @@ class RuntimeManager {
 
     await sleep(CLI_STARTUP_WAIT_MS);
     if (launch.promptDeliveredAtLaunch) {
-      console.log(`[runtime] CLI launch prompt already delivered cli=${session.cliId} terminal=${session.terminalId}; skipping idle prompt wait`);
+      runtimeDebugLog(`[runtime] CLI launch prompt already delivered cli=${session.cliId} terminal=${session.terminalId}; skipping idle prompt wait`);
     } else {
       const cliReady = await this.waitForCliReady(session, CLI_READY_WAIT_MS);
       if (!cliReady) {
@@ -2953,7 +3012,7 @@ class RuntimeManager {
         ));
       }
     }
-    console.log(`[runtime] CLI ready cli=${session.cliId} terminal=${session.terminalId}`);
+    runtimeDebugLog(`[runtime] CLI ready cli=${session.cliId} terminal=${session.terminalId}`);
     missionRepository.appendWorkflowEvent({
       missionId: session.missionId,
       nodeId: session.nodeId,
@@ -2982,9 +3041,9 @@ class RuntimeManager {
       const missionId = escapeGeminiStartupPromptValue(session.missionId);
       const nodeId = escapeGeminiStartupPromptValue(session.nodeId);
       const signal = [
-        `NEW_TASK. First call get_task_details({ missionId: "${missionId}", nodeId: "${nodeId}" }) through the Terminal Docks MCP server.`,
+        `NEW_TASK. First call get_task_details({ missionId: "${missionId}", nodeId: "${nodeId}" }) through the Starlink MCP server.`,
         'Use the returned role instructions, task payload, inbox, and legal targets as the source of truth.',
-        'Finish by calling complete_task or handoff_task through Terminal Docks MCP; do not stop after a normal final answer.',
+        'Finish by calling complete_task or handoff_task through Starlink MCP; do not stop after a normal final answer.',
       ].join(' ');
       return {
         command: buildGeminiInteractiveLaunchCommand({
@@ -3200,12 +3259,12 @@ class RuntimeManager {
     const payload = activationPayload.inputPayload ? JSON.stringify(activationPayload.inputPayload) : null;
     const payloadSuffix = payload ? `, payload=${payload}` : '';
     const prompt =
-      `Connect to MCP before task activation. MCP URL: ${mcpUrl}. ` +
+      `Connect to Starlink before task activation. Starlink URL: ${mcpUrl}. ` +
       `Call connect_agent with role="${role}", agentId="${session.agentId}", terminalId="${session.terminalId}", ` +
       `cli="${session.cliId}", profileId="${profileId}", sessionId="${session.sessionId}", runtimeSessionId="${session.sessionId}", ` +
       `missionId="${session.missionId}", nodeId="${session.nodeId}", attempt=${session.attempt}${payloadSuffix}. ` +
-      'Use the configured Terminal Docks MCP tools in this Codex session; do not search the web for the local MCP URL. ' +
-      `After connection, call get_current_task({ sessionId: "${session.sessionId}" }) immediately. The compact returned objective, assignment, roleInstructions, frontend framework summary, inbox, and legal targets are the actual task payload; do not request the full frontend framework unless explicitly debugging Terminal Docks itself. Do not wait for any separate NEW_TASK, inbox payload, or user message. Execute that task, create the required files/context for your role, and call complete_task as your final MCP action. Do not stop after connecting, after reading task details, or after reporting that the task is ready.`;
+      'Use the configured Starlink tools in this Codex session; do not search the web for the local Starlink URL. ' +
+      `After connection, call get_current_task({ sessionId: "${session.sessionId}" }) immediately. The compact returned objective, assignment, roleInstructions, frontend framework summary, inbox, and legal targets are the actual task payload; do not request the full frontend framework unless explicitly debugging Comet-AI itself. Do not wait for any separate NEW_TASK, inbox payload, or user message. Execute that task, create the required files/context for your role, and call complete_task as your final MCP action. Do not stop after connecting, after reading task details, or after reporting that the task is ready.`;
     return `${prompt}\r`;
   }
 
@@ -3420,6 +3479,24 @@ class RuntimeManager {
     }
   }
 
+  private failRuntimeForTaskInjection(session: RuntimeSession, error: unknown): void {
+    if (isRuntimeSessionTerminal(session.state)) {
+      this.cleanupSession(session);
+      return;
+    }
+
+    const message = error instanceof Error ? error.message : String(error);
+    const reason = `Task injection failed: ${message}`;
+    session.markFailed(reason);
+    this.emit({
+      type: 'session_failed',
+      sessionId: session.sessionId,
+      nodeId: session.nodeId,
+      error: reason,
+    });
+    this.cleanupSession(session);
+  }
+
   private async failRuntimeForMissingPty(session: RuntimeSession, error: unknown): Promise<void> {
     if (session.state === 'manual_takeover') {
       console.warn(
@@ -3544,7 +3621,7 @@ class RuntimeManager {
         if (readiness.status.status === 'waiting_auth' && authDeadline === null) {
           authDeadline = startedAt + Math.max(timeoutMs, CLI_AUTH_WAIT_MS);
           deadline = Math.max(deadline, authDeadline);
-          console.log(
+          runtimeDebugLog(
             `[runtime] cli-ready auth wait extended cli=${session.cliId} delayMs=${Math.max(timeoutMs, CLI_AUTH_WAIT_MS)}`,
           );
         }
@@ -3552,7 +3629,7 @@ class RuntimeManager {
           ? readiness.status.detail
           : readiness.legacyReady?.detail ?? readiness.status.detail;
         if (detail && detail !== lastDetail) {
-          console.log(
+          runtimeDebugLog(
             `[runtime] cli-ready cli=${session.cliId} ready=${readiness.ready} status=${readiness.status.status} confidence=${readiness.status.confidence} strictGate=${readiness.strictGateEnabled} detail="${detail}"`,
           );
           lastDetail = detail;
@@ -3560,7 +3637,7 @@ class RuntimeManager {
         if (readiness.ready) {
           const settleMs = session.adapter.postReadySettleDelayMs ?? 0;
           if (settleMs > 0) {
-            console.log(`[runtime] cli-ready settle cli=${session.cliId} delayMs=${settleMs}`);
+            runtimeDebugLog(`[runtime] cli-ready settle cli=${session.cliId} delayMs=${settleMs}`);
             await sleep(settleMs);
             if (isRuntimeSessionTerminal(session.state) || !this.isCurrentOwner(session)) {
               return false;
@@ -3574,7 +3651,7 @@ class RuntimeManager {
               const settledDetail = settledReadiness.strictGateEnabled
                 ? settledReadiness.status.detail
                 : settledReadiness.legacyReady?.detail ?? settledReadiness.status.detail;
-              console.log(
+              runtimeDebugLog(
                 `[runtime] cli-ready settle recheck cli=${session.cliId} ready=false status=${settledReadiness.status.status} confidence=${settledReadiness.status.confidence} detail="${settledDetail}"`,
               );
               lastDetail = settledDetail ?? lastDetail;
@@ -3727,7 +3804,7 @@ class RuntimeManager {
       const active = await isTerminalActive(session.terminalId).catch(() => false);
       if (!active) return false;
 
-      console.log(`[runtime] pane has no active cliSource; forcing fresh CLI launch cli=${session.cliId} terminal=${session.terminalId}`);
+      runtimeDebugLog(`[runtime] pane has no active cliSource; forcing fresh CLI launch cli=${session.cliId} terminal=${session.terminalId}`);
       return true;
     }
 

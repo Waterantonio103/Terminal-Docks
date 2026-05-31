@@ -348,7 +348,7 @@ export function registerDebugObservabilityTools(server, getSessionId) {
   });
 
   server.registerTool('debug_get_mcp_events', {
-    title: 'Debug Get MCP Events',
+    title: 'Debug Get Starlink Events',
     inputSchema: {
       debugRunId: z.string().min(1),
       sessionId: z.string().optional(),

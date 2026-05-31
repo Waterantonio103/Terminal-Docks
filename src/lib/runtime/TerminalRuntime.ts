@@ -9,7 +9,16 @@
  */
 
 import { invoke } from '@tauri-apps/api/core';
+import { normalizeTerminalId } from '../terminalIds.js';
 import { terminalOutputBus } from './TerminalOutputBus.js';
+
+export function requireTerminalRuntimeId(value: unknown, operation: string): string {
+  const terminalId = normalizeTerminalId(value);
+  if (!terminalId) {
+    throw new Error(`Cannot ${operation}: missing terminal id.`);
+  }
+  return terminalId;
+}
 
 // ──────────────────────────────────────────────
 // PTY Lifecycle
@@ -24,10 +33,11 @@ export async function spawnTerminal(args: {
   args?: string[];
   env?: Record<string, string>;
 }): Promise<void> {
+  const terminalId = requireTerminalRuntimeId(args.id, 'spawn PTY');
   let result: boolean;
   if (args.command) {
     result = await invoke<boolean>('spawn_pty_with_command', {
-      id: args.id,
+      id: terminalId,
       rows: args.rows,
       cols: args.cols,
       cwd: args.cwd ?? null,
@@ -37,7 +47,7 @@ export async function spawnTerminal(args: {
     });
   } else {
     result = await invoke<boolean>('spawn_pty', {
-      id: args.id,
+      id: terminalId,
       rows: args.rows,
       cols: args.cols,
       cwd: args.cwd ?? null,
@@ -45,47 +55,57 @@ export async function spawnTerminal(args: {
     });
   }
   if (result !== true) {
-    throw new Error(`PTY spawn for terminalId "${args.id}" returned false — backend refused creation.`);
+    throw new Error(`PTY spawn for terminalId "${terminalId}" returned false — backend refused creation.`);
   }
 }
 
 export async function writeToTerminal(terminalId: string, data: string): Promise<void> {
+  const id = requireTerminalRuntimeId(terminalId, 'write to PTY');
   try {
-    await invoke('write_to_pty', { id: terminalId, data });
+    await invoke('write_to_pty', { id, data });
   } catch (err) {
-    console.warn(`[pty] Write error for ${terminalId}:`, err);
+    console.warn(`[pty] Write error for ${id}:`, err);
     throw err;
   }
 }
 
 export async function isTerminalActive(terminalId: string): Promise<boolean> {
-  return await invoke<boolean>('is_pty_active', { id: terminalId });
+  const id = requireTerminalRuntimeId(terminalId, 'check PTY state');
+  return await invoke<boolean>('is_pty_active', { id });
 }
 
 export async function destroyTerminal(terminalId: string): Promise<void> {
+  const id = normalizeTerminalId(terminalId);
+  if (!id) return;
   try {
-    await invoke('destroy_pty', { id: terminalId });
+    await invoke('destroy_pty', { id });
   } catch (err) {
-    console.warn(`[pty] Ignored destroy error for ${terminalId}:`, err);
+    console.warn(`[pty] Ignored destroy error for ${id}:`, err);
   }
 }
 
 export async function getRecentTerminalOutput(terminalId: string, maxBytes = 4096): Promise<string> {
-  const buffered = terminalOutputBus.getTail(terminalId, maxBytes);
+  const id = normalizeTerminalId(terminalId);
+  if (!id) return '';
+
+  const buffered = terminalOutputBus.getTail(id, maxBytes);
   if (buffered) return buffered;
 
   try {
-    return await invoke<string>('get_pty_recent_output', { id: terminalId, maxBytes });
+    return await invoke<string>('get_pty_recent_output', { id, maxBytes });
   } catch {
     return '';
   }
 }
 
 export async function resizeTerminal(terminalId: string, rows: number, cols: number): Promise<void> {
+  const id = normalizeTerminalId(terminalId);
+  if (!id) return;
+
   try {
-    await invoke('resize_pty', { id: terminalId, rows, cols });
+    await invoke('resize_pty', { id, rows, cols });
   } catch (err) {
-    console.warn(`[pty] Ignored resize error for ${terminalId}:`, err);
+    console.warn(`[pty] Ignored resize error for ${id}:`, err);
   }
 }
 
@@ -101,9 +121,12 @@ export async function registerTerminalMetadata(args: {
   attempt: number;
   cli: string;
 }): Promise<void> {
+  const terminalId = normalizeTerminalId(args.terminalId);
+  if (!terminalId) return;
+
   try {
     await invoke('register_pty_runtime_metadata', {
-      terminalId: args.terminalId,
+      terminalId,
       missionId: args.missionId,
       nodeId: args.nodeId,
       runtimeSessionId: args.runtimeSessionId,
@@ -121,6 +144,9 @@ export async function registerTerminalMetadata(args: {
 
 let cachedMcpBaseUrl: string | null = null;
 const DEFAULT_MCP_HEALTH_TIMEOUT_MS = 5_000;
+const DEFAULT_MCP_BASE_URL = 'http://localhost:3741';
+const DEFAULT_MCP_ENDPOINT_URL = `${DEFAULT_MCP_BASE_URL}/mcp`;
+const URL_CONTROL_CHARS_PATTERN = /[\x00-\x1F\x7F]/g;
 
 export interface McpHealthCheckOptions {
   timeoutMs?: number;
@@ -136,10 +162,49 @@ export interface McpHealthCheckResult {
   durationMs: number;
 }
 
+export function normalizeMcpBaseUrl(value: string | null | undefined): string {
+  const raw = typeof value === 'string' ? value.replace(URL_CONTROL_CHARS_PATTERN, '').trim() : '';
+  if (!raw) return DEFAULT_MCP_BASE_URL;
+
+  try {
+    const url = new URL(raw);
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') return DEFAULT_MCP_BASE_URL;
+    url.username = '';
+    url.password = '';
+    url.pathname = url.pathname.replace(/\/mcp\/?$/i, '').replace(/\/+$/g, '');
+    url.search = '';
+    url.hash = '';
+    return url.toString().replace(/\/$/g, '');
+  } catch {
+    if (/^[a-z][a-z0-9+.-]*:/i.test(raw)) return DEFAULT_MCP_BASE_URL;
+    return raw.replace(/\/mcp\/?$/i, '').replace(/\/+$/g, '') || DEFAULT_MCP_BASE_URL;
+  }
+}
+
+export function normalizeMcpEndpointUrl(value: string | null | undefined): string {
+  const raw = typeof value === 'string' ? value.replace(URL_CONTROL_CHARS_PATTERN, '').trim() : '';
+  if (!raw) return DEFAULT_MCP_ENDPOINT_URL;
+
+  try {
+    const url = new URL(raw);
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') return DEFAULT_MCP_ENDPOINT_URL;
+    url.username = '';
+    url.password = '';
+    const pathname = url.pathname.replace(/\/+$/g, '');
+    url.pathname = pathname.endsWith('/mcp') ? pathname : `${pathname || ''}/mcp`;
+    url.hash = '';
+    return url.toString();
+  } catch {
+    if (/^[a-z][a-z0-9+.-]*:/i.test(raw)) return DEFAULT_MCP_ENDPOINT_URL;
+    const cleaned = raw.split('#')[0]?.replace(/\/+$/g, '') ?? '';
+    return cleaned.endsWith('/mcp') ? cleaned : `${cleaned || DEFAULT_MCP_BASE_URL}/mcp`;
+  }
+}
+
 export async function getMcpBaseUrl(): Promise<string> {
   if (cachedMcpBaseUrl) return cachedMcpBaseUrl;
   try {
-    cachedMcpBaseUrl = await invoke<string>('get_mcp_base_url');
+    cachedMcpBaseUrl = normalizeMcpBaseUrl(await invoke<string>('get_mcp_base_url'));
   } catch {
     cachedMcpBaseUrl = 'http://localhost:3741';
   }
@@ -148,15 +213,15 @@ export async function getMcpBaseUrl(): Promise<string> {
 
 export async function getMcpUrl(): Promise<string> {
   try {
-    return await invoke<string>('get_mcp_url');
+    return normalizeMcpEndpointUrl(await invoke<string>('get_mcp_url'));
   } catch {
-    return 'http://localhost:3741/mcp';
+    return normalizeMcpEndpointUrl(await getMcpBaseUrl());
   }
 }
 
 export async function checkMcpHealthDetailed(options: McpHealthCheckOptions = {}): Promise<McpHealthCheckResult> {
   const startedAt = Date.now();
-  const baseUrl = options.baseUrl ?? await getMcpBaseUrl();
+  const baseUrl = normalizeMcpBaseUrl(options.baseUrl ?? await getMcpBaseUrl());
   const timeoutMs = Math.max(1, options.timeoutMs ?? DEFAULT_MCP_HEALTH_TIMEOUT_MS);
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -261,13 +326,14 @@ export async function registerActivationDispatch(args: {
   terminalId: string;
   activatedAt: number;
 }): Promise<void> {
+  const terminalId = requireTerminalRuntimeId(args.terminalId, 'register runtime activation');
   await invoke('register_runtime_activation_dispatch', {
     missionId: args.missionId,
     nodeId: args.nodeId,
     attempt: args.attempt,
     sessionId: args.sessionId,
     agentId: args.agentId,
-    terminalId: args.terminalId,
+    terminalId,
     activatedAt: args.activatedAt,
   });
 }

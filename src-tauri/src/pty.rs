@@ -49,6 +49,32 @@ fn home_dir() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
+fn user_codex_home() -> Option<String> {
+    home_dir().map(|home| home.join(".codex").to_string_lossy().to_string())
+}
+
+fn force_user_codex_home_env(command: &str, env: &mut HashMap<String, String>) {
+    if !command.eq_ignore_ascii_case("codex") {
+        return;
+    }
+    if let Some(path) = user_codex_home() {
+        env.insert("CODEX_HOME".to_string(), path);
+    }
+}
+
+fn maybe_force_user_codex_home_for_shell(env: &mut HashMap<String, String>) {
+    let is_codex = env
+        .get("TD_KIND")
+        .map(|value| value.eq_ignore_ascii_case("codex"))
+        .unwrap_or(false);
+    if !is_codex {
+        return;
+    }
+    if let Some(path) = user_codex_home() {
+        env.insert("CODEX_HOME".to_string(), path);
+    }
+}
+
 fn normalize_codex_home_env(command: &str, cwd: Option<&str>, env: &mut HashMap<String, String>) {
     if !command.eq_ignore_ascii_case("codex") {
         return;
@@ -117,85 +143,6 @@ fn seed_codex_auth_if_needed(command: &str, env: &HashMap<String, String>) -> Re
     }
 
     Ok(())
-}
-
-fn find_project_trust_root(cwd: &str) -> PathBuf {
-    let mut current = PathBuf::from(cwd);
-    loop {
-        if current.join(".git").exists() {
-            return current;
-        }
-        if !current.pop() {
-            return PathBuf::from(cwd);
-        }
-    }
-}
-
-fn codex_project_key(path: &std::path::Path) -> String {
-    path.to_string_lossy()
-        .replace('/', "\\")
-        .trim_end_matches('\\')
-        .to_string()
-}
-
-fn append_codex_trust_entry(next: &mut String, project_key: &str) {
-    let table_header = format!("[projects.'{}']", project_key);
-    if next.contains(&table_header) {
-        return;
-    }
-    if !next.is_empty() && !next.ends_with('\n') {
-        next.push('\n');
-    }
-    next.push('\n');
-    next.push_str(&table_header);
-    next.push_str("\ntrust_level = \"trusted\"\n");
-}
-
-fn seed_codex_noninteractive_config(next: &mut String) {
-    if !next.contains("approval_policy") {
-        if !next.is_empty() && !next.ends_with('\n') {
-            next.push('\n');
-        }
-        next.push_str("\napproval_policy = \"never\"\n");
-    }
-    if !next.contains("sandbox_mode") {
-        if !next.is_empty() && !next.ends_with('\n') {
-            next.push('\n');
-        }
-        next.push_str("sandbox_mode = \"danger-full-access\"\n");
-    }
-}
-
-fn seed_codex_trust_if_needed(
-    command: &str,
-    cwd: Option<&str>,
-    env: &HashMap<String, String>,
-) -> Result<(), String> {
-    if !command.eq_ignore_ascii_case("codex") {
-        return Ok(());
-    }
-
-    let codex_home = match env
-        .get("CODEX_HOME")
-        .map(|value| value.trim())
-        .filter(|value| !value.is_empty())
-    {
-        Some(path) => PathBuf::from(path),
-        None => return Ok(()),
-    };
-    let cwd = match cwd.map(str::trim).filter(|value| !value.is_empty()) {
-        Some(value) => value,
-        None => return Ok(()),
-    };
-
-    fs::create_dir_all(&codex_home).map_err(|e| e.to_string())?;
-    let config_path = codex_home.join("config.toml");
-    let existing = fs::read_to_string(&config_path).unwrap_or_default();
-    let mut next = existing;
-    append_codex_trust_entry(&mut next, &codex_project_key(&PathBuf::from(cwd)));
-    append_codex_trust_entry(&mut next, &codex_project_key(&find_project_trust_root(cwd)));
-    seed_codex_noninteractive_config(&mut next);
-    fs::write(config_path, next).map_err(|e| e.to_string())
 }
 
 impl PtyState {
@@ -330,11 +277,21 @@ fn unix_millis_now() -> u64 {
 }
 
 fn normalize_cli(cli: Option<&str>) -> String {
-    let value = cli.unwrap_or("generic").trim().to_lowercase();
-    if value.is_empty() {
-        "generic".to_string()
-    } else {
-        value
+    let value = cli
+        .unwrap_or("generic")
+        .trim()
+        .to_lowercase()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join("_")
+        .replace('-', "_");
+
+    match value.as_str() {
+        "" => "generic".to_string(),
+        "open_code" | "opencode" => "opencode".to_string(),
+        "lm_studio" | "lmstudio" => "lmstudio".to_string(),
+        "claude" | "gemini" | "codex" | "custom" | "generic" | "ollama" => value,
+        _ => value,
     }
 }
 
@@ -671,14 +628,16 @@ pub fn spawn_pty(
     cmd.env("TERM", "xterm-256color");
 
     // Phase 1: Inject MCP auto-connection config
+    cmd.env("COMET_SESSION_ID", &id);
     cmd.env("TD_SESSION_ID", &id);
     let mcp_state = app.state::<crate::mcp::McpState>();
     let mcp_url = crate::mcp::get_mcp_url(mcp_state);
+    cmd.env("COMET_MCP_URL", &mcp_url);
     cmd.env("TD_MCP_URL", mcp_url);
-    if let Some(vars) = env {
-        for (key, value) in vars {
-            cmd.env(key, value);
-        }
+    let mut launch_env = env.unwrap_or_default();
+    maybe_force_user_codex_home_for_shell(&mut launch_env);
+    for (key, value) in launch_env {
+        cmd.env(key, value);
     }
 
     if !cfg!(target_os = "windows") {
@@ -824,9 +783,9 @@ pub fn spawn_pty_with_command(
     let mcp_state = app.state::<crate::mcp::McpState>();
     let mcp_url = crate::mcp::get_mcp_url(mcp_state);
     let mut launch_env = env.unwrap_or_default();
+    force_user_codex_home_env(&command, &mut launch_env);
     normalize_codex_home_env(&command, cwd.as_deref(), &mut launch_env);
     seed_codex_auth_if_needed(&command, &launch_env)?;
-    seed_codex_trust_if_needed(&command, cwd.as_deref(), &launch_env)?;
     let candidates = windows_command_candidates(&command);
     let mut last_error: Option<String> = None;
     let mut child = None;
@@ -834,7 +793,9 @@ pub fn spawn_pty_with_command(
     for candidate in candidates {
         let mut cmd = CommandBuilder::new(&candidate);
         cmd.env("TERM", "xterm-256color");
+        cmd.env("COMET_SESSION_ID", &id);
         cmd.env("TD_SESSION_ID", &id);
+        cmd.env("COMET_MCP_URL", mcp_url.clone());
         cmd.env("TD_MCP_URL", mcp_url.clone());
         for arg in &args {
             cmd.arg(arg);
@@ -1233,6 +1194,17 @@ pub fn kill_all_ptys(app: &AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(target_os = "windows")]
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn normalizes_cli_aliases_for_pty_metadata() {
+        assert_eq!(normalize_cli(Some("open-code")), "opencode");
+        assert_eq!(normalize_cli(Some("Open Code")), "opencode");
+        assert_eq!(normalize_cli(Some("LM Studio")), "lmstudio");
+        assert_eq!(normalize_cli(Some("ollama")), "ollama");
+        assert_eq!(normalize_cli(Some(" \t ")), "generic");
+    }
 
     #[test]
     fn classifier_detects_cli_permission_fixtures() {
@@ -1337,5 +1309,163 @@ mod tests {
 
         assert_eq!(expired.len(), 1);
         assert_eq!(expired[0].state, PermissionRequestState::Expired);
+    }
+
+    #[cfg(target_os = "windows")]
+    fn command_exists(command: &str) -> bool {
+        let path = std::path::Path::new(command);
+        if path.extension().is_some() {
+            return std::process::Command::new("where")
+                .arg(command)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .map(|status| status.success())
+                .unwrap_or(false);
+        }
+
+        windows_command_candidates(command).iter().any(|candidate| {
+            std::process::Command::new("where")
+                .arg(candidate)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .map(|status| status.success())
+                .unwrap_or(false)
+        })
+    }
+
+    #[cfg(target_os = "windows")]
+    fn run_interactive_cmd_through_native_pty(
+        command_line: &str,
+        expected: &str,
+        min_expected_occurrences: usize,
+    ) -> Result<String, String> {
+        let pty_system = NativePtySystem::default();
+        let pair = pty_system
+            .openpty(PtySize {
+                rows: 24,
+                cols: 100,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .map_err(|error| format!("openpty failed: {error}"))?;
+
+        let shell = std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".to_string());
+        let mut builder = CommandBuilder::new(&shell);
+        builder.env("TERM", "xterm-256color");
+        let mut child = pair
+            .slave
+            .spawn_command(builder)
+            .map_err(|error| format!("spawn failed for {shell}: {error}"))?;
+        let mut writer = pair
+            .master
+            .take_writer()
+            .map_err(|error| format!("take writer failed: {error}"))?;
+        let mut reader = pair
+            .master
+            .try_clone_reader()
+            .map_err(|error| format!("clone reader failed: {error}"))?;
+
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let output_clone = Arc::clone(&output);
+        let reader_thread = thread::spawn(move || {
+            let mut buf = [0; 4096];
+            loop {
+                match reader.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => output_clone.lock().unwrap().extend_from_slice(&buf[..n]),
+                    Err(_) => break,
+                }
+            }
+        });
+
+        thread::sleep(Duration::from_millis(250));
+        if String::from_utf8_lossy(&output.lock().unwrap()).contains("\x1b[6n") {
+            writer
+                .write_all(b"\x1b[1;1R")
+                .and_then(|_| writer.flush())
+                .map_err(|error| format!("cursor position response failed: {error}"))?;
+            thread::sleep(Duration::from_millis(100));
+        }
+        writer
+            .write_all(format!("{command_line}\r").as_bytes())
+            .and_then(|_| writer.flush())
+            .map_err(|error| format!("write failed for {command_line}: {error}"))?;
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut matched = false;
+        while Instant::now() < deadline {
+            let text = String::from_utf8_lossy(&output.lock().unwrap()).to_string();
+            if text.matches(expected).count() >= min_expected_occurrences {
+                matched = true;
+                break;
+            }
+            match child.try_wait() {
+                Ok(Some(_)) => break,
+                Ok(None) => thread::sleep(Duration::from_millis(50)),
+                Err(error) => return Err(format!("try_wait failed for {command_line}: {error}")),
+            }
+        }
+
+        let _ = writer.write_all(b"exit\r").and_then(|_| writer.flush());
+        let _ = child.kill();
+        drop(writer);
+        drop(child);
+        drop(pair);
+        let _ = reader_thread.join();
+        let text = String::from_utf8_lossy(&output.lock().unwrap()).to_string();
+        if !matched && text.matches(expected).count() < min_expected_occurrences {
+            return Err(format!(
+                "{command_line} output did not contain {expected:?} at least {min_expected_occurrences} time(s); output was {text:?}"
+            ));
+        }
+        Ok(text)
+    }
+
+    #[test]
+    #[ignore = "local Windows PTY QA; depends on installed common CLIs"]
+    #[cfg(target_os = "windows")]
+    fn live_windows_pty_common_cli_qa() {
+        let checks: Vec<(&str, &str, &str, usize, bool)> = vec![
+            ("cmd.exe", "set /a 6*7", "42", 1, false),
+            (
+                "powershell.exe",
+                "powershell.exe -NoLogo -NoProfile -NonInteractive -Command \"6*7\"",
+                "42",
+                1,
+                false,
+            ),
+            ("node", "node -e \"console.log(6*7)\"", "42", 1, true),
+            (
+                "npm",
+                "for /f %v in ('npm --version') do @echo TD_NPM_%v",
+                "TD_NPM_",
+                2,
+                true,
+            ),
+            ("git", "git --version", "git version", 1, true),
+        ];
+
+        let mut executed = 0;
+        for (command, command_line, expected, min_expected_occurrences, optional) in checks {
+            if !command_exists(command) {
+                if optional {
+                    eprintln!("SKIP {command}: command not found");
+                    continue;
+                }
+                panic!("required terminal QA command not found: {command}");
+            }
+            let output = run_interactive_cmd_through_native_pty(
+                command_line,
+                expected,
+                min_expected_occurrences,
+            )
+            .unwrap_or_else(|error| panic!("{command} PTY check failed: {error}"));
+            eprintln!("PASS {command}: {}", normalize_prompt_text(&output));
+            executed += 1;
+        }
+
+        assert!(executed >= 2, "PowerShell and cmd PTY checks must run");
     }
 }

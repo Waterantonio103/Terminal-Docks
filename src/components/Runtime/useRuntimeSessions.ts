@@ -27,6 +27,12 @@ export interface EnrichedRuntimeSession extends LiveRuntimeSession {
   cliConfig?: string;
 }
 
+function normalizeRuntimeNodeId(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const normalized = value.replace(/\0/g, '').trim();
+  return normalized || null;
+}
+
 export function useRuntimeSessions(): EnrichedRuntimeSession[] {
   const [sessions, setSessions] = useState<LiveRuntimeSession[]>(() =>
     runtimeObserver.getSessions(),
@@ -49,10 +55,16 @@ export function useRuntimeSessions(): EnrichedRuntimeSession[] {
   const globalGraph = useWorkspaceStore((s) => s.globalGraph ?? EMPTY_GRAPH);
 
   const enriched = useMemo(() => {
-    const nodeMap = new Map((globalGraph.nodes ?? []).map((n) => [n.id, n]));
+    const nodeMap = new Map(
+      (globalGraph.nodes ?? []).flatMap((node) => {
+        const normalizedNodeId = normalizeRuntimeNodeId(node.id);
+        return normalizedNodeId ? [[normalizedNodeId, node] as const] : [];
+      }),
+    );
 
     return sessions.map((session) => {
-      const node = nodeMap.get(session.nodeId);
+      const normalizedNodeId = normalizeRuntimeNodeId(session.nodeId);
+      const node = normalizedNodeId ? nodeMap.get(normalizedNodeId) : undefined;
       return {
         ...session,
         position: node?.config?.position,

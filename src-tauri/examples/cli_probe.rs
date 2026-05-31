@@ -55,7 +55,10 @@ impl Cli {
             "plain" => return Some(vec![flat, "\r".to_string()]),
             "clear_plain" => return Some(vec!["\x15".to_string(), flat, "\r".to_string()]),
             "bracketed" => {
-                return Some(vec![format!("\x1b[200~{}\x1b[201~", flat), "\r".to_string()]);
+                return Some(vec![
+                    format!("\x1b[200~{}\x1b[201~", flat),
+                    "\r".to_string(),
+                ]);
             }
             "clear_bracketed" => {
                 return Some(vec![
@@ -74,7 +77,10 @@ impl Cli {
                 "\r".to_string(),
             ]),
             Cli::Claude => Some(vec!["\x15".to_string(), flat, "\r".to_string()]),
-            Cli::OpenCode => Some(vec![format!("\x15\x1b[200~{}\x1b[201~", flat), "\r".to_string()]),
+            Cli::OpenCode => Some(vec![
+                format!("\x15\x1b[200~{}\x1b[201~", flat),
+                "\r".to_string(),
+            ]),
             Cli::Codex | Cli::Echo => None,
         }
     }
@@ -224,7 +230,12 @@ impl ProbeResult {
     }
 }
 
-fn probe_cli(cli: Cli, timeout: Duration, inject_mode: &str, post_ready_delay: Duration) -> ProbeResult {
+fn probe_cli(
+    cli: Cli,
+    timeout: Duration,
+    inject_mode: &str,
+    post_ready_delay: Duration,
+) -> ProbeResult {
     let started = Instant::now();
     let token = format!("TD_PROMPT_PROBE_{}_{}", cli.id(), epoch_millis());
     let prompt = format!("{}. Do not run tools. Reply with this token only.", token);
@@ -255,7 +266,12 @@ fn probe_cli(cli: Cli, timeout: Duration, inject_mode: &str, post_ready_delay: D
     let shell = env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".to_string());
     let mut cmd = if cli == Cli::Echo {
         let mut direct = CommandBuilder::new("powershell.exe");
-        direct.args(["-NoLogo", "-NoProfile", "-Command", "Write-Host TD_ECHO_PROBE"]);
+        direct.args([
+            "-NoLogo",
+            "-NoProfile",
+            "-Command",
+            "Write-Host TD_ECHO_PROBE",
+        ]);
         direct
     } else {
         CommandBuilder::new(shell)
@@ -462,7 +478,12 @@ fn strip_ansi(raw: &str) -> String {
 fn tail(value: &str, limit: usize) -> String {
     let chars: Vec<char> = value.chars().collect();
     let start = chars.len().saturating_sub(limit);
-    chars[start..].iter().collect::<String>().split_whitespace().collect::<Vec<_>>().join(" ")
+    chars[start..]
+        .iter()
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn hex_preview(bytes: &[u8]) -> String {

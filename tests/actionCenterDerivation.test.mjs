@@ -1,5 +1,11 @@
 import assert from 'node:assert/strict';
-import { countNeedsYou, deriveActionCenterItems } from '../.tmp-tests/lib/actionCenter/index.js';
+import { readFileSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { countNeedsYou, deriveActionCenterItems, normalizeActionCenterInboxItems } from '../.tmp-tests/lib/actionCenter/index.js';
+
+const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const actionCenterPane = readFileSync(resolve(root, 'src/components/ActionCenter/ActionCenterPane.tsx'), 'utf8');
 
 function run(name, fn) {
   try {
@@ -53,6 +59,41 @@ run('pending and approved inbox items are actionable delegations', () => {
   assert.equal(items.find(item => item.id === 'delegation:2')?.actions.some(action => action.id === 'claim_delegation'), true);
 });
 
+run('inbox normalization drops malformed Starlink payload rows', () => {
+  const items = normalizeActionCenterInboxItems([
+    {
+      id: 7,
+      status: ' Pending\0 ',
+      title: '  Review\0\npatch  ',
+      from_session_id: ' session\0-1 ',
+      recipient_session_id: null,
+      recipient_node_id: '',
+      role_id: ' reviewer\nlead ',
+      created_at: '2026-05-09T12:00:00Z',
+    },
+    { id: 8, status: 'unknown', title: 'bad status' },
+    { id: 0, status: 'pending', title: 'bad id' },
+    null,
+  ]);
+
+  assert.deepEqual(items, [{
+    id: 7,
+    status: 'pending',
+    title: 'Review patch',
+    from_session_id: 'session-1',
+    recipient_session_id: null,
+    recipient_node_id: undefined,
+    role_id: 'reviewer lead',
+    objective: undefined,
+    mission_id: undefined,
+    created_at: '2026-05-09T12:00:00Z',
+  }]);
+
+  assert.deepEqual(normalizeActionCenterInboxItems([
+    { id: 10, status: ' APPROVED ', title: 'Claimable' },
+  ]).map(item => item.status), ['approved']);
+});
+
 run('running runtime appears in active-now, not needs-you', () => {
   const items = deriveActionCenterItems({
     now,
@@ -71,6 +112,19 @@ run('running runtime appears in active-now, not needs-you', () => {
   assert.equal(items[0].id, 'active-runtime:session-2');
   assert.equal(items[0].section, 'active_now');
   assert.equal(countNeedsYou(items), 0);
+});
+
+run('runtime items require a usable session id', () => {
+  const items = deriveActionCenterItems({
+    now,
+    sessions: [
+      { sessionId: '', status: 'failed', title: 'Missing session' },
+      { sessionId: '   ', status: 'running', title: 'Blank session' },
+      { sessionId: 'session-valid', status: 'running', title: 'Valid session' },
+    ],
+  });
+
+  assert.deepEqual(items.map(item => item.id), ['active-runtime:session-valid']);
 });
 
 run('failed and manual-takeover runtimes require human intervention', () => {
@@ -102,4 +156,48 @@ run('recent items are capped by window and limit', () => {
   assert.equal(items.length, 1);
   assert.equal(items[0].id, 'recent:runtime:new');
   assert.equal(items[0].section, 'recently_resolved');
+});
+
+run('recent derivation clamps invalid limits and timestamps', () => {
+  const noRecent = deriveActionCenterItems({
+    now,
+    recentLimit: -1,
+    recentEvents: [
+      { id: 'new', source: 'runtime', eventType: 'session_completed', title: 'New', createdAt: now - 1000 },
+    ],
+  });
+  assert.equal(noRecent.length, 0);
+
+  const items = deriveActionCenterItems({
+    now: Number.NaN,
+    recentLimit: Number.NaN,
+    recentWindowMs: -1,
+    sessions: [
+      { sessionId: 'session-invalid-time', status: 'running', startedAt: Number.NaN },
+    ],
+    inboxItems: [
+      { id: 9, title: 'Bad date', status: 'completed', created_at: 'not a date' },
+    ],
+    recentEvents: [
+      { id: 'future', source: 'runtime', eventType: 'session_completed', title: 'Future', createdAt: now + 1000 },
+      { id: 'invalid', source: 'runtime', eventType: 'session_completed', title: 'Invalid', createdAt: Number.NaN },
+    ],
+  });
+
+  assert.equal(items.some(item => item.id === 'recent:runtime:future'), false);
+  assert.equal(items.some(item => item.id === 'recent:runtime:invalid'), false);
+  assert.equal(items.find(item => item.id === 'active-runtime:session-invalid-time')?.createdAt > 0, true);
+  assert.equal(items.find(item => item.id === 'delegation:9')?.createdAt > 0, true);
+});
+
+run('action center controls expose accessible state and labels', () => {
+  for (const value of [
+    'aria-expanded={rawExpanded}',
+    'aria-controls={`action-raw-prompt-${item.id}`}',
+    'id={`action-raw-prompt-${item.id}`}',
+    'aria-label="Refresh delegations"',
+    'aria-label="Clear recent"',
+  ]) {
+    assert.ok(actionCenterPane.includes(value), `missing ${value}`);
+  }
 });

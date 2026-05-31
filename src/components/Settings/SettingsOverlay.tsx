@@ -1,7 +1,15 @@
 import { useState, useRef, useEffect } from 'react';
-import { X, Palette, Monitor, RotateCcw, Check, Sun, Moon, Sparkles, ChevronDown } from 'lucide-react';
+import { X, Palette, Monitor, RotateCcw, Check, Sun, Moon, Sparkles, ChevronDown, KeyRound, Server } from 'lucide-react';
 import { useWorkspaceStore, ThemeType, CustomThemeColors } from '../../store/workspace';
 import { ColorPicker } from '../ColorPicker/ColorPicker';
+import {
+  getStoredOpenAiApiKey,
+  getStoredOpenAiBaseUrl,
+  normalizeOpenAiSdkBaseUrl,
+  notifyOpenAiSdkConfigChanged,
+  setStoredOpenAiApiKey,
+  setStoredOpenAiBaseUrl,
+} from '../../lib/sdkChat';
 
 const THEMES_DARK: { value: ThemeType; label: string }[] = [
 // ... (rest of themes)
@@ -87,6 +95,9 @@ export function SettingsOverlay() {
   const pickerRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const [, setTick] = useState(0);
+  const [openAiApiKeyDraft, setOpenAiApiKeyDraft] = useState(() => getStoredOpenAiApiKey());
+  const [openAiBaseUrlDraft, setOpenAiBaseUrlDraft] = useState(() => getStoredOpenAiBaseUrl());
+  const [openAiConfigStatus, setOpenAiConfigStatus] = useState('');
 
   useEffect(() => {
     // Force a re-render once containerRef is available or theme changes 
@@ -155,6 +166,30 @@ export function SettingsOverlay() {
     );
   };
 
+  const saveOpenAiSdkConfig = () => {
+    try {
+      const trimmedKey = openAiApiKeyDraft.trim();
+      const normalizedBaseUrl = normalizeOpenAiSdkBaseUrl(openAiBaseUrlDraft) ?? '';
+      setStoredOpenAiApiKey(trimmedKey);
+      setStoredOpenAiBaseUrl(normalizedBaseUrl);
+      setOpenAiApiKeyDraft(trimmedKey);
+      setOpenAiBaseUrlDraft(normalizedBaseUrl);
+      notifyOpenAiSdkConfigChanged();
+      setOpenAiConfigStatus(trimmedKey ? 'Saved. Codex can use SDK mode.' : 'Saved. Codex will use CLI login.');
+    } catch (error) {
+      setOpenAiConfigStatus(error instanceof Error ? error.message : 'Could not save SDK settings.');
+    }
+  };
+
+  const clearOpenAiSdkConfig = () => {
+    setStoredOpenAiApiKey('');
+    setStoredOpenAiBaseUrl('');
+    setOpenAiApiKeyDraft('');
+    setOpenAiBaseUrlDraft('');
+    notifyOpenAiSdkConfigChanged();
+    setOpenAiConfigStatus('Cleared. Codex will use CLI login.');
+  };
+
   return (
     <div ref={containerRef} className="absolute inset-0 background-bg-app z-[100] flex flex-col animate-fade-in text-text-primary">
       {/* Header */}
@@ -175,6 +210,98 @@ export function SettingsOverlay() {
       {/* Content */}
       <div className="flex-1 overflow-y-auto p-8">
         <div className="max-w-6xl mx-auto w-full space-y-16 pb-20">
+          {/* Agent Providers Section */}
+          <section className="space-y-6">
+            <div className="flex items-center gap-2 border-b border-border-panel pb-2">
+              <KeyRound size={16} className="text-text-muted" />
+              <h2 className="text-xs font-bold uppercase text-text-secondary">Agent Providers</h2>
+            </div>
+
+            <div className="background-bg-panel border border-border-panel rounded-lg p-5 space-y-4">
+              <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+                <div className="min-w-0">
+                  <div className="text-sm font-bold text-text-primary">OpenAI SDK</div>
+                  <div className="text-[11px] text-text-muted mt-1 leading-relaxed">
+                    Optional. Without a key, Codex uses your local CLI login.
+                  </div>
+                </div>
+                <div className="text-[10px] uppercase tracking-widest text-text-muted">
+                  {openAiApiKeyDraft.trim() ? 'SDK configured' : 'CLI fallback'}
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_minmax(220px,0.55fr)] gap-3">
+                <label className="space-y-1.5">
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-text-muted">API key</span>
+                  <div className="flex items-center gap-2 rounded-lg border border-border-panel background-bg-app px-3 py-2 focus-within:border-accent-primary/70">
+                    <KeyRound size={14} className="text-text-muted shrink-0" />
+                    <input
+                      value={openAiApiKeyDraft}
+                      onChange={(event) => {
+                        setOpenAiApiKeyDraft(event.target.value);
+                        setOpenAiConfigStatus('');
+                      }}
+                      onKeyDown={(event) => {
+                        if (event.key === 'Enter') {
+                          event.preventDefault();
+                          saveOpenAiSdkConfig();
+                        }
+                      }}
+                      placeholder="sk-..."
+                      className="min-w-0 flex-1 bg-transparent text-xs text-text-primary outline-none placeholder:text-text-muted"
+                      type="password"
+                    />
+                  </div>
+                </label>
+
+                <label className="space-y-1.5">
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-text-muted">Base URL</span>
+                  <div className="flex items-center gap-2 rounded-lg border border-border-panel background-bg-app px-3 py-2 focus-within:border-accent-primary/70">
+                    <Server size={14} className="text-text-muted shrink-0" />
+                    <input
+                      value={openAiBaseUrlDraft}
+                      onChange={(event) => {
+                        setOpenAiBaseUrlDraft(event.target.value);
+                        setOpenAiConfigStatus('');
+                      }}
+                      onKeyDown={(event) => {
+                        if (event.key === 'Enter') {
+                          event.preventDefault();
+                          saveOpenAiSdkConfig();
+                        }
+                      }}
+                      placeholder="https://api.openai.com/v1"
+                      className="min-w-0 flex-1 bg-transparent text-xs text-text-primary outline-none placeholder:text-text-muted"
+                      type="url"
+                    />
+                  </div>
+                </label>
+              </div>
+
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div className={`text-[11px] ${openAiConfigStatus.includes('must') || openAiConfigStatus.includes('Could not') ? 'text-red-300' : 'text-text-muted'}`}>
+                  {openAiConfigStatus || 'Leave both fields blank to keep using Codex CLI.'}
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={clearOpenAiSdkConfig}
+                    className="px-3 py-1.5 rounded-md border border-border-panel text-[11px] font-bold text-text-muted hover:text-text-primary hover:border-text-muted transition-colors"
+                  >
+                    Clear
+                  </button>
+                  <button
+                    type="button"
+                    onClick={saveOpenAiSdkConfig}
+                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-accent-primary text-[11px] font-bold text-white shadow-lg shadow-accent-primary/20"
+                  >
+                    <Check size={13} />
+                    Save
+                  </button>
+                </div>
+              </div>
+            </div>
+          </section>
           
           {/* Preset Selection Section */}
           <section className="space-y-8">

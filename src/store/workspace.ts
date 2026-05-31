@@ -3,16 +3,17 @@ import { persist } from 'zustand/middleware';
 import { generateId } from '../lib/graphUtils.js';
 import type { RetryPolicy } from '../lib/workflow/WorkflowTypes.js';
 import type { FrontendDirectionSpec } from '../lib/frontendDirection.js';
+import { activePaneIdAfterReplacingTabPanes, activePaneIdForTab, activeTabIdForTabs, arrayMoveSafely, clampPaneInsertIndex, normalizeWorkspaceGridPos } from '../lib/workspaceTabs.js';
+import { workspacePathEquals } from '../lib/workspacePaths.js';
+import { normalizePreviewUrl, previewUrlEquals } from '../lib/previewUrl.js';
+import { normalizeTerminalId } from '../lib/terminalIds.js';
 export type { RetryPolicy };
 
 export function arrayMove<T>(array: T[], fromIndex: number, toIndex: number): T[] {
-  const newArray = [...array];
-  const [item] = newArray.splice(fromIndex, 1);
-  newArray.splice(toIndex, 0, item);
-  return newArray;
+  return arrayMoveSafely(array, fromIndex, toIndex);
 }
 
-export type PaneType = 'terminal' | 'editor' | 'taskboard' | 'activityfeed' | 'launcher' | 'missioncontrol' | 'nodetree' | 'inbox';
+export type PaneType = 'terminal' | 'editor' | 'changereview' | 'preview' | 'taskboard' | 'activityfeed' | 'launcher' | 'missioncontrol' | 'nodetree' | 'inbox';
 export type AppMode = 'workflow' | 'runtime' | 'workspace' | 'actioncenter' | 'mcptoolbox';
 export type WorkflowNodeStatus =
   | 'idle'
@@ -38,6 +39,39 @@ export type WorkflowNodeStatus =
   | 'failed'
   | 'disconnected'
   | 'manual_takeover';
+
+export const WORKFLOW_NODE_STATUS_VALUES = [
+  'idle',
+  'unbound',
+  'bound',
+  'launching',
+  'connecting',
+  'spawning',
+  'waiting_auth',
+  'terminal_started',
+  'adapter_starting',
+  'mcp_connecting',
+  'registered',
+  'ready',
+  'activation_pending',
+  'activation_acked',
+  'activated',
+  'running',
+  'handoff_pending',
+  'waiting',
+  'done',
+  'completed',
+  'failed',
+  'disconnected',
+  'manual_takeover',
+] as const satisfies readonly WorkflowNodeStatus[];
+
+export const WORKFLOW_NODE_STATUS_SET: ReadonlySet<WorkflowNodeStatus> = new Set(WORKFLOW_NODE_STATUS_VALUES);
+
+export function isWorkflowNodeStatus(value: string | null | undefined): value is WorkflowNodeStatus {
+  return Boolean(value && WORKFLOW_NODE_STATUS_SET.has(value as WorkflowNodeStatus));
+}
+
 export type WorkflowMode = 'build' | 'edit';
 export type WorkflowEdgeCondition = 'always' | 'on_success' | 'on_failure';
 export type WorkflowAgentCli = 'claude' | 'gemini' | 'opencode' | 'codex' | 'custom' | 'ollama' | 'lmstudio';
@@ -303,12 +337,38 @@ export interface Pane {
     filePath?: string;
     cwd?: string;
     initialCommand?: string;
+    initialCommandShouldRun?: boolean;
     customCliCommand?: string;
     customCliArgs?: string[];
     customCliEnv?: Record<string, string>;
     customCliMcpHint?: string;
     [key: string]: any;
   };
+}
+
+const EMPTY_PANES: Pane[] = [];
+
+function isPane(value: unknown): value is Pane {
+  if (!value || typeof value !== 'object') return false;
+  const pane = value as Partial<Pane>;
+  const gridPos = pane.gridPos;
+  if (!gridPos || typeof gridPos !== 'object') return false;
+  return typeof pane.id === 'string'
+    && Boolean(pane.id)
+    && typeof pane.type === 'string'
+    && typeof pane.title === 'string'
+    && Number.isFinite(gridPos.x)
+    && Number.isFinite(gridPos.y)
+    && Number.isFinite(gridPos.w)
+    && Number.isFinite(gridPos.h);
+}
+
+function safePanes(value: unknown): Pane[] {
+  if (!Array.isArray(value)) return EMPTY_PANES;
+  for (const item of value) {
+    if (!isPane(item)) return value.filter(isPane);
+  }
+  return value;
 }
 
 export function resolveCollisions(panes: Pane[], anchorId?: string): Pane[] {
@@ -380,6 +440,39 @@ export interface SavedLayout {
   panes: Array<Pick<Pane, 'type' | 'title' | 'data' | 'gridPos'>>;
 }
 
+const PANE_TYPES = new Set<PaneType>([
+  'terminal',
+  'editor',
+  'changereview',
+  'preview',
+  'taskboard',
+  'activityfeed',
+  'launcher',
+  'missioncontrol',
+  'nodetree',
+  'inbox',
+]);
+
+function isPaneType(value: unknown): value is PaneType {
+  return typeof value === 'string' && PANE_TYPES.has(value as PaneType);
+}
+
+function normalizeGridPos(value: unknown, fallback: GridPos): GridPos {
+  return normalizeWorkspaceGridPos(value, fallback);
+}
+
+function normalizeSavedLayoutPane(value: unknown): Pick<Pane, 'type' | 'title' | 'data' | 'gridPos'> | null {
+  if (!value || typeof value !== 'object') return null;
+  const pane = value as Partial<Pane>;
+  if (!isPaneType(pane.type)) return null;
+  return {
+    type: pane.type,
+    title: cleanPaneTitle(pane.title, pane.type === 'terminal' ? 'Terminal' : 'Untitled'),
+    data: cleanPaneDataInput(pane.data),
+    gridPos: normalizeGridPos(pane.gridPos, { x: 0, y: 0, w: 25, h: 40 }),
+  };
+}
+
 export const TAB_COLORS = [
   '#7059f5', '#3b82f6', '#10b981', '#f59e0b',
   '#ef4444', '#8b5cf6', '#06b6d4', '#f97316',
@@ -387,16 +480,20 @@ export const TAB_COLORS = [
 ];
 
 export function selectActivePanes(state: WorkspaceState): Pane[] {
-  return state.tabs.find(t => t.id === state.activeTabId)?.panes ?? [];
+  const activeTabId = activeTabIdForTabs(state.tabs, state.activeTabId);
+  const panes = state.tabs.find(t => t.id === activeTabId)?.panes;
+  return safePanes(panes);
 }
 
 function withActivePanes(
   state: WorkspaceState,
   updater: (panes: Pane[]) => Pane[]
-): Pick<WorkspaceState, 'tabs'> {
+): Pick<WorkspaceState, 'tabs' | 'activeTabId'> {
+  const activeTabId = activeTabIdForTabs(state.tabs, state.activeTabId) ?? state.activeTabId;
   return {
+    activeTabId,
     tabs: state.tabs.map(t =>
-      t.id === state.activeTabId ? { ...t, panes: updater(t.panes) } : t
+      t.id === activeTabId ? { ...t, panes: updater(safePanes(t.panes)) } : t
     ),
   };
 }
@@ -430,7 +527,7 @@ export interface DbTask {
   payload: string | null;
 }
 
-export type SidebarTabType = 'files' | 'tasks' | 'swarm' | 'agents' | 'nodetree' | 'settings';
+export type SidebarTabType = 'files' | 'tasks' | 'agents' | 'nodetree' | 'settings';
 export type LayoutMode = 'grid' | 'tabs';
 
 export interface CustomThemeColors {
@@ -545,17 +642,166 @@ function findHighestAvailableSpot(panes: Pane[], w: number, h: number, padding =
   return { x: 0, y: 0, w, h };
 }
 
+function dirtyEditorPanes(panes: Pane[]): Pane[] {
+  return panes.filter(pane => pane.type === 'editor' && Boolean(pane.data?.editorDirty));
+}
+
+function confirmDiscardDirtyEditors(panes: Pane[], action: string): boolean {
+  const dirty = dirtyEditorPanes(panes);
+  if (dirty.length === 0 || typeof window === 'undefined' || typeof window.confirm !== 'function') return true;
+  const names = dirty
+    .slice(0, 3)
+    .map(pane => pane.title || pane.data?.filePath || 'Untitled')
+    .join(', ');
+  const extra = dirty.length > 3 ? ` and ${dirty.length - 3} more` : '';
+  return window.confirm(`Discard unsaved changes in ${names}${extra} before ${action}?`);
+}
+
+function destroyTerminalPanes(panes: Pane[]) {
+  const terminalIds = panes
+    .map(pane => pane.type === 'terminal' ? normalizeTerminalId(pane.data?.terminalId) : null)
+    .filter((terminalId): terminalId is string => Boolean(terminalId));
+  if (terminalIds.length === 0) return;
+  import('../lib/runtime/TerminalOutputBus.js').then(({ terminalOutputBus }) => {
+    terminalIds.forEach(id => terminalOutputBus.clear(id));
+  }).catch(console.error);
+  import('@tauri-apps/api/core').then(({ invoke }) => {
+    terminalIds.forEach(id => {
+      invoke('destroy_pty', { id }).catch(console.error);
+    });
+  });
+}
+
 function clearEditorPanesForWorkspaceChange(state: WorkspaceState): Pick<WorkspaceState, 'tabs' | 'activePaneId'> {
-  const tabs = state.tabs.map(tab => ({
-    ...tab,
-    panes: tab.panes.filter(pane => pane.type !== 'editor'),
-  }));
-  const activePaneStillExists = tabs.some(tab => tab.panes.some(pane => pane.id === state.activePaneId));
-  const activeTab = tabs.find(tab => tab.id === state.activeTabId) ?? tabs[0];
+  const tabs = state.tabs.map(tab => tab.id === state.activeTabId
+    ? {
+        ...tab,
+        panes: safePanes(tab.panes).filter(pane => pane.type !== 'editor'),
+      }
+    : tab);
   return {
     tabs,
-    activePaneId: activePaneStillExists ? state.activePaneId : (activeTab?.panes[0]?.id ?? null),
+    activePaneId: activePaneIdForTab(tabs, state.activeTabId, state.activePaneId),
   };
+}
+
+function cleanWorkspaceDirValue(dir: string | null): string | null {
+  if (typeof dir !== 'string') return null;
+  const cleaned = dir.replace(/\0/g, '').trim();
+  return cleaned || null;
+}
+
+export function cleanPaneTitle(value: unknown, fallback = 'Untitled'): string {
+  const title = typeof value === 'string'
+    ? value.replace(/\0/g, '').replace(/\s+/g, ' ').trim()
+    : '';
+  const fallbackTitle = fallback.replace(/\0/g, '').replace(/\s+/g, ' ').trim() || 'Untitled';
+  return (title || fallbackTitle).slice(0, 120);
+}
+
+export function cleanWorkspaceTabName(value: unknown, fallback = 'Workspace'): string {
+  return cleanPaneTitle(value, fallback);
+}
+
+export function cleanSavedLayoutName(value: unknown, fallback = 'Workspace layout'): string {
+  return cleanPaneTitle(value, fallback);
+}
+
+function activeWorkspaceDirForState(state: WorkspaceState): string | null {
+  return cleanWorkspaceDirValue(state.tabs.find(tab => tab.id === state.activeTabId)?.workspaceDir ?? state.workspaceDir);
+}
+
+function cleanPaneDataInput(data: unknown): Record<string, unknown> {
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return {};
+  return Object.fromEntries(
+    Object.entries(data as Record<string, unknown>).filter(([, value]) => value !== undefined),
+  );
+}
+
+function paneDataWithActiveWorkspaceDir(state: WorkspaceState, data?: any): any {
+  const nextData = cleanPaneDataInput(data);
+  const providedWorkspaceDir = cleanWorkspaceDirValue(typeof nextData.workspaceDir === 'string' ? nextData.workspaceDir : null);
+  if (providedWorkspaceDir) {
+    nextData.workspaceDir = providedWorkspaceDir;
+  } else {
+    const activeWorkspaceDir = activeWorkspaceDirForState(state);
+    if (activeWorkspaceDir) {
+      nextData.workspaceDir = activeWorkspaceDir;
+    } else {
+      delete nextData.workspaceDir;
+    }
+  }
+  return nextData;
+}
+
+function normalizePreviewPaneData(data?: any): any {
+  const nextData = cleanPaneDataInput(data);
+  if (typeof nextData.url === 'string') {
+    const normalizedUrl = normalizePreviewUrl(nextData.url);
+    if (normalizedUrl) {
+      nextData.url = normalizedUrl;
+    } else {
+      delete nextData.url;
+    }
+  }
+  return nextData;
+}
+
+function paneDataForType(state: WorkspaceState, type: PaneType, data?: any): any {
+  const nextData = paneDataWithActiveWorkspaceDir(state, data);
+  return type === 'preview' ? normalizePreviewPaneData(nextData) : nextData;
+}
+
+function matchingPreviewPane(panes: Pane[], previewData: any): Pane | null {
+  return previewData?.url
+    ? panes.find(p => p.type === 'preview' && previewUrlEquals(p.data?.url, previewData.url)) ?? null
+    : null;
+}
+
+function reusePreviewPaneState(
+  state: WorkspaceState,
+  existingPreview: Pane,
+  title: string,
+  previewData: any,
+): Pick<WorkspaceState, 'tabs' | 'activeTabId' | 'activePaneId'> {
+  const nextTitle = cleanPaneTitle(title, existingPreview.title);
+  return {
+    ...withActivePanes(state, ps => ps.map(p => p.id === existingPreview.id
+      ? { ...p, title: nextTitle, data: { ...p.data, ...previewData } }
+      : p)),
+    activePaneId: existingPreview.id,
+  };
+}
+
+function refreshedFilePaneData(state: WorkspaceState, type: PaneType, data: any): any {
+  const nextData = paneDataForType(state, type, data);
+  if (type === 'editor' && nextData.filePath) nextData.editorReloadToken = generateId();
+  return nextData;
+}
+
+function workspaceDirValuesEqual(left: string | null | undefined, right: string | null | undefined): boolean {
+  if (!left && !right) return true;
+  if (!left || !right) return false;
+  return workspacePathEquals(left, right);
+}
+
+function cleanRuntimeBindingNodeId(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const cleaned = value.replace(/\0/g, '').trim();
+  return cleaned || null;
+}
+
+export function nodeRuntimeBindingsFromTerminalBindings(bindings: unknown): Record<string, NodeRuntimeBinding> {
+  if (!bindings || typeof bindings !== 'object') return {};
+  return Object.fromEntries(
+    Object.entries(bindings as Record<string, unknown>)
+      .map(([nodeId, terminalId]) => [cleanRuntimeBindingNodeId(nodeId), normalizeTerminalId(terminalId)] as const)
+      .filter((entry): entry is readonly [string, string] => Boolean(entry[0] && entry[1]))
+      .map(([nodeId, terminalId]) => [
+        nodeId,
+        { terminalId, runtimeSessionId: null, adapterStatus: null },
+      ]),
+  );
 }
 
 function cleanWorkflowGraph(graph: WorkflowGraph): WorkflowGraph {
@@ -628,7 +874,7 @@ export const useWorkspaceStore = create<WorkspaceState>()(
       layoutMode: 'tabs',
       sidebarOpen: true,
       activeSidebarTab: 'files',
-      appMode: 'workflow',
+      appMode: 'workspace',
       workspaceDir: null,
       theme: getInitialTheme(),
       showSettings: false,
@@ -716,14 +962,16 @@ export const useWorkspaceStore = create<WorkspaceState>()(
         const tabId = `workflow-workspace:${workflow.missionId}`;
         const existing = state.tabs.find(tab => tab.id === tabId);
         if (existing) {
+          const missionPane = existing.panes.find(pane => pane.type === 'missioncontrol');
           return {
             activeTabId: existing.id,
-            activePaneId: existing.panes[0]?.id ?? state.activePaneId,
+            activePaneId: missionPane?.id ?? existing.panes[0]?.id ?? state.activePaneId,
             workspaceDir: workflow.workspaceDir ?? state.workspaceDir,
           };
         }
 
         const color = TAB_COLORS[state.tabs.length % TAB_COLORS.length];
+        const missionPaneId = generateId();
         const editorPaneId = generateId();
         const newTab: WorkspaceTab = {
           id: tabId,
@@ -732,23 +980,36 @@ export const useWorkspaceStore = create<WorkspaceState>()(
           workspaceDir: workflow.workspaceDir,
           workflowRunId: workflow.missionId,
           workflowName: workflow.name,
-          panes: [{
-            id: editorPaneId,
-            type: 'editor',
-            title: workflow.workspaceDir
-              ? workflow.workspaceDir.split(/[\\/]/).filter(Boolean).pop() || workflow.name
-              : workflow.name,
-            gridPos: { x: 0, y: 0, w: 100, h: 100 },
-            data: {
-              workspaceDir: workflow.workspaceDir,
-              initialContent: `// ${workflow.name}\n// Workspace: ${workflow.workspaceDir ?? 'No directory selected'}\n`,
+          panes: [
+            {
+              id: missionPaneId,
+              type: 'missioncontrol',
+              title: 'Mission Progress',
+              gridPos: { x: 0, y: 0, w: 50, h: 100 },
+              data: {
+                missionId: workflow.missionId,
+                taskDescription: workflow.name,
+                agents: [],
+              },
             },
-          }],
+            {
+              id: editorPaneId,
+              type: 'editor',
+              title: workflow.workspaceDir
+                ? workflow.workspaceDir.split(/[\\/]/).filter(Boolean).pop() || workflow.name
+                : workflow.name,
+              gridPos: { x: 50, y: 0, w: 50, h: 100 },
+              data: {
+                workspaceDir: workflow.workspaceDir,
+                initialContent: `// ${workflow.name}\n// Workspace: ${workflow.workspaceDir ?? 'No directory selected'}\n`,
+              },
+            },
+          ],
         };
         return {
           tabs: [...state.tabs, newTab],
           activeTabId: tabId,
-          activePaneId: editorPaneId,
+          activePaneId: missionPaneId,
           workspaceDir: workflow.workspaceDir ?? state.workspaceDir,
         };
       }),
@@ -764,30 +1025,42 @@ export const useWorkspaceStore = create<WorkspaceState>()(
       addResult: (result) => set((s) => ({ results: [...s.results, result].slice(-200) })),
       setTasks: (tasks) => set({ tasks }),
       setAgentInstruction: (id, value) => set((s) => ({ agentInstructions: { ...s.agentInstructions, [id]: value } })),
-      setNodeTerminalBinding: (nodeId, terminalId) => set((s) => ({
-        nodeTerminalBindings: { ...s.nodeTerminalBindings, [nodeId]: terminalId },
-        nodeRuntimeBindings: {
-          ...s.nodeRuntimeBindings,
-          [nodeId]: {
-            ...(s.nodeRuntimeBindings[nodeId] ?? {}),
-            terminalId,
-            updatedAt: Date.now(),
+      setNodeTerminalBinding: (nodeId, terminalId) => set((s) => {
+        const normalizedTerminalId = normalizeTerminalId(terminalId);
+        if (!normalizedTerminalId) return s;
+        return {
+          nodeTerminalBindings: { ...s.nodeTerminalBindings, [nodeId]: normalizedTerminalId },
+          nodeRuntimeBindings: {
+            ...s.nodeRuntimeBindings,
+            [nodeId]: {
+              ...(s.nodeRuntimeBindings[nodeId] ?? {}),
+              terminalId: normalizedTerminalId,
+              updatedAt: Date.now(),
+            },
           },
-        },
-      })),
-      setNodeRuntimeBinding: (nodeId, binding) => set((s) => ({
-        nodeRuntimeBindings: {
-          ...s.nodeRuntimeBindings,
-          [nodeId]: {
-            ...(s.nodeRuntimeBindings[nodeId] ?? {}),
-            ...binding,
-            updatedAt: Date.now(),
+        };
+      }),
+      setNodeRuntimeBinding: (nodeId, binding) => set((s) => {
+        const normalizedTerminalId = normalizeTerminalId(binding.terminalId);
+        const nextBinding = {
+          ...(s.nodeRuntimeBindings[nodeId] ?? {}),
+          ...binding,
+          ...(normalizedTerminalId ? { terminalId: normalizedTerminalId } : {}),
+          updatedAt: Date.now(),
+        };
+        if (binding.terminalId !== undefined && !normalizedTerminalId) {
+          delete nextBinding.terminalId;
+        }
+        return {
+          nodeRuntimeBindings: {
+            ...s.nodeRuntimeBindings,
+            [nodeId]: nextBinding,
           },
-        },
-        nodeTerminalBindings: binding.terminalId
-          ? { ...s.nodeTerminalBindings, [nodeId]: binding.terminalId }
-          : s.nodeTerminalBindings,
-      })),
+          nodeTerminalBindings: normalizedTerminalId
+            ? { ...s.nodeTerminalBindings, [nodeId]: normalizedTerminalId }
+            : s.nodeTerminalBindings,
+        };
+      }),
       removeNodeTerminalBinding: (nodeId) => set((s) => {
         const bindings = { ...s.nodeTerminalBindings };
         const runtimeBindings = { ...s.nodeRuntimeBindings };
@@ -798,7 +1071,7 @@ export const useWorkspaceStore = create<WorkspaceState>()(
       addMissionArtifact: (_missionId, nodeId, artifact) => set((state) => ({
         tabs: state.tabs.map(tab => ({
           ...tab,
-          panes: tab.panes.map(pane => {
+          panes: safePanes(tab.panes).map(pane => {
             if (pane.type !== 'missioncontrol') return pane;
             const agents = (pane.data?.agents as MissionAgent[] | undefined) ?? [];
             const updatedAgents = agents.map(agent => {
@@ -831,7 +1104,7 @@ export const useWorkspaceStore = create<WorkspaceState>()(
             type: 'terminal',
             title,
             gridPos,
-            data: { terminalId, nodeId, roleId, cli, cliSource: 'heuristic', executionMode, runtimeManaged: true }
+            data: paneDataWithActiveWorkspaceDir(state, { terminalId, nodeId, roleId, cli, cliSource: 'heuristic', executionMode, runtimeManaged: true })
           };
           
           return {
@@ -847,6 +1120,7 @@ export const useWorkspaceStore = create<WorkspaceState>()(
 
       addPane: (type, title, data) => set((state) => {
         const panes = selectActivePanes(state);
+        const paneTitle = cleanPaneTitle(title, type === 'terminal' ? 'Terminal' : 'Untitled');
         
         // Singleton logic for specific pane types
         if (type === 'missioncontrol' || type === 'inbox') {
@@ -854,7 +1128,7 @@ export const useWorkspaceStore = create<WorkspaceState>()(
           if (existing) {
             return {
               ...withActivePanes(state, ps => 
-                ps.map(p => p.id === existing.id ? { ...p, title, data: { ...p.data, ...data } } : p)
+                ps.map(p => p.id === existing.id ? { ...p, title: cleanPaneTitle(title, existing.title), data: { ...p.data, ...data } } : p)
               ),
               ...(type === 'missioncontrol' ? { messages: [], results: [], tasks: [] } : {}),
               activePaneId: existing.id
@@ -862,22 +1136,40 @@ export const useWorkspaceStore = create<WorkspaceState>()(
           }
         }
 
-        const existingFile = data?.filePath ? panes.find(p => p.data?.filePath === data.filePath) : null;
-        if (existingFile) {
-          return { ...state, activePaneId: existingFile.id };
+        const previewData = type === 'preview' ? normalizePreviewPaneData(data) : null;
+        const existingPreview = type === 'preview' ? matchingPreviewPane(panes, previewData) : null;
+        if (existingPreview) {
+          return reusePreviewPaneState(state, existingPreview, title, previewData);
         }
 
-        const newData = data ? { ...data } : {};
+        const existingFile = data?.filePath
+          ? panes.find(p => typeof p.data?.filePath === 'string' && workspacePathEquals(p.data.filePath, data.filePath))
+          : null;
+        if (existingFile) {
+          if (existingFile.data?.editorDirty) {
+            return { activePaneId: existingFile.id };
+          }
+          const nextData = refreshedFilePaneData(state, type, data);
+          return {
+            ...withActivePanes(state, ps => ps.map(p => p.id === existingFile.id
+              ? { ...p, title: paneTitle, data: { ...p.data, ...nextData } }
+              : p)),
+            activePaneId: existingFile.id
+          };
+        }
+
+        const newData = paneDataForType(state, type, data);
+        if (type === 'editor' && newData.filePath) newData.editorReloadToken = generateId();
         if (type === 'terminal' && !newData.terminalId) newData.terminalId = generateId();
         
-        const gridPos = newData.gridPos || findHighestAvailableSpot(panes, 25, 40);
+        const gridPos = normalizeGridPos(newData.gridPos, findHighestAvailableSpot(panes, 25, 40));
         delete newData.gridPos;
 
         const paneId = generateId();
         const newPane: Pane = { 
           id: paneId, 
           type, 
-          title, 
+          title: paneTitle, 
           gridPos,
           data: newData 
         };
@@ -893,25 +1185,50 @@ export const useWorkspaceStore = create<WorkspaceState>()(
       }),
 
       addPaneAt: (type, title, index, data) => set((state) => {
-        const newData = data ? { ...data } : {};
+        const panes = selectActivePanes(state);
+        const paneTitle = cleanPaneTitle(title, type === 'terminal' ? 'Terminal' : 'Untitled');
+
+        const previewData = type === 'preview' ? normalizePreviewPaneData(data) : null;
+        const existingPreview = type === 'preview' ? matchingPreviewPane(panes, previewData) : null;
+        if (existingPreview) {
+          return reusePreviewPaneState(state, existingPreview, title, previewData);
+        }
+
+        const existingFile = data?.filePath
+          ? panes.find(p => typeof p.data?.filePath === 'string' && workspacePathEquals(p.data.filePath, data.filePath))
+          : null;
+        if (existingFile) {
+          if (existingFile.data?.editorDirty) {
+            return { activePaneId: existingFile.id };
+          }
+          const nextData = refreshedFilePaneData(state, type, data);
+          return {
+            ...withActivePanes(state, ps => ps.map(p => p.id === existingFile.id
+              ? { ...p, title: paneTitle, data: { ...p.data, ...nextData } }
+              : p)),
+            activePaneId: existingFile.id
+          };
+        }
+
+        const newData = paneDataForType(state, type, data);
+        if (type === 'editor' && newData.filePath) newData.editorReloadToken = generateId();
         if (type === 'terminal' && !newData.terminalId) newData.terminalId = generateId();
 
-        const panes = selectActivePanes(state);
-        const gridPos = newData.gridPos || findHighestAvailableSpot(panes, 25, 40);
+        const gridPos = normalizeGridPos(newData.gridPos, findHighestAvailableSpot(panes, 25, 40));
         delete newData.gridPos;
 
         const paneId = generateId();
         const newPane: Pane = { 
           id: paneId, 
           type, 
-          title, 
+          title: paneTitle, 
           gridPos,
           data: newData 
         };
         
         const nextState = withActivePanes(state, ps => {
           const arr = [...ps];
-          arr.splice(index, 0, newPane);
+          arr.splice(clampPaneInsertIndex(arr.length, index), 0, newPane);
           return resolveCollisions(arr);
         });
 
@@ -925,11 +1242,10 @@ export const useWorkspaceStore = create<WorkspaceState>()(
       removePane: (id) => set((state) => {
         const panes = selectActivePanes(state);
         const pane = panes.find(p => p.id === id);
-        if (pane?.type === 'terminal' && pane.data?.terminalId) {
-          import('@tauri-apps/api/core').then(({ invoke }) => {
-            invoke('destroy_pty', { id: pane.data?.terminalId }).catch(console.error);
-          });
+        if (pane?.type === 'editor' && pane.data?.editorDirty && !confirmDiscardDirtyEditors([pane], 'closing this tab')) {
+          return state;
         }
+        if (pane) destroyTerminalPanes([pane]);
         
         const nextPanes = panes.filter(p => p.id !== id);
         let nextActivePaneId = state.activePaneId;
@@ -960,33 +1276,37 @@ export const useWorkspaceStore = create<WorkspaceState>()(
         )
       ),
 
-      updatePaneDataByTerminalId: (terminalId, data) => set((state) => ({
-        tabs: state.tabs.map(tab => ({
-          ...tab,
-          panes: tab.panes.map(p =>
-            p.type === 'terminal' && p.data?.terminalId === terminalId
-              ? { ...p, data: { ...p.data, ...data } }
-              : p
-          ),
-        })),
-      })),
+      updatePaneDataByTerminalId: (terminalId, data) => set((state) => {
+        const normalizedTerminalId = normalizeTerminalId(terminalId);
+        if (!normalizedTerminalId) return state;
+        return {
+          tabs: state.tabs.map(tab => ({
+            ...tab,
+            panes: safePanes(tab.panes).map(p =>
+              p.type === 'terminal' && normalizeTerminalId(p.data?.terminalId) === normalizedTerminalId
+                ? { ...p, data: { ...p.data, ...data } }
+                : p
+            ),
+          })),
+        };
+      }),
 
       renamePane: (id, title) => set((state) =>
         withActivePanes(state, panes =>
-          panes.map(p => p.id === id ? { ...p, title } : p)
+          panes.map(p => p.id === id ? { ...p, title: cleanPaneTitle(title, p.title) } : p)
         )
       ),
 
       resizePane: (id, w, h) => set((state) =>
         withActivePanes(state, panes => {
-          const updated = panes.map(p => p.id === id ? { ...p, gridPos: { ...p.gridPos, w, h } } : p);
+          const updated = panes.map(p => p.id === id ? { ...p, gridPos: normalizeGridPos({ ...p.gridPos, w, h }, p.gridPos) } : p);
           return resolveCollisions(updated, id);
         })
       ),
 
       updatePaneLayout: (id, gridPos) => set((state) =>
         withActivePanes(state, panes => {
-          const updated = panes.map(p => p.id === id ? { ...p, gridPos: { ...p.gridPos, ...gridPos } } : p);
+          const updated = panes.map(p => p.id === id ? { ...p, gridPos: normalizeGridPos({ ...p.gridPos, ...gridPos }, p.gridPos) } : p);
           return resolveCollisions(updated, id);
         })
       ),
@@ -1009,17 +1329,31 @@ export const useWorkspaceStore = create<WorkspaceState>()(
             data: { taskDescription, agents },
           }],
         };
-        return { tabs: [...state.tabs, newTab], activeTabId: tabId };
+        return { tabs: [...state.tabs, newTab], activeTabId: tabId, activePaneId: activePaneIdForTab([newTab], tabId) };
       }),
 
-      clearPanes: () => set((state) => withActivePanes(state, () => [])),
+      clearPanes: () => set((state) => {
+        const panes = selectActivePanes(state);
+        if (!confirmDiscardDirtyEditors(panes, 'clearing panes')) return state;
+        destroyTerminalPanes(panes);
+        return { ...withActivePanes(state, () => []), activePaneId: null };
+      }),
 
       setWorkspaceDir: (dir) => set((state) => {
-        const nextDir = typeof dir === 'string' ? dir.replace(/\0/g, '').trim() : dir;
-        if ((state.workspaceDir ?? null) === (nextDir ?? null)) return state;
+        const nextDir = cleanWorkspaceDirValue(dir);
+        const activeTab = state.tabs.find(tab => tab.id === state.activeTabId);
+        if (
+          workspaceDirValuesEqual(state.workspaceDir, nextDir)
+          && workspaceDirValuesEqual(activeTab?.workspaceDir, nextDir)
+        ) {
+          return state;
+        }
+        if (!confirmDiscardDirtyEditors(safePanes(activeTab?.panes), 'changing workspace folders')) return state;
+        const cleared = clearEditorPanesForWorkspaceChange(state);
         return {
           workspaceDir: nextDir,
-          ...clearEditorPanesForWorkspaceChange(state),
+          ...cleared,
+          tabs: cleared.tabs.map(tab => tab.id === state.activeTabId ? { ...tab, workspaceDir: nextDir } : tab),
         };
       }),
 
@@ -1027,9 +1361,14 @@ export const useWorkspaceStore = create<WorkspaceState>()(
         const panes = selectActivePanes(state);
         const layout: SavedLayout = {
           id: generateId(),
-          name,
+          name: cleanSavedLayoutName(name),
           createdAt: Date.now(),
-          panes: panes.map(({ type, title, data, gridPos }) => ({ type, title, data: data ? { ...data } : {}, gridPos })),
+          panes: panes.map(({ type, title, data, gridPos }) => ({
+            type,
+            title: cleanPaneTitle(title, type === 'terminal' ? 'Terminal' : 'Untitled'),
+            data: cleanPaneDataInput(data),
+            gridPos: normalizeGridPos(gridPos, { x: 0, y: 0, w: 25, h: 40 }),
+          })),
         };
         return { savedLayouts: [...state.savedLayouts, layout] };
       }),
@@ -1037,18 +1376,28 @@ export const useWorkspaceStore = create<WorkspaceState>()(
       loadLayout: (id) => set((state) => {
         const layout = state.savedLayouts.find(l => l.id === id);
         if (!layout) return state;
-        const newPanes: Pane[] = layout.panes.map(p => {
-          const newData = p.data ? { ...p.data } : {};
+        const panes = selectActivePanes(state);
+        if (!confirmDiscardDirtyEditors(panes, 'loading this layout')) return state;
+        destroyTerminalPanes(panes);
+        const layoutPanes = Array.isArray(layout.panes)
+          ? layout.panes.map(normalizeSavedLayoutPane).filter((pane): pane is Pick<Pane, 'type' | 'title' | 'data' | 'gridPos'> => Boolean(pane))
+          : [];
+        const newPanes: Pane[] = layoutPanes.map(p => {
+          const newData = paneDataForType(state, p.type, p.data);
           if (p.type === 'terminal') newData.terminalId = generateId();
           return { 
             id: generateId(), 
             type: p.type, 
-            title: p.title, 
-            gridPos: p.gridPos || { x: 0, y: 0, w: 25, h: 40 },
+            title: cleanPaneTitle(p.title, p.type === 'terminal' ? 'Terminal' : 'Untitled'), 
+            gridPos: p.gridPos,
             data: newData 
           };
         });
-        return withActivePanes(state, () => resolveCollisions(newPanes));
+        const nextState = withActivePanes(state, () => resolveCollisions(newPanes));
+        return {
+          ...nextState,
+          activePaneId: activePaneIdAfterReplacingTabPanes(nextState.tabs, state.activeTabId),
+        };
       }),
 
       deleteLayout: (id) => set((state) => ({
@@ -1059,40 +1408,52 @@ export const useWorkspaceStore = create<WorkspaceState>()(
         const tabNum = state.tabs.length + 1;
         const color = TAB_COLORS[state.tabs.length % TAB_COLORS.length];
         const newTabId = generateId();
+        const activeWorkspaceDir = activeWorkspaceDirForState(state);
         const newTab: WorkspaceTab = {
           id: newTabId,
           name: `Workspace ${tabNum}`,
           color,
+          workspaceDir: activeWorkspaceDir,
           panes: [
-            { id: generateId(), type: 'terminal', title: 'Terminal 1', gridPos: { x: 0, y: 0, w: 50, h: 100 }, data: { terminalId: generateId() } },
+            { id: generateId(), type: 'terminal', title: 'Terminal 1', gridPos: { x: 0, y: 0, w: 50, h: 100 }, data: paneDataWithActiveWorkspaceDir(state, { terminalId: generateId() }) },
           ],
         };
-        return { tabs: [...state.tabs, newTab], activeTabId: newTabId };
+        return {
+          tabs: [...state.tabs, newTab],
+          activeTabId: newTabId,
+          activePaneId: activePaneIdForTab([newTab], newTabId),
+        };
       }),
 
       removeTab: (id) => set((state) => {
         if (state.tabs.length <= 1) return state;
         const tab = state.tabs.find(t => t.id === id);
-        if (tab) {
-          tab.panes.forEach(pane => {
-            if (pane.type === 'terminal' && pane.data?.terminalId) {
-              import('@tauri-apps/api/core').then(({ invoke }) => {
-                invoke('destroy_pty', { id: pane.data?.terminalId }).catch(console.error);
-              });
-            }
-          });
-        }
+        if (!tab) return state;
+        const panes = safePanes(tab.panes);
+        if (!confirmDiscardDirtyEditors(panes, 'closing this workspace tab')) return state;
+        destroyTerminalPanes(panes);
         const newTabs = state.tabs.filter(t => t.id !== id);
         const newActiveTabId = id === state.activeTabId
           ? newTabs[Math.max(0, state.tabs.findIndex(t => t.id === id) - 1)].id
           : state.activeTabId;
-        return { tabs: newTabs, activeTabId: newActiveTabId };
+        return {
+          tabs: newTabs,
+          activeTabId: newActiveTabId,
+          activePaneId: activePaneIdForTab(newTabs, newActiveTabId, id === state.activeTabId ? null : state.activePaneId),
+        };
       }),
 
-      switchTab: (id) => set({ activeTabId: id }),
+      switchTab: (id) => set((state) => {
+        const activeTabId = activeTabIdForTabs(state.tabs, id, state.activeTabId);
+        if (!activeTabId || activeTabId === state.activeTabId) return state;
+        return {
+          activeTabId,
+          activePaneId: activePaneIdForTab(state.tabs, activeTabId),
+        };
+      }),
 
       renameTab: (id, name) => set((state) => ({
-        tabs: state.tabs.map(t => t.id === id ? { ...t, name } : t),
+        tabs: state.tabs.map(t => t.id === id ? { ...t, name: cleanWorkspaceTabName(name, t.name) } : t),
       })),
 
       loadPlannedDag: (planned) => {
@@ -1113,13 +1474,20 @@ export const useWorkspaceStore = create<WorkspaceState>()(
     }),
     {
       name: 'workspace-storage',
-      version: 17,
+      version: 18,
       migrate: (persistedState: any, version: number) => {
+        if (version < 18) {
+          persistedState = {
+            ...persistedState,
+            appMode: 'workspace',
+          };
+        }
         if (version < 17) {
+          const tabs = Array.isArray(persistedState?.tabs) ? persistedState.tabs : [];
           persistedState = {
             ...persistedState,
             launchedWorkflows: [],
-            tabs: (persistedState?.tabs ?? []).map((tab: any) => ({
+            tabs: tabs.map((tab: any) => ({
               ...tab,
               workspaceDir: tab.workspaceDir ?? null,
             })),
@@ -1132,18 +1500,18 @@ export const useWorkspaceStore = create<WorkspaceState>()(
           };
         }
         if (version <= 2) {
-          const tabs = persistedState.tabs || [];
+          const tabs = Array.isArray(persistedState?.tabs) ? persistedState.tabs : [];
           const updatedTabs = tabs.map((tab: any) => ({
             ...tab,
-            panes: (tab.panes || []).map((pane: any, idx: number) => ({
+            panes: (Array.isArray(tab.panes) ? tab.panes : []).map((pane: any, idx: number) => ({
               ...pane,
               gridPos: pane.gridPos || { x: (idx % 2) * 12, y: Math.floor(idx / 2) * 10, w: 12, h: 10 }
             }))
           }));
-          return { ...persistedState, tabs: updatedTabs };
+          persistedState = { ...persistedState, tabs: updatedTabs };
         }
         if (version < 5) {
-          return {
+          persistedState = {
             ...persistedState,
             globalGraph: { id: 'global-editor', nodes: [], edges: [] },
             nodeTerminalBindings: {},
@@ -1151,21 +1519,16 @@ export const useWorkspaceStore = create<WorkspaceState>()(
           };
         }
         if (version < 6) {
-          return { ...persistedState, nodeTerminalBindings: {}, nodeRuntimeBindings: {} };
+          persistedState = { ...persistedState, nodeTerminalBindings: {}, nodeRuntimeBindings: {} };
         }
         if (version < 7) {
-          const tabs = persistedState?.tabs ?? [];
-          return {
+          const tabs = Array.isArray(persistedState?.tabs) ? persistedState.tabs : [];
+          persistedState = {
             ...persistedState,
-            nodeRuntimeBindings: Object.fromEntries(
-              Object.entries(persistedState?.nodeTerminalBindings ?? {}).map(([nodeId, terminalId]) => [
-                nodeId,
-                { terminalId: String(terminalId), runtimeSessionId: null, adapterStatus: null },
-              ])
-            ),
+            nodeRuntimeBindings: nodeRuntimeBindingsFromTerminalBindings(persistedState?.nodeTerminalBindings),
             tabs: tabs.map((tab: any) => ({
               ...tab,
-              panes: (tab.panes ?? []).map((pane: any) => ({
+              panes: (Array.isArray(tab.panes) ? tab.panes : []).map((pane: any) => ({
                 ...pane,
                 data: pane.data ? {
                   ...pane.data,
@@ -1181,25 +1544,20 @@ export const useWorkspaceStore = create<WorkspaceState>()(
           };
         }
         if (version < 8) {
-          return {
+          persistedState = {
             ...persistedState,
-            nodeRuntimeBindings: Object.fromEntries(
-              Object.entries(persistedState?.nodeTerminalBindings ?? {}).map(([nodeId, terminalId]) => [
-                nodeId,
-                { terminalId: String(terminalId), runtimeSessionId: null, adapterStatus: null },
-              ])
-            ),
+            nodeRuntimeBindings: nodeRuntimeBindingsFromTerminalBindings(persistedState?.nodeTerminalBindings),
           };
         }
         if (version < 10) {
-          const tabs = persistedState?.tabs ?? [];
-          return {
+          const tabs = Array.isArray(persistedState?.tabs) ? persistedState.tabs : [];
+          persistedState = {
             ...persistedState,
             nodeTerminalBindings: {},
             nodeRuntimeBindings: {},
             tabs: tabs.map((tab: any) => ({
               ...tab,
-              panes: (tab.panes ?? [])
+              panes: (Array.isArray(tab.panes) ? tab.panes : [])
                 .filter((pane: any) => pane.type !== 'terminal')
                 .map((pane: any) => {
                   if (pane.type === 'missioncontrol' && Array.isArray(pane.data?.agents)) {
@@ -1222,18 +1580,15 @@ export const useWorkspaceStore = create<WorkspaceState>()(
           };
         }
         if (version < 11) {
-          return {
+          persistedState = {
             ...persistedState,
             layoutMode: 'tabs',
             activePaneId: null,
           };
         }
-        if (version < 12) {
-          return persistedState;
-        }
         if (version < 13) {
           const graph = persistedState?.globalGraph ?? { id: 'global-editor', nodes: [], edges: [] };
-          return {
+          persistedState = {
             ...persistedState,
             workflowGraphMode: 'standard',
             workflowGraphs: {
@@ -1251,7 +1606,7 @@ export const useWorkspaceStore = create<WorkspaceState>()(
         if (version < 14) {
           const activeMode = persistedState?.workflowGraphMode === 'ui' ? 'ui' : 'standard';
           const graphs = persistedState?.workflowGraphs ?? {};
-          return {
+          persistedState = {
             ...persistedState,
             workflowGraphMode: activeMode,
             workflowGraphs: {
@@ -1273,7 +1628,7 @@ export const useWorkspaceStore = create<WorkspaceState>()(
           };
         }
         if (version < 15) {
-          return {
+          persistedState = {
             ...persistedState,
             canvasEffectsEnabled: true,
           };
@@ -1290,10 +1645,10 @@ export const useWorkspaceStore = create<WorkspaceState>()(
         };
         return persistedState;
       },
-      partialize: (state) => ({
-        tabs: state.tabs.map(tab => ({
+      partialize: (state) => {
+        const tabs = state.tabs.map(tab => ({
           ...tab,
-          panes: tab.panes.filter(p => p.type !== 'terminal').map(p => {
+          panes: safePanes(tab.panes).filter(p => p.type !== 'terminal').map(p => {
             if (p.type === 'missioncontrol' && Array.isArray(p.data?.agents)) {
               return {
                 ...p,
@@ -1310,35 +1665,41 @@ export const useWorkspaceStore = create<WorkspaceState>()(
             }
             return p;
           })
-        })),
-        activeTabId: state.activeTabId,
-        activePaneId: state.activePaneId,
-        layoutMode: 'tabs',
-        sidebarOpen: state.sidebarOpen,
-        appMode: state.appMode,
-        workspaceDir: state.workspaceDir,
-        theme: state.theme,
-        canvasEffectsEnabled: state.canvasEffectsEnabled,
-        savedLayouts: state.savedLayouts,
-        results: state.results.slice(-100),
-        agentInstructions: state.agentInstructions,
-        workflowGraphMode: state.workflowGraphMode,
-        uiFrontendMode: state.uiFrontendMode,
-        launchedWorkflows: state.launchedWorkflows.slice(0, 24),
-        workflowGraphs: {
-          standard: stripRuntimeFromGraph(state.workflowGraphMode === 'standard' ? state.globalGraph : state.workflowGraphs.standard),
-          research: stripRuntimeFromGraph(state.workflowGraphMode === 'research' ? state.globalGraph : state.workflowGraphs.research),
-          plan: stripRuntimeFromGraph(state.workflowGraphMode === 'plan' ? state.globalGraph : state.workflowGraphs.plan),
-          review: stripRuntimeFromGraph(state.workflowGraphMode === 'review' ? state.globalGraph : state.workflowGraphs.review),
-          verify: stripRuntimeFromGraph(state.workflowGraphMode === 'verify' ? state.globalGraph : state.workflowGraphs.verify),
-          secure: stripRuntimeFromGraph(state.workflowGraphMode === 'secure' ? state.globalGraph : state.workflowGraphs.secure),
-          document: stripRuntimeFromGraph(state.workflowGraphMode === 'document' ? state.globalGraph : state.workflowGraphs.document),
-          ui: stripRuntimeFromGraph(state.workflowGraphMode === 'ui' ? state.globalGraph : state.workflowGraphs.ui),
-        },
-        globalGraph: stripRuntimeFromGraph(state.globalGraph)!,
-        nodeTerminalBindings: {},
-        nodeRuntimeBindings: {},
-      }),
+        }));
+
+        const activeTabId = activeTabIdForTabs(tabs, state.activeTabId);
+
+        return {
+          tabs,
+          activeTabId: activeTabId ?? state.activeTabId,
+          activePaneId: activePaneIdForTab(tabs, activeTabId, state.activePaneId),
+          layoutMode: 'tabs',
+          sidebarOpen: state.sidebarOpen,
+          appMode: state.appMode,
+          workspaceDir: state.workspaceDir,
+          theme: state.theme,
+          canvasEffectsEnabled: state.canvasEffectsEnabled,
+          savedLayouts: state.savedLayouts,
+          results: state.results.slice(-100),
+          agentInstructions: state.agentInstructions,
+          workflowGraphMode: state.workflowGraphMode,
+          uiFrontendMode: state.uiFrontendMode,
+          launchedWorkflows: state.launchedWorkflows.slice(0, 24),
+          workflowGraphs: {
+            standard: stripRuntimeFromGraph(state.workflowGraphMode === 'standard' ? state.globalGraph : state.workflowGraphs.standard),
+            research: stripRuntimeFromGraph(state.workflowGraphMode === 'research' ? state.globalGraph : state.workflowGraphs.research),
+            plan: stripRuntimeFromGraph(state.workflowGraphMode === 'plan' ? state.globalGraph : state.workflowGraphs.plan),
+            review: stripRuntimeFromGraph(state.workflowGraphMode === 'review' ? state.globalGraph : state.workflowGraphs.review),
+            verify: stripRuntimeFromGraph(state.workflowGraphMode === 'verify' ? state.globalGraph : state.workflowGraphs.verify),
+            secure: stripRuntimeFromGraph(state.workflowGraphMode === 'secure' ? state.globalGraph : state.workflowGraphs.secure),
+            document: stripRuntimeFromGraph(state.workflowGraphMode === 'document' ? state.globalGraph : state.workflowGraphs.document),
+            ui: stripRuntimeFromGraph(state.workflowGraphMode === 'ui' ? state.globalGraph : state.workflowGraphs.ui),
+          },
+          globalGraph: stripRuntimeFromGraph(state.globalGraph)!,
+          nodeTerminalBindings: {},
+          nodeRuntimeBindings: {},
+        };
+      },
     }
   )
 );

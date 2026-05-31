@@ -151,5 +151,5 @@ run('opencode headless launch uses run subcommand and supported non-interactive 
   ]);
   assert.equal(launch.args.includes('--yolo'), false);
   assert.equal(launch.args.includes('--no-alt-screen'), false);
-  assert.equal(JSON.parse(launch.env.OPENCODE_CONFIG_CONTENT).mcp['terminal-docks'].url, 'http://127.0.0.1:3741/mcp');
+  assert.equal(JSON.parse(launch.env.OPENCODE_CONFIG_CONTENT).mcp['starlink'].url, 'http://127.0.0.1:3741/mcp');
 });

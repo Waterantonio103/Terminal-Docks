@@ -37,7 +37,16 @@ export async function discoverModelsForCli(
     if (cli === 'opencode') result = await discoverOpenCodeModels(Boolean(options.refresh));
     else if (cli === 'codex') result = await discoverCodexModels(options.workspaceDir, Boolean(options.refresh));
     else if (cli === 'claude') result = await discoverClaudeModels(options.workspaceDir, Boolean(options.refresh));
-    else result = await discoverGeminiModels(options.workspaceDir, Boolean(options.refresh));
+    else if (cli === 'gemini') result = await discoverGeminiModels(options.workspaceDir, Boolean(options.refresh));
+    else {
+      result = {
+        cli,
+        models: [],
+        attempts: [],
+        warnings: [`Model discovery is not configured for CLI "${cli}".`],
+        fetchedAt: new Date().toISOString(),
+      };
+    }
   } catch (error) {
     result = {
       cli,

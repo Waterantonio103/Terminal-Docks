@@ -1,6 +1,7 @@
 import type { FrontendWorkflowMode, WorkflowAgentCli, WorkflowEdgeCondition, WorkflowExecutionMode, WorkflowMode } from '../store/workspace.js';
 import type { FrontendDirectionSpec } from './frontendDirection.js';
 import { defaultPresetReadmeEnabled } from './workflowReadme.js';
+import agentsConfig from '../config/agents.js';
 
 export type WorkflowPresetMode =
   | 'build'
@@ -97,6 +98,17 @@ function chainEdges(nodeIds: string[], condition: WorkflowEdgeCondition = 'alway
 
 function node(id: string, roleId: string): PresetNodeDefinition {
   return { id, roleId };
+}
+
+export function getPresetNodeTerminalTitle(presetNode: PresetNodeDefinition): string {
+  const agent = agentsConfig.agents.find(candidate => candidate.id === presetNode.roleId);
+  const baseTitle = agent?.name ?? presetNode.roleId
+    .split(/[_-]+/g)
+    .filter(Boolean)
+    .map(part => `${part.slice(0, 1).toUpperCase()}${part.slice(1)}`)
+    .join(' ');
+
+  return presetNode.id === presetNode.roleId ? baseTitle : `${baseTitle} (${presetNode.id})`;
 }
 
 export const WORKFLOW_PRESETS: PresetDefinition[] = [
@@ -958,7 +970,7 @@ export function buildPresetFlowGraph(options: {
           roleId: presetNode.roleId,
           instructionOverride: instructionOverrides[presetNode.roleId] ?? '',
           terminalId: binding?.terminalId ?? '',
-          terminalTitle: binding?.terminalTitle ?? '',
+          terminalTitle: getPresetNodeTerminalTitle(presetNode),
           paneId: binding?.paneId ?? '',
           cli: binding?.cli ?? 'claude',
           model: binding?.model ?? '',

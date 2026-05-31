@@ -4,9 +4,11 @@ import { missionRepository } from '../../lib/missionRepository.js';
 import type { RuntimeManager } from '../../lib/runtime/RuntimeManager.js';
 import type { RuntimeManagerEvent } from '../../lib/runtime/RuntimeTypes.js';
 import type { WorkflowOrchestrator } from '../../lib/workflow/WorkflowOrchestrator.js';
+import { isMcpMessageType } from '../../lib/mcpMessages.js';
 import {
   countNeedsYou,
   deriveActionCenterItems,
+  normalizeActionCenterInboxItems,
   type ActionCenterInboxInput,
   type ActionCenterItem,
   type ActionCenterRecentInput,
@@ -128,8 +130,7 @@ export function useActionCenterItems(): {
     try {
       setLoadingInbox(true);
       const result = await missionRepository.invokeMcp('list_inbox', {});
-      const parsed = JSON.parse(result) as ActionCenterInboxInput[];
-      setInboxItems(Array.isArray(parsed) ? parsed : []);
+      setInboxItems(normalizeActionCenterInboxItems(JSON.parse(result)));
     } catch (error) {
       console.error('Failed to fetch action center inbox', error);
     } finally {
@@ -142,8 +143,8 @@ export function useActionCenterItems(): {
 
     let cancelled = false;
     let unlistenInbox: (() => void) | undefined;
-    listen('mcp-message', (event: any) => {
-      if (event.payload?.type === 'inbox_update') {
+    listen<unknown>('mcp-message', (event) => {
+      if (isMcpMessageType(event.payload, 'inbox_update')) {
         refreshInbox();
       }
     }).then((unlisten) => {

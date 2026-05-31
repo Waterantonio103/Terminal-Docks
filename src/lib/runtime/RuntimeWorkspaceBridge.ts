@@ -1,4 +1,5 @@
 import { useWorkspaceStore, type NodeRuntimeBinding, type Pane } from '../../store/workspace.js';
+import { normalizeTerminalId } from '../terminalIds.js';
 
 type TerminalPaneData = Partial<NonNullable<Pane['data']>>;
 
@@ -23,5 +24,7 @@ export function getRuntimeTerminalPanes(): Pane[] {
 }
 
 export function getRuntimeTerminalPane(terminalId: string): Pane | undefined {
-  return getRuntimeTerminalPanes().find(pane => pane.data?.terminalId === terminalId);
+  const normalizedTerminalId = normalizeTerminalId(terminalId);
+  if (!normalizedTerminalId) return undefined;
+  return getRuntimeTerminalPanes().find(pane => normalizeTerminalId(pane.data?.terminalId) === normalizedTerminalId);
 }

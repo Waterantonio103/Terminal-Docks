@@ -2,10 +2,11 @@ import http from 'http';
 
 process.env.MCP_INTERNAL_PUSH_TOKEN = 'test_token';
 process.env.MCP_DB_PATH = ':memory:';
+process.env.MCP_DISABLE_HTTP = '1';
 
 async function runTest() {
-  const { startHttpServer, stopHttpServer } = await import('./server.mjs');
-  const server = startHttpServer(3745);
+  const { app } = await import('./server.mjs');
+  const server = app.listen(3745);
 
   const payload = {
     type: "runtime_bootstrap",
@@ -29,7 +30,7 @@ async function runTest() {
     headers: {
       'Content-Type': 'application/json',
       'Content-Length': Buffer.byteLength(data),
-      'x-td-push-token': 'test_token'
+      'x-comet-push-token': 'test_token'
     }
   }, (res) => {
     let body = '';
@@ -37,14 +38,14 @@ async function runTest() {
     res.on('end', () => {
       console.log('Status:', res.statusCode);
       console.log('Body:', body);
-      stopHttpServer();
+      server.close();
       process.exit(res.statusCode === 200 ? 0 : 1);
     });
   });
   
   req.on('error', (e) => {
     console.error(e);
-    stopHttpServer();
+    server.close();
     process.exit(1);
   });
   

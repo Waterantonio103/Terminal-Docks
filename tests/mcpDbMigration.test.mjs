@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import Database from '../mcp-server/node_modules/better-sqlite3/lib/index.js';
 
-const tempDir = mkdtempSync(join(tmpdir(), 'td-mcp-db-'));
+const tempDir = mkdtempSync(join(tmpdir(), 'starlink-mcp-db-'));
 const dbPath = join(tempDir, 'tasks.db');
 
 try {

@@ -3,14 +3,14 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-const tempRoot = mkdtempSync(join(tmpdir(), 'terminal-docks-mcp-'));
+const tempRoot = mkdtempSync(join(tmpdir(), 'starlink-mcp-'));
 process.env.MCP_DB_PATH = join(tempRoot, 'tasks.db');
 process.env.MCP_DISABLE_HTTP = '1';
 
 const { db } = await import('../mcp-server/src/db/index.mjs');
 const { buildTaskDetails, ackAndEmitTaskFetch } = await import('../mcp-server/src/tools/task-details.mjs');
 const { executeHandoffTask, executeCompleteTask } = await import('../mcp-server/src/tools/handoff-complete.mjs');
-const { executeGetCurrentTask, executeGetTaskDetails } = await import('../mcp-server/src/tools/tasks.mjs');
+const { executeGetCurrentTask, executeGetTaskDetails, executeRecordProgress } = await import('../mcp-server/src/tools/tasks.mjs');
 const { registerArtifactTools } = await import('../mcp-server/src/tools/artifacts.mjs');
 const { registerWorkspaceTools } = await import('../mcp-server/src/tools/workspace.mjs');
 const {
@@ -155,6 +155,38 @@ try {
     assert.equal(details.node.attempt, 1);
     assert.equal(details.completionContract.requiredTool, 'complete_task');
     assert.match(details.completionContract.note, /Natural-language final answers do not complete/);
+    assert.equal(details.progressReportingContract.requiredTool, 'record_progress');
+    assert.equal(details.progressReportingContract.eventShape.nodeId, 'builder');
+  });
+
+  await run('record_progress persists a structured workflow event and rejects unknown node ids', async () => {
+    resetStarlinkState();
+    seedCompiledMission(demoMission());
+    const invalid = executeRecordProgress({
+      missionId: 'mission-graph',
+      nodeId: 'reviewer',
+      status: 'progress',
+      title: 'Wrong node id',
+    }, 'session-progress');
+    assert.equal(invalid.isError, true);
+
+    const result = executeRecordProgress({
+      missionId: 'mission-graph',
+      nodeId: 'builder',
+      status: 'progress',
+      title: 'Inspecting inputs',
+      detail: 'Task details loaded and implementation path selected.',
+      filePaths: ['src/App.tsx'],
+      percentHint: 40,
+    }, 'session-progress');
+    assert.match(result.content[0].text, /Progress recorded/);
+
+    const row = db.prepare('SELECT * FROM workflow_events WHERE mission_id = ? AND type = ?').get('mission-graph', 'agent_progress');
+    assert.equal(row.node_id, 'builder');
+    assert.equal(row.session_id, 'session-progress');
+    const payload = JSON.parse(row.payload_json);
+    assert.equal(payload.status, 'progress');
+    assert.deepEqual(payload.filePaths, ['src/App.tsx']);
   });
 
   await run('get_task_details includes frontend framework for strict UI missions', async () => {
@@ -192,6 +224,53 @@ try {
     assert.equal(details.workspaceContext.frontendSpecs.value.acceptedProduct, 'PRD.md');
     assert.equal(details.assignment.workspaceContext.frontendSpecs.updatedBy, 'frontend_product');
     assert.equal(details.workspaceContext.architecture, undefined);
+  });
+
+  await run('get_task_details includes preset framework for all framework-backed presets', async () => {
+    const cases = [
+      ['patch_build_expanded', 'build', 'Patch / Build', 'Patch summary', 'block_on_missing_build_evidence'],
+      ['parallel_delivery', 'build', 'Delivery', 'Delivery summary', 'block_on_missing_build_evidence'],
+      ['research_scout_expanded', 'research', 'Research Scout', 'Key findings', 'block_on_missing_evidence'],
+      ['architecture_plan_expanded', 'plan', 'Architecture Plan', 'File/module ownership map', 'block_on_missing_plan'],
+      ['code_review_expanded', 'review', 'Code Review', 'Findings ordered by severity', 'block_on_missing_verdict'],
+      ['regression_sweep_expanded', 'verify', 'Regression Sweep', 'Verification matrix', 'block_on_missing_verification'],
+      ['security_review_expanded', 'secure', 'Security Review', 'Threat model', 'block_on_missing_security_evidence'],
+      ['docs_refresh_expanded', 'document', 'Docs Refresh', 'Documentation change summary', 'block_on_missing_doc_evidence'],
+    ];
+
+    for (const [presetId, mode, subMode, requiredOutput, gateLevel] of cases) {
+      resetStarlinkState();
+      const mission = demoMission();
+      mission.metadata.authoringMode = 'preset';
+      mission.metadata.presetId = presetId;
+      mission.nodes[0].roleId = 'coordinator';
+      seedCompiledMission(mission);
+      seedMissionNodeRuntime({
+        missionId: 'mission-graph',
+        nodeId: 'builder',
+        roleId: 'coordinator',
+        status: 'running',
+        attempt: 1,
+        currentWaveId: 'root:mission-graph',
+      });
+      seedAgentRuntimeSession({
+        sessionId: 'session:mission-graph:builder:1',
+        agentId: 'agent:mission-graph:builder:term-builder',
+        missionId: 'mission-graph',
+        nodeId: 'builder',
+        attempt: 1,
+        terminalId: 'term-builder',
+        status: 'running',
+      });
+
+      const details = buildTaskDetails('mission-graph', 'builder');
+      assert.equal(details.presetFramework.mode, mode, `${presetId}: framework mode`);
+      assert.equal(details.presetFramework.subMode, subMode, `${presetId}: framework sub-mode`);
+      assert.ok(details.presetFramework.framework.requiredOutputs.some(item => item.includes(requiredOutput)), `${presetId}: required output`);
+      assert.ok(details.presetToolHints.exactTools.includes('update_workspace_context'), `${presetId}: tool hints`);
+      assert.ok(details.node.instructionOverride.includes(`Preset framework: ${mode} / ${subMode}`), `${presetId}: instruction override`);
+      assert.equal(details.assignment.presetFramework.modeConfig.gateLevel, gateLevel, `${presetId}: gate level`);
+    }
   });
 
   await run('submit_summary persists an artifact without server.callTool support', async () => {

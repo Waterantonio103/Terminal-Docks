@@ -51,7 +51,7 @@ run('codex stale active work does not hide visible idle prompt', () => {
     '',
     '› Implement {feature}',
     '',
-    '  gpt-5.4 default · C:\\VSCODE\\docks-testing\\app-test2 · Context 86% left',
+    '  gpt-5.4 default · C:\\VSCODE\\comet-testing\\app-test2 · Context 86% left',
   ].join('\n');
   const status = codexAdapter.detectStatus(`${staleActive}\n${'\n'.repeat(30)}${idleTail}`);
   assert.equal(status.status, 'idle', status.detail);

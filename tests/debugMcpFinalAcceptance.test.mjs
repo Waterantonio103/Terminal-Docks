@@ -3,7 +3,7 @@ import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
-const tempRoot = mkdtempSync(join(tmpdir(), 'terminal-docks-debug-final-'));
+const tempRoot = mkdtempSync(join(tmpdir(), 'comet-ai-debug-final-'));
 process.env.MCP_DB_PATH = join(tempRoot, 'tasks.db');
 
 function textPayload(result) {

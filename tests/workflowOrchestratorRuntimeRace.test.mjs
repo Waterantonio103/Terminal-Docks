@@ -205,12 +205,30 @@ await run('agent runtimes inherit task workspace when node workspace is unset', 
   orchestrator.setRuntimeManager(createCapturingRuntimeManager(capturedArgs));
 
   const def = definition();
-  def.nodes[0].config.workspaceDir = 'C:/docks-testing/workflow-output';
+  def.nodes[0].config.workspaceDir = 'C:/comet-testing/workflow-output';
 
   orchestrator.startRun(def, { runId: 'workspace-fallback-run' });
   await sleep(50);
 
-  assert.equal(capturedArgs[0]?.workspaceDir, 'C:/docks-testing/workflow-output');
+  assert.equal(capturedArgs[0]?.workspaceDir, 'C:/comet-testing/workflow-output');
+});
+
+await run('runtime assignments receive shaped legal handoff targets', async () => {
+  const orchestrator = new WorkflowOrchestrator();
+  const capturedArgs = [];
+  orchestrator.setRuntimeManager(createCapturingRuntimeManager(capturedArgs));
+
+  orchestrator.startRun(twoStepDefinition(), { runId: 'legal-target-run' });
+  await sleep(50);
+
+  assert.deepEqual(capturedArgs[0]?.legalTargets, [
+    {
+      targetNodeId: 'reviewer',
+      targetRoleId: 'reviewer',
+      condition: 'on_success',
+      allowedOutcomes: ['success'],
+    },
+  ]);
 });
 
 await run('explicit MCP handoff waits for all fan-in parents', async () => {

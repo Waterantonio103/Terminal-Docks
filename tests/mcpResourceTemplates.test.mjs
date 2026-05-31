@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ResourceTemplate } from '../mcp-server/node_modules/@modelcontextprotocol/sdk/dist/esm/server/mcp.js';
 
-const tempRoot = mkdtempSync(join(tmpdir(), 'terminal-docks-mcp-resources-'));
+const tempRoot = mkdtempSync(join(tmpdir(), 'starlink-mcp-resources-'));
 process.env.MCP_DB_PATH = join(tempRoot, 'tasks.db');
 process.env.MCP_DISABLE_HTTP = '1';
 

@@ -13,6 +13,10 @@ const {
   buildFrontendReferenceIndex,
   registerFrontendLibraryResources,
 } = await import('../mcp-server/src/resources/frontend-library.mjs');
+const {
+  buildWorkflowPresetFramework,
+  evaluateWorkflowPresetOutput,
+} = await import('../mcp-server/src/utils/workflow-preset-framework.mjs');
 
 function run(name, fn) {
   try {
@@ -60,7 +64,10 @@ run('frontend library index exposes skills, patterns, and references', () => {
   const references = buildFrontendReferenceIndex();
 
   assert.equal(library.uri, 'frontend-library://index');
-  assert.equal(library.skills.length, 11);
+  assert.equal(library.skills.length, 12);
+  assert.ok(library.skills.some(skill => skill.id === 'frontend_negatives'));
+  assert.ok(library.roleSkillRecommendations.frontend_builder.includes('frontend_negatives'));
+  assert.ok(library.workflow.some(step => step.includes('frontend-skill://frontend_negatives')));
   assert.equal(library.patterns.indexUri, 'frontend-patterns://neuform/index');
   assert.equal(library.patterns.totalPatterns, 69);
   assert.equal(library.references.indexUri, 'frontend-reference://ui/index');
@@ -184,4 +191,155 @@ run('complete category specs pass the intake gate', () => {
   assert.equal(result.files['DESIGN.md'].status, 'accepted');
   assert.equal(result.files['structure.md'].status, 'accepted');
   assert.deepEqual(result.alignmentRisks, []);
+});
+
+run('workflow preset framework exposes build, research, plan, review, verify, secure, and document contracts', () => {
+  const patchBuild = buildWorkflowPresetFramework({ presetId: 'patch_build_expanded' });
+  const delivery = buildWorkflowPresetFramework({ presetId: 'parallel_delivery' });
+  const research = buildWorkflowPresetFramework({ presetId: 'research_scout_expanded' });
+  const plan = buildWorkflowPresetFramework({ presetId: 'architecture_plan_standard' });
+  const review = buildWorkflowPresetFramework({ presetId: 'code_review_expanded' });
+  const verify = buildWorkflowPresetFramework({ presetId: 'regression_sweep_expanded' });
+  const secure = buildWorkflowPresetFramework({ presetId: 'security_review_expanded' });
+  const docs = buildWorkflowPresetFramework({ presetId: 'docs_refresh_expanded' });
+
+  assert.equal(patchBuild.mode, 'build');
+  assert.equal(patchBuild.subMode, 'Patch / Build');
+  assert.equal(patchBuild.modeConfig.gateLevel, 'block_on_missing_build_evidence');
+  assert.ok(patchBuild.framework.laneGuidance.builder.includes('smallest coherent code change'));
+  assert.ok(patchBuild.framework.requiredOutputs.some(item => item.includes('Patch summary')));
+
+  assert.equal(delivery.mode, 'build');
+  assert.equal(delivery.subMode, 'Delivery');
+  assert.ok(delivery.framework.laneGuidance.coordinator.includes('acceptance criteria'));
+  assert.ok(delivery.framework.requiredOutputs.some(item => item.includes('Delivery summary')));
+
+  assert.equal(research.mode, 'research');
+  assert.equal(research.subMode, 'Research Scout');
+  assert.ok(research.framework.laneGuidance.scout.includes('current implementation'));
+  assert.ok(research.completionContract.successRequires.some(item => item.includes('Key findings')));
+
+  assert.equal(plan.modeConfig.gateLevel, 'block_on_missing_plan');
+  assert.ok(plan.framework.requiredOutputs.some(item => item.includes('File/module ownership map')));
+  assert.ok(plan.framework.qualityRubric.some(item => item.includes('architecture boundaries')));
+
+  assert.equal(review.mode, 'review');
+  assert.ok(review.framework.laneGuidance.reviewer.includes('severity'));
+  assert.ok(review.completionContract.downstreamPayloadShape.evidence.length > 0);
+
+  assert.equal(verify.mode, 'verify');
+  assert.equal(verify.subMode, 'Regression Sweep');
+  assert.ok(verify.framework.laneGuidance.interaction_qa.includes('visible behavior'));
+  assert.ok(verify.framework.requiredOutputs.some(item => item.includes('Verification matrix')));
+
+  assert.equal(secure.mode, 'secure');
+  assert.equal(secure.subMode, 'Security Review');
+  assert.ok(secure.framework.laneGuidance.security.includes('source-to-sink attack paths'));
+  assert.ok(secure.framework.qualityRubric.some(item => item.includes('Severity')));
+
+  assert.equal(docs.mode, 'document');
+  assert.equal(docs.subMode, 'Docs Refresh');
+  assert.ok(docs.framework.laneGuidance.builder.includes('obsolete guidance'));
+  assert.ok(docs.framework.requiredOutputs.some(item => item.includes('Documentation change summary')));
+});
+
+run('workflow preset output evaluation flags weak payloads and accepts evidence-backed output', () => {
+  const weak = evaluateWorkflowPresetOutput({
+    presetId: 'code_review_standard',
+    output: { summary: 'Looks fine.' },
+  });
+  assert.equal(weak.status, 'needs_work');
+  assert.ok(weak.missing.length > 0);
+
+  const strong = evaluateWorkflowPresetOutput({
+    presetId: 'code_review_standard',
+    output: {
+      summary: 'Review completed.',
+      evidence: ['Checked src/lib/workflowPresets.ts and ran npm run test:graph.'],
+      keyFindings: ['Findings ordered by severity with file/line references: no blocking findings.'],
+      gaps: ['Test gaps: live CLI agent behavior was not exercised.'],
+      verdict: 'Final verdict: pass with residual risk.',
+    },
+  });
+  assert.equal(strong.status, 'ready');
+
+  assert.equal(
+    evaluateWorkflowPresetOutput({
+      presetId: 'patch_build_expanded',
+      output: {
+        summary: 'Patch completed.',
+        evidence: ['Changed src/lib/workflowPresets.ts and ran npm run test:graph.'],
+        keyFindings: [
+          'Patch summary: changed files and behavior impact are scoped to preset framework mapping.',
+          'Verification evidence: exact command passed and skipped live CLI checks are noted.',
+          'Review verdict: pass with residual risk limited to untested live agent output.',
+        ],
+      },
+    }).status,
+    'ready',
+  );
+
+  assert.equal(
+    evaluateWorkflowPresetOutput({
+      presetId: 'parallel_delivery',
+      output: {
+        summary: 'Delivery completed.',
+        evidence: ['Ran npm run test:graph and inspected preset framework output.'],
+        keyFindings: [
+          'Delivery summary: acceptance criteria and changed artifacts are documented.',
+          'Validation evidence: smoke checks and manual workflow proof are recorded.',
+          'Handoff notes: run commands, residual risks, and follow-up actions are ready.',
+        ],
+      },
+    }).status,
+    'ready',
+  );
+
+  assert.equal(
+    evaluateWorkflowPresetOutput({
+      presetId: 'regression_sweep_standard',
+      output: {
+        summary: 'Verification completed.',
+        evidence: ['Ran npm run test:graph and inspected Mission Control workflow behavior.'],
+        keyFindings: [
+          'Verification matrix: smoke and regression commands passed.',
+          'Regression findings: no blocking behavior changes found in tested paths.',
+          'Release verdict: pass with untested live CLI scope noted.',
+        ],
+      },
+    }).status,
+    'ready',
+  );
+
+  assert.equal(
+    evaluateWorkflowPresetOutput({
+      presetId: 'security_review_standard',
+      output: {
+        summary: 'Security review completed.',
+        evidence: ['Checked mcp-server/src/tools and src/lib/runtime paths.'],
+        keyFindings: [
+          'Threat model: MCP tools, runtime task injection, filesystem writes, and dependency boundaries inspected.',
+          'Validated findings: no exploitable issue found in reviewed scope; severity and exploit preconditions documented.',
+          'Remediation plan: keep validation tests and residual risk notes tied to concrete commands.',
+        ],
+      },
+    }).status,
+    'ready',
+  );
+
+  assert.equal(
+    evaluateWorkflowPresetOutput({
+      presetId: 'docs_refresh_standard',
+      output: {
+        summary: 'Docs refresh completed.',
+        evidence: ['Checked package.json scripts, PRD.md, architecture.md, and updated docs.'],
+        keyFindings: [
+          'Documentation change summary: refreshed current architecture and test command guidance.',
+          'Verified commands: npm run test:graph and documented paths checked.',
+          'Reader-focused final note: current behavior, remaining stale areas, and next doc work recorded.',
+        ],
+      },
+    }).status,
+    'ready',
+  );
 });

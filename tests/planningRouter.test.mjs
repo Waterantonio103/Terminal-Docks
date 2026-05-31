@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { planMission, routeTaskType } from '../.tmp-tests/lib/workflow/PlanningRouter.js';
+import { convertPlannedDagToWorkflowGraph, planMission, routeTaskType } from '../.tmp-tests/lib/workflow/PlanningRouter.js';
 
 function run(name, fn) {
   try {
@@ -51,4 +51,42 @@ run('planMission generates docs-specific DAG', () => {
   assert.ok(roles.includes('reviewer'));
   assert.ok(!roles.includes('coordinator'));
   assert.ok(!roles.includes('tester'));
+});
+
+run('convertPlannedDagToWorkflowGraph normalizes suggested CLI ids', () => {
+  const planned = {
+    missionId: 'cli-normalization',
+    goal: 'Check CLI normalization',
+    nodes: [
+      {
+        id: 'scout',
+        role: 'scout',
+        title: 'Scout',
+        objective: 'Inspect',
+        expectedOutput: 'Context',
+        acceptanceCriteria: [],
+        suggestedCli: 'OpenCode',
+        dependencies: [],
+      },
+      {
+        id: 'builder',
+        role: 'builder',
+        title: 'Builder',
+        objective: 'Build',
+        expectedOutput: 'Patch',
+        acceptanceCriteria: [],
+        suggestedCli: 'not-a-cli',
+        dependencies: ['scout'],
+      },
+    ],
+    edges: [{ from: 'scout', to: 'builder', reason: 'handoff', condition: 'on_success' }],
+    assumptions: [],
+    risks: [],
+  };
+
+  const graph = convertPlannedDagToWorkflowGraph(planned);
+  const agentNodes = graph.nodes.filter(node => node.roleId !== 'task');
+
+  assert.equal(agentNodes[0]?.config?.cli, 'opencode');
+  assert.equal(agentNodes[1]?.config?.cli, 'claude');
 });

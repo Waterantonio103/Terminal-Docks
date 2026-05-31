@@ -9,6 +9,7 @@
 
 import type { WorkflowEdgeCondition, WorkflowGraph, WorkflowNode, WorkflowEdge, RetryPolicy } from '../../store/workspace.js';
 import { generateId } from '../graphUtils.js';
+import { normalizeCliId } from '../cliIdentity.js';
 
 export const ROLE_CONTRACTS: Record<string, string> = {
   scout: `
@@ -318,7 +319,7 @@ export function convertPlannedDagToWorkflowGraph(planned: PlannedDag): WorkflowG
         outputContract: ROLE_CONTRACTS[pn.role] || '',
         retryPolicy: pn.suggestedRetryPolicy,
         position: { x: 400 + (index % 2) * 300, y: 100 + Math.floor(index / 2) * 200 },
-        cli: (pn.suggestedCli as any) || 'claude',
+        cli: normalizeCliId(pn.suggestedCli) ?? 'claude',
         model: pn.suggestedModel,
       },
     });

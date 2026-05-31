@@ -10,7 +10,7 @@
 
 import type { WorkflowRun } from './WorkflowRun.js';
 import { getNodeState } from './WorkflowRun.js';
-import type { Artifact } from './WorkflowTypes.js';
+import type { Artifact, ArtifactKind } from './WorkflowTypes.js';
 
 export type QualityGateStatus =
   | 'waiting_for_inputs'
@@ -50,7 +50,7 @@ export class QualityGateService {
     }
 
     // 2. Check for required artifacts by mission type
-    const goal = (run.definition.nodes.find(n => n.kind === 'task') as any)?.config?.prompt || '';
+    const goal = run.definition.nodes.find(n => n.kind === 'task')?.config.prompt || '';
     const taskType = this.inferTaskType(goal);
     
     const requiredArtifactKinds = this.getRequiredArtifactKinds(taskType);
@@ -59,8 +59,8 @@ export class QualityGateService {
     );
 
     for (const kind of requiredArtifactKinds) {
-      const exists = allArtifacts.some(a => a.kind === (kind as any));
-      if (!kind.startsWith('optional_') && !exists) {
+      const exists = allArtifacts.some(a => a.kind === kind);
+      if (!exists) {
         missingArtifacts.push(kind);
       }
     }
@@ -84,7 +84,7 @@ export class QualityGateService {
 
     // 4. Check test results
     const testResults = allArtifacts.filter(a => a.kind === 'test_result' || a.label.toLowerCase().includes('test result'));
-    const failedTests = testResults.filter(t => (t.content || '').toUpperCase().includes('FAIL'));
+    const failedTests = testResults.filter(t => this.hasFailedTestSignal(t.content || ''));
     
     if (testResults.length === 0 && taskType !== 'docs') {
         reasons.push(`No test results found for technical task.`);
@@ -114,7 +114,7 @@ export class QualityGateService {
     return 'generic';
   }
 
-  private getRequiredArtifactKinds(taskType: string): string[] {
+  private getRequiredArtifactKinds(taskType: string): ArtifactKind[] {
     switch (taskType) {
       case 'bugfix':
         return ['scout_context', 'patch', 'test_result'];
@@ -125,6 +125,14 @@ export class QualityGateService {
       default:
         return ['scout_context', 'patch', 'test_result'];
     }
+  }
+
+  private hasFailedTestSignal(content: string): boolean {
+    const normalized = content.replace(/\s+/g, ' ').trim();
+    if (!normalized) return false;
+    if (/\b[1-9]\d*\s+(?:failures?|failed|failing)\b/i.test(normalized)) return true;
+    if (/\b(?:0|zero)\s+(?:failures?|failed|failing)\b/i.test(normalized)) return false;
+    return /\b(?:fail|failed|failure|failures|failing)\b/i.test(normalized);
   }
 }
 

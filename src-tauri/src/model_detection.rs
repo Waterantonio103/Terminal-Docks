@@ -54,6 +54,27 @@ pub struct ModelDiscoveryResult {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct CliSkill {
+    id: String,
+    name: String,
+    source: String,
+    path: String,
+    description: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CliCapabilityDiscovery {
+    cli: String,
+    models: Vec<CliModel>,
+    skills: Vec<CliSkill>,
+    commands: Vec<Value>,
+    agents: Vec<Value>,
+    warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct ModelDiscoveryCache {
     schema_version: u32,
     entries: Vec<ModelDiscoveryCacheEntry>,
@@ -91,7 +112,7 @@ pub async fn discover_cli_models(
     project_path: Option<String>,
     refresh: Option<bool>,
 ) -> Result<ModelDiscoveryResult, String> {
-    let normalized = cli.trim().to_lowercase();
+    let normalized = normalize_cli_id(&cli);
     let refresh = refresh.unwrap_or(false);
     let cache_path = cache_path(project_path.as_deref());
 
@@ -147,6 +168,43 @@ pub async fn discover_cli_models(
     Ok(result)
 }
 
+#[tauri::command]
+pub async fn discover_cli_capabilities(
+    cli: String,
+    project_path: Option<String>,
+    refresh: Option<bool>,
+) -> Result<CliCapabilityDiscovery, String> {
+    let normalized = normalize_cli_id(&cli);
+    let model_result = discover_cli_models(normalized.clone(), project_path, refresh).await?;
+    let mut warnings = model_result.warnings.clone();
+    let skills = discover_cli_skills(&normalized, &mut warnings);
+    Ok(CliCapabilityDiscovery {
+        cli: normalized,
+        models: model_result.models,
+        skills,
+        commands: Vec::new(),
+        agents: Vec::new(),
+        warnings,
+    })
+}
+
+fn normalize_cli_id(value: &str) -> String {
+    let key = value
+        .trim()
+        .to_lowercase()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join("_")
+        .replace('-', "_");
+
+    match key.as_str() {
+        "open_code" | "opencode" => "opencode".to_string(),
+        "lm_studio" | "lmstudio" => "lmstudio".to_string(),
+        "claude" | "gemini" | "codex" | "custom" | "ollama" => key,
+        _ => key,
+    }
+}
+
 fn iso_now() -> String {
     match SystemTime::now().duration_since(UNIX_EPOCH) {
         Ok(duration) => format!("{}", duration.as_millis()),
@@ -161,15 +219,176 @@ fn home_dir() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-fn cache_path(project_path: Option<&str>) -> PathBuf {
-    let base = project_path
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| std::env::current_dir().ok())
-        .unwrap_or_else(|| PathBuf::from("."));
-    base.join(".terminal-docks")
-        .join("model-discovery-cache.json")
+fn discover_cli_skills(cli: &str, warnings: &mut Vec<String>) -> Vec<CliSkill> {
+    let mut roots: Vec<(PathBuf, &str)> = Vec::new();
+    let Some(home) = home_dir() else {
+        warnings.push("Could not resolve home directory for skill discovery.".to_string());
+        return Vec::new();
+    };
+
+    match cli {
+        "codex" => {
+            roots.push((home.join(".codex").join("skills"), "codex-skill"));
+            roots.push((
+                home.join(".codex").join("plugins").join("cache"),
+                "codex-plugin",
+            ));
+        }
+        "claude" => {
+            roots.push((home.join(".claude").join("plugins"), "claude-plugin"));
+        }
+        "gemini" | "opencode" => {
+            warnings.push(format!(
+                "Skill discovery is not supported for {} in known local config locations.",
+                cli
+            ));
+            return Vec::new();
+        }
+        _ => {
+            warnings.push(format!("Skill discovery is not supported for CLI {}.", cli));
+            return Vec::new();
+        }
+    }
+
+    let mut skills = Vec::new();
+    let mut seen = HashSet::new();
+    for (root, source) in roots {
+        collect_skill_markdown(&root, source, 0, &mut seen, &mut skills);
+        if skills.len() >= 200 {
+            warnings.push("Skill discovery stopped after 200 entries.".to_string());
+            break;
+        }
+    }
+    skills.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    skills
+}
+
+fn collect_skill_markdown(
+    dir: &Path,
+    source: &str,
+    depth: usize,
+    seen: &mut HashSet<String>,
+    out: &mut Vec<CliSkill>,
+) {
+    if depth > MAX_RECURSIVE_DEPTH || out.len() >= 200 || !dir.is_dir() {
+        return;
+    }
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if out.len() >= 200 {
+            return;
+        }
+        let path = entry.path();
+        if path.is_dir() {
+            collect_skill_markdown(&path, source, depth + 1, seen, out);
+            continue;
+        }
+        if path.file_name().and_then(|name| name.to_str()) != Some("SKILL.md") {
+            continue;
+        }
+        let key = path.to_string_lossy().to_string();
+        if !seen.insert(key.clone()) {
+            continue;
+        }
+        if let Some(skill) = parse_skill_file(&path, source) {
+            out.push(skill);
+        }
+    }
+}
+
+fn parse_skill_file(path: &Path, source: &str) -> Option<CliSkill> {
+    let metadata = fs::metadata(path).ok()?;
+    if metadata.len() > MAX_FILE_BYTES {
+        return None;
+    }
+    let text = fs::read_to_string(path).ok()?;
+    let parent_name = path.parent()?.file_name()?.to_string_lossy().to_string();
+    let mut name = parent_name.clone();
+    let mut description = None;
+
+    for line in text.lines().take(40) {
+        let trimmed = line.trim();
+        if let Some(value) = trimmed.strip_prefix("name:") {
+            name = clean_frontmatter_value(value);
+        } else if let Some(value) = trimmed.strip_prefix("description:") {
+            description = Some(clean_frontmatter_value(value));
+        }
+    }
+
+    Some(CliSkill {
+        id: format!("{}:{}", source, parent_name),
+        name,
+        source: source.to_string(),
+        path: path.to_string_lossy().to_string(),
+        description,
+    })
+}
+
+fn clean_frontmatter_value(value: &str) -> String {
+    value
+        .trim()
+        .trim_matches('"')
+        .trim_matches('\'')
+        .to_string()
+}
+
+fn app_cache_root() -> PathBuf {
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
+            let trimmed = local_app_data.trim();
+            if !trimmed.is_empty() {
+                return PathBuf::from(trimmed)
+                    .join("Comet-AI")
+                    .join("model-detection");
+            }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(home) = std::env::var("HOME") {
+            let trimmed = home.trim();
+            if !trimmed.is_empty() {
+                return PathBuf::from(trimmed)
+                    .join("Library")
+                    .join("Application Support")
+                    .join("Comet-AI")
+                    .join("model-detection");
+            }
+        }
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        if let Ok(cache_home) = std::env::var("XDG_CACHE_HOME") {
+            let trimmed = cache_home.trim();
+            if !trimmed.is_empty() {
+                return PathBuf::from(trimmed)
+                    .join("comet-ai")
+                    .join("model-detection");
+            }
+        }
+        if let Ok(home) = std::env::var("HOME") {
+            let trimmed = home.trim();
+            if !trimmed.is_empty() {
+                return PathBuf::from(trimmed)
+                    .join(".cache")
+                    .join("comet-ai")
+                    .join("model-detection");
+            }
+        }
+    }
+
+    std::env::temp_dir()
+        .join("comet-ai")
+        .join("model-detection")
+}
+
+fn cache_path(_project_path: Option<&str>) -> PathBuf {
+    app_cache_root().join("model-discovery-cache.json")
 }
 
 fn read_cache_entry(path: &Path, cli: &str) -> Option<ModelDiscoveryResult> {
@@ -1566,6 +1785,14 @@ impl<T> Pipe for T {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn normalizes_cli_ids_for_model_discovery() {
+        assert_eq!(normalize_cli_id("open-code"), "opencode");
+        assert_eq!(normalize_cli_id("Open Code"), "opencode");
+        assert_eq!(normalize_cli_id("LM Studio"), "lmstudio");
+        assert_eq!(normalize_cli_id("ollama"), "ollama");
+    }
 
     #[test]
     fn parses_opencode_provider_model_lines() {

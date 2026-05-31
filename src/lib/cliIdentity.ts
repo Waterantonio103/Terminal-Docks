@@ -18,6 +18,7 @@ export const CANONICAL_CLI_IDS: readonly CliId[] = [
 ] as const;
 
 const CLI_ID_SET = new Set<string>(CANONICAL_CLI_IDS);
+const ANSI_ESCAPE_PATTERN = /\x1B(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1B]*(?:\x07|\x1B\\)|[@-_])/g;
 
 const CLI_ALIASES: Record<string, CliId> = {
   open_code: 'opencode',
@@ -27,12 +28,18 @@ const CLI_ALIASES: Record<string, CliId> = {
   codex: 'codex',
   custom: 'custom',
   ollama: 'ollama',
+  lm_studio: 'lmstudio',
   lmstudio: 'lmstudio',
 };
 
 export function normalizeCliId(value: unknown): CliId | null {
   if (typeof value !== 'string') return null;
-  const key = value.trim().toLowerCase();
+  const key = value
+    .replace(ANSI_ESCAPE_PATTERN, '')
+    .replace(/[\x00-\x1F\x7F]/g, '')
+    .trim()
+    .toLowerCase()
+    .replace(/[\s-]+/g, '_');
   if (CLI_ID_SET.has(key)) return key as CliId;
   const aliased = CLI_ALIASES[key];
   if (aliased) return aliased;

@@ -21,7 +21,7 @@ export class ErrorBoundary extends React.Component<ErrorBoundaryProps, ErrorBoun
 
   componentDidCatch(error: Error, info: React.ErrorInfo) {
     const { message, stack } = stringifyUnknownError(error);
-    const componentStack = (info as any)?.componentStack ?? undefined;
+    const componentStack = info.componentStack || undefined;
     recordBreadcrumb('react-error', { name: this.props.name, message, stack, componentStack });
     this.props.onError?.({ name: this.props.name, error, componentStack });
   }

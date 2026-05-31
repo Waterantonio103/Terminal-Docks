@@ -2,12 +2,18 @@ import { useEffect, useState, useRef } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
 import { Activity, Wifi, Users, Lock } from 'lucide-react';
-import { useWorkspaceStore, McpMessage } from '../../store/workspace';
+import { useWorkspaceStore } from '../../store/workspace';
+import { isMcpMessageType } from '../../lib/mcpMessages';
 
 interface FileLock {
   agentId: string;
   sessionId: string;
   lockedAt: number;
+}
+
+interface ActivityFeedConnection {
+  baseUrl: string;
+  token: string;
 }
 
 const TYPE_COLORS: Record<string, string> = {
@@ -19,6 +25,52 @@ const TYPE_COLORS: Record<string, string> = {
 
 function shortId(id: string) {
   return id.slice(0, 8);
+}
+
+function cleanActivityText(value: unknown): string {
+  return typeof value === 'string'
+    ? value.replace(/\0/g, '').replace(/\s+/g, ' ').trim()
+    : '';
+}
+
+function parseActivityFeedConnection(value: string): ActivityFeedConnection {
+  const cleaned = value.replace(/\0/g, '').trim();
+  if (!cleaned) return { baseUrl: '', token: '' };
+  try {
+    const urlObj = new URL(cleaned);
+    return {
+      baseUrl: `${urlObj.protocol}//${urlObj.host}`,
+      token: urlObj.searchParams.get('token') || '',
+    };
+  } catch {
+    return { baseUrl: '', token: '' };
+  }
+}
+
+function normalizeActivitySessions(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map(cleanActivityText)
+    .filter(Boolean);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function normalizeActivityLocks(value: unknown): Record<string, FileLock> {
+  if (!isRecord(value)) return {};
+  const locks: Record<string, FileLock> = {};
+  for (const [filePath, lock] of Object.entries(value)) {
+    const cleanFilePath = cleanActivityText(filePath);
+    if (!cleanFilePath || !isRecord(lock)) continue;
+    const agentId = cleanActivityText(lock.agentId);
+    const sessionId = cleanActivityText(lock.sessionId);
+    const lockedAt = typeof lock.lockedAt === 'number' && Number.isFinite(lock.lockedAt) ? lock.lockedAt : 0;
+    if (!agentId) continue;
+    locks[cleanFilePath] = { agentId, sessionId, lockedAt };
+  }
+  return locks;
 }
 
 function AgentPanel({ baseUrl, token }: { baseUrl: string, token: string }) {
@@ -36,18 +88,21 @@ function AgentPanel({ baseUrl, token }: { baseUrl: string, token: string }) {
           fetch(`${baseUrl}/sessions${query}`),
           fetch(`${baseUrl}/locks${query}`),
         ]);
+        const [sessionsPayload, locksPayload] = await Promise.all([
+          sRes.json().catch(() => []),
+          lRes.json().catch(() => ({})),
+        ]);
         if (!cancelled) {
-          setSessions(await sRes.json());
-          setLocks(await lRes.json());
+          setSessions(normalizeActivitySessions(sessionsPayload));
+          setLocks(normalizeActivityLocks(locksPayload));
         }
       } catch { /* server not ready yet */ }
     }
 
     fetchData();
 
-    const unlisten = listen<McpMessage>('mcp-message', (event) => {
-      const t = event.payload.type;
-      if (t === 'lock_update' || t === 'session_update') {
+    const unlisten = listen<unknown>('mcp-message', (event) => {
+      if (isMcpMessageType(event.payload, 'lock_update') || isMcpMessageType(event.payload, 'session_update')) {
         fetchData();
       }
     });
@@ -56,7 +111,7 @@ function AgentPanel({ baseUrl, token }: { baseUrl: string, token: string }) {
       cancelled = true;
       unlisten.then((f) => f());
     };
-  }, [baseUrl]);
+  }, [baseUrl, token]);
 
   const lockEntries = Object.entries(locks);
 
@@ -122,10 +177,8 @@ export function ActivityFeedPane() {
   const [mcpUrl,   setMcpUrl]   = useState<string>('');
   const scrollRef = useRef<HTMLDivElement>(null);
 
-  // Derive base URL and append token to fetch requests
-  const urlObj = mcpUrl ? new URL(mcpUrl) : null;
-  const baseUrl = urlObj ? `${urlObj.protocol}//${urlObj.host}` : '';
-  const token = urlObj?.searchParams.get('token') || '';
+  // Derive base URL and append token to fetch requests.
+  const { baseUrl, token } = parseActivityFeedConnection(mcpUrl);
 
   useEffect(() => {
     invoke<string>('get_mcp_url').then(setMcpUrl).catch(() => {});
@@ -144,7 +197,7 @@ export function ActivityFeedPane() {
       <div className="flex items-center justify-between px-4 py-2.5 border-b border-border-panel shrink-0">
         <div className="flex items-center gap-2">
           <Activity size={14} className="text-accent-primary" />
-          <span className="text-xs font-semibold text-text-secondary uppercase tracking-wider">Swarm</span>
+          <span className="text-xs font-semibold text-text-secondary uppercase tracking-wider">Starlink</span>
         </div>
         <div className="flex items-center gap-1.5">
           <span className={`w-1.5 h-1.5 rounded-full ${messages.length > 0 ? 'bg-green-400' : 'bg-text-muted opacity-30'}`} />
@@ -160,7 +213,7 @@ export function ActivityFeedPane() {
         {messages.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-full gap-3 text-text-muted">
             <Wifi size={28} className="opacity-20" />
-            <p className="opacity-50 text-center">Listening for MCP messages…</p>
+            <p className="opacity-50 text-center">Listening for Starlink messages…</p>
             {mcpUrl && (
               <p className="opacity-30 text-center break-all px-2">{mcpUrl}</p>
             )}

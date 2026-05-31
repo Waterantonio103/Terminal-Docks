@@ -3,23 +3,11 @@ import { invoke } from "@tauri-apps/api/core";
 import { Plus, Trash2, Play } from "lucide-react";
 import { useWorkspaceStore } from "../../store/workspace";
 import agentConfig from "../../config/agents";
+import { isTaskBoardStatus, normalizeTaskBoardTasks, TASK_BOARD_COLUMNS, type TaskBoardStatus } from "../../lib/taskBoard";
+import { isMcpMessageType } from "../../lib/mcpMessages";
+import { currentDirectoryForPane } from "../../lib/workspaceTabs";
 
-interface Task {
-  id: number;
-  title: string;
-  description: string | null;
-  status: string;
-  created_at: string;
-  parent_id: number | null;
-  agent_id: string | null;
-}
-
-const COLUMNS = [
-  { id: "todo", title: "To Do" },
-  { id: "in_progress", title: "In Progress" },
-  { id: "review", title: "Review" },
-  { id: "done", title: "Done" },
-];
+type Task = ReturnType<typeof normalizeTaskBoardTasks>[number];
 
 export function TaskBoardPane() {
   const [tasks, setTasks] = useState<Task[]>([]);
@@ -29,8 +17,8 @@ export function TaskBoardPane() {
 
   const fetchTasks = async () => {
     try {
-      const fetchedTasks = await invoke<Task[]>("get_tasks");
-      setTasks(fetchedTasks);
+      const fetchedTasks = await invoke<unknown>("get_tasks");
+      setTasks(normalizeTaskBoardTasks(fetchedTasks));
     } catch (err) {
       console.error("Failed to fetch tasks", err);
     }
@@ -41,8 +29,8 @@ export function TaskBoardPane() {
 
     let unlisten: (() => void) | undefined;
     import('@tauri-apps/api/event').then(({ listen }) => {
-      listen('mcp-message', (event: any) => {
-        if (event.payload?.type === 'task_update') {
+      listen<unknown>('mcp-message', (event) => {
+        if (isMcpMessageType(event.payload, 'task_update')) {
           fetchTasks();
         }
       }).then(fn => { unlisten = fn; });
@@ -73,7 +61,7 @@ export function TaskBoardPane() {
     }
   };
 
-  const handleStatusChange = async (taskId: number, newStatus: string) => {
+  const handleStatusChange = async (taskId: number, newStatus: TaskBoardStatus) => {
     try {
       await invoke("update_task_status", { id: taskId, status: newStatus, agentId: null });
       fetchTasks();
@@ -99,8 +87,9 @@ export function TaskBoardPane() {
     e.preventDefault();
   };
 
-  const onDrop = (e: React.DragEvent, status: string) => {
+  const onDrop = (e: React.DragEvent, status: TaskBoardStatus) => {
     e.preventDefault();
+    if (!isTaskBoardStatus(status)) return;
     const taskId = parseInt(e.dataTransfer.getData("taskId"), 10);
     if (!isNaN(taskId)) {
       handleStatusChange(taskId, status);
@@ -110,8 +99,12 @@ export function TaskBoardPane() {
   const handleRunTask = (task: Task) => {
     const agentId = task.agent_id || 'coordinator';
     const agent = agentConfig.agents.find(a => a.id === agentId) || agentConfig.agents[0];
-    const workspaceDir = useWorkspaceStore.getState().workspaceDir;
-    const wdLine = workspaceDir ? `Working directory: ${workspaceDir}\nWrite ALL output files here using your native file tools.\n\n` : '';
+    const storeState = useWorkspaceStore.getState();
+    const activeTab = storeState.tabs.find(tab => tab.id === storeState.activeTabId);
+    const activePane = activeTab?.panes.find(pane => pane.id === storeState.activePaneId) ?? activeTab?.panes[0];
+    const workspaceRoot = activeTab?.workspaceDir || storeState.workspaceDir;
+    const taskCwd = currentDirectoryForPane(activePane, workspaceRoot);
+    const wdLine = taskCwd ? `Working directory: ${taskCwd}\nWrite ALL output files here using your native file tools.\n\n` : '';
     
     // Map agent to CLI binary
     let cli = 'claude';
@@ -124,6 +117,8 @@ export function TaskBoardPane() {
       initialCommand: prompt,
       cli,
       roleId: agent.id,
+      cwd: taskCwd,
+      workspaceDir: workspaceRoot,
     });
   };
 
@@ -151,7 +146,7 @@ export function TaskBoardPane() {
       {/* Header */}
       <div className="flex items-center justify-between px-4 py-2.5 border-b border-border-panel shrink-0">
         <div className="flex items-center gap-2">
-          <span className="text-xs font-semibold text-text-secondary uppercase tracking-wider">CometAI Board</span>
+          <span className="text-xs font-semibold text-text-secondary uppercase tracking-wider">Comet-AI Board</span>
           <span className="text-xs background-bg-surface text-text-muted px-1.5 py-0.5 rounded-full">
             {tasks.length}
           </span>
@@ -183,6 +178,7 @@ export function TaskBoardPane() {
                   key={agent.id}
                   type="button"
                   onClick={() => setSelectedAgent(agent.id)}
+                  aria-pressed={selectedAgent === agent.id}
                   className={`text-[10px] px-2 py-1 rounded transition-colors border ${
                     selectedAgent === agent.id 
                       ? 'bg-accent-primary/20 border-accent-primary text-accent-primary' 
@@ -210,7 +206,7 @@ export function TaskBoardPane() {
       )}
 
       <div className="flex flex-1 gap-3 overflow-x-auto p-4 pb-3">
-        {COLUMNS.map((column) => (
+        {TASK_BOARD_COLUMNS.map((column) => (
           <div
             key={column.id}
             className="flex flex-col background-bg-surface rounded-lg min-w-[280px] max-w-[320px] flex-1 border border-border-panel"
@@ -250,6 +246,7 @@ export function TaskBoardPane() {
                         onClick={() => handleRunTask(task)}
                         className="w-6 h-6 flex items-center justify-center text-text-muted hover:text-accent-primary background-bg-surface rounded-md border border-border-panel transition-colors"
                         title="Run Task"
+                        aria-label={`Run task ${task.title}`}
                       >
                         <Play size={12} />
                       </button>
@@ -257,6 +254,7 @@ export function TaskBoardPane() {
                         onClick={() => handleDeleteTask(task.id)}
                         className="w-6 h-6 flex items-center justify-center text-text-muted hover:text-red-400 background-bg-surface rounded-md border border-border-panel transition-colors"
                         title="Delete"
+                        aria-label={`Delete task ${task.title}`}
                       >
                         <Trash2 size={12} />
                       </button>

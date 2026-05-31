@@ -3,6 +3,7 @@ import { registry } from './registry';
 import { mcpBus } from './mcpEventBus';
 import { getMcpUrl, newSessionId } from './bootstrap';
 import { useWorkspaceStore } from '../../store/workspace';
+import { buildCometRuntimeEnv } from '../runtimeEnv';
 import type { SpawnArgs, TaskEnvelope, WorkerAdapter, WorkerEvent, WorkerSession } from './types';
 
 /**
@@ -49,12 +50,15 @@ export const customAdapter: WorkerAdapter = {
       args,
       env: {
         ...env,
-        TD_SESSION_ID: sessionId,
-        TD_MCP_URL: mcpUrl,
-        TD_AGENT_ID: agentId,
+        ...buildCometRuntimeEnv({
+          sessionId,
+          mcpUrl,
+          agentId,
+          workspaceDir: workspaceDir ?? '',
+          kind: 'custom',
+        }),
+        COMET_PROFILE_ID: profileId,
         TD_PROFILE_ID: profileId,
-        TD_WORKSPACE: workspaceDir ?? '',
-        TD_KIND: 'custom',
       },
     });
 

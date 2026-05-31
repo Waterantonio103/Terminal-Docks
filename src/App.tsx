@@ -1,10 +1,10 @@
-import { useWorkspaceStore, PaneType, McpMessage, DbTask, type AppMode } from './store/workspace';
+import { useWorkspaceStore, PaneType, type AppMode, type WorkflowNode } from './store/workspace';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { defaultWindowIcon } from '@tauri-apps/api/app';
 import { homeDir } from '@tauri-apps/api/path';
 import { Window } from '@tauri-apps/api/window';
-import { TerminalSquare, FileCode2, KanbanSquare, Activity, Rocket, Monitor, Minus, Square, X, Network, FolderTree, Settings, Bell, Toolbox } from 'lucide-react';
+import { TerminalSquare, FileCode2, KanbanSquare, Activity, Rocket, Monitor, Minus, Square, X, Network, FolderTree, Settings, Bell, Toolbox, Save, Globe2 } from 'lucide-react';
 import React, { Suspense, lazy, useState, useEffect, useRef, useMemo } from 'react';
 import { detectRoleFromText, normalizeCli } from './lib/cliDetection';
 import { refreshCliDetectionForTerminals } from './lib/terminalCliRuntime';
@@ -14,7 +14,13 @@ import { clearLastFatalReport, readBreadcrumbs, readLastFatalReport, recordBread
 import { useActionCenterItems } from './components/ActionCenter/useActionCenterItems';
 import { missionRepository } from './lib/missionRepository';
 import type { ActionCenterActionId, ActionCenterItem } from './lib/actionCenter';
+import { markStartup } from './lib/startupTrace';
+import { clearCachedEditorDirty, getCachedDirtyEditorContent } from './lib/editorSessionCache';
+import { normalizeTaskBoardTasks } from './lib/taskBoard';
+import { normalizeAgentConnectedPayload, normalizeMcpMessage } from './lib/mcpMessages';
 import './App.css';
+
+markStartup('app module evaluated');
 
 const WorkspaceGrid = lazy(() => import('./components/Layout/WorkspaceGrid').then(module => ({ default: module.WorkspaceGrid })));
 const Sidebar = lazy(() => import('./components/Sidebar/Sidebar').then(module => ({ default: module.Sidebar })));
@@ -22,12 +28,14 @@ const QuickOpen = lazy(() => import('./components/QuickOpen/QuickOpen').then(mod
 const NodeTreePane = lazy(() => import('./components/NodeTree/NodeTreePane').then(module => ({ default: module.NodeTreePane })));
 const RuntimeView = lazy(() => import('./components/Runtime/RuntimeView').then(module => ({ default: module.RuntimeView })));
 const ActionCenterPane = lazy(() => import('./components/ActionCenter/ActionCenterPane').then(module => ({ default: module.ActionCenterPane })));
-const McpToolboxPage = lazy(() => import('./components/McpToolbox/McpToolboxPage').then(module => ({ default: module.McpToolboxPage })));
+const StarlinkToolboxPage = lazy(() => import('./components/McpToolbox/McpToolboxPage').then(module => ({ default: module.StarlinkToolboxPage })));
 const SettingsOverlay = lazy(() => import('./components/Settings/SettingsOverlay').then(module => ({ default: module.SettingsOverlay })));
+const AgentDock = lazy(() => import('./components/AgentDock/AgentDock').then(module => ({ default: module.AgentDock })));
 
 // Safe access to the Tauri window. Plain browser automation does not expose
 // Tauri internals, so avoid resolving the current window outside that runtime.
 const appWindow = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window ? Window.getCurrent() : null;
+const isTauriRuntime = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
 
 // Helper to inject custom theme CSS
 function CustomThemeInjector() {
@@ -47,6 +55,8 @@ function CustomThemeInjector() {
 const PANE_ICONS: Record<PaneType, React.ReactNode> = {
   terminal:     <TerminalSquare size={13} />,
   editor:       <FileCode2 size={13} />,
+  changereview: <FileCode2 size={13} />,
+  preview:      <Globe2 size={13} />,
   taskboard:    <KanbanSquare size={13} />,
   activityfeed: <Activity size={13} />,
   launcher:       <Rocket size={13} />,
@@ -55,7 +65,42 @@ const PANE_ICONS: Record<PaneType, React.ReactNode> = {
   inbox:          <Bell size={13} />,
 };
 
-let liveWorkflowHarnessStarted = false;
+declare global {
+  interface Window {
+    __cometAiLiveWorkflowHarnessStarted?: boolean;
+    __cometAiWorkspaceQaHarnessStarted?: boolean;
+  }
+}
+
+const LIVE_WORKFLOW_HARNESS_STORAGE_PREFIX = 'comet-ai-live-workflow-harness:';
+
+type RuntimeCleanupWorkflowConfig = NonNullable<WorkflowNode['config']> & {
+  runtimeSessionId?: unknown;
+};
+
+type TopBarMenuId = 'file' | 'edit' | 'view' | 'window' | 'help';
+
+interface TopBarMenuItem {
+  label: string;
+  shortcut?: string;
+  disabled?: boolean;
+  onSelect: () => void;
+}
+
+interface TopBarMenu {
+  id: TopBarMenuId;
+  label: string;
+  items: TopBarMenuItem[];
+}
+
+function formatErrorForDisplay(error: unknown): string {
+  const { message, stack } = stringifyUnknownError(error);
+  return stack ?? message;
+}
+
+function executeDocumentCommand(command: string) {
+  document.execCommand(command);
+}
 
 function PaneLoadingFallback({ label = 'Loading' }: { label?: string }) {
   return (
@@ -85,6 +130,7 @@ function sendFrontendErrorToDebugMcp(report: FatalErrorReport, name?: string) {
 
 function MainApp() {
   useEffect(() => {
+    markStartup('root mounted');
     if (appWindow) {
       defaultWindowIcon()
         .then(icon => {
@@ -99,23 +145,61 @@ function MainApp() {
       import('./lib/workflow/WorkflowOrchestrator'),
     ])
       .then(([terminalOutputBusModule, runtimeExecutorModule, runtimeManagerModule, workflowOrchestratorModule]) => {
+        markStartup('runtime modules loaded');
         terminalOutputBusModule.terminalOutputBus.start().catch(console.error);
         workflowOrchestratorModule.workflowOrchestrator.setRuntimeManager(runtimeExecutorModule.runtimeExecutor);
-        runtimeManagerModule.runtimeManager.startListening().catch(console.error);
+        runtimeManagerModule.runtimeManager.startListening()
+          .then(() => markStartup('runtime listeners ready'))
+          .catch(console.error);
       })
       .catch(console.error);
-    if (import.meta.env.DEV && import.meta.env.VITE_LIVE_WORKFLOW_DEBUG === '1' && !liveWorkflowHarnessStarted) {
-      liveWorkflowHarnessStarted = true;
+    if (import.meta.env.DEV && import.meta.env.VITE_LIVE_WORKFLOW_DEBUG === '1' && !window.__cometAiLiveWorkflowHarnessStarted) {
+      window.__cometAiLiveWorkflowHarnessStarted = true;
+      const debugReportPath = import.meta.env.VITE_LIVE_WORKFLOW_REPORT;
+      const harnessStorageKey = typeof debugReportPath === 'string' && debugReportPath.trim()
+        ? `${LIVE_WORKFLOW_HARNESS_STORAGE_PREFIX}${debugReportPath}`
+        : null;
+      if (harnessStorageKey && window.localStorage.getItem(harnessStorageKey) === 'running') {
+        console.warn('[liveWorkflowHarness] Existing run marker found for this report path; skipping duplicate harness start.');
+        return;
+      }
+      if (harnessStorageKey) {
+        window.localStorage.setItem(harnessStorageKey, 'running');
+      }
+      if (typeof debugReportPath === 'string' && debugReportPath.trim()) {
+        invoke('workspace_write_text_file', {
+          path: `${debugReportPath}.start`,
+          content: new Date().toISOString(),
+        }).catch(console.error);
+      }
       import('./lib/debug/liveWorkflowHarness')
         .then(({ liveWorkflowHarnessOptionsFromEnv, runLiveWorkflowHarness }) =>
-          runLiveWorkflowHarness(liveWorkflowHarnessOptionsFromEnv()),
+          runLiveWorkflowHarness(liveWorkflowHarnessOptionsFromEnv())
+            .finally(() => {
+              if (harnessStorageKey) window.localStorage.setItem(harnessStorageKey, 'finished');
+            }),
         )
-        .catch(console.error);
+        .catch(error => {
+          console.error(error);
+          if (harnessStorageKey) window.localStorage.setItem(harnessStorageKey, 'error');
+          if (typeof debugReportPath === 'string' && debugReportPath.trim()) {
+            invoke('workspace_write_text_file', {
+              path: `${debugReportPath}.error`,
+              content: stringifyUnknownError(error),
+            }).catch(console.error);
+          }
+        });
+    }
+    if (import.meta.env.DEV && import.meta.env.VITE_WORKSPACE_QA_DEBUG === '1' && !window.__cometAiWorkspaceQaHarnessStarted) {
+      window.__cometAiWorkspaceQaHarnessStarted = true;
+      import('./lib/debug/workspaceQaHarness')
+        .then(({ runWorkspaceQaHarness, workspaceQaOptionsFromEnv }) =>
+          runWorkspaceQaHarness(workspaceQaOptionsFromEnv()),
+        )
+        .catch(error => console.error('[workspaceQaHarness]', error));
     }
   }, []);
 
-  const toggleSidebar = useWorkspaceStore((s) => s.toggleSidebar);
-  const sidebarOpen   = useWorkspaceStore((s) => s.sidebarOpen);
   const appMode       = useWorkspaceStore((s) => s.appMode);
   const theme        = useWorkspaceStore((s) => s.theme);
   const tabs         = useWorkspaceStore((s) => s.tabs);
@@ -129,12 +213,72 @@ function MainApp() {
   const setGlobalGraph  = useWorkspaceStore((s) => s.setGlobalGraph);
 
    const showSettings = useWorkspaceStore((s) => s.showSettings);
-   const modeLabel = MODE_OPTIONS.find(mode => mode.id === appMode)?.label ?? 'Workflow';
+   const setAppMode = useWorkspaceStore((s) => s.setAppMode);
+   const setShowSettings = useWorkspaceStore((s) => s.setShowSettings);
+   const dirtyEditorCount = useMemo(
+     () => tabs.reduce(
+       (count, tab) => count + tab.panes.filter(pane => pane.type === 'editor' && Boolean(pane.data?.editorDirty)).length,
+       0,
+     ),
+     [tabs],
+   );
+
+  const saveAllDirtyEditors = async () => {
+    const state = useWorkspaceStore.getState();
+    const dirtyEditors = state.tabs
+      .flatMap(tab => tab.panes)
+      .filter(pane => pane.type === 'editor' && Boolean(pane.data?.editorDirty) && typeof pane.data?.filePath === 'string');
+
+    const savedPaths = new Set<string>();
+    for (const pane of dirtyEditors) {
+      const filePath = pane.data!.filePath as string;
+      if (savedPaths.has(filePath)) continue;
+      const content = getCachedDirtyEditorContent(filePath);
+      if (content === undefined) continue;
+      await invoke('workspace_write_text_file', { path: filePath, content });
+      clearCachedEditorDirty(filePath);
+      savedPaths.add(filePath);
+    }
+
+    if (savedPaths.size > 0) {
+      useWorkspaceStore.setState(current => ({
+        tabs: current.tabs.map(tab => ({
+          ...tab,
+          panes: tab.panes.map(pane => {
+            const filePath = pane.data?.filePath;
+            if (pane.type !== 'editor' || typeof filePath !== 'string' || !savedPaths.has(filePath)) return pane;
+            return { ...pane, data: { ...pane.data, editorDirty: false } };
+          }),
+        })),
+      }));
+    }
+  };
 
   useEffect(() => {
     if (!workspaceDir) {
-      homeDir().then(dir => setWorkspaceDir(dir)).catch(() => {});
+      homeDir()
+        .then(dir => {
+          markStartup('home directory resolved');
+          setWorkspaceDir(dir);
+        })
+        .catch(() => {});
     }
+  }, []);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if ((event.ctrlKey || event.metaKey) && !event.shiftKey && event.key.toLowerCase() === 'p') {
+        event.preventDefault();
+        setShowQuickOpen(true);
+        return;
+      }
+      if ((event.ctrlKey || event.metaKey) && event.shiftKey && event.key.toLowerCase() === 's') {
+        event.preventDefault();
+        saveAllDirtyEditors().catch(error => console.error('Failed to save all editors:', error));
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
   }, []);
 
   const hasCleanedRef = useRef(false);
@@ -150,9 +294,9 @@ function MainApp() {
         if (nextNode.status !== 'idle') { nextNode.status = 'idle'; changed = true; }
         if (nextNode.mcpState) { nextNode.mcpState = undefined; changed = true; }
         if (nextNode.config) {
-          const config = { ...nextNode.config };
-          if (config.terminalId || config.paneId || (config as any).runtimeSessionId) {
-            delete config.terminalId; delete config.paneId; delete (config as any).runtimeSessionId;
+          const config: RuntimeCleanupWorkflowConfig = { ...nextNode.config };
+          if (config.terminalId || config.paneId || config.runtimeSessionId) {
+            delete config.terminalId; delete config.paneId; delete config.runtimeSessionId;
             nextNode.config = config; changed = true;
           }
         }
@@ -186,29 +330,33 @@ function MainApp() {
   }, [globalGraph, tabs]); 
 
   useEffect(() => {
-    invoke<DbTask[]>('get_tasks').then(setTasks).catch(() => {});
+    invoke<unknown>('get_tasks')
+      .then(tasks => {
+        markStartup('tasks loaded');
+        setTasks(normalizeTaskBoardTasks(tasks));
+      })
+      .catch(() => {});
   }, []);
 
    const [draggingNew] = useState<{ type: PaneType; x: number; y: number; label?: string; data?: any } | null>(null);
 
   useEffect(() => {
-    const unlisten = listen<McpMessage>('mcp-message', (event) => {
-      const msg = event.payload;
+    if (!isTauriRuntime) return;
+    const unlisten = listen<unknown>('mcp-message', (event) => {
+      const msg = normalizeMcpMessage(event.payload);
+      if (!msg) return;
       if (msg.type === 'agent_connected') {
-        try {
-          const payload = JSON.parse(msg.content || '{}');
-          if (payload.terminalId) {
-            const cli = normalizeCli(payload.cli);
-            const roleId = detectRoleFromText(payload.role);
-            updatePaneDataByTerminalId(payload.terminalId, {
-              ...(cli ? { cli } : {}), ...(roleId ? { roleId } : {}),
-              cliSource: 'connect_agent', cliConfidence: cli ? 'high' : 'low', cliUpdatedAt: Date.now(),
-            });
-          }
-        } catch {}
+        const payload = normalizeAgentConnectedPayload(msg.content);
+        if (!payload) return;
+        const cli = normalizeCli(payload.cli);
+        const roleId = detectRoleFromText(payload.role);
+        updatePaneDataByTerminalId(payload.terminalId, {
+          ...(cli ? { cli } : {}), ...(roleId ? { roleId } : {}),
+          cliSource: 'connect_agent', cliConfidence: cli ? 'high' : 'low', cliUpdatedAt: Date.now(),
+        });
         return;
       }
-      if (msg.type === 'task_update') { invoke<DbTask[]>('get_tasks').then(setTasks).catch(() => {}); return; }
+      if (msg.type === 'task_update') { invoke<unknown>('get_tasks').then(tasks => setTasks(normalizeTaskBoardTasks(tasks))).catch(() => {}); return; }
       if (msg.type.startsWith('result:')) {
         addResult({ id: msg.id, agentId: msg.from, content: msg.content, type: msg.type === 'result:url' ? 'url' : 'markdown', timestamp: msg.timestamp });
       } else { addMessage(msg); }
@@ -229,6 +377,8 @@ function MainApp() {
 
   const [showQuickOpen, setShowQuickOpen] = useState(false);
   const [fatalReport, setFatalReport] = useState<FatalErrorReport | null>(() => readLastFatalReport());
+  const [modeRailOpen, setModeRailOpen] = useState(true);
+  const [activeTopBarMenu, setActiveTopBarMenu] = useState<TopBarMenuId | null>(null);
 
   useEffect(() => {
     function report(kind: FatalErrorReport['kind'], error: unknown) {
@@ -243,34 +393,159 @@ function MainApp() {
     return () => { window.removeEventListener('error', onError); window.removeEventListener('unhandledrejection', onRejection); };
   }, []);
 
+  useEffect(() => {
+    if (!activeTopBarMenu) return;
+    const onPointerDown = (event: PointerEvent) => {
+      if (event.target instanceof Element && event.target.closest('[data-top-bar-menu]')) return;
+      setActiveTopBarMenu(null);
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setActiveTopBarMenu(null);
+    };
+    window.addEventListener('pointerdown', onPointerDown);
+    window.addEventListener('keydown', onKeyDown);
+    return () => {
+      window.removeEventListener('pointerdown', onPointerDown);
+      window.removeEventListener('keydown', onKeyDown);
+    };
+  }, [activeTopBarMenu]);
+
+  const topBarMenus: TopBarMenu[] = [
+    {
+      id: 'file',
+      label: 'File',
+      items: [
+        { label: 'Quick Open...', shortcut: 'Ctrl+P', onSelect: () => setShowQuickOpen(true) },
+        {
+          label: dirtyEditorCount > 0 ? `Save All (${dirtyEditorCount})` : 'Save All',
+          shortcut: 'Ctrl+Shift+S',
+          disabled: dirtyEditorCount === 0,
+          onSelect: () => saveAllDirtyEditors().catch(error => console.error('Failed to save all editors:', error)),
+        },
+        { label: 'Settings', onSelect: () => setShowSettings(true) },
+      ],
+    },
+    {
+      id: 'edit',
+      label: 'Edit',
+      items: [
+        { label: 'Undo', shortcut: 'Ctrl+Z', onSelect: () => executeDocumentCommand('undo') },
+        { label: 'Redo', shortcut: 'Ctrl+Y', onSelect: () => executeDocumentCommand('redo') },
+        { label: 'Cut', shortcut: 'Ctrl+X', onSelect: () => executeDocumentCommand('cut') },
+        { label: 'Copy', shortcut: 'Ctrl+C', onSelect: () => executeDocumentCommand('copy') },
+        { label: 'Paste', shortcut: 'Ctrl+V', onSelect: () => executeDocumentCommand('paste') },
+      ],
+    },
+    {
+      id: 'view',
+      label: 'View',
+      items: MODE_OPTIONS.map(mode => ({
+        label: mode.label,
+        disabled: mode.id === appMode,
+        onSelect: () => setAppMode(mode.id),
+      })),
+    },
+    {
+      id: 'window',
+      label: 'Window',
+      items: [
+        { label: modeRailOpen ? 'Hide Window Rail' : 'Show Window Rail', onSelect: () => setModeRailOpen(open => !open) },
+        { label: 'Minimize', onSelect: () => { appWindow?.minimize(); } },
+        { label: 'Maximize / Restore', onSelect: () => { appWindow?.toggleMaximize(); } },
+      ],
+    },
+    {
+      id: 'help',
+      label: 'Help',
+      items: [
+        { label: 'Action Center', onSelect: () => setAppMode('actioncenter') },
+        { label: 'Starlink Toolbox', onSelect: () => setAppMode('mcptoolbox') },
+      ],
+    },
+  ];
+
   const content = (
     <div className={`flex flex-col h-screen overflow-hidden theme-${theme} bg-bg-app text-text-primary font-sans select-none relative`}>
       <CustomThemeInjector />
       {fatalReport && <FatalErrorOverlay report={fatalReport} onDismiss={() => { clearLastFatalReport(); setFatalReport(null); }} />}
       
       <div className="flex items-center h-10 bg-bg-titlebar border-b border-border-panel shrink-0 select-none relative z-50">
-        <div className="flex items-center justify-center w-12 border-r border-border-panel h-full cursor-pointer hover:bg-bg-surface transition-colors" onClick={toggleSidebar} title={sidebarOpen ? 'Hide sidebar' : 'Show sidebar'}>
+        <button
+          type="button"
+          className="flex items-center justify-center w-12 border-r border-border-panel h-full cursor-pointer hover:bg-bg-surface transition-colors"
+          onClick={() => setModeRailOpen(open => !open)}
+          title={modeRailOpen ? 'Hide window rail' : 'Show window rail'}
+          aria-label={modeRailOpen ? 'Hide window rail' : 'Show window rail'}
+          aria-controls={modeRailOpen ? 'td-mode-rail' : undefined}
+          aria-expanded={modeRailOpen}
+          data-tauri-no-drag
+        >
           <CometAiLogoMark className="w-8 h-8" />
+        </button>
+
+        <div className="flex-1 flex items-center h-full min-w-0 relative z-10">
+          <nav className="flex items-center h-full px-1" aria-label="Application menu" data-tauri-no-drag data-top-bar-menu>
+            {topBarMenus.map(menu => (
+              <div key={menu.id} className="relative h-full flex items-center">
+                <button
+                  type="button"
+                  className={`h-full px-3 flex items-center text-[12px] text-text-secondary hover:text-text-primary hover:bg-bg-surface transition-colors ${activeTopBarMenu === menu.id ? 'bg-bg-surface text-text-primary' : ''}`}
+                  onClick={() => setActiveTopBarMenu(activeTopBarMenu === menu.id ? null : menu.id)}
+                  aria-haspopup="menu"
+                  aria-expanded={activeTopBarMenu === menu.id}
+                >
+                  {menu.label}
+                </button>
+                {activeTopBarMenu === menu.id && (
+                  <div className="absolute left-0 top-full mt-px min-w-48 rounded-md border border-border-panel bg-bg-panel shadow-2xl py-1 z-[60]" role="menu">
+                    {menu.items.map(item => (
+                      <button
+                        key={`${menu.id}-${item.label}`}
+                        type="button"
+                        className="w-full min-h-8 px-3 flex items-center justify-between gap-5 text-left text-[12px] text-text-secondary hover:text-text-primary hover:bg-bg-surface disabled:opacity-45 disabled:hover:bg-transparent disabled:hover:text-text-secondary"
+                        disabled={item.disabled}
+                        role="menuitem"
+                        onClick={() => {
+                          setActiveTopBarMenu(null);
+                          item.onSelect();
+                        }}
+                      >
+                        <span>{item.label}</span>
+                        {item.shortcut && <span className="text-[11px] text-text-muted">{item.shortcut}</span>}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            ))}
+          </nav>
+          <div className="flex-1 h-full" data-tauri-drag-region />
         </div>
 
-        <div className="flex-1 flex justify-center items-center gap-1 h-full relative z-10" data-tauri-drag-region>
-          <div className="flex items-center gap-2 text-xs font-bold text-accent-primary uppercase tracking-widest">
-             {appMode === 'runtime' ? <Monitor size={14} /> : appMode === 'workspace' ? <FolderTree size={14} /> : appMode === 'actioncenter' ? <Bell size={14} /> : appMode === 'mcptoolbox' ? <Toolbox size={14} /> : <Network size={14} />}
-             <span>{modeLabel}</span>
-          </div>
-        </div>
-
-        <div className="flex items-center gap-3 shrink-0 relative z-10" data-tauri-drag-region>
-          <div className="flex items-center bg-bg-surface border border-border-panel rounded-md h-6 px-1 mr-2" data-tauri-no-drag>
-            <button onClick={() => appWindow?.minimize()} className="w-6 h-full flex items-center justify-center text-text-muted hover:text-text-primary hover:bg-bg-panel rounded transition-colors"><Minus size={12} /></button>
-            <button onClick={() => appWindow?.toggleMaximize()} className="w-6 h-full flex items-center justify-center text-text-muted hover:text-text-primary hover:bg-bg-panel rounded transition-colors"><Square size={10} /></button>
-            <button onClick={() => appWindow?.close()} className="w-6 h-full flex items-center justify-center text-text-muted hover:text-red-400 hover:bg-red-400/10 rounded transition-colors"><X size={12} /></button>
+        <div className="flex h-full items-center gap-2 shrink-0 relative z-10" data-tauri-drag-region>
+          {appMode === 'workspace' && dirtyEditorCount > 0 && (
+            <button
+              type="button"
+              onClick={() => saveAllDirtyEditors().catch(error => console.error('Failed to save all editors:', error))}
+              className="h-6 px-2 flex items-center gap-1 rounded-md border border-accent-primary/30 bg-accent-primary/10 text-[11px] font-medium text-accent-primary hover:bg-accent-primary/20 transition-colors"
+              title="Save all dirty editors"
+              aria-label={`Save ${dirtyEditorCount} dirty editor${dirtyEditorCount === 1 ? '' : 's'}`}
+              data-tauri-no-drag
+            >
+              <Save size={12} />
+              <span>{dirtyEditorCount}</span>
+            </button>
+          )}
+          <div className="flex h-full items-stretch" data-tauri-no-drag>
+            <button type="button" aria-label="Minimize window" title="Minimize" onClick={() => appWindow?.minimize()} className="w-11 h-full flex items-center justify-center text-text-secondary hover:text-text-primary hover:bg-bg-surface transition-colors"><Minus size={13} strokeWidth={1.7} /></button>
+            <button type="button" aria-label="Maximize window" title="Maximize" onClick={() => appWindow?.toggleMaximize()} className="w-11 h-full flex items-center justify-center text-text-secondary hover:text-text-primary hover:bg-bg-surface transition-colors"><Square size={11} strokeWidth={1.7} /></button>
+            <button type="button" aria-label="Close window" title="Close" onClick={() => appWindow?.close()} className="w-11 h-full flex items-center justify-center text-text-secondary hover:text-white hover:bg-[#c42b1c] transition-colors"><X size={14} strokeWidth={1.7} /></button>
           </div>
         </div>
       </div>
 
       <div className="flex-1 flex overflow-hidden relative">
-        <ModeRail />
+        {modeRailOpen && <ModeRail />}
         {appMode === 'workspace' && (
           <Suspense fallback={null}>
             <Sidebar />
@@ -294,8 +569,8 @@ function MainApp() {
               <ActionCenterPane />
             </Suspense>
           ) : appMode === 'mcptoolbox' ? (
-            <Suspense fallback={<PaneLoadingFallback label="Loading MCP toolbox" />}>
-              <McpToolboxPage />
+            <Suspense fallback={<PaneLoadingFallback label="Loading Starlink Toolbox" />}>
+              <StarlinkToolboxPage />
             </Suspense>
           ) : (
             <div className="flex-1 flex flex-col overflow-hidden">
@@ -317,6 +592,9 @@ function MainApp() {
           <SettingsOverlay />
         </Suspense>
       )}
+      <Suspense fallback={null}>
+        <AgentDock />
+      </Suspense>
       <GlobalNotificationOverlay />
       {draggingNew && (
         <div className="fixed pointer-events-none z-[9999] bg-accent-primary/20 border-2 border-accent-primary rounded-lg px-3 py-1.5 flex items-center gap-2 text-accent-primary font-bold shadow-2xl backdrop-blur-sm" style={{ left: draggingNew.x + 10, top: draggingNew.y + 10 }}>
@@ -342,7 +620,7 @@ function MainApp() {
               <button onClick={() => window.location.reload()} className="px-3 py-1.5 text-[11px] bg-red-500/90 text-white rounded font-semibold">Reload</button>   
             </div>
           </div>
-          <div className="p-4 space-y-3"><pre className="text-[11px] whitespace-pre-wrap break-words bg-bg-surface border border-border-panel rounded-lg p-3 text-text-primary">{String((error as any)?.stack ?? (error as any)?.message ?? error)}</pre></div>
+          <div className="p-4 space-y-3"><pre className="text-[11px] whitespace-pre-wrap break-words bg-bg-surface border border-border-panel rounded-lg p-3 text-text-primary">{formatErrorForDisplay(error)}</pre></div>
         </div>
       </div>
     )}>
@@ -446,10 +724,10 @@ function App() {
 }
 
 const MODE_OPTIONS: Array<{ id: AppMode; label: string; icon: React.ReactNode }> = [
-  { id: 'workflow', label: 'Workflow', icon: <Network size={18} /> },
-  { id: 'runtime', label: 'Runtime', icon: <Monitor size={18} /> },
   { id: 'workspace', label: 'Workspace', icon: <FolderTree size={18} /> },
-  { id: 'mcptoolbox', label: 'MCP Toolbox', icon: <Toolbox size={18} /> },
+  { id: 'workflow', label: 'Workflow Builder', icon: <Network size={18} /> },
+  { id: 'runtime', label: 'Runtime Monitor', icon: <TerminalSquare size={18} /> },
+  { id: 'mcptoolbox', label: 'Starlink Toolbox', icon: <Toolbox size={18} /> },
   { id: 'actioncenter', label: 'Action Center', icon: <Bell size={18} /> },
 ];
 
@@ -457,8 +735,8 @@ function CometAiLogoMark({ className = '' }: { className?: string }) {
   return (
     <img
       className={`object-contain ${className}`}
-      src="/cometai-logo.svg"
-      alt="CometAI logo"
+      src="/comet-ai-logo.svg"
+      alt="Comet-AI logo"
       draggable={false}
     />
   );
@@ -472,26 +750,42 @@ function ModeRail() {
   const { needsYouCount } = useActionCenterItems();
 
   return (
-    <nav className="w-12 shrink-0 h-full bg-bg-titlebar border-r border-border-panel flex flex-col items-center py-2 gap-1 relative">
-      <div className="mb-3 flex items-center justify-center w-8 h-8">
-        <TerminalSquare size={20} className="text-accent-primary" />
+    <nav id="td-mode-rail" className="td-mode-rail" aria-label="Window rail">
+      <div className="td-mode-rail-items">
+        {MODE_OPTIONS.map((mode) => (
+          <button
+            key={mode.id}
+            type="button"
+            onClick={() => setAppMode(mode.id)}
+            title={mode.label}
+            aria-label={mode.label}
+            aria-current={appMode === mode.id ? 'page' : undefined}
+            className={`td-mode-rail-button ${appMode === mode.id ? 'is-active' : ''}`}
+          >
+            <span className="td-mode-rail-icon">{mode.icon}</span>
+            <span className="td-mode-rail-label">{mode.label}</span>
+            {appMode === mode.id && <span className="td-mode-rail-active" />}
+            {mode.id === 'actioncenter' && needsYouCount > 0 && (
+              <span className="td-mode-rail-badge">
+                {needsYouCount > 9 ? '9+' : needsYouCount}
+              </span>
+            )}
+          </button>
+        ))}
       </div>
-      {MODE_OPTIONS.map((mode) => (
-        <button key={mode.id} onClick={() => setAppMode(mode.id)} title={mode.label} className={`relative w-9 h-9 flex items-center justify-center rounded-lg transition-all ${appMode === mode.id ? 'text-accent-primary bg-accent-primary/10' : 'text-text-muted hover:text-text-secondary hover:bg-bg-surface'}`}>
-          {mode.icon}
-          {appMode === mode.id && <span className="absolute left-0 top-1/2 -translate-y-1/2 w-0.5 h-5 bg-accent-primary rounded-r-full" />}
-          {mode.id === 'actioncenter' && needsYouCount > 0 && (
-            <span className="absolute -right-0.5 -top-0.5 min-w-4 h-4 px-1 rounded-full bg-amber-400 text-black text-[9px] font-bold leading-4 text-center shadow">
-              {needsYouCount > 9 ? '9+' : needsYouCount}
-            </span>
-          )}
-        </button>
-      ))}
 
-      <div className="mt-auto pb-2 flex flex-col items-center gap-1">
-        <button onClick={() => setShowSettings(!showSettings)} title="Settings" className={`relative w-9 h-9 flex items-center justify-center rounded-lg transition-all ${showSettings ? 'text-accent-primary bg-accent-primary/10' : 'text-text-muted hover:text-text-secondary hover:bg-bg-surface'}`}>
-          <Settings size={18} />
-          {showSettings && <span className="absolute left-0 top-1/2 -translate-y-1/2 w-0.5 h-5 bg-accent-primary rounded-r-full" />}
+      <div className="td-mode-rail-footer">
+        <button
+          type="button"
+          onClick={() => setShowSettings(!showSettings)}
+          title="Settings"
+          aria-label="Settings"
+          aria-pressed={showSettings}
+          className={`td-mode-rail-button ${showSettings ? 'is-active' : ''}`}
+        >
+          <span className="td-mode-rail-icon"><Settings size={18} /></span>
+          <span className="td-mode-rail-label">Settings</span>
+          {showSettings && <span className="td-mode-rail-active" />}
         </button>
       </div>
     </nav>

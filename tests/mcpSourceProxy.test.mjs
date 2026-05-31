@@ -4,9 +4,10 @@ import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-const tempRoot = mkdtempSync(join(tmpdir(), 'terminal-docks-mcp-sources-'));
+const tempRoot = mkdtempSync(join(tmpdir(), 'starlink-mcp-sources-'));
 process.env.MCP_DB_PATH = join(tempRoot, 'tasks.db');
 process.env.MCP_DISABLE_HTTP = '1';
+process.env.MCP_INTERNAL_PUSH_TOKEN = 'test-token';
 
 const { db, initDb } = await import('../mcp-server/src/db/index.mjs');
 const {
@@ -181,7 +182,7 @@ try {
   initDb();
   initMcpSourceRegistry();
 
-  await run('blocks public internet MCP URLs in v1', async () => {
+  await run('blocks public internet Starlink URLs in v1', async () => {
     const result = validateRemoteSourceUrl('https://example.com/mcp');
     assert.equal(result.ok, false);
     assert.match(result.error, /localhost and private-network/);
@@ -313,10 +314,13 @@ try {
   await run('MCP handler lists and calls proxied tools through Starlink', async () => {
     const fake = await startFakeMcpServer([
       { name: 'create_scene', inputSchema: { type: 'object', properties: { title: { type: 'string' } } } },
-    ], params => ({ content: [{ type: 'text', text: `upstream:${params.name}` }] }));
+    ], params => ({ content: [{ type: 'text', text: `upstream:${params.name}` }] }), {
+      resources: [{ uri: 'file://scene-note', name: 'Scene Note', mimeType: 'text/plain' }],
+      resourceRead: params => ({ contents: [{ uri: params.uri, mimeType: 'text/plain', text: 'scene resource' }] }),
+    });
     let server;
     try {
-      await createRemoteMcpSource({ id: 'excalidraw', displayName: 'Excalidraw', url: fake.url, enabled: true });
+      await createRemoteMcpSource({ id: 'excalidraw', displayName: 'Excalidraw', url: fake.url, enabled: true, allowedRoles: ['builder'] });
       const { app } = await import('../mcp-server/server.mjs');
       server = app.listen(0, '127.0.0.1');
       await new Promise(resolve => server.once('listening', resolve));
@@ -338,6 +342,21 @@ try {
       });
       const sessionId = initialized.headers.get('mcp-session-id');
       await initialized.text();
+      const registered = await fetch(`http://127.0.0.1:${server.address().port}/internal/push`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-comet-push-token': 'test-token' },
+        body: JSON.stringify({
+          type: 'runtime_bootstrap',
+          sessionId,
+          missionId: 'mission-proxy',
+          nodeId: 'builder-node',
+          attempt: 1,
+          role: 'builder',
+          agentId: 'Builder',
+          terminalId: 'terminal-proxy',
+        }),
+      });
+      assert.equal(registered.ok, true);
       await fetch(base, {
         method: 'POST',
         headers: { ...headers, 'mcp-session-id': sessionId },
@@ -364,6 +383,28 @@ try {
       });
       const calledPayload = JSON.parse(await called.text());
       assert.equal(calledPayload.result.content[0].text, 'upstream:create_scene');
+
+      const listedResources = await fetch(base, {
+        method: 'POST',
+        headers: { ...headers, 'mcp-session-id': sessionId },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 4, method: 'resources/list', params: {} }),
+      });
+      const resourceListText = await listedResources.text();
+      const resourceListPayload = JSON.parse(resourceListText.split('\n').find(line => line.startsWith('data: '))?.slice(6) ?? resourceListText);
+      assert.ok(resourceListPayload.result.resources.some(resource => resource.uri === 'starlink-mcp://excalidraw/file%3A%2F%2Fscene-note'));
+
+      const resourceRead = await fetch(base, {
+        method: 'POST',
+        headers: { ...headers, 'mcp-session-id': sessionId },
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          id: 5,
+          method: 'resources/read',
+          params: { uri: 'starlink-mcp://excalidraw/file%3A%2F%2Fscene-note' },
+        }),
+      });
+      const resourceReadPayload = JSON.parse(await resourceRead.text());
+      assert.equal(resourceReadPayload.result.contents[0].text, 'scene resource');
     } finally {
       if (server) await new Promise(resolve => server.close(resolve));
       await fake.close();
@@ -402,9 +443,11 @@ try {
     const result = await callProxyTool('localstdio_echo', { message: 'hello stdio' });
     assert.equal(result.content[0].text, 'hello stdio');
     const resources = listAgentVisibleProxyResources();
-    assert.equal(resources[0].uri, 'td-mcp://localstdio/file%3A%2F%2Fstdio-note');
+    assert.equal(resources[0].uri, 'starlink-mcp://localstdio/file%3A%2F%2Fstdio-note');
     const read = await readProxyResource(resources[0].uri);
     assert.equal(read.result.contents[0].text, 'stdio resource');
+    const legacyRead = await readProxyResource('td-mcp://localstdio/file%3A%2F%2Fstdio-note');
+    assert.equal(legacyRead.result.contents[0].text, 'stdio resource');
   });
 
   await run('restores archived sources disabled for explicit repair', async () => {

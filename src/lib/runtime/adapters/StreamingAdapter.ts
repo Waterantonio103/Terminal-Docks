@@ -12,6 +12,7 @@ import type {
   StatusDetectionResult,
   TaskContext,
 } from './CliAdapter';
+import { buildCometRuntimeEnv } from '../../runtimeEnv';
 
 /**
  * StreamingAdapter.ts
@@ -30,13 +31,13 @@ export const streamingAdapter: CliAdapter = {
     return {
       command: 'true', // or any nop
       args: [],
-      env: {
-        TD_SESSION_ID: context.sessionId,
-        TD_AGENT_ID: context.agentId,
-        TD_MISSION_ID: context.missionId,
-        TD_NODE_ID: context.nodeId,
-        TD_EXECUTION_MODE: context.executionMode,
-      },
+      env: buildCometRuntimeEnv({
+        sessionId: context.sessionId,
+        agentId: context.agentId,
+        missionId: context.missionId,
+        nodeId: context.nodeId,
+        executionMode: context.executionMode,
+      }),
       promptDelivery: 'unsupported',
     };
   },

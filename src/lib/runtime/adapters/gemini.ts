@@ -13,6 +13,7 @@ import type {
   TaskContext,
 } from './CliAdapter.js';
 import { buildPtyLaunchCommandParts } from '../../cliCommandBuilders.js';
+import { buildCometRuntimeEnv } from '../../runtimeEnv.js';
 
 const ANSI_RE =
   /\x1b\][^\x07]*(?:\x07|\x1b\\)|\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])/g;
@@ -112,13 +113,15 @@ export const geminiAdapter: CliAdapter = {
 
   buildLaunchCommand(context: LaunchContext): LaunchCommand {
     const env: Record<string, string> = {
-      TD_SESSION_ID: context.sessionId,
-      TD_AGENT_ID: context.agentId,
-      TD_MISSION_ID: context.missionId,
-      TD_NODE_ID: context.nodeId,
-      TD_MCP_URL: context.mcpUrl,
-      TD_WORKSPACE: context.workspaceDir ?? '',
-      TD_KIND: 'gemini',
+      ...buildCometRuntimeEnv({
+        sessionId: context.sessionId,
+        agentId: context.agentId,
+        missionId: context.missionId,
+        nodeId: context.nodeId,
+        mcpUrl: context.mcpUrl,
+        workspaceDir: context.workspaceDir ?? '',
+        kind: 'gemini',
+      }),
       ...(context.envOverrides ?? {}),
     };
 

@@ -83,7 +83,7 @@ function workspaceHasConcreteOutput(workspaceDir) {
   if (!workspace) return false;
   try {
     return readdirSync(workspace, { withFileTypes: true })
-      .some(entry => entry.name !== '.terminal-docks');
+      .some(entry => entry.name !== '.comet-ai');
   } catch {
     return false;
   }

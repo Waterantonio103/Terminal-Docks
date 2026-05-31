@@ -16,8 +16,11 @@ console.log('runtimeActivity');
 
 run('runtime action detector maps common tool output', () => {
   assert.equal(detectRuntimeAction('ReadFile src/App.tsx'), 'Reading files...');
+  assert.equal(detectRuntimeAction('read_file src/App.tsx'), 'Reading files...');
   assert.equal(detectRuntimeAction('Edit src/App.tsx'), 'Writing code...');
+  assert.equal(detectRuntimeAction('write-file src/App.tsx'), 'Writing code...');
   assert.equal(detectRuntimeAction('Bash cargo test'), 'Running tests...');
+  assert.equal(detectRuntimeAction('npm-test smoke'), 'Running tests...');
   assert.equal(detectRuntimeAction('shell command ls'), 'Running command...');
 });
 

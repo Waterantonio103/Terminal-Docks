@@ -1,18 +1,19 @@
 import { useState, useEffect } from "react";
 import { Check, X, User, Box, MessageSquare } from "lucide-react";
 import { missionRepository } from "../../lib/missionRepository";
+import { normalizeActionCenterInboxItems, type ActionCenterInboxInput } from "../../lib/actionCenter";
+import { isMcpMessageType } from "../../lib/mcpMessages";
 
-interface InboxItem {
-  id: number;
-  mission_id: string;
-  from_session_id: string;
-  recipient_session_id: string | null;
-  recipient_node_id: string | null;
-  role_id: string | null;
-  title: string;
-  objective: string | null;
-  status: 'pending' | 'approved' | 'rejected' | 'claimed' | 'completed';
-  created_at: string;
+type InboxItem = ActionCenterInboxInput;
+
+function shortId(value: string | null | undefined): string {
+  return value ? `${value.slice(0, 8)}...` : 'unknown';
+}
+
+function formatInboxTime(value: string | undefined): string {
+  if (!value) return '';
+  const time = new Date(value);
+  return Number.isFinite(time.getTime()) ? time.toLocaleTimeString() : '';
 }
 
 export function InboxPane() {
@@ -23,7 +24,7 @@ export function InboxPane() {
     try {
       setLoading(true);
       const result = await missionRepository.invokeMcp("list_inbox", {});
-      setItems(JSON.parse(result));
+      setItems(normalizeActionCenterInboxItems(JSON.parse(result)));
     } catch (err) {
       console.error("Failed to fetch inbox", err);
     } finally {
@@ -36,8 +37,8 @@ export function InboxPane() {
     
     let unlisten: (() => void) | undefined;
     import('@tauri-apps/api/event').then(({ listen }) => {
-      listen('mcp-message', (event: any) => {
-        if (event.payload?.type === 'inbox_update') {
+      listen<unknown>('mcp-message', (event) => {
+        if (isMcpMessageType(event.payload, 'inbox_update')) {
           fetchInbox();
         }
       }).then(fn => { unlisten = fn; });
@@ -97,12 +98,12 @@ export function InboxPane() {
           <div key={item.id} className={`background-bg-surface border border-border-panel rounded-lg p-3 transition-all hover:border-border-divider ${item.status !== 'pending' && item.status !== 'approved' ? 'opacity-60' : ''}`}>
             <div className="flex items-start justify-between gap-3 mb-2">
               <div className="flex flex-col gap-1 min-w-0">
-                <div className="text-xs font-bold text-text-primary break-words">{item.title}</div>
+                <div className="text-xs font-bold text-text-primary break-words">{item.title || `Delegation ${item.id}`}</div>
                 <div className="flex items-center gap-1.5 text-[10px] text-text-muted">
                    <User size={10} />
-                   <span>from {item.from_session_id.slice(0, 8)}...</span>
-                   <span>•</span>
-                   <span>{new Date(item.created_at).toLocaleTimeString()}</span>
+                   <span>from {shortId(item.from_session_id)}</span>
+                   {formatInboxTime(item.created_at) && <span>•</span>}
+                   {formatInboxTime(item.created_at) && <span>{formatInboxTime(item.created_at)}</span>}
                 </div>
               </div>
               <div className={`text-[10px] px-1.5 py-0.5 rounded-full border font-bold uppercase tracking-tighter ${
@@ -136,16 +137,30 @@ export function InboxPane() {
               <div className="flex items-center gap-1">
                 {item.status === 'pending' && (
                   <>
-                    <button onClick={() => handleReject(item.id)} className="p-1.5 rounded hover:bg-red-500/10 text-text-muted hover:text-red-400 transition-colors" title="Reject">
+                    <button
+                      onClick={() => handleReject(item.id)}
+                      className="p-1.5 rounded hover:bg-red-500/10 text-text-muted hover:text-red-400 transition-colors"
+                      title="Reject"
+                      aria-label={`Reject delegation ${item.title || item.id}`}
+                    >
                       <X size={14} />
                     </button>
-                    <button onClick={() => handleApprove(item.id)} className="p-1.5 rounded hover:bg-green-500/10 text-text-muted hover:text-green-400 transition-colors" title="Approve">
+                    <button
+                      onClick={() => handleApprove(item.id)}
+                      className="p-1.5 rounded hover:bg-green-500/10 text-text-muted hover:text-green-400 transition-colors"
+                      title="Approve"
+                      aria-label={`Approve delegation ${item.title || item.id}`}
+                    >
                       <Check size={14} />
                     </button>
                   </>
                 )}
                 {item.status === 'approved' && (
-                  <button onClick={() => handleClaim(item.id)} className="text-[10px] px-2.5 py-1 bg-accent-primary hover:bg-accent-hover text-accent-text rounded font-bold uppercase transition-all shadow-sm">
+                  <button
+                    onClick={() => handleClaim(item.id)}
+                    className="text-[10px] px-2.5 py-1 bg-accent-primary hover:bg-accent-hover text-accent-text rounded font-bold uppercase transition-all shadow-sm"
+                    aria-label={`Claim delegation ${item.title || item.id}`}
+                  >
                     Claim
                   </button>
                 )}

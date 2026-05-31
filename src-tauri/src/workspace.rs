@@ -1,8 +1,8 @@
+use base64::Engine as _;
 use serde::Serialize;
 use std::fs;
 use std::path::Path;
 use tauri::command;
-use base64::Engine as _;
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -107,6 +107,24 @@ pub async fn workspace_create_dir(parent_path: String, name: String) -> Result<(
     Ok(())
 }
 
+fn create_dir_all_checked(path: &str) -> Result<(), String> {
+    if !is_safe_path(path) {
+        return Err("Invalid path".to_string());
+    }
+
+    let dir_path = Path::new(path);
+    if dir_path.exists() && !dir_path.is_dir() {
+        return Err("Path already exists and is not a directory".to_string());
+    }
+
+    fs::create_dir_all(dir_path).map_err(|e| e.to_string())
+}
+
+#[command]
+pub async fn workspace_create_dir_all(path: String) -> Result<(), String> {
+    create_dir_all_checked(&path)
+}
+
 #[command]
 pub async fn workspace_rename(target_path: String, new_name: String) -> Result<(), String> {
     if !is_safe_path(&target_path) || !is_safe_name(&new_name) {
@@ -127,6 +145,29 @@ pub async fn workspace_rename(target_path: String, new_name: String) -> Result<(
 
     fs::rename(target, new_path).map_err(|e| e.to_string())?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::create_dir_all_checked;
+
+    #[test]
+    fn create_dir_all_checked_creates_nested_directories() {
+        let root =
+            std::env::temp_dir().join(format!("comet-ai-workspace-test-{}", uuid::Uuid::new_v4()));
+        let nested = root.join("a").join("b").join("c");
+
+        create_dir_all_checked(nested.to_string_lossy().as_ref()).expect("create nested directory");
+
+        assert!(nested.is_dir());
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn create_dir_all_checked_rejects_traversal() {
+        let error = create_dir_all_checked("../outside").expect_err("reject traversal");
+        assert_eq!(error, "Invalid path");
+    }
 }
 
 #[command]
@@ -179,7 +220,49 @@ pub async fn workspace_copy(src: String, dest: String) -> Result<(), String> {
     if !is_safe_path(&src) || !is_safe_path(&dest) {
         return Err("Invalid path".to_string());
     }
-    fs::copy(src, dest).map(|_| ()).map_err(|e| e.to_string())
+    let src_path = Path::new(&src);
+    let dest_path = Path::new(&dest);
+
+    if !src_path.exists() {
+        return Err("Source path does not exist".to_string());
+    }
+
+    if dest_path.exists() {
+        return Err("Destination already exists".to_string());
+    }
+
+    if src_path.is_dir() {
+        let src_canonical = src_path.canonicalize().map_err(|e| e.to_string())?;
+        let dest_parent = dest_path
+            .parent()
+            .ok_or_else(|| "Destination parent path does not exist".to_string())?;
+        let dest_parent_canonical = dest_parent.canonicalize().map_err(|e| e.to_string())?;
+        if dest_parent_canonical.starts_with(&src_canonical) {
+            return Err("Cannot copy a directory into itself".to_string());
+        }
+        copy_dir_recursive(src_path, dest_path)?;
+        Ok(())
+    } else {
+        fs::copy(src_path, dest_path)
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+}
+
+fn copy_dir_recursive(src: &Path, dest: &Path) -> Result<(), String> {
+    fs::create_dir(dest).map_err(|e| e.to_string())?;
+    for entry in fs::read_dir(src).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let entry_src = entry.path();
+        let entry_dest = dest.join(entry.file_name());
+        let file_type = entry.file_type().map_err(|e| e.to_string())?;
+        if file_type.is_dir() {
+            copy_dir_recursive(&entry_src, &entry_dest)?;
+        } else if file_type.is_file() {
+            fs::copy(&entry_src, &entry_dest).map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
 }
 
 #[command]

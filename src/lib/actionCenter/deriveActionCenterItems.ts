@@ -36,6 +36,7 @@ const ACTIVE_RUNTIME_STATUSES = new Set([
 
 const RECENT_DEFAULT_LIMIT = 50;
 const RECENT_DEFAULT_WINDOW_MS = 30 * 60 * 1000;
+const INBOX_STATUSES = new Set(['pending', 'approved', 'rejected', 'claimed', 'completed']);
 
 const permissionActions: ActionCenterAction[] = [
   { id: 'deny_permission', label: 'Deny', tone: 'danger' },
@@ -54,9 +55,80 @@ const activeRuntimeActions: ActionCenterAction[] = [
   { id: 'stop_runtime', label: 'Stop', tone: 'danger' },
 ];
 
-function createdAtFromInbox(item: ActionCenterInboxInput): number {
+function finiteNumber(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+function timestampOrFallback(value: unknown, fallback: number): number {
+  return finiteNumber(value) ?? fallback;
+}
+
+function normalizedRecentLimit(value: unknown): number {
+  const limit = finiteNumber(value);
+  if (limit === null) return RECENT_DEFAULT_LIMIT;
+  return Math.max(0, Math.floor(limit));
+}
+
+function normalizedRecentWindowMs(value: unknown): number {
+  const windowMs = finiteNumber(value);
+  if (windowMs === null || windowMs < 0) return RECENT_DEFAULT_WINDOW_MS;
+  return windowMs;
+}
+
+function createdAtFromInbox(item: ActionCenterInboxInput, fallback: number): number {
   const parsed = item.created_at ? Date.parse(item.created_at) : NaN;
-  return Number.isFinite(parsed) ? parsed : Date.now();
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function cleanActionCenterString(value: unknown): string {
+  return typeof value === 'string'
+    ? value.replace(/\0/g, '').replace(/\s+/g, ' ').trim()
+    : '';
+}
+
+function optionalString(value: unknown): string | undefined {
+  const cleaned = cleanActionCenterString(value);
+  return cleaned || undefined;
+}
+
+function optionalNullableString(value: unknown): string | null | undefined {
+  if (value === null) return null;
+  return optionalString(value);
+}
+
+function normalizeInboxStatus(value: unknown): ActionCenterInboxInput['status'] | null {
+  const status = cleanActionCenterString(value).toLowerCase();
+  return INBOX_STATUSES.has(status) ? status as ActionCenterInboxInput['status'] : null;
+}
+
+function normalizeInboxItem(value: unknown): ActionCenterInboxInput | null {
+  if (!isRecord(value)) return null;
+  const rawId = value.id;
+  const id = typeof rawId === 'number' && Number.isInteger(rawId) && rawId > 0 ? rawId : null;
+  const status = normalizeInboxStatus(value.status);
+  if (!id || !status) return null;
+
+  return {
+    id,
+    status,
+    mission_id: optionalString(value.mission_id),
+    from_session_id: optionalString(value.from_session_id),
+    recipient_session_id: optionalNullableString(value.recipient_session_id),
+    recipient_node_id: optionalNullableString(value.recipient_node_id),
+    role_id: optionalNullableString(value.role_id),
+    title: optionalString(value.title),
+    objective: optionalNullableString(value.objective),
+    created_at: optionalString(value.created_at),
+  };
+}
+
+export function normalizeActionCenterInboxItems(value: unknown): ActionCenterInboxInput[] {
+  if (!Array.isArray(value)) return [];
+  return value.map(normalizeInboxItem).filter((item): item is ActionCenterInboxInput => Boolean(item));
 }
 
 function shortId(value: string | null | undefined): string {
@@ -92,10 +164,11 @@ function runtimeDetail(session: ActionCenterRuntimeSessionInput): string {
   return bits.join(' · ');
 }
 
-function deriveRuntimeItems(sessions: ActionCenterRuntimeSessionInput[]): ActionCenterItem[] {
+function deriveRuntimeItems(sessions: ActionCenterRuntimeSessionInput[], now: number): ActionCenterItem[] {
   const items: ActionCenterItem[] = [];
 
   for (const session of sessions) {
+    if (!optionalString(session.sessionId)) continue;
     if (session.activePermission) {
       const permission = session.activePermission;
       items.push({
@@ -106,7 +179,7 @@ function deriveRuntimeItems(sessions: ActionCenterRuntimeSessionInput[]): Action
         source: 'runtime',
         title: `Permission needed: ${permission.category}`,
         detail: permission.detail || runtimeDetail(session),
-        createdAt: permission.detectedAt ?? session.lastActivityAt ?? Date.now(),
+        createdAt: timestampOrFallback(permission.detectedAt, timestampOrFallback(session.lastActivityAt, now)),
         nodeId: permission.nodeId ?? session.nodeId,
         sessionId: permission.sessionId || session.sessionId,
         terminalId: session.terminalId,
@@ -142,7 +215,7 @@ function deriveRuntimeItems(sessions: ActionCenterRuntimeSessionInput[]): Action
             ? `${runtimeTitle(session)} is waiting for manual takeover`
             : `${runtimeTitle(session)} ${statusLabel(session.status)}`,
         detail: session.currentAction || runtimeDetail(session),
-        createdAt: session.lastActivityAt ?? session.startedAt ?? Date.now(),
+        createdAt: timestampOrFallback(session.lastActivityAt, timestampOrFallback(session.startedAt, now)),
         nodeId: session.nodeId,
         sessionId: session.sessionId,
         terminalId: session.terminalId,
@@ -161,7 +234,7 @@ function deriveRuntimeItems(sessions: ActionCenterRuntimeSessionInput[]): Action
         source: 'runtime',
         title: runtimeTitle(session),
         detail: session.currentAction || runtimeDetail(session) || statusLabel(session.status),
-        createdAt: session.startedAt ?? Date.now(),
+        createdAt: timestampOrFallback(session.startedAt, now),
         nodeId: session.nodeId,
         sessionId: session.sessionId,
         terminalId: session.terminalId,
@@ -177,7 +250,7 @@ function deriveRuntimeItems(sessions: ActionCenterRuntimeSessionInput[]): Action
   return items;
 }
 
-function deriveInboxItems(inboxItems: ActionCenterInboxInput[]): ActionCenterItem[] {
+function deriveInboxItems(inboxItems: ActionCenterInboxInput[], now: number): ActionCenterItem[] {
   return inboxItems.map((item) => {
     const needsYou = item.status === 'pending' || item.status === 'approved';
     const actions: ActionCenterAction[] = item.status === 'pending'
@@ -197,7 +270,7 @@ function deriveInboxItems(inboxItems: ActionCenterInboxInput[]): ActionCenterIte
       source: 'mcp_inbox',
       title: item.title || `Delegation ${item.id}`,
       detail: item.objective ?? undefined,
-      createdAt: createdAtFromInbox(item),
+      createdAt: createdAtFromInbox(item, now),
       nodeId: item.recipient_node_id ?? undefined,
       sessionId: item.recipient_session_id ?? undefined,
       missionId: item.mission_id,
@@ -219,7 +292,7 @@ function deriveRecentItems(
   windowMs: number,
 ): ActionCenterItem[] {
   return recentEvents
-    .filter(event => now - event.createdAt <= windowMs)
+    .filter(event => Number.isFinite(event.createdAt) && event.createdAt <= now && now - event.createdAt <= windowMs)
     .sort((a, b) => b.createdAt - a.createdAt)
     .slice(0, limit)
     .map(event => ({
@@ -242,13 +315,13 @@ function deriveRecentItems(
 }
 
 export function deriveActionCenterItems(input: DeriveActionCenterItemsInput): ActionCenterItem[] {
-  const now = input.now ?? Date.now();
-  const recentLimit = input.recentLimit ?? RECENT_DEFAULT_LIMIT;
-  const recentWindowMs = input.recentWindowMs ?? RECENT_DEFAULT_WINDOW_MS;
+  const now = timestampOrFallback(input.now, Date.now());
+  const recentLimit = normalizedRecentLimit(input.recentLimit);
+  const recentWindowMs = normalizedRecentWindowMs(input.recentWindowMs);
 
   const items = [
-    ...deriveRuntimeItems(input.sessions ?? []),
-    ...deriveInboxItems(input.inboxItems ?? []),
+    ...deriveRuntimeItems(input.sessions ?? [], now),
+    ...deriveInboxItems(input.inboxItems ?? [], now),
     ...deriveRecentItems(input.recentEvents ?? [], now, recentLimit, recentWindowMs),
   ];
 

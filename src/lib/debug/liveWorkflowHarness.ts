@@ -1,10 +1,12 @@
 import { invoke } from '@tauri-apps/api/core';
 import { Window } from '@tauri-apps/api/window';
-import type { CompiledMission, FrontendSpecCategory, WorkflowAgentCli } from '../../store/workspace.js';
+import type { CompiledMission, FrontendSpecCategory, FrontendWorkflowMode, WorkflowAgentCli, WorkflowGraph } from '../../store/workspace.js';
 import { useWorkspaceStore } from '../../store/workspace.js';
 import { isAppSitePresetId, normalizeFrontendDirectionSpec, type FrontendDirectionSpec } from '../frontendDirection.js';
+import { listWorkflowPresets, type PresetDefinition } from '../workflowPresets.js';
 import { missionOrchestrator } from '../workflow/MissionOrchestrator.js';
 import { workflowOrchestrator } from '../workflow/WorkflowOrchestrator.js';
+import type { WorkflowDefinition } from '../workflow/WorkflowDefinition.js';
 import { runtimeManager } from '../runtime/RuntimeManager.js';
 import { checkMcpHealthDetailed, destroyTerminal, getRecentTerminalOutput, isTerminalActive } from '../runtime/TerminalRuntime.js';
 
@@ -347,7 +349,7 @@ function getTaskSpec(taskType: LiveWorkflowTaskType): LiveWorkflowTaskSpec {
       };
     default:
       return {
-        objective: 'Verify Terminal Docks workflow lifecycle without touching user missions.',
+        objective: 'Verify Comet-AI workflow lifecycle without touching user missions.',
         expectedFiles: [],
         acceptance: ['Complete the MCP handshake and report success.'],
       };
@@ -355,11 +357,7 @@ function getTaskSpec(taskType: LiveWorkflowTaskType): LiveWorkflowTaskSpec {
 }
 
 function compactEvent(event: Record<string, unknown>): Record<string, unknown> {
-  const next = { ...event };
-  if (typeof next.text === 'string') {
-    next.text = truncateText(next.text);
-  }
-  return next;
+  return compactReportValue(event, 'event', 0) as Record<string, unknown>;
 }
 
 function buildTaskPrompt(
@@ -389,7 +387,7 @@ function buildTaskPrompt(
   const base = [
     `LIVE_WORKFLOW_TEST clis=${sequenceLabel} phase=${phase} task=${taskType}.`,
     'Do not edit files and do not run shell commands.',
-    'Use the Terminal Docks MCP tools only.',
+    'Use the Starlink MCP tools only.',
     'First call get_task_details with this missionId and your nodeId.',
   ];
   if (taskType === 'metadata') {
@@ -448,7 +446,7 @@ function buildMission(
       id: nodeId,
       roleId: roleSequence[index] ?? (index === nodeIds.length - 1 && nodeIds.length > 1 ? 'debug-output' : 'debug-agent'),
       instructionOverride: [
-        'You are executing an automated live Terminal Docks workflow test.',
+        'You are executing an automated live Comet-AI workflow test.',
         `Your test role is ${roleSequence[index] ?? 'debug-agent'}.`,
         isFileProducingTask(taskType)
           ? [
@@ -482,10 +480,41 @@ function buildMission(
   };
 }
 
+const REPORT_STRING_LIMIT = 2_000;
+const REPORT_SESSION_EVENT_LIMIT = 160;
+const REPORT_ORCHESTRATOR_EVENT_LIMIT = 320;
+
+function compactReportValue(value: unknown, key = '', depth = 0): unknown {
+  if (typeof value === 'string') {
+    return truncateText(value, REPORT_STRING_LIMIT);
+  }
+  if (typeof value !== 'object' || value === null) {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    let items = value;
+    if (key === 'sessionEvents' && value.length > REPORT_SESSION_EVENT_LIMIT) {
+      items = value.slice(-REPORT_SESSION_EVENT_LIMIT);
+    } else if (key === 'orchestratorEvents' && value.length > REPORT_ORCHESTRATOR_EVENT_LIMIT) {
+      items = value.slice(-REPORT_ORCHESTRATOR_EVENT_LIMIT);
+    }
+    return items.map(item => compactReportValue(item, '', depth + 1));
+  }
+  if (depth > 8) {
+    return '[truncated nested object]';
+  }
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>).map(([entryKey, entryValue]) => [
+      entryKey,
+      compactReportValue(entryValue, entryKey, depth + 1),
+    ]),
+  );
+}
+
 async function writeReport(outputPath: string, report: Record<string, unknown>): Promise<void> {
   await invoke('workspace_write_text_file', {
     path: outputPath,
-    content: JSON.stringify(report, null, 2),
+    content: JSON.stringify(compactReportValue(report), null, 2),
   });
 }
 
@@ -529,7 +558,7 @@ function buildUiScreenwatchVisualReview(): UiScreenwatchVisualReview {
   return {
     required: true,
     reason: 'Screenwatch JSON uses DOM and xterm heuristics only; it is not a visual UI classifier.',
-    instruction: 'Explicitly capture the running CometAI app with debug_capture_app_screenshot, analyze the PNG, and report perceivable UI errors such as broken layout, overlapping panes, clipped text, blank areas, stale prompts, or incorrect CLI surfaces. The screenshot tool captures the matched app window handle, not foreground desktop pixels, so other windows being open or in front should not affect the image.',
+    instruction: 'Explicitly capture the running Comet-AI app with debug_capture_app_screenshot, analyze the PNG, and report perceivable UI errors such as broken layout, overlapping panes, clipped text, blank areas, stale prompts, or incorrect CLI surfaces. The screenshot tool captures the matched app window handle, not foreground desktop pixels, so other windows being open or in front should not affect the image.',
     screenshotTool: 'debug_capture_app_screenshot',
     screenshotContract: {
       captureTarget: 'matched_app_window_handle',
@@ -689,8 +718,50 @@ async function ensureWorkflowDirectory(parentDir: string, name: string): Promise
   return outputDir;
 }
 
+function validatePresetPackageQuality(expectedFiles: string[], fileContents: Record<string, string>): string[] {
+  const issues: string[] = [];
+  const normalizedExpected = new Set(expectedFiles.map(file => file.replace(/[\\]+/g, '/')));
+  const readme = fileContents['README.md'] ?? '';
+
+  if (normalizedExpected.has('README.md') && normalizedExpected.has('branch-artifacts/reviewer.md')) {
+    const statusSection = /## Current Status([\s\S]*)$/i.exec(readme)?.[1] ?? '';
+    if (/\breviewer\s+should\b/i.test(statusSection) || /\bshould\s+(?:inspect|write|run|validate|complete)\b/i.test(statusSection)) {
+      issues.push('README current status describes final reviewer work as pending after reviewer completion.');
+    }
+  }
+
+  if (normalizedExpected.has('research_brief.md')) {
+    const brief = fileContents['research_brief.md'] ?? '';
+    const hasFindingsSection = /##\s+(?:Key Findings|Evidence Summary|Findings)/i.test(brief);
+    if (!hasFindingsSection) issues.push('research_brief.md is missing a findings or evidence summary section.');
+    for (const marker of ['## Recommendation', '## Validation Notes']) {
+      if (!brief.includes(marker)) issues.push(`research_brief.md is missing ${marker}.`);
+    }
+    if (!/\bconfidence\b/i.test(brief)) issues.push('research_brief.md is missing confidence language.');
+  }
+
+  if (normalizedExpected.has('implementation_plan.md')) {
+    const plan = fileContents['implementation_plan.md'] ?? '';
+    for (const marker of ['ownership', 'implementation', 'verification']) {
+      if (!new RegExp(`\\b${marker}\\b`, 'i').test(plan)) issues.push(`implementation_plan.md is missing ${marker} coverage.`);
+    }
+    if (!/\brisks?\b/i.test(plan)) issues.push('implementation_plan.md is missing risk coverage.');
+  }
+
+  if (normalizedExpected.has('review_report.md')) {
+    const review = fileContents['review_report.md'] ?? '';
+    if (!/\bfindings?\b/i.test(review)) issues.push('review_report.md is missing finding coverage.');
+    for (const marker of ['evidence', 'verdict']) {
+      if (!new RegExp(`\\b${marker}\\b`, 'i').test(review)) issues.push(`review_report.md is missing ${marker} coverage.`);
+    }
+  }
+
+  return issues;
+}
+
 async function validateOutputFiles(outputDir: string, expectedFiles: string[]) {
   const filePreviews: Record<string, string> = {};
+  const fileContents: Record<string, string> = {};
   const existingFiles: string[] = [];
   const missingFiles: string[] = [];
 
@@ -699,13 +770,18 @@ async function validateOutputFiles(outputDir: string, expectedFiles: string[]) {
     try {
       const content = await invoke<string>('workspace_read_text_file', { path });
       existingFiles.push(file);
+      fileContents[file.replace(/[\\]+/g, '/')] = content;
       filePreviews[file] = truncateText(content, 800);
     } catch {
       missingFiles.push(file);
     }
   }
 
-  return { existingFiles, missingFiles, filePreviews };
+  const qualityIssues = missingFiles.length === 0
+    ? validatePresetPackageQuality(expectedFiles, fileContents)
+    : [];
+
+  return { existingFiles, missingFiles, filePreviews, qualityIssues };
 }
 
 async function collectTerminalTails(terminalIds: string[]): Promise<Record<string, string>> {
@@ -1010,10 +1086,148 @@ interface Prompt06WorkflowSpec {
   suiteDirName?: string;
   expectedFailure?: boolean;
   presetId?: string;
-  frontendMode?: 'off' | 'aligned' | 'strict_ui';
+  frontendMode?: FrontendWorkflowMode;
   frontendCategory?: FrontendSpecCategory;
   frontendDirection?: FrontendDirectionSpec;
   specProfile?: 'none' | 'frontend_three_file';
+}
+
+const LIVE_PRESET_RUNS = Math.max(1, Number(import.meta.env.VITE_LIVE_WORKFLOW_PRESET_RUNS || 2));
+
+const PRESET_ROLE_TITLES: Record<string, string> = {
+  scout: 'Scout',
+  coordinator: 'Coordinator',
+  builder: 'Builder',
+  tester: 'Tester',
+  security: 'Security Reviewer',
+  reviewer: 'Reviewer',
+  frontend_product: 'Frontend Product Lead',
+  frontend_designer: 'Frontend Designer',
+  frontend_architect: 'Frontend Architect',
+  frontend_builder: 'Frontend Builder',
+  interaction_qa: 'Interaction QA',
+  accessibility_reviewer: 'Accessibility Reviewer',
+  visual_polish_reviewer: 'Visual Polish Reviewer',
+  planner: 'Planner',
+};
+
+function presetLiveSlug(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 64) || 'preset';
+}
+
+function presetRoleTitle(roleId: string): string {
+  return PRESET_ROLE_TITLES[roleId] ?? roleId
+    .split(/[_-]+/g)
+    .filter(Boolean)
+    .map(part => `${part.slice(0, 1).toUpperCase()}${part.slice(1)}`)
+    .join(' ');
+}
+
+function presetPrimaryFiles(preset: PresetDefinition): string[] {
+  if (preset.specProfile === 'frontend_three_file' || preset.frontendMode) {
+    return ['index.html', 'app.js', 'styles.css', 'preset_manifest.json', 'verify_preset.mjs', 'README.md'];
+  }
+  if (preset.mode === 'document') {
+    return ['DOCS_REFRESH.md', 'doc_inventory.json', 'verify_preset.mjs', 'README.md'];
+  }
+  if (preset.mode === 'research') {
+    return ['research_brief.md', 'evidence_matrix.json', 'verify_preset.mjs', 'README.md'];
+  }
+  if (preset.mode === 'plan') {
+    return ['implementation_plan.md', 'work_breakdown.json', 'verify_preset.mjs', 'README.md'];
+  }
+  if (preset.mode === 'review') {
+    return ['review_report.md', 'findings.json', 'verify_preset.mjs', 'README.md'];
+  }
+  if (preset.mode === 'verify') {
+    return ['verification_matrix.md', 'test_results.json', 'verify_preset.mjs', 'README.md'];
+  }
+  if (preset.mode === 'secure') {
+    return ['security_review.md', 'risk_register.json', 'verify_preset.mjs', 'README.md'];
+  }
+  return ['index.html', 'app.js', 'preset_manifest.json', 'verify_preset.mjs', 'README.md'];
+}
+
+function presetLiveExpectedFiles(preset: PresetDefinition): string[] {
+  return expectedWithArtifacts(presetPrimaryFiles(preset), preset.nodes.map(node => node.id));
+}
+
+function presetNodeResponsibility(preset: PresetDefinition, nodeId: string, roleId: string, runIndex: number): string {
+  const roleTitle = presetRoleTitle(roleId);
+  const frontendRoleInstruction = (() => {
+    if (!(preset.specProfile === 'frontend_three_file' || preset.frontendMode)) return '';
+    if (roleId === 'frontend_builder' || roleId.startsWith('frontend_builder_')) {
+      return 'Create the runnable HTML/CSS/JS/manifest/verifier files promptly, keep the implementation compact, then hand off without extended polish.';
+    }
+    if (roleId === 'interaction_qa' || roleId === 'accessibility_reviewer' || roleId === 'visual_polish_reviewer') {
+      return 'Run the verifier and inspect only the required picker/effects acceptance points; write no more than 10 concise evidence bullets, then complete.';
+    }
+    if (roleId.startsWith('frontend_')) {
+      return 'Do not create separate planning documents. Write only a concise branch artifact with no more than 10 bullets, then hand off quickly.';
+    }
+    return '';
+  })();
+  return [
+    `Act as ${roleTitle} node ${nodeId} for preset ${preset.name}, run ${runIndex}.`,
+    'Create or verify the files owned by your role, preserve exact node IDs in handoff/completion payloads, and write your node evidence artifact.',
+    `Your required evidence artifact is branch-artifacts/${nodeId}.md.`,
+    frontendRoleInstruction,
+    'Keep the work compact and finish with the MCP complete_task or handoff_task tool as soon as your node responsibility is satisfied.',
+  ].filter(Boolean).join(' ');
+}
+
+function buildWorkflowPresetLiveSpecs(): Prompt06WorkflowSpec[] {
+  return listWorkflowPresets().flatMap(preset =>
+    Array.from({ length: LIVE_PRESET_RUNS }, (_, index) => {
+      const runIndex = index + 1;
+      const slug = presetLiveSlug(`${preset.id}-run-${runIndex}`);
+      const primaryFiles = presetPrimaryFiles(preset);
+      const isFrontendPreset = preset.specProfile === 'frontend_three_file' || Boolean(preset.frontendMode);
+      const frontendInstruction = preset.specProfile === 'frontend_three_file' || preset.frontendMode
+        ? 'Build a compact browser app directly in index.html, styles.css, and app.js with real interaction state and responsive behavior; keep each source file under about 250 lines.'
+        : 'Produce a concrete package with at least one structured JSON file and one verifier script, not only narrative notes.';
+      return {
+        name: slug,
+        title: `${preset.name} run ${runIndex}`,
+        task: [
+          `Run workflow preset "${preset.name}" (${preset.id}) exactly as a live preset validation run.`,
+          `Preset mode=${preset.mode}; subMode=${preset.subMode}; size=${preset.size}; expected agents=${preset.agentCount}.`,
+          frontendInstruction,
+          `Create the preset deliverable files: ${primaryFiles.join(', ')}.`,
+          isFrontendPreset
+            ? 'For App/Site presets, use the full theme picker direction and selected effects, but implement a small dashboard slice only; do not create separate planning docs such as structure.md or design specs outside branch-artifacts.'
+            : '',
+          'The verifier script must check the expected files and JSON syntax where applicable, then print a short success line.',
+          'verify_preset.mjs must resolve its base directory from import.meta.url so it works both from the output directory and when invoked by absolute path from another current working directory.',
+          'README.md must name the preset, run number, graph shape, local open/run command, and output files.',
+          'Final README/status text must describe the completed package state; do not leave downstream reviewer, validation, or acceptance work written as pending future work.',
+          'Every node must write branch-artifacts/<nodeId>.md with concise evidence for its role.',
+          'Downstream nodes must inspect upstream branch artifacts before completing.',
+        ].join(' '),
+        expectedFiles: presetLiveExpectedFiles(preset),
+        runInstruction: 'Run node verify_preset.mjs.',
+        presetId: preset.id,
+        frontendMode: preset.frontendMode,
+        specProfile: preset.specProfile ?? 'none',
+        agents: preset.nodes.map(node => ({
+          id: node.id,
+          roleId: node.roleId,
+          title: `${presetRoleTitle(node.roleId)} ${node.id}`,
+          responsibility: presetNodeResponsibility(preset, node.id, node.roleId, runIndex),
+          cli: 'codex' as WorkflowAgentCli,
+        })),
+        edges: preset.edges.map(edge => ({
+          fromNodeId: edge.fromNodeId,
+          toNodeId: edge.toNodeId,
+          condition: edge.condition ?? 'on_success',
+        })),
+      } satisfies Prompt06WorkflowSpec;
+    }),
+  );
 }
 
 const STARV_EXPANDED_THEME_DIRECTION = normalizeFrontendDirectionSpec({
@@ -1213,29 +1427,36 @@ const PROMPT_03_UI_MODE_WORKFLOWS: Prompt06WorkflowSpec[] = [
     ].join(' '),
     expectedFiles: expectedWithArtifacts(
       [
+        'PRD.md',
         'DESIGN.md',
+        'structure.md',
         'index.html',
         'styles.css',
         'script.js',
         'README.md',
       ],
-      ['product', 'designer', 'interaction-qa', 'builder', 'accessibility', 'visual-polish'],
+      ['product', 'designer', 'architect', 'builder', 'interaction-qa', 'accessibility'],
     ),
     runInstruction: 'Open index.html in a browser and exercise the severity/status/location filters or incident action control.',
+    presetId: 'frontend_ui_delivery',
+    frontendMode: 'strict_ui',
+    frontendCategory: 'saas_dashboard',
+    specProfile: 'frontend_three_file',
     agents: [
       prompt06Agent('product', 'frontend_product', 'Product Agent', 'Classify the UI category and record Strict UI product requirements with concrete dashboard acceptance criteria in workspace context.', PROMPT_03_CLI),
       prompt06Agent('designer', 'frontend_designer', 'Designer', 'Create DESIGN.md with concrete layout, typography, color, density, state, responsive, and accessibility rules for the hospital incident dashboard.', PROMPT_03_CLI),
-      prompt06Agent('interaction-qa', 'interaction_qa', 'Interaction QA', 'Record required filter/action/responsive states in workspace context, then hand off the concrete QA checklist to the builder.', PROMPT_03_CLI),
-      prompt06Agent('builder', 'frontend_builder', 'Frontend Builder', 'Implement the runnable static dashboard in index.html, styles.css, and script.js, following workspace product context, DESIGN.md, and frontendPlan.', PROMPT_03_CLI),
-      prompt06Agent('accessibility', 'accessibility_reviewer', 'Accessibility Reviewer', 'Review accessibility and final visual polish, put findings in the completion payload, and ensure README.md lists the open/run instruction.', PROMPT_03_CLI),
-      prompt06Agent('visual-polish', 'visual_polish_reviewer', 'Visual Polish Reviewer', 'Inspect the finished dashboard for landing-page drift, density, visual hierarchy, responsive fit, and domain specificity; put concrete fix requests or pass notes in the completion payload.', PROMPT_03_CLI),
+      prompt06Agent('architect', 'frontend_architect', 'Architect', 'Create structure.md with screen map, component map, data model, file structure, state model, and verification checklist for the hospital incident dashboard.', PROMPT_03_CLI),
+      prompt06Agent('builder', 'frontend_builder', 'Frontend Builder', 'Implement the runnable static dashboard in index.html, styles.css, and script.js, following accepted product, design, and structure decisions.', PROMPT_03_CLI),
+      prompt06Agent('interaction-qa', 'interaction_qa', 'Interaction QA', 'Verify visible behavior, filter/action states, responsiveness, text fit, and generic-template failures against the built dashboard.', PROMPT_03_CLI),
+      prompt06Agent('accessibility', 'accessibility_reviewer', 'Accessibility Reviewer', 'Review contrast, labels, keyboard affordances, focus states, non-color status indicators, reduced-motion behavior, and README open/run instruction.', PROMPT_03_CLI),
     ],
     edges: [
       prompt06Edge('product', 'designer'),
-      prompt06Edge('designer', 'interaction-qa'),
-      prompt06Edge('interaction-qa', 'builder'),
+      prompt06Edge('product', 'architect'),
+      prompt06Edge('designer', 'builder'),
+      prompt06Edge('architect', 'builder'),
+      prompt06Edge('builder', 'interaction-qa'),
       prompt06Edge('builder', 'accessibility'),
-      prompt06Edge('accessibility', 'visual-polish'),
     ],
   },
 ];
@@ -1640,7 +1861,7 @@ const OPENCODE_POST_ACK_REPRO_WORKFLOWS: Prompt06WorkflowSpec[] = [
   {
     name: 'single-opencode-file-completion',
     title: 'Single OpenCode node creates one file and completes via MCP',
-    task: 'Create the smallest possible completion probe: write one text file named opencode_completion_probe.txt with two short lines, then stop work and complete the node through Terminal Docks MCP.',
+    task: 'Create the smallest possible completion probe: write one text file named opencode_completion_probe.txt with two short lines, then stop work and complete the node through Starlink MCP.',
     expectedFiles: ['opencode_completion_probe.txt'],
     runInstruction: 'Read opencode_completion_probe.txt and confirm it mentions OpenCode MCP completion.',
     agents: [
@@ -1665,7 +1886,7 @@ const OPENCODE_POST_ACK_REPRO_WORKFLOWS: Prompt06WorkflowSpec[] = [
   {
     name: 'codex-upstream-to-opencode-file-completion',
     title: 'Codex upstream hands one tiny task to OpenCode builder',
-    task: 'Create a minimal handoff completion probe. The Codex upstream node should write one short branch note. The OpenCode builder should use that handoff to create one final text file named opencode_handoff_probe.txt, then immediately complete the node through Terminal Docks MCP.',
+    task: 'Create a minimal handoff completion probe. The Codex upstream node should write one short branch note. The OpenCode builder should use that handoff to create one final text file named opencode_handoff_probe.txt, then immediately complete the node through Starlink MCP.',
     expectedFiles: ['opencode_handoff_probe.txt'],
     runInstruction: 'Read opencode_handoff_probe.txt and confirm it mentions Codex upstream handoff and OpenCode MCP completion.',
     agents: [
@@ -2899,7 +3120,9 @@ function buildPrompt06Mission(
         'Prompt 03 UI builder mode requirements: treat frontendMode as Strict UI and use the frontend role responsibilities rather than generic builder/reviewer behavior.',
         'The deliverable must be a compact operational SaaS dashboard, not a landing page or marketing site.',
         'The final output must include accepted product/implementation decisions in workspace context, DESIGN.md, runnable static frontend files, interaction QA notes, accessibility review, visual polish review, and README open/run instructions. Review notes should stay in completion payloads or workspace context unless the user asks for separate files.',
-        'Reviewer roles must judge concrete visible output quality, responsiveness, state behavior, accessibility, and product/spec adherence before completing.',
+        'Reviewer roles must judge concrete visible output quality, responsiveness, state behavior, accessibility, and product/spec adherence before completing; source inspection alone is not enough when runnable output exists.',
+        'Prompt 03 reviewers must open or execute the generated dashboard when available, exercise at least one filter/action state, and fail visible state bugs such as an empty-state message shown while matching rows or cards remain visible.',
+        'Prompt 03 responsive verdicts must come from a real browser or headless browser viewport when one is available; source inspection or a lightweight DOM harness is not sufficient to pass horizontal-overflow or text-fit checks.',
       ]
     : [];
   const nodeTreeInstructions = promptNumber === '04'
@@ -2913,7 +3136,7 @@ function buildPrompt06Mission(
     ? [
         'Prompt 07 artifact organization requirements: each agent must create or verify a distinct branch artifact under branch-artifacts using its exact node ID in the filename.',
         'Final outputs must be concrete runnable/openable/readable project files, not only final.md or result.md notes.',
-        'The final reviewer must list every user-facing output path in README.md and verify that no output is outside docks-testing.',
+        'The final reviewer must list every user-facing output path in README.md and verify that no output is outside comet-testing.',
       ]
     : [];
   const prompt08Instructions = promptNumber === '08'
@@ -2974,9 +3197,15 @@ function buildPrompt06Mission(
     spec.frontendDirection
       ? `Use this App/Site theme picker direction as binding visual intent: ${spec.frontendDirection.summary}.`
       : '',
+    spec.frontendDirection
+      ? 'For App/Site live validation, implement one compact screen slice. Architects and designers should write only their required branch-artifacts evidence, then hand off; builders should create the runnable files promptly; QA should verify and complete without broad redesign.'
+      : '',
     `Create or update only files inside ${outputDir}.`,
     `Expected concrete project files: ${spec.expectedFiles.join(', ')}.`,
-    `Runnable verification: ${spec.runInstruction}`,
+        `Runnable verification: ${spec.runInstruction}`,
+    'Expected files are workflow-level acceptance criteria, not a requirement for every parallel node to see every final file before downstream producers have run.',
+    'Non-final and parallel review/test/security nodes should write their own branch artifact, record missing downstream work as pending context, and complete successfully unless their own assigned artifact or explicit role check fails.',
+    'Only final merge/reviewer nodes should fail solely because final expected files are still missing after all upstream producer nodes have completed.',
     ...prompt03Instructions,
     ...branchMergeInstructions,
     ...nodeTreeInstructions,
@@ -2991,6 +3220,7 @@ function buildPrompt06Mission(
     ...prompt15Instructions,
     'This must be a real runnable/openable project, not markdown-only evidence.',
     'Keep the project compact and bounded: no large embedded assets, no long generated data dumps, and target small text/source files.',
+    'When creating multiple or large files, write them in small tool batches within a minute or two of planning so the runtime sees concrete file progress.',
     'Do not create screenshots, preview images, generated media, or dev-server evidence unless this node is explicitly the tester and the project cannot be verified from files alone.',
     'This is a reliability test, so finish the assigned role promptly and do not continue polishing after the expected files exist.',
     'Each agent must inspect the current task details, inspect upstream context if present, perform its role, then complete the node with complete_task or handoff_task.',
@@ -3031,17 +3261,19 @@ function buildPrompt06Mission(
         id: agent.id,
         roleId: agent.roleId,
         instructionOverride: [
-          `You are a live Terminal Docks Prompt ${promptNumber} ${cli} workflow agent.`,
+          `You are a live Comet-AI Prompt ${promptNumber} ${cli} workflow agent.`,
         `Role: ${agent.title}.`,
         `Responsibility: ${agent.responsibility}`,
         `Output directory: ${outputDir}.`,
         `Expected files for the overall workflow: ${spec.expectedFiles.join(', ')}.`,
+        'Those expected files are workflow-level acceptance criteria. If your node runs before downstream producers, do not fail only because downstream or final files do not exist yet; write your own branch artifact and pass pending checks downstream.',
+        'Complete with outcome="failure" only for a real failure in your assigned responsibility, not for work owned by later graph nodes.',
         'Do not write outside the output directory.',
         promptNumber === '05'
           ? `If you are producing branch work, write a distinct artifact under branch-artifacts/${agent.id}.md or a similarly named source fragment. If you are merging, testing, or reviewing, inspect upstream context and branch-artifacts before completing.`
           : '',
         promptNumber === '03'
-          ? `This is a Strict UI builder mode workflow. Use the role ID ${agent.roleId} literally, read upstream PRD/DESIGN/ARCHITECTURE files when available, write branch-artifacts/${agent.id}.md with your evidence, and keep the final dashboard operational, accessible, responsive, and free of marketing-page patterns.`
+          ? `This is a Strict UI builder mode workflow. Use the role ID ${agent.roleId} literally, read upstream PRD/DESIGN/ARCHITECTURE files when available, write branch-artifacts/${agent.id}.md with your evidence, and keep the final dashboard operational, accessible, responsive, and free of marketing-page patterns. Review roles must verify the runnable dashboard behavior when files exist, including at least one filter/action state, whether empty-state UI is hidden when matching incidents are visible, and browser-viewport overflow/text fit when a browser or headless browser is available.`
           : '',
         promptNumber === '07'
           ? `Write or verify an artifact under branch-artifacts/${agent.id}.md, and keep all project outputs inside the configured output directory.`
@@ -3062,6 +3294,7 @@ function buildPrompt06Mission(
           ? 'Treat missing expected files as a failed quality gate; reviewers/testers must verify the required artifacts before completing successfully.'
           : '',
         'Keep your contribution compact and finish quickly once your role is satisfied.',
+        'For large file creation, make an early small file or branch-artifact write, then continue in small apply_patch batches instead of composing silently for several minutes.',
         'Avoid screenshots, preview images, browser automation, and extra generated assets unless your named responsibility is testing and file checks are insufficient.',
         'Complete your node with complete_task or handoff_task after your contribution or verification is done.',
         'Do not end with only a normal final answer; a successful MCP completion/handoff tool call is required.',
@@ -3123,7 +3356,7 @@ async function runPrompt06Workflow(
 ): Promise<LiveWorkflowResult> {
   const startedAt = Date.now();
   const suffix = `${index + 1}-${spec.name}-${Date.now().toString(36)}`;
-  const suiteDir = joinWindowsPath(options.repoRoot, 'docks-testing', suiteDirName);
+  const suiteDir = joinWindowsPath(options.repoRoot, 'comet-testing', suiteDirName);
   const outputDir = options.directOutputDir
     ? await ensureNestedDirectory(options.directOutputDir)
     : await (async () => {
@@ -3225,9 +3458,11 @@ async function runPrompt06Workflow(
         await screenwatch.capture('completed');
         const validation = await validateOutputFiles(outputDir, spec.expectedFiles);
         const failures = Object.values(run.nodeStates).filter(node => node.state === 'failed');
-        const error = failures.map(node => `${node.nodeId}: failed`).join('; ') || (validation.missingFiles.length ? `Missing files: ${validation.missingFiles.join(', ')}` : undefined);
+        const error = failures.map(node => `${node.nodeId}: failed`).join('; ')
+          || (validation.missingFiles.length ? `Missing files: ${validation.missingFiles.join(', ')}` : undefined)
+          || (validation.qualityIssues.length ? `Quality issues: ${validation.qualityIssues.join('; ')}` : undefined);
         const expectedFailureRecovered = Boolean(spec.expectedFailure && failures.length && validation.missingFiles.length === 0);
-        const isSuccessfulResult = expectedFailureRecovered || (!failures.length && validation.missingFiles.length === 0);
+        const isSuccessfulResult = expectedFailureRecovered || (!failures.length && validation.missingFiles.length === 0 && validation.qualityIssues.length === 0);
         return {
           cli: missionCliLabel,
           cliSequence: missionCliSequence,
@@ -3367,6 +3602,56 @@ async function runPrompt06LargeWorkflowHarness(options: LiveWorkflowHarnessOptio
   }
 }
 
+async function runWorkflowPresetLiveAllHarness(options: LiveWorkflowHarnessOptions): Promise<void> {
+  const selectedWorkflows = selectPromptWorkflows(buildWorkflowPresetLiveSpecs());
+  const report = {
+    startedAt: new Date().toISOString(),
+    finishedAt: null as string | null,
+    suiteName: 'workflow_preset_live_all',
+    workflowFilter: LIVE_WORKFLOW_FILTER ?? null,
+    executionPath: 'live_app_harness',
+    liveRuntimeLaunched: true,
+    note: 'Runs every workflow preset twice through MissionOrchestrator, WorkflowOrchestrator, RuntimeManager, MCP, and PTY-backed Codex sessions. Each run must create real files in comet-testing and pass expected-file validation.',
+    presetRunsPerPreset: LIVE_PRESET_RUNS,
+    workflows: selectedWorkflows.map(({ spec, index }) => ({
+      index: index + 1,
+      name: spec.name,
+      title: spec.title,
+      presetId: spec.presetId,
+      agentCount: spec.agents.length,
+      expectedFiles: spec.expectedFiles,
+      runInstruction: spec.runInstruction,
+      edges: spec.edges,
+    })),
+    results: [] as LiveWorkflowResult[],
+  };
+
+  await writeReport(options.outputPath, report);
+  for (let index = 0; index < selectedWorkflows.length; index += 1) {
+    const { spec } = selectedWorkflows[index];
+    const result = await runPrompt06Workflow(
+      spec,
+      index,
+      options,
+      'live-workflow-presets',
+      'preset',
+      'workflow-presets',
+    );
+    report.results.push(result);
+    await writeReport(options.outputPath, report);
+    if (index < selectedWorkflows.length - 1) {
+      await waitForPrompt06McpHealth('Workflow preset live-all');
+    }
+  }
+
+  report.finishedAt = new Date().toISOString();
+  await writeReport(options.outputPath, report);
+
+  if (options.closeWhenDone) {
+    await Window.getCurrent().close();
+  }
+}
+
 async function runPrompt05BranchingMergeHarness(options: LiveWorkflowHarnessOptions): Promise<void> {
   const selectedWorkflows = selectPromptWorkflows(PROMPT_05_WORKFLOWS);
   const report = {
@@ -3474,7 +3759,7 @@ async function runOpenCodePostAckReproducerHarness(options: LiveWorkflowHarnessO
     workflowFilter: LIVE_WORKFLOW_FILTER ?? null,
     executionPath: 'live_app_harness',
     liveRuntimeLaunched: true,
-    note: 'Minimal live reproducers for OpenCode post_ack_no_mcp_completion. Runs small OpenCode interactive PTY workflows through MissionOrchestrator, WorkflowOrchestrator, RuntimeManager, and Terminal Docks MCP.',
+    note: 'Minimal live reproducers for OpenCode post_ack_no_mcp_completion. Runs small OpenCode interactive PTY workflows through MissionOrchestrator, WorkflowOrchestrator, RuntimeManager, and Starlink MCP.',
     workflows: selectedWorkflows.map(({ spec, index }) => ({
       index: index + 1,
       name: spec.name,
@@ -3571,7 +3856,7 @@ async function runPrompt0710CappedHarness(options: LiveWorkflowHarnessOptions): 
     workflowFilter: LIVE_WORKFLOW_FILTER ?? null,
     executionPath: 'live_app_harness',
     liveRuntimeLaunched: true,
-    note: 'Runs prompts 07-10 as a bounded four-workflow live app/runtime suite per operator cap. Each workflow uses mixed Codex, Claude, Gemini, and OpenCode interactive PTY nodes and produces concrete deliverables under the prompt-specific docks-testing root.',
+    note: 'Runs prompts 07-10 as a bounded four-workflow live app/runtime suite per operator cap. Each workflow uses mixed Codex, Claude, Gemini, and OpenCode interactive PTY nodes and produces concrete deliverables under the prompt-specific comet-testing root.',
     workflows: selectedWorkflows.map(({ spec, index }) => ({
       index: index + 1,
       promptNumber: spec.promptNumber,
@@ -3723,7 +4008,7 @@ async function runPromptSpecSuiteHarness(
   }
 }
 
-function buildPrompt05ManualDefinition(name: string, nodeIds: string[]) {
+function buildPrompt05ManualDefinition(name: string, nodeIds: string[]): WorkflowDefinition {
   const now = new Date().toISOString();
   return {
     id: `prompt05-${name}`,
@@ -3742,20 +4027,20 @@ function buildPrompt05ManualDefinition(name: string, nodeIds: string[]) {
       },
       ...nodeIds.map((nodeId, index) => ({
         id: nodeId,
-        kind: 'agent',
+        kind: 'agent' as const,
         roleId: index === 0 ? 'builder' : 'reviewer',
         config: {
-          cli: 'codex',
-          executionMode: 'manual',
+          cli: 'codex' as const,
+          executionMode: 'manual' as const,
           terminalId: `prompt05-${name}-${nodeId}`,
           profileId: index === 0 ? 'builder' : 'reviewer',
-          retryPolicy: { maxRetries: 1, retryOn: ['unknown'], backoffMs: 0 },
+          retryPolicy: { maxAttempts: 1, retryOn: ['unknown' as const], backoffMs: 0 },
         },
       })),
     ],
     edges: [
-      { fromNodeId: `${name}-task`, toNodeId: nodeIds[0], condition: 'always' },
-      ...nodeIds.slice(1).map(nodeId => ({ fromNodeId: nodeIds[0], toNodeId: nodeId, condition: 'on_success' })),
+      { fromNodeId: `${name}-task`, toNodeId: nodeIds[0], condition: 'always' as const },
+      ...nodeIds.slice(1).map(nodeId => ({ fromNodeId: nodeIds[0], toNodeId: nodeId, condition: 'on_success' as const })),
     ],
   };
 }
@@ -3779,12 +4064,12 @@ async function runPrompt05ManualWorkflow(
   options: LiveWorkflowHarnessOptions,
 ) {
   const outputDir = await ensureWorkflowDirectory(
-    joinWindowsPath(options.repoRoot, 'docks-testing', 'manual-intervention'),
+    joinWindowsPath(options.repoRoot, 'comet-testing', 'manual-intervention'),
     `workflow-${String(index).padStart(2, '0')}-${name}-${Date.now().toString(36)}`,
   );
   const primaryNodeId = `${name}-agent`;
   const extraNodeId = name.includes('cancel') ? `${name}-reviewer` : null;
-  const definition = buildPrompt05ManualDefinition(name, extraNodeId ? [primaryNodeId, extraNodeId] : [primaryNodeId]) as any;
+  const definition = buildPrompt05ManualDefinition(name, extraNodeId ? [primaryNodeId, extraNodeId] : [primaryNodeId]);
   const missionId = `live-prompt05-manual-${name}-${Date.now().toString(36)}`;
   const startedAt = Date.now();
   const sessionEvents: Array<Record<string, unknown>> = [];
@@ -3841,7 +4126,7 @@ async function runPrompt05ManualWorkflow(
 
 async function runPrompt05ManualInterventionHarness(options: LiveWorkflowHarnessOptions): Promise<void> {
   await invoke('workspace_create_dir', {
-    parentPath: joinWindowsPath(options.repoRoot, 'docks-testing'),
+    parentPath: joinWindowsPath(options.repoRoot, 'comet-testing'),
     name: 'manual-intervention',
   }).catch(error => {
     if (!String(error).toLowerCase().includes('already exists')) throw error;
@@ -3930,7 +4215,7 @@ async function runRuntimeViewLayoutMockHarness(options: LiveWorkflowHarnessOptio
   const now = new Date().toISOString();
   const missionId = `runtime-view-layout-mock-${Date.now().toString(36)}`;
   const outputDir = await ensureWorkflowDirectory(
-    joinWindowsPath(options.repoRoot, 'docks-testing'),
+    joinWindowsPath(options.repoRoot, 'comet-testing'),
     `runtime-view-layout-mock-${Date.now().toString(36)}`,
   );
   const agentIds = ['agent-1', 'agent-2', 'agent-3', 'agent-4', 'agent-5'];
@@ -3940,7 +4225,7 @@ async function runRuntimeViewLayoutMockHarness(options: LiveWorkflowHarnessOptio
     { fromNodeId: 'agent-3', toNodeId: 'agent-4', condition: 'on_success' as const },
     { fromNodeId: 'agent-3', toNodeId: 'agent-5', condition: 'on_success' as const },
   ];
-  const definition = {
+  const definition: WorkflowDefinition = {
     id: 'runtime-view-layout-mock',
     name: 'Runtime View Layout Mock',
     createdAt: now,
@@ -3956,11 +4241,11 @@ async function runRuntimeViewLayoutMockHarness(options: LiveWorkflowHarnessOptio
         terminalId: `runtime-view-layout-${nodeId}`,
         terminalTitle: `Agent ${index + 1}`,
         profileId: `agent${index + 1}`,
-        retryPolicy: { maxRetries: 0, retryOn: ['unknown'], backoffMs: 0 },
+        retryPolicy: { maxAttempts: 0, retryOn: ['unknown' as const], backoffMs: 0 },
       },
     })),
     edges,
-  } as any;
+  };
 
   const report = {
     startedAt: new Date().toISOString(),
@@ -3978,23 +4263,23 @@ async function runRuntimeViewLayoutMockHarness(options: LiveWorkflowHarnessOptio
 
   await writeReport(options.outputPath, report);
   const run = workflowOrchestrator.startRun(definition, { runId: missionId, workspaceDir: outputDir });
-  useWorkspaceStore.getState().setGlobalGraph({
+  const runtimeLayoutGraph: WorkflowGraph = {
     id: 'runtime-view-layout-mock',
     nodes: [
       {
         id: 'task',
-        type: 'workflow.task',
-        data: { label: 'Task' },
-        config: { prompt: 'Runtime layout mock task', position: { x: 260, y: 0 } },
+        roleId: 'task',
+        status: 'idle',
+        config: { label: 'Task', prompt: 'Runtime layout mock task', position: { x: 260, y: 0 } },
       },
       ...agentIds.map((nodeId, index) => ({
         id: nodeId,
-        type: 'workflow.agent',
-        data: { label: `Agent ${index + 1}` },
+        roleId: `agent${index + 1}`,
+        status: 'idle' as const,
         config: {
-          roleId: `agent${index + 1}`,
-          cli: 'codex',
-          executionMode: 'manual',
+          label: `Agent ${index + 1}`,
+          cli: 'codex' as const,
+          executionMode: 'manual' as const,
           position: {
             x: index < 2 ? index * 520 : index === 2 ? 260 : (index - 3) * 520,
             y: index < 2 ? 180 : index === 2 ? 360 : 540,
@@ -4007,7 +4292,8 @@ async function runRuntimeViewLayoutMockHarness(options: LiveWorkflowHarnessOptio
       { fromNodeId: 'task', toNodeId: 'agent-2', condition: 'always' },
       ...edges,
     ],
-  } as any);
+  };
+  useWorkspaceStore.getState().setGlobalGraph(runtimeLayoutGraph);
   useWorkspaceStore.getState().setAppMode('runtime');
 
   for (let index = 0; index < agentIds.length; index += 1) {
@@ -4036,7 +4322,7 @@ async function runRuntimeViewLayoutMockHarness(options: LiveWorkflowHarnessOptio
   }
 
   report.finishedAt = new Date().toISOString();
-  report.nodeFinalStates = Object.values(run.nodeStates).map((nodeState: any) => ({
+  report.nodeFinalStates = Object.values(run.nodeStates).map(nodeState => ({
     nodeId: nodeState.nodeId,
     state: nodeState.state,
     attempt: nodeState.attempt,
@@ -4076,6 +4362,13 @@ export async function runLiveWorkflowHarness(options: LiveWorkflowHarnessOptions
       'app-site-expanded',
       'app-site-expanded',
       'Runs the exact expanded App/Site preset shape through MissionOrchestrator, WorkflowOrchestrator, RuntimeManager, and PTY-backed frontend-role sessions in a fresh workspace.',
+    );
+    return;
+  }
+
+  if (options.suiteName === 'workflow_preset_live_all') {
+    await runWorkflowPresetLiveAllHarness(
+      { ...options, workflowTimeoutMs: Math.max(options.workflowTimeoutMs, 180_000) },
     );
     return;
   }
@@ -4227,7 +4520,7 @@ export async function runLiveWorkflowHarness(options: LiveWorkflowHarnessOptions
 
 export function liveWorkflowHarnessOptionsFromEnv(): LiveWorkflowHarnessOptions {
   const env = import.meta.env;
-  const repoRoot = env.VITE_LIVE_WORKFLOW_REPO_ROOT || 'C:\\VSCODE\\terminal-docks';
+  const repoRoot = env.VITE_LIVE_WORKFLOW_REPO_ROOT || 'C:\\VSCODE\\comet-ai';
   return {
     suiteName: env.VITE_LIVE_WORKFLOW_SUITE || null,
     repoRoot,

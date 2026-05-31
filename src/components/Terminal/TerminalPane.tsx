@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
-import { WebglAddon } from '@xterm/addon-webgl';
 import { SearchAddon } from '@xterm/addon-search';
 import { WebLinksAddon } from '@xterm/addon-web-links';
 import '@xterm/xterm/css/xterm.css';
@@ -13,8 +12,15 @@ import { useWorkspaceStore, Pane } from '../../store/workspace';
 import { ChevronDown, ChevronUp, X } from 'lucide-react';
 import { detectRuntimeAction } from '../../lib/runtimeActivity';
 import { terminalOutputBus } from '../../lib/runtime/TerminalOutputBus';
+import { currentDirectoryForPane, nextTerminalTitle } from '../../lib/workspaceTabs';
+import { scopedDebugLog } from '../../lib/debugLog';
+import { normalizeTerminalId } from '../../lib/terminalIds';
 
 interface ContextMenuState { x: number; y: number }
+
+function terminalDebugLog(...args: unknown[]): void {
+  scopedDebugLog('terminal', 'VITE_TERMINAL_DEBUG', ...args);
+}
 
 function isMissingPtyError(err: unknown): boolean {
   return String(err).includes('not found in active PTY state');
@@ -44,13 +50,13 @@ export function TerminalPane({ pane, dragEndSeq }: { pane: Pane; dragEndSeq?: nu
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
 
   useEffect(() => {
-    console.log(`[TerminalPane] Mounted pane: ${pane.id}`, pane.data);
+    terminalDebugLog(`[TerminalPane] Mounted pane: ${pane.id}`, pane.data);
   }, [pane.id]);
 
   const showSearchRef = useRef(false);
   useEffect(() => { showSearchRef.current = showSearch; }, [showSearch]);
 
-  const terminalId     = pane.data?.terminalId || `term-${pane.id}`;
+  const terminalId     = normalizeTerminalId(pane.data?.terminalId) || `term-${pane.id}`;
   const currentTheme   = useWorkspaceStore((s) => s.theme);
 
   // Close context menu on any click elsewhere
@@ -122,6 +128,7 @@ export function TerminalPane({ pane, dragEndSeq }: { pane: Pane; dragEndSeq?: nu
     term.open(terminalElement);
     fitAddon.current   = fit;
     searchAddon.current = search;
+    let disposed = false;
 
     const publishTerminalSize = () => {
       if (!term.rows || !term.cols) return;
@@ -145,7 +152,8 @@ export function TerminalPane({ pane, dragEndSeq }: { pane: Pane; dragEndSeq?: nu
     };
     terminalElement.addEventListener('paste', pasteHandler, true);
 
-    try {
+    import('@xterm/addon-webgl').then(({ WebglAddon }) => {
+      if (disposed) return;
       const webgl = new WebglAddon();
       // On macOS (WKWebView), compositing layer changes during drag can silently
       // kill the WebGL context. Detect this and fall back to the canvas renderer.
@@ -153,7 +161,7 @@ export function TerminalPane({ pane, dragEndSeq }: { pane: Pane; dragEndSeq?: nu
         webgl.dispose();
       });
       term.loadAddon(webgl);
-    } catch { /* WebGL not available */ }
+    }).catch(() => { /* WebGL not available */ });
 
     // Use a timeout longer than the panel's 200ms CSS transition so dimensions are stable
     setTimeout(() => {
@@ -217,7 +225,6 @@ export function TerminalPane({ pane, dragEndSeq }: { pane: Pane; dragEndSeq?: nu
 
     let unlisten: (() => void) | null = null;
     let refitUnlisten: UnlistenFn | null = null;
-    let disposed = false;
     const attachFlushTimers: ReturnType<typeof setTimeout>[] = [];
 
     const initPty = async () => {
@@ -225,7 +232,11 @@ export function TerminalPane({ pane, dragEndSeq }: { pane: Pane; dragEndSeq?: nu
       const storeSnap = useWorkspaceStore.getState();
       const paneCwd = typeof pane.data?.cwd === 'string' ? pane.data.cwd.replace(/\0/g, '').trim() : '';
       const paneWorkspaceDir = typeof pane.data?.workspaceDir === 'string' ? pane.data.workspaceDir.replace(/\0/g, '').trim() : '';
-      const workspaceDir = paneCwd || paneWorkspaceDir || storeSnap.workspaceDir;
+      const activeTabWorkspaceDir = storeSnap.tabs.find(tab => tab.id === storeSnap.activeTabId)?.workspaceDir;
+      const workspaceDir = currentDirectoryForPane(pane, paneWorkspaceDir || activeTabWorkspaceDir || storeSnap.workspaceDir);
+      if (typeof workspaceDir === 'string' && workspaceDir.trim() && paneCwd !== workspaceDir.trim()) {
+        useWorkspaceStore.getState().updatePaneDataByTerminalId(terminalId, { cwd: workspaceDir.trim() });
+      }
       const boundNodeId = typeof pane.data?.nodeId === 'string' ? pane.data.nodeId : null;
       // Read CLI from globalGraph (authoritative) by matching terminalId. pane.data.cli can
       // be stale when the CLI was changed in workflow mode while the app was in workspace mode,
@@ -252,7 +263,7 @@ export function TerminalPane({ pane, dragEndSeq }: { pane: Pane; dragEndSeq?: nu
 
       refitUnlisten = await listen<{ terminalId: string }>('terminal-refit-requested', (event) => {
         if (disposed) return;
-        if (event.payload.terminalId !== terminalId) return;
+        if (normalizeTerminalId(event.payload.terminalId) !== terminalId) return;
         if (terminalElement.offsetWidth === 0 || terminalElement.offsetHeight === 0) return;
         fit.fit();
         publishTerminalSize();
@@ -275,7 +286,7 @@ export function TerminalPane({ pane, dragEndSeq }: { pane: Pane; dragEndSeq?: nu
       const ptyAlreadyExists = await invoke<boolean>('is_pty_active', { id: terminalId }).catch(() => false);
       const runtimeManaged = runtimeManagedByFlag || runtimeManagedByBinding || ptyAlreadyExists;
       if (ptyAlreadyExists && !runtimeManagedByFlag) {
-        console.log(`[TerminalPane] PTY pre-exists — treating as runtime-managed terminal=${terminalId}`);
+        terminalDebugLog(`[TerminalPane] PTY pre-exists — treating as runtime-managed terminal=${terminalId}`);
       }
 
       await invoke('register_pty_runtime_metadata', {
@@ -285,14 +296,14 @@ export function TerminalPane({ pane, dragEndSeq }: { pane: Pane; dragEndSeq?: nu
         cli: typeof cli === 'string' ? cli : 'generic',
       }).catch(() => {});
 
-      console.log(`[TerminalPane] Auto-launch check for ${pane.id} (${terminalId})`, { customCommand, cli, runtimeManaged, spawned: false });
+      terminalDebugLog(`[TerminalPane] Auto-launch check for ${pane.id} (${terminalId})`, { customCommand, cli, runtimeManaged, spawned: false });
 
       const trySpawnPty = async (opts: Parameters<typeof invoke>[1]): Promise<boolean> => {
         try {
           return await invoke<boolean>('spawn_pty', opts);
         } catch (err) {
           if (String(err).includes('already exists')) {
-            console.log(`[TerminalPane] PTY already exists for ${terminalId} — attaching to existing`);
+            terminalDebugLog(`[TerminalPane] PTY already exists for ${terminalId} — attaching to existing`);
             return false;
           }
           throw err;
@@ -304,7 +315,7 @@ export function TerminalPane({ pane, dragEndSeq }: { pane: Pane; dragEndSeq?: nu
           return await invoke<boolean>('spawn_pty_with_command', opts);
         } catch (err) {
           if (String(err).includes('already exists')) {
-            console.log(`[TerminalPane] PTY already exists for ${terminalId} — attaching to existing`);
+            terminalDebugLog(`[TerminalPane] PTY already exists for ${terminalId} — attaching to existing`);
             return false;
           }
           throw err;
@@ -313,7 +324,7 @@ export function TerminalPane({ pane, dragEndSeq }: { pane: Pane; dragEndSeq?: nu
 
       if (runtimeManaged) {
         // RuntimeManager owns spawning for this terminal — attach only, no spawn.
-        console.log(`[TerminalPane] runtimeManaged=true; skipping spawn for ${terminalId}`);
+        terminalDebugLog(`[TerminalPane] runtimeManaged=true; skipping spawn for ${terminalId}`);
         if (replayChunks.length === 0) {
           // Only ask the backend for a startup flush if the global output bus
           // has nothing to replay. Otherwise resize can duplicate buffered shell
@@ -328,7 +339,7 @@ export function TerminalPane({ pane, dragEndSeq }: { pane: Pane; dragEndSeq?: nu
               safePtyInvoke('resize_pty', { id: terminalId, rows, cols });
               terminalInstance.current.refresh(0, rows - 1);
               terminalInstance.current.scrollToBottom();
-              if (shouldLog) console.log(`[TerminalPane] post-attach flush triggered terminal=${terminalId}`);
+              if (shouldLog) terminalDebugLog(`[TerminalPane] post-attach flush triggered terminal=${terminalId}`);
             }, delay);
             attachFlushTimers.push(timer);
           };
@@ -345,7 +356,7 @@ export function TerminalPane({ pane, dragEndSeq }: { pane: Pane; dragEndSeq?: nu
           args: Array.isArray(pane.data?.customCliArgs) ? pane.data?.customCliArgs : [],
           env: pane.data?.customCliEnv ?? null,
         });
-        console.log(`[TerminalPane] Spawned with command: ${spawned}`, customCommand);
+        terminalDebugLog(`[TerminalPane] Spawned with command: ${spawned}`, customCommand);
       } else if (cli && cli !== 'custom') {
         const command = String(cli).replace(/\0/g, '');
         // For known CLIs in "interactive PTY" mode, we spawn a default shell
@@ -357,7 +368,7 @@ export function TerminalPane({ pane, dragEndSeq }: { pane: Pane; dragEndSeq?: nu
           cols: term.cols || 80,
           cwd: workspaceDir,
         });
-        console.log(`[TerminalPane] Spawned default shell: ${spawned} for CLI ${command}`);
+        terminalDebugLog(`[TerminalPane] Spawned default shell: ${spawned} for CLI ${command}`);
 
         // Only send the CLI launch command if we actually spawned a new PTY
         // and it's not managed by RuntimeManager (which handles its own booting).
@@ -379,7 +390,7 @@ export function TerminalPane({ pane, dragEndSeq }: { pane: Pane; dragEndSeq?: nu
                 );
             const cliAlreadyRunning = latestPane?.data?.cliSource === 'stdout' || latestPane?.data?.cliSource === 'connect_agent';
             if (!hasPaneSessionId && !hasStoreBinding && !cliAlreadyRunning && !isRuntimeManaged) {
-              console.log(`[TerminalPane] Auto-launching CLI: ${command}`);
+              terminalDebugLog(`[TerminalPane] Auto-launching CLI: ${command}`);
               invoke('write_to_pty', { id: terminalId, data: `${command}\r` }).catch(() => {});
             }
           }, 600);
@@ -391,14 +402,15 @@ export function TerminalPane({ pane, dragEndSeq }: { pane: Pane; dragEndSeq?: nu
           cols: term.cols || 80,
           cwd: workspaceDir,
         });
-        console.log(`[TerminalPane] Spawned empty shell: ${spawned}`);
+        terminalDebugLog(`[TerminalPane] Spawned empty shell: ${spawned}`);
       }
 
       const initialCommand = pane.data?.initialCommand;
       if (initialCommand) {
         // Small delay to ensure the shell is ready to receive input
         setTimeout(() => {
-          safePtyInvoke('write_to_pty', { id: terminalId, data: initialCommand + '\r' });
+          const shouldRun = pane.data?.initialCommandShouldRun === true;
+          safePtyInvoke('write_to_pty', { id: terminalId, data: initialCommand + (shouldRun ? '\r' : '') });
         }, 1000);
       }
 
@@ -453,14 +465,16 @@ export function TerminalPane({ pane, dragEndSeq }: { pane: Pane; dragEndSeq?: nu
 
     const bindFocus = async () => {
       unlisten = await listen<{ terminalId: string }>('focus-terminal', (event) => {
-        if (event.payload.terminalId !== terminalId) return;
+        if (normalizeTerminalId(event.payload.terminalId) !== terminalId) return;
         terminalInstance.current?.focus();
         terminalInstance.current?.scrollToBottom();
         emit('terminal-focused', { terminalId }).catch(() => {});
       });
     };
 
-    bindFocus();
+    bindFocus().catch(err => {
+      console.debug('[TerminalPane] focus listener unavailable in this runtime', err);
+    });
 
     return () => {
       if (unlisten) unlisten();
@@ -530,9 +544,15 @@ export function TerminalPane({ pane, dragEndSeq }: { pane: Pane; dragEndSeq?: nu
       case 'clear':
         term.clear();
         break;
-      case 'split':
-        useWorkspaceStore.getState().addPane('terminal', 'Terminal');
+      case 'split': {
+        const store = useWorkspaceStore.getState();
+        const activeTab = store.tabs.find(tab => tab.id === store.activeTabId);
+        const panes = activeTab?.panes ?? [];
+        const workspaceDir = activeTab?.workspaceDir ?? store.workspaceDir;
+        const cwd = currentDirectoryForPane(pane, workspaceDir);
+        store.addPane('terminal', nextTerminalTitle(panes), { cwd: cwd ?? undefined });
         break;
+      }
     }
   };
 

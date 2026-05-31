@@ -6,7 +6,8 @@ import {
   buildCodexInteractiveLaunchArgs,
   buildCodexInteractiveLaunchCommand,
 } from '../.tmp-tests/lib/cliCommandBuilders.js';
-import { supportsHeadless } from '../.tmp-tests/lib/cliIdentity.js';
+import { normalizeCliId, supportsHeadless } from '../.tmp-tests/lib/cliIdentity.js';
+import { isModelCliId } from '../.tmp-tests/lib/models/modelTypes.js';
 import { codexAdapter } from '../.tmp-tests/lib/runtime/adapters/codex.js';
 import {
   assessPostAckTerminalProgress,
@@ -14,6 +15,7 @@ import {
   isMeaningfulPostAckMcpEvent,
 } from '../.tmp-tests/lib/runtime/RuntimeProgressWatchdog.js';
 import { checkMcpHealthDetailed } from '../.tmp-tests/lib/runtime/TerminalRuntime.js';
+import { buildCometRuntimeEnv, readCometEnv } from '../.tmp-tests/lib/runtimeEnv.js';
 import { buildStartAgentRunRequest } from '../.tmp-tests/lib/runtimeDispatcher.js';
 
 function payload(overrides = {}) {
@@ -72,6 +74,8 @@ run('custom command builder preserves prompt file and runtime variables', () => 
   assert.equal(command.command, 'node');
   assert.deepEqual(command.args, ['worker.mjs', '{promptPath}', '{mcpUrl}', '{sessionId}']);
   assert.equal(command.promptDelivery, 'arg_file');
+  assert.equal(command.env.COMET_SESSION_ID, 'session:mission:node:1');
+  assert.equal(command.env.COMET_EXECUTION_MODE, 'streaming_headless');
   assert.equal(command.env.TD_SESSION_ID, 'session:mission:node:1');
   assert.equal(command.env.TD_EXECUTION_MODE, 'streaming_headless');
 });
@@ -97,11 +101,56 @@ run('runtime dispatcher materializes non-path variables and keeps promptPath for
   assert.equal(request.prompt, 'hello');
 });
 
+run('Comet runtime env reads prefixed keys without dropping legacy compatibility', () => {
+  const env = buildCometRuntimeEnv({
+    sessionId: 'session-1',
+    mcpUrl: 'http://localhost:3741/mcp',
+    attempt: 2,
+  });
+
+  assert.equal(env.COMET_SESSION_ID, 'session-1');
+  assert.equal(env.TD_SESSION_ID, 'session-1');
+  assert.equal(readCometEnv(env, 'COMET_MCP_URL'), 'http://localhost:3741/mcp');
+  assert.equal(readCometEnv(env, 'td_attempt'), '2');
+  assert.equal(readCometEnv({ LOCAL_HTTP_URL: 'http://localhost:11434/v1' }, 'COMET_LOCAL_HTTP_URL', 'LOCAL_HTTP_URL'), 'http://localhost:11434/v1');
+});
+
+run('Comet runtime env sanitizes blank and nul-containing values', () => {
+  const env = buildCometRuntimeEnv({
+    sessionId: ' session-1\u0000 ',
+    agentId: ' \u0000 ',
+    missionId: 'mission-1',
+    nodeId: '\u0000node-1 ',
+    attempt: 0,
+  });
+
+  assert.equal(env.COMET_SESSION_ID, 'session-1');
+  assert.equal(env.TD_SESSION_ID, 'session-1');
+  assert.equal(env.COMET_NODE_ID, 'node-1');
+  assert.equal(env.COMET_ATTEMPT, '0');
+  assert.equal(env.COMET_AGENT_ID, undefined);
+  assert.equal(readCometEnv({ COMET_SESSION_ID: ' session-2\u0000 ' }, 'COMET_SESSION_ID'), 'session-2');
+  assert.equal(readCometEnv({ FALLBACK_KEY: ' fallback\u0000 ' }, ' \u0000 ', 'FALLBACK_KEY'), 'fallback');
+});
+
 run('codex headless command is disabled for normal workflow safety', () => {
   const command = buildCliRunCommand(payload({ cliType: 'codex' }));
   assert.equal(command.command, '');
   assert.equal(command.promptDelivery, 'unsupported');
   assert.match(command.unsupportedReason, /interactive PTY/);
+});
+
+run('CLI identity normalizes common separator variants', () => {
+  assert.equal(normalizeCliId('open-code'), 'opencode');
+  assert.equal(normalizeCliId('Open Code'), 'opencode');
+  assert.equal(normalizeCliId('\u001b[36mOpen\u0000 Code\u001b[39m'), 'opencode');
+  assert.equal(normalizeCliId('LM Studio'), 'lmstudio');
+});
+
+run('model discovery support follows canonical CLI aliases without enabling local runtimes', () => {
+  assert.equal(isModelCliId('open-code'), true);
+  assert.equal(isModelCliId('LM Studio'), false);
+  assert.equal(isModelCliId('ollama'), false);
 });
 
 run('post-ack watchdog fails acknowledged stalled sessions as post_ack_no_progress', () => {
@@ -142,6 +191,26 @@ run('post-ack watchdog ignores acknowledged sessions that completed', () => {
   });
 
   assert.equal(decision.action, 'none');
+});
+
+run('post-ack watchdog treats zero warnedAt as an existing warning timestamp', () => {
+  const decision = evaluatePostAckWatchdog({
+    snapshot: {
+      acknowledgedAt: 0,
+      lastProgressAt: 0,
+      progressCount: 0,
+      mcpEventCount: 0,
+      terminalProgressCount: 0,
+      expectedFileOutputCount: 0,
+      permissionPromptCount: 0,
+      warnedAt: 0,
+    },
+    now: 120_000,
+    windowMs: 60_000,
+  });
+
+  assert.equal(decision.action, 'fail');
+  assert.equal(decision.reason, 'post_ack_no_progress');
 });
 
 run('post-ack watchdog treats progress as an extension and classifies later stalls separately', () => {
@@ -218,7 +287,7 @@ run('opencode is eligible for headless workflow execution', () => {
 
 run('opencode headless command uses official run mode with inline workflow config', () => {
   const command = buildCliRunCommand(payload({ cliType: 'opencode' }), {
-    mcpUrl: 'http://127.0.0.1:3741',
+    mcpUrl: 'http://127.0.0.1:3741#local',
     model: 'anthropic/claude-sonnet-4',
   });
 
@@ -239,9 +308,9 @@ run('opencode headless command uses official run mode with inline workflow confi
   assert.equal(command.args.includes('--no-alt-screen'), false);
 
   const config = JSON.parse(command.env.OPENCODE_CONFIG_CONTENT);
-  assert.equal(config.mcp['terminal-docks'].type, 'remote');
-  assert.equal(config.mcp['terminal-docks'].url, 'http://127.0.0.1:3741/mcp');
-  assert.equal(config.mcp['terminal-docks'].enabled, true);
+  assert.equal(config.mcp['starlink'].type, 'remote');
+  assert.equal(config.mcp['starlink'].url, 'http://127.0.0.1:3741/mcp');
+  assert.equal(config.mcp['starlink'].enabled, true);
   assert.equal(config.permission, 'allow');
 });
 
@@ -261,7 +330,7 @@ run('opencode headless dispatcher materializes activation prompt as final messag
   assert.equal(request.promptDelivery, 'arg_text');
   assert.equal(request.args.at(-1), 'NEW_TASK. call get_task_details, then complete_task.');
   assert.equal(request.args.includes('{prompt}'), false);
-  assert.equal(JSON.parse(request.env.OPENCODE_CONFIG_CONTENT).mcp['terminal-docks'].url, 'http://127.0.0.1:3741/mcp');
+  assert.equal(JSON.parse(request.env.OPENCODE_CONFIG_CONTENT).mcp['starlink'].url, 'http://127.0.0.1:3741/mcp');
 });
 
 run('opencode workflow config preserves explicit OPENCODE_CONFIG_CONTENT override', () => {
@@ -272,7 +341,7 @@ run('opencode workflow config preserves explicit OPENCODE_CONFIG_CONTENT overrid
   });
 
   assert.equal(command.env.OPENCODE_CONFIG_CONTENT, customConfig);
-  assert.equal(JSON.parse(buildOpenCodeWorkflowConfigContent('http://127.0.0.1:3741')).mcp['terminal-docks'].url, 'http://127.0.0.1:3741/mcp');
+  assert.equal(JSON.parse(buildOpenCodeWorkflowConfigContent('http://127.0.0.1:3741')).mcp['starlink'].url, 'http://127.0.0.1:3741/mcp');
 });
 
 run('codex interactive argv normalizes model and places yolo before final prompt', () => {
@@ -294,13 +363,13 @@ run('codex interactive argv normalizes model and places yolo before final prompt
     '-c',
     'sandbox_mode="danger-full-access"',
     '-c',
-    'mcp_servers.terminal-docks.url="http://127.0.0.1:3741/mcp?token=abc"',
+    'mcp_servers.starlink.url="http://127.0.0.1:3741/mcp?token=abc"',
     '-c',
-    'mcp_servers.terminal-docks.enabled=true',
+    'mcp_servers.starlink.enabled=true',
     '-c',
-    'mcp_servers.terminal-docks.startup_timeout_sec=30',
+    'mcp_servers.starlink.startup_timeout_sec=30',
     '-c',
-    'mcp_servers.terminal-docks.tool_timeout_sec=120',
+    'mcp_servers.starlink.tool_timeout_sec=120',
     '--model',
     'gpt-5.5',
     '--cd',
@@ -316,7 +385,7 @@ run('codex interactive argv can omit global MCP disables for isolated CODEX_HOME
   const args = buildCodexInteractiveLaunchArgs({
     yolo: false,
     mcpUrl: 'http://127.0.0.1:3741/mcp?token=abc',
-    bootstrapPrompt: 'Connect only to terminal docks.',
+    bootstrapPrompt: 'Connect only to Comet-AI.',
     disableKnownGlobalMcps: false,
   });
 
@@ -324,19 +393,19 @@ run('codex interactive argv can omit global MCP disables for isolated CODEX_HOME
   assert.equal(args.includes('mcp_servers.excalidraw.enabled=false'), false);
   assert.equal(args.includes('approval_policy="never"'), true);
   assert.equal(args.includes('sandbox_mode="danger-full-access"'), true);
-  assert.equal(args.includes('mcp_servers.terminal-docks.enabled=true'), true);
-  assert.equal(args.at(-1), 'Connect only to terminal docks.');
+  assert.equal(args.includes('mcp_servers.starlink.enabled=true'), true);
+  assert.equal(args.at(-1), 'Connect only to Comet-AI.');
 });
 
 run('codex interactive argv can trust an isolated workflow project', () => {
   const args = buildCodexInteractiveLaunchArgs({
     yolo: false,
-    trustedProjectDir: 'C:\\VSCODE\\terminal-docks',
+    trustedProjectDir: 'C:\\VSCODE\\comet-ai',
     bootstrapPrompt: 'Fetch the task.',
     disableKnownGlobalMcps: false,
   });
 
-  assert.equal(args.includes('projects."C:\\VSCODE\\terminal-docks".trust_level="trusted"'), true);
+  assert.equal(args.includes('projects."C:\\VSCODE\\comet-ai".trust_level="trusted"'), true);
   assert.equal(args.at(-1), 'Fetch the task.');
 });
 
@@ -367,17 +436,17 @@ run('codex shell fallback flattens the bootstrap prompt before shell quoting', (
   const command = buildCodexInteractiveLaunchCommand({
     modelId: 'gpt-5.4-mini',
     yolo: false,
-    bootstrapPrompt: 'You are a Terminal-Docks Codex runtime.\nA workflow task is ready for you.',
+    bootstrapPrompt: 'You are a Comet-AI Codex runtime.\nA workflow task is ready for you.',
   });
 
   assert.equal(
     command.startsWith(
-      'codex -c mcp_servers.pencil.enabled=false -c mcp_servers.excalidraw.enabled=false -c approval_policy="never" -c sandbox_mode="danger-full-access" --model gpt-5.4-mini --no-alt-screen ',
+      'set "CODEX_HOME=%USERPROFILE%\\.codex" && codex -c mcp_servers.pencil.enabled=false -c mcp_servers.excalidraw.enabled=false -c approval_policy="never" -c sandbox_mode="danger-full-access" --model gpt-5.4-mini --no-alt-screen ',
     ),
     true,
   );
   assert.equal(command.includes('\n'), false);
-  assert.equal(command.includes('You are a Terminal-Docks Codex runtime. A workflow task is ready for you.'), true);
+  assert.equal(command.includes('You are a Comet-AI Codex runtime. A workflow task is ready for you.'), true);
 });
 
 run('codex follow-up task signal is tiny and session-aware', () => {
@@ -421,7 +490,7 @@ run('codex permission detector ignores ordinary status output', () => {
 
 run('codex permission detector accepts MCP tool approval prompts', () => {
   const request = codexAdapter.detectPermissionRequest(
-    'Allow the terminal-docks MCP server to run tool "connect_agent"?\n' +
+    'Allow the Starlink MCP server to run tool "connect_agent"?\n' +
       '  1. Allow\n' +
       '  2. Allow for this session\n' +
       '  3. Always allow\n' +
@@ -452,14 +521,16 @@ run('codex completion detector recognizes completed turn footer', () => {
 
 run('local HTTP runtimes share the headless adapter request path', () => {
   const { request, error } = buildStartAgentRunRequest(payload({ cliType: 'ollama' }), 'hello', {
-    customEnv: { TD_LOCAL_HTTP_MODEL: 'qwen2.5-coder' },
+    customEnv: { COMET_LOCAL_HTTP_MODEL: 'qwen2.5-coder' },
     mcpUrl: 'http://localhost:3741',
   });
 
   assert.equal(error, null);
   assert.ok(request);
-  assert.equal(request.command, '__terminal_docks_local_http__');
+  assert.equal(request.command, '__comet_ai_local_http__');
   assert.equal(request.cli, 'ollama');
+  assert.equal(request.env.COMET_LOCAL_HTTP_URL, 'http://localhost:11434/v1/chat/completions');
+  assert.equal(request.env.COMET_LOCAL_HTTP_MODEL, 'qwen2.5-coder');
   assert.equal(request.env.TD_LOCAL_HTTP_URL, 'http://localhost:11434/v1/chat/completions');
   assert.equal(request.env.TD_LOCAL_HTTP_MODEL, 'qwen2.5-coder');
   assert.equal(request.prompt, 'hello');

@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const tempRoot = mkdtempSync(join(tmpdir(), 'terminal-docks-lock-tools-'));
+const tempRoot = mkdtempSync(join(tmpdir(), 'comet-ai-lock-tools-'));
 process.env.MCP_DB_PATH = join(tempRoot, 'tasks.db');
 let dbHandle = null;
 

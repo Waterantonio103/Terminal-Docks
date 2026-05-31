@@ -219,6 +219,8 @@ export function LauncherPane() {
   const allPanes = useWorkspaceStore(selectActivePanes);
   const addPane = useWorkspaceStore(s => s.addPane);
   const setAppMode = useWorkspaceStore(s => s.setAppMode);
+  const addLaunchedWorkflow = useWorkspaceStore(s => s.addLaunchedWorkflow);
+  const ensureWorkflowWorkspace = useWorkspaceStore(s => s.ensureWorkflowWorkspace);
   const updatePaneData = useWorkspaceStore(s => s.updatePaneData);
   const workspaceDir = useWorkspaceStore(s => s.workspaceDir);
   const globalGraph = useWorkspaceStore(s => s.globalGraph);
@@ -338,13 +340,13 @@ export function LauncherPane() {
 
           const cliHint =
             cli === 'claude'
-              ? `If CometAI Starlink tools are not yet available run: !claude mcp add --transport sse starlink-mcp ${mcpUrl} --scope user `
+              ? `If Starlink tools are not yet available run: !claude mcp add --transport sse starlink-mcp ${mcpUrl} --scope user `
               : cli === 'gemini'
-                ? `The MCP server uses SSE transport at ${mcpUrl}. `
+                ? `The Starlink server uses SSE transport at ${mcpUrl}. `
                 : cli === 'custom'
                   ? ((row.pane.data?.customCliMcpHint as string | undefined)
                     ? `${row.pane.data?.customCliMcpHint} `
-                    : `Add this MCP URL to your CLI config (SSE): ${mcpUrl} `)
+                    : `Add this Starlink URL to your CLI config (SSE): ${mcpUrl} `)
                   : '';
 
           const roleParam = cli === 'gemini' ? role : `${role}`;
@@ -353,7 +355,7 @@ export function LauncherPane() {
           const profileId = profile?.profileId ?? `${role}_profile`;
           const escapedWorkingDir = workspaceDir ? workspaceDir.replace(/\\/g, '\\\\') : '';
           const prompt =
-            `The CometAI Starlink server is at ${mcpUrl} (SSE). ` +
+            `The Starlink server is at ${mcpUrl} (SSE). ` +
             cliHint +
             `Graph runtime is control-plane driven: wait for NEW_TASK payloads and use mission/node-scoped tools. ` +
             `Session bootstrap: call connect_agent with role="${roleParam}", agentId="${row.pane.title}", terminalId="${terminalId}", cli="${cli}", profileId="${profileId}", capabilities=${capabilityJson}${workspaceDir ? `, workingDir="${escapedWorkingDir}"` : ''}. ` +
@@ -363,7 +365,7 @@ export function LauncherPane() {
         })
       );
 
-      setStatus(`Sent MCP bootstrap context to ${targets.length} terminal(s).`);
+      setStatus(`Sent Starlink bootstrap context to ${targets.length} terminal(s).`);
     } catch (error) {
       setStatus(`Error: ${error}`);
     } finally {
@@ -561,6 +563,18 @@ export function LauncherPane() {
         const { missionOrchestrator } = await import('../../lib/workflow/MissionOrchestrator');
         await invoke('seed_mission_to_db', { missionId: pendingLaunch.missionId, graph: pendingLaunch.mission });
         await missionOrchestrator.launchMission(pendingLaunch.mission);
+        const workflowDescriptor = {
+          missionId: pendingLaunch.missionId,
+          workflowId: pendingLaunch.mission.graphId,
+          name: task.trim() || 'Launcher Mission',
+          subMode: pendingLaunch.mission.metadata.authoringMode ?? 'graph',
+          mode: pendingLaunch.mission.metadata.authoringMode ?? 'graph',
+          agentCount: pendingLaunch.mission.nodes.length,
+          workspaceDir: pendingLaunch.mission.task.workspaceDir,
+          launchedAt: Date.now(),
+        };
+        addLaunchedWorkflow(workflowDescriptor);
+        ensureWorkflowWorkspace(workflowDescriptor);
 
         addPane('missioncontrol', 'Mission Control', {
           taskDescription: task.trim(),
@@ -568,7 +582,7 @@ export function LauncherPane() {
           missionId: pendingLaunch.missionId,
           mission: pendingLaunch.mission,
         });
-        setAppMode('runtime');
+        setAppMode('workspace');
 
         const modeLabel = pendingLaunch.mission.metadata.authoringMode ?? 'graph';
         setStatus(`Launched ${pendingLaunch.startTerminalIds.length} start node(s) in ${modeLabel} mode. Mission Control opened.`);

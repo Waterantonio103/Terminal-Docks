@@ -69,21 +69,21 @@ const CONTRACTS: Record<SupportedRuntimeCli, RuntimeBootstrapContract> = {
     endpoint: '/internal/push',
     registrationType: 'runtime_bootstrap',
     handshakeEvent: 'agent:ready',
-    notes: 'Custom headless commands receive Terminal Docks runtime identifiers in the environment.',
+    notes: 'Custom headless commands receive Comet-AI runtime identifiers in the environment.',
   },
   ollama: {
     cli: 'ollama',
     endpoint: '/internal/push',
     registrationType: 'runtime_bootstrap',
     handshakeEvent: 'agent:ready',
-    notes: 'Local HTTP runtime registered by Terminal Docks; task ACK and completion are reported by the adapter.',
+    notes: 'Local HTTP runtime registered by Comet-AI; task ACK and completion are reported by the adapter.',
   },
   lmstudio: {
     cli: 'lmstudio',
     endpoint: '/internal/push',
     registrationType: 'runtime_bootstrap',
     handshakeEvent: 'agent:ready',
-    notes: 'OpenAI-compatible local HTTP runtime registered by Terminal Docks; task ACK and completion are reported by the adapter.',
+    notes: 'OpenAI-compatible local HTTP runtime registered by Comet-AI; task ACK and completion are reported by the adapter.',
   },
 };
 

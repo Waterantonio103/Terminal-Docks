@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { compileMission, validateGraph } from '../.tmp-tests/lib/graphCompiler.js';
 import {
   buildPresetFlowGraph,
+  getPresetNodeTerminalTitle,
   getPresetSpecMetadata,
   getPresetReadmeDefault,
   getRecommendedWorkflowPreset,
@@ -11,6 +12,7 @@ import {
   listWorkflowPresets,
   sortWorkflowPresets,
 } from '../.tmp-tests/lib/workflowPresets.js';
+import { detectRoleForPane, detectRoleFromText } from '../.tmp-tests/lib/cliDetection.js';
 
 function taskNode(id = 'task-1') {
   return {
@@ -312,6 +314,98 @@ run('preset-expanded graphs use evenly spaced layer layout', () => {
   assert.deepEqual(byId.get('builder')?.position, { x: 1680, y: 100 });
   assert.deepEqual(byId.get('tester')?.position, { x: 1680, y: 620 });
   assert.deepEqual(byId.get('reviewer')?.position, { x: 2240, y: 360 });
+});
+
+run('docs preset mission titles ignore stale frontend terminal pane names', () => {
+  const preset = getWorkflowPreset('docs_refresh_small');
+  assert.ok(preset, 'docs_refresh_small preset must exist');
+
+  const flow = buildPresetFlowGraph({
+    preset,
+    missionId: 'docs-title-mission',
+    prompt: 'Refresh the agent documentation',
+    mode: 'edit',
+    workspaceDir: 'C:/workspace',
+    instructionOverrides: {},
+    bindingsByRole: {
+      scout: { terminalId: 'term-scout', terminalTitle: 'Product Agent' },
+      builder: { terminalId: 'term-builder', terminalTitle: 'Product Agent' },
+      reviewer: { terminalId: 'term-reviewer', terminalTitle: 'Product Agent' },
+    },
+  });
+
+  const mission = compileMission({
+    graphId: 'preset:docs_refresh_small',
+    missionId: 'docs-title-mission',
+    nodes: flow.nodes,
+    edges: flow.edges,
+    workspaceDirFallback: 'C:/workspace',
+    compiledAt: 123,
+    authoringMode: 'preset',
+    presetId: 'docs_refresh_small',
+    runVersion: 1,
+  });
+
+  assert.deepEqual(mission.nodes.map(node => node.roleId), ['scout', 'builder', 'reviewer']);
+  assert.deepEqual(mission.nodes.map(node => node.terminal.terminalTitle), ['Scout', 'Builder', 'Reviewer']);
+});
+
+run('all non-frontend preset modes use role-correct titles even with stale product pane names', () => {
+  const staleBindings = {
+    scout: { terminalId: 'term-scout', terminalTitle: 'Product Agent' },
+    coordinator: { terminalId: 'term-coordinator', terminalTitle: 'Product Agent' },
+    builder: { terminalId: 'term-builder', terminalTitle: 'Product Agent' },
+    tester: { terminalId: 'term-tester', terminalTitle: 'Product Agent' },
+    security: { terminalId: 'term-security', terminalTitle: 'Product Agent' },
+    reviewer: { terminalId: 'term-reviewer', terminalTitle: 'Product Agent' },
+    interaction_qa: { terminalId: 'term-interaction', terminalTitle: 'Product Agent' },
+    accessibility_reviewer: { terminalId: 'term-accessibility', terminalTitle: 'Product Agent' },
+  };
+  const coveredModes = new Set();
+
+  for (const preset of listWorkflowPresets()) {
+    if (preset.specProfile === 'frontend_three_file' || preset.frontendMode) continue;
+    coveredModes.add(preset.mode);
+    const flow = buildPresetFlowGraph({
+      preset,
+      missionId: `mode-title-${preset.id}`,
+      prompt: `Run ${preset.name}`,
+      mode: 'edit',
+      workspaceDir: 'C:/workspace',
+      instructionOverrides: {},
+      bindingsByRole: staleBindings,
+    });
+    const mission = compileMission({
+      graphId: `preset:${preset.id}`,
+      missionId: `mode-title-${preset.id}`,
+      nodes: flow.nodes,
+      edges: flow.edges,
+      workspaceDirFallback: 'C:/workspace',
+      compiledAt: 123,
+      authoringMode: 'preset',
+      presetId: preset.id,
+      runVersion: 1,
+    });
+
+    for (const node of mission.nodes) {
+      const presetNode = preset.nodes.find(entry => entry.id === node.id);
+      assert.ok(presetNode, `${preset.id}: preset node exists for ${node.id}`);
+      assert.equal(node.terminal.terminalTitle, getPresetNodeTerminalTitle(presetNode), `${preset.id}: title for ${node.id}`);
+      assert.notEqual(node.terminal.terminalTitle, 'Product Agent', `${preset.id}: stale Product Agent title not reused for ${node.id}`);
+    }
+  }
+
+  assert.deepEqual([...coveredModes].sort(), ['build', 'document', 'plan', 'research', 'review', 'secure', 'verify']);
+});
+
+run('role detection recognizes every preset role name instead of falling back to stale generic roles', () => {
+  const allPresetRoleIds = new Set(listWorkflowPresets().flatMap(preset => preset.nodes.map(node => node.roleId)));
+  for (const roleId of allPresetRoleIds) {
+    const title = getPresetNodeTerminalTitle({ id: roleId, roleId });
+    assert.equal(detectRoleFromText(title), roleId, `detect text title ${title}`);
+    assert.equal(detectRoleForPane({ title, data: {} }), roleId, `detect pane title ${title}`);
+    assert.equal(detectRoleForPane({ title: 'Stale Product Agent', data: { roleId } }), roleId, `detect data role ${roleId}`);
+  }
 });
 
 run('frontend preset compiles with explicit UI roles and metadata', () => {

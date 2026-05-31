@@ -1,0 +1,42 @@
+import assert from 'node:assert/strict';
+import { normalizePreviewUrl, previewUrlEquals } from '../.tmp-tests/lib/previewUrl.js';
+
+assert.equal(normalizePreviewUrl('localhost:5173'), 'http://localhost:5173');
+assert.equal(normalizePreviewUrl('[localhost:5173/]'), 'http://localhost:5173');
+assert.equal(normalizePreviewUrl('{localhost:5173/}'), 'http://localhost:5173');
+assert.equal(normalizePreviewUrl('\u001b[36mhttp://localhost:5173/\u001b[39m'), 'http://localhost:5173');
+assert.equal(normalizePreviewUrl('http://localhost:5173/\u0000'), 'http://localhost:5173');
+assert.equal(normalizePreviewUrl('0.0.0.0:1420'), 'http://localhost:1420');
+assert.equal(normalizePreviewUrl('[::1]:1420'), 'http://[::1]:1420');
+assert.equal(normalizePreviewUrl('[http://[::1]:1420/]'), 'http://[::1]:1420');
+assert.equal(normalizePreviewUrl('[http://[::1]:1420/app/]'), 'http://[::1]:1420/app');
+assert.equal(normalizePreviewUrl('docs.localhost:8080/help'), 'http://docs.localhost:8080/help');
+assert.equal(normalizePreviewUrl('192.168.1.25:5173/'), 'http://192.168.1.25:5173');
+assert.equal(normalizePreviewUrl('http://localhost:5173'), 'http://localhost:5173');
+assert.equal(normalizePreviewUrl('http://0.0.0.0:1420/'), 'http://localhost:1420');
+assert.equal(normalizePreviewUrl('http://8.8.8.8:5173/'), 'http://8.8.8.8:5173/');
+assert.equal(normalizePreviewUrl('file:///C:/tmp/preview.html'), 'file:///C:/tmp/preview.html');
+assert.equal(normalizePreviewUrl('<file:///C:/tmp/preview.html>'), 'file:///C:/tmp/preview.html');
+assert.equal(normalizePreviewUrl('file://['), '');
+assert.equal(normalizePreviewUrl('example.com'), 'example.com');
+assert.equal(normalizePreviewUrl('https://example.com/app/'), 'https://example.com/app/');
+assert.equal(normalizePreviewUrl('[https://example.com/app/]'), 'https://example.com/app/');
+assert.equal(normalizePreviewUrl('\u001b[36mhttps://example.com/app/\u001b[39m'), 'https://example.com/app/');
+assert.equal(normalizePreviewUrl('https://user:pass@example.com/app/?view=preview'), 'https://example.com/app/?view=preview');
+assert.equal(normalizePreviewUrl('http://user:pass@localhost:5173/app/'), 'http://localhost:5173/app');
+assert.equal(normalizePreviewUrl('http://'), '');
+assert.equal(normalizePreviewUrl('https://bad host'), '');
+assert.equal(normalizePreviewUrl('javascript:alert(1)'), '');
+assert.equal(normalizePreviewUrl('data:text/html,<h1>preview</h1>'), '');
+assert.equal(normalizePreviewUrl('mailto:test@example.com'), '');
+assert.equal(normalizePreviewUrl(null), '');
+
+assert.equal(previewUrlEquals('localhost:5173/', 'http://0.0.0.0:5173'), true);
+assert.equal(previewUrlEquals('{http://localhost:5173/app/}', 'http://localhost:5173/app'), true);
+assert.equal(previewUrlEquals('http://LOCALHOST:5173/app/', '[http://localhost:5173/app]'), true);
+assert.equal(previewUrlEquals('http://localhost:5173', 'http://localhost:5174'), false);
+assert.equal(previewUrlEquals('', 'http://localhost:5173'), false);
+assert.equal(previewUrlEquals('https://example.com/app/', 'https://example.com/app'), false);
+assert.equal(previewUrlEquals('javascript:alert(1)', 'javascript:alert(1)'), false);
+
+console.log('PASS preview URL normalization matches local server rules');

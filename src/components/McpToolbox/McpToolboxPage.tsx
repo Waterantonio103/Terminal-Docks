@@ -164,7 +164,9 @@ interface McpProbeResult {
 }
 
 const MCP_PROTOCOL_VERSION = '2025-11-25';
-const TOOL_CONFIG_STORAGE_KEY = 'td:mcp-toolbox:tool-config:v1';
+const TOOL_CONFIG_STORAGE_KEY = 'comet-ai:starlink-toolbox:tool-config:v1';
+const LEGACY_TOOL_CONFIG_STORAGE_KEY = 'td:mcp-toolbox:tool-config:v1';
+const PROXY_RESOURCE_SCHEMES = ['starlink-mcp://', 'td-mcp://'];
 const SOURCE_ID_RE = /^[a-z][a-z0-9_]{1,31}$/;
 const AGENT_ROLES = agentsConfig.agents.map(agent => ({ id: agent.id, name: agent.name }));
 const CONFIRMATION_OPTIONS: Array<{ value: ToolConfirmationMode; label: string }> = [
@@ -215,7 +217,7 @@ async function postMcpRpc(url: string, body: JsonObject, sessionId?: string): Pr
     body: JSON.stringify(body),
   });
   const text = await response.text();
-  if (!response.ok) throw new Error(text || `MCP request failed with HTTP ${response.status}`);
+  if (!response.ok) throw new Error(text || `Starlink request failed with HTTP ${response.status}`);
   return { data: parseRpcPayload(text), sessionId: response.headers.get('mcp-session-id') ?? sessionId };
 }
 
@@ -228,10 +230,10 @@ async function listStarlinkTools(): Promise<McpToolDescriptor[]> {
     params: {
       protocolVersion: MCP_PROTOCOL_VERSION,
       capabilities: {},
-      clientInfo: { name: 'terminal-docks-mcp-toolbox', version: '0.1.0' },
+      clientInfo: { name: 'starlink-toolbox', version: '0.1.0' },
     },
   });
-  if (!initialized.sessionId) throw new Error('MCP initialize did not return a session id.');
+  if (!initialized.sessionId) throw new Error('Starlink handshake did not return a session id.');
   await postMcpRpc(mcpUrl, { jsonrpc: '2.0', method: 'notifications/initialized', params: {} }, initialized.sessionId);
   const listed = await postMcpRpc(mcpUrl, { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} }, initialized.sessionId);
   const result = listed.data.result;
@@ -257,17 +259,17 @@ async function listStarlinkResources(): Promise<McpResourceDescriptor[]> {
     params: {
       protocolVersion: MCP_PROTOCOL_VERSION,
       capabilities: {},
-      clientInfo: { name: 'terminal-docks-mcp-toolbox', version: '0.1.0' },
+      clientInfo: { name: 'starlink-toolbox', version: '0.1.0' },
     },
   });
-  if (!initialized.sessionId) throw new Error('MCP initialize did not return a session id.');
+  if (!initialized.sessionId) throw new Error('Starlink handshake did not return a session id.');
   await postMcpRpc(mcpUrl, { jsonrpc: '2.0', method: 'notifications/initialized', params: {} }, initialized.sessionId);
   const listed = await postMcpRpc(mcpUrl, { jsonrpc: '2.0', id: 3, method: 'resources/list', params: {} }, initialized.sessionId);
   const result = listed.data.result;
   if (!isJsonObject(result) || !Array.isArray(result.resources)) return [];
   return result.resources
     .filter((resource): resource is JsonObject => isJsonObject(resource) && typeof resource.uri === 'string')
-    .filter(resource => !String(resource.uri).startsWith('td-mcp://'))
+    .filter(resource => !PROXY_RESOURCE_SCHEMES.some(scheme => String(resource.uri).startsWith(scheme)))
     .map(resource => ({
       uri: String(resource.uri),
       name: typeof resource.name === 'string' ? resource.name : undefined,
@@ -323,6 +325,12 @@ function splitArgs(text: string): string[] {
 function sourceHealthLabel(source: Pick<BackendSource, 'status' | 'lastDiscoveredAt' | 'archived'>): string {
   if (source.archived) return 'Archived';
   return `${source.status} · Last discovery ${formatTimestamp(source.lastDiscoveredAt)}`;
+}
+
+function formatProbeStatus(status: string): string {
+  if (status === 'valid_mcp') return 'Valid Starlink endpoint';
+  if (status === 'possible_mcp_sse') return 'Possible Starlink SSE endpoint';
+  return status.replace(/_/g, ' ');
 }
 
 function statusFor(enabled: boolean, sourceStatus: string, toolStatus: string): ToolView['status'] {
@@ -451,7 +459,7 @@ function formatRelativeTime(timestamp: number): string {
 
 function readLegacyConfig(): Record<string, unknown> | null {
   try {
-    const raw = window.localStorage.getItem(TOOL_CONFIG_STORAGE_KEY);
+    const raw = window.localStorage.getItem(TOOL_CONFIG_STORAGE_KEY) ?? window.localStorage.getItem(LEGACY_TOOL_CONFIG_STORAGE_KEY);
     if (!raw) return null;
     const parsed = JSON.parse(raw) as unknown;
     return isJsonObject(parsed) ? parsed : null;
@@ -485,7 +493,7 @@ const emptyAddDraft = (): AddSourceDraft => ({
   probeResults: [],
 });
 
-export function McpToolboxPage() {
+export function StarlinkToolboxPage() {
   const [sources, setSources] = useState<SourceView[]>([]);
   const [selectedSourceId, setSelectedSourceId] = useState('starlink');
   const [selectedToolName, setSelectedToolName] = useState<string | null>(null);
@@ -519,6 +527,7 @@ export function McpToolboxPage() {
           body: JSON.stringify({ configByTool: legacy }),
         }).catch(() => {});
         window.localStorage.removeItem(TOOL_CONFIG_STORAGE_KEY);
+        window.localStorage.removeItem(LEGACY_TOOL_CONFIG_STORAGE_KEY);
       }
 
       const [registry, starlinkTools, starlinkResources, approvalPayload] = await Promise.all([
@@ -582,8 +591,8 @@ export function McpToolboxPage() {
     : feed.filter(item => item.sourceId === eventFilterSourceId || item.tool.startsWith(`${eventFilterSourceId}:`) || item.tool.startsWith(`${eventFilterSourceId}_`));
 
   const toolbarText = useMemo(() => {
-    if (loading) return 'Syncing MCP sources.';
-    if (error) return 'MCP source registry is unavailable.';
+    if (loading) return 'Syncing Starlink sources.';
+    if (error) return 'Starlink source registry is unavailable.';
     const sourceCount = sources.filter(source => !source.archived).length;
     const toolCount = sources.reduce((sum, source) => sum + source.toolCount, 0);
     const resourceCount = sources.reduce((sum, source) => sum + source.resourceCount, 0);
@@ -789,11 +798,11 @@ export function McpToolboxPage() {
         <aside className="td-mcp-sidebar">
           <div className="td-mcp-sidebar-header">
             <Wrench size={14} />
-            <span>MCP Sources</span>
+            <span>Starlink Sources</span>
           </div>
           <button type="button" className="td-mcp-add-source" onClick={() => setAddDraft(emptyAddDraft())}>
             <Plus size={13} />
-            Add MCP Source
+            Add Starlink Source
           </button>
           <div className="td-mcp-server-list">
             {sources.map(source => (
@@ -934,8 +943,8 @@ export function McpToolboxPage() {
             <aside className="td-mcp-call-feed">
               <div className="td-mcp-call-feed-header">
                 <Bot size={14} />
-                <span>Live MCP Events</span>
-                <select value={eventFilterSourceId} onChange={event => setEventFilterSourceId(event.target.value)} aria-label="Filter MCP events by source">
+                <span>Live Starlink Events</span>
+                <select value={eventFilterSourceId} onChange={event => setEventFilterSourceId(event.target.value)} aria-label="Filter Starlink events by source">
                   <option value="all">All</option>
                   {sources.map(source => <option key={source.id} value={source.id}>{source.displayName}</option>)}
                 </select>
@@ -1165,11 +1174,11 @@ export function McpToolboxPage() {
             )}
 
             {addDraft && (
-              <div className="td-mcp-config-sheet" role="dialog" aria-modal="true" aria-label="Add MCP Source">
+              <div className="td-mcp-config-sheet" role="dialog" aria-modal="true" aria-label="Add Starlink Source">
                 <div className="td-mcp-config-panel td-mcp-add-panel">
                   <header>
                     <div>
-                      <span>Add MCP Source</span>
+                      <span>Add Starlink Source</span>
                       <strong>{addDraft.step === 1 ? 'Choose source type' : addDraft.step === 2 ? 'Remote HTTP/SSE source' : 'Review discovery'}</strong>
                     </div>
                     <button type="button" aria-label="Close add source" onClick={() => setAddDraft(null)}>
@@ -1180,9 +1189,9 @@ export function McpToolboxPage() {
                     {addDraft.step === 1 && (
                       <>
                         {[
-                          ['remote', 'Remote HTTP/SSE MCP', 'Connect a local, private-network, or trusted authenticated HTTP MCP endpoint.'],
-                          ['stdio', 'Stdio MCP command', 'Launch and supervise a local MCP server process over stdio.'],
-                          ['managed', 'Managed local MCP', 'Use the managed Node stdio integration when a known local command is selected.'],
+                          ['remote', 'Remote HTTP/SSE source', 'Connect a local, private-network, or trusted authenticated Starlink-compatible endpoint.'],
+                          ['stdio', 'Stdio command', 'Launch and supervise a local Starlink-compatible server process over stdio.'],
+                          ['managed', 'Managed local source', 'Use the managed Node stdio integration when a known local command is selected.'],
                         ].map(([type, title, description]) => (
                           <button
                             key={type}
@@ -1210,7 +1219,7 @@ export function McpToolboxPage() {
                         {addDraft.type === 'remote' ? (
                           <>
                             <label>
-                              <span>MCP URL</span>
+                              <span>Endpoint URL</span>
                               <input value={addDraft.url} placeholder="http://127.0.0.1:3001/mcp" onChange={event => setAddDraft({ ...addDraft, url: event.target.value })} />
                             </label>
                             <div className="td-mcp-prober">
@@ -1237,7 +1246,7 @@ export function McpToolboxPage() {
                                       className={`td-mcp-probe-result ${result.status === 'valid_mcp' ? 'valid' : result.status === 'possible_mcp_sse' ? 'possible' : ''}`}
                                       onClick={() => setAddDraft({ ...addDraft, url: result.url })}
                                     >
-                                      <strong>{result.status.replace(/_/g, ' ')}</strong>
+                                      <strong>{formatProbeStatus(result.status)}</strong>
                                       <span>{result.url}</span>
                                       <em>{result.detail}</em>
                                     </button>
@@ -1342,3 +1351,5 @@ export function McpToolboxPage() {
     </div>
   );
 }
+
+export const McpToolboxPage = StarlinkToolboxPage;

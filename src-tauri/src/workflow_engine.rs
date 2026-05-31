@@ -838,17 +838,28 @@ fn persist_runtime_session(
 
 fn persist_initial_agent_run(app: &AppHandle, payload: &RuntimeActivationPayload) {
     let mut env = HashMap::new();
+    env.insert("COMET_SESSION_ID".to_string(), payload.session_id.clone());
     env.insert("TD_SESSION_ID".to_string(), payload.session_id.clone());
+    env.insert("COMET_AGENT_ID".to_string(), payload.agent_id.clone());
     env.insert("TD_AGENT_ID".to_string(), payload.agent_id.clone());
+    env.insert("COMET_MISSION_ID".to_string(), payload.mission_id.clone());
     env.insert("TD_MISSION_ID".to_string(), payload.mission_id.clone());
+    env.insert("COMET_NODE_ID".to_string(), payload.node_id.clone());
     env.insert("TD_NODE_ID".to_string(), payload.node_id.clone());
+    env.insert("COMET_ATTEMPT".to_string(), payload.attempt.to_string());
     env.insert("TD_ATTEMPT".to_string(), payload.attempt.to_string());
+    env.insert("COMET_RUN_ID".to_string(), payload.run_id.clone());
     env.insert("TD_RUN_ID".to_string(), payload.run_id.clone());
+    env.insert(
+        "COMET_EXECUTION_MODE".to_string(),
+        execution_mode_label(&payload.execution_mode).to_string(),
+    );
     env.insert(
         "TD_EXECUTION_MODE".to_string(),
         execution_mode_label(&payload.execution_mode).to_string(),
     );
     if let Some(workspace) = payload.workspace_dir.as_ref() {
+        env.insert("COMET_WORKSPACE".to_string(), workspace.clone());
         env.insert("TD_WORKSPACE".to_string(), workspace.clone());
     }
 

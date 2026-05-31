@@ -24,6 +24,7 @@ import {
   initMcpSourceRegistry,
   jsonRpcError,
   jsonRpcResult,
+  isProxyResourceUri,
   listAgentVisibleProxyResources,
   listAgentVisibleProxyTools,
   readProxyResource,
@@ -395,7 +396,7 @@ async function handleProxyToolCall(req, res, context = {}) {
 async function handleProxyResourceRead(req, res, context = {}) {
   if (!isSingleRpc(req.body, 'resources/read')) return { handled: false };
   const uri = req.body.params?.uri;
-  if (typeof uri !== 'string' || !uri.startsWith('td-mcp://')) return { handled: false };
+  if (!isProxyResourceUri(uri)) return { handled: false };
   try {
     const read = await readProxyResource(uri, context);
     if (!read.ok) {
@@ -414,7 +415,8 @@ async function handleProxyResourceRead(req, res, context = {}) {
 app.post('/internal/push', (req, res) => {
   const expected = process.env.MCP_INTERNAL_PUSH_TOKEN;
   if (!expected) return res.status(503).json({ ok: false, error: 'Internal push token not configured' });
-  if (req.headers['x-td-push-token'] !== expected) return res.status(401).json({ ok: false, error: 'Bad push token' });
+  const provided = req.headers['x-comet-push-token'] ?? req.headers['x-td-push-token'];
+  if (provided !== expected) return res.status(401).json({ ok: false, error: 'Bad push token' });
 
   const body = req.body ?? {};
 
@@ -553,5 +555,5 @@ app.delete('/mcp', async (req, res) => {
 
 const PORT = parseInt(process.env.MCP_PORT || '3741');
 app.listen(PORT, () => {
-  console.log(`MCP Server (Phase 9) listening on port ${PORT}`);
+  console.log(`Starlink MCP server listening on port ${PORT}`);
 });

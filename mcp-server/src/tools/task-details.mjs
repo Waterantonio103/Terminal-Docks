@@ -6,6 +6,7 @@ import { parseJsonSafe } from '../utils/index.mjs';
 import { getMissionNode, getMissionNodeRuntime, getRuntimeSessionByAttempt, getLegalOutgoingTargets, loadCompiledMissionRecord } from '../utils/workflow.mjs';
 import { ackTaskPush, emitAgentEvent } from '../state.mjs';
 import { buildFrontendSpecFramework } from '../utils/frontend-spec-framework.mjs';
+import { buildWorkflowPresetFramework, buildWorkflowPresetToolHints } from '../utils/workflow-preset-framework.mjs';
 
 const FINAL_README_INSTRUCTION =
   'Final README instruction: before completing, create one very short human guidance file for the work produced by this workflow. Prefer the generated app/target folder, and make the run commands start by changing into that folder. If README.md does not exist there, create README.md. If README.md already exists, do not overwrite or append to it by default; create INSTRUCTIONS.md instead. If both files already exist, update workspace context or the completion payload instead of creating another markdown file. Keep it concise: summarize the files and folders created or changed, note the main entry points, and include only the concrete run/test commands the user needs, such as cd into the created app folder and npm run dev. Do not write a long architecture rundown.';
@@ -197,7 +198,7 @@ function buildFrontendRuntimeGuidance(node, mission) {
   const nodeId = node?.id ?? '';
   const presetId = mission?.metadata?.presetId ?? mission?.task?.presetId ?? null;
   const parts = [
-    'Runtime efficiency: use get_task_details as the primary source of truth. Use get_workspace_context only for keys you still need; do not search .terminal-docks caches for tool/resource names.',
+    'Runtime efficiency: use get_task_details as the primary source of truth. Use get_workspace_context only for keys you still need; do not search .comet-ai caches for tool/resource names.',
     'For strict UI spec files, keep durable handoffs concise and complete: PRD.md about 90-140 lines, DESIGN.md about 110-170 lines, structure.md about 90-150 lines. Validate once after writing, then make only narrow patches.',
     'Use update_workspace_context for frontendSpecs/frontendPlan summaries and write_artifact only when a durable artifact is useful; submit_summary is optional.',
   ];
@@ -251,6 +252,46 @@ function buildFrontendToolHints(frontendFramework, selectedFrontendEffects) {
       builderCompletion: 'concise payload listing generated app folder and changed files',
     },
     validationPolicy: 'Validate once after writing required spec files; if accepted, do not re-run the same full-text validation.',
+  };
+}
+
+function buildPresetRuntimeGuidance(node, presetFramework) {
+  if (!presetFramework) return '';
+  const roleId = node?.roleId ?? '';
+  const lane = presetFramework.framework?.laneGuidance?.[roleId];
+  const requiredOutputs = (presetFramework.framework?.requiredOutputs ?? []).join(' ');
+  const rubric = (presetFramework.framework?.qualityRubric ?? []).join(' ');
+  return [
+    `Preset framework: ${presetFramework.mode} / ${presetFramework.subMode}. Focus: ${presetFramework.framework?.focus ?? 'role-specific workflow output'}.`,
+    lane ? `Your lane: ${lane}` : '',
+    requiredOutputs ? `Success requires: ${requiredOutputs}` : '',
+    rubric ? `Quality bar: ${rubric}` : '',
+    'Keep durable details in workspace context or downstreamPayload; create markdown artifacts only when they are genuinely useful to Mission Control or the user.',
+  ].filter(Boolean).join(' ');
+}
+
+function buildProgressReportingContract(record, node) {
+  return {
+    requiredTool: 'record_progress',
+    eventShape: {
+      missionId: record.mission.missionId,
+      nodeId: node.id,
+      phaseId: 'optional framework phase id',
+      status: ['started', 'progress', 'completed', 'blocked', 'failed'],
+      title: 'short human-readable title, 8 words max',
+      detail: 'optional plain-language sentence describing what is happening now',
+      artifactIds: [],
+      filePaths: [],
+      percentHint: 'optional advisory number 0-100',
+    },
+    rules: [
+      'Post when starting a meaningful subtask, finishing it, producing an artifact, or becoming blocked.',
+      'Use the exact graph node ID, but write for a human watching Mission Control.',
+      'Keep title short, usually 2-5 words and never more than 8 words.',
+      'Write detail as a natural status sentence, such as "Researching matrix calculation methods..." or "Checking the responsive layout...".',
+      'Avoid internal tool names, node IDs, attempt numbers, JSON-shaped prose, and long task descriptions in title/detail.',
+      'Do not send token-by-token, command-by-command, or noisy heartbeat updates.',
+    ],
   };
 }
 
@@ -438,17 +479,24 @@ export function buildTaskDetails(missionId, nodeId) {
   const frontendFramework = frontendMode !== 'off' || specProfile === 'frontend_three_file'
     ? buildFrontendSpecFramework({ categoryId: frontendCategory, mode: frontendMode === 'off' ? 'aligned' : frontendMode })
     : null;
+  const presetFramework = buildWorkflowPresetFramework({
+    presetId: record.mission.metadata?.presetId ?? null,
+  });
   const finalReadmeEnabled = isFinalReadmeEnabled(record.mission);
   const finalReadmeOwnerNodeId = finalReadmeEnabled ? selectFinalReadmeOwner(record.mission) : null;
   const isFinalReadmeOwner = Boolean(finalReadmeEnabled && finalReadmeOwnerNodeId === nodeId);
   const nodeInstructionOverride = joinInstructionParts(
     node.instructionOverride ?? '',
+    buildPresetRuntimeGuidance(node, presetFramework),
+    'Progress reporting: use record_progress for meaningful starts, completions, artifacts, and blockers. Use the exact graph node ID. Write human-readable Mission Control updates: title is a short label of 8 words or fewer, and detail is a natural sentence like "Researching matrix calculation methods..." Avoid node IDs, tool names, attempt numbers, and long task descriptions in user-visible wording.',
     frontendDirectionInstruction,
     buildFrontendRuntimeGuidance(node, record.mission),
     isFinalReadmeOwner ? FINAL_README_INSTRUCTION : '',
   );
   const workspaceContext = readWorkspaceContext(missionId);
   const frontendToolHints = buildFrontendToolHints(frontendFramework, selectedFrontendEffects);
+  const presetToolHints = buildWorkflowPresetToolHints(presetFramework);
+  const progressReportingContract = buildProgressReportingContract(record, node);
 
   return {
     missionId,
@@ -466,6 +514,7 @@ export function buildTaskDetails(missionId, nodeId) {
     frontendDirection,
     frontendDirectionReview,
     frontendFramework,
+    presetFramework,
     goal: record.mission.task?.prompt ?? '',
     objective: nodeInstructionOverride || record.mission.task?.prompt || '',
     acceptanceCriteria: node.acceptanceCriteria || [],
@@ -502,6 +551,8 @@ export function buildTaskDetails(missionId, nodeId) {
     upstreamContext,
     workspaceContext,
     frontendToolHints,
+    presetToolHints,
+    progressReportingContract,
     completionContract: {
       requiredTool: 'complete_task',
       authority: 'MCP task:completed event',
@@ -528,6 +579,9 @@ export function buildTaskDetails(missionId, nodeId) {
       frontendDirectionReview,
       frontendFramework,
       frontendToolHints,
+      presetFramework,
+      presetToolHints,
+      progressReportingContract,
       workspaceContext,
     },
   };

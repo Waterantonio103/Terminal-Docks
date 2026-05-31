@@ -17,8 +17,9 @@ import {
   X,
 } from 'lucide-react';
 import { missionRepository } from '../../lib/missionRepository.js';
-import type { ActionCenterActionId, ActionCenterItem, ActionCenterSection } from '../../lib/actionCenter/index.js';
-import { useRuntimeObserver } from '../Runtime/useRuntimeSessions.js';
+import type { ActionCenterActionId, ActionCenterItem, ActionCenterRuntimeSessionInput, ActionCenterSection } from '../../lib/actionCenter/index.js';
+import { isWorkflowNodeStatus } from '../../store/workspace.js';
+import { useRuntimeObserver, type EnrichedRuntimeSession } from '../Runtime/useRuntimeSessions.js';
 import { useActionCenterItems } from './useActionCenterItems.js';
 
 const SECTION_LABELS: Record<ActionCenterSection, string> = {
@@ -29,6 +30,25 @@ const SECTION_LABELS: Record<ActionCenterSection, string> = {
 
 function formatTime(value: number): string {
   return new Date(value).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+function toRuntimeActionSession(session: ActionCenterRuntimeSessionInput): EnrichedRuntimeSession {
+  return {
+    nodeId: session.nodeId ?? '',
+    terminalId: session.terminalId ?? '',
+    sessionId: session.sessionId,
+    missionId: session.missionId ?? '',
+    cli: session.cli ?? '',
+    executionMode: '',
+    roleId: session.roleId ?? '',
+    title: session.title ?? '',
+    status: isWorkflowNodeStatus(session.status) ? session.status : 'idle',
+    attempt: 0,
+    currentAction: session.currentAction,
+    artifacts: [],
+    startedAt: session.startedAt ?? Date.now(),
+    lastActivityAt: session.lastActivityAt ?? Date.now(),
+  };
 }
 
 function toneClasses(item: ActionCenterItem): string {
@@ -107,21 +127,7 @@ export function ActionCenterPane({ compactHeader = false }: { compactHeader?: bo
     setBusyAction(busyId);
     try {
       const session = item.sessionId ? sessions.find(candidate => candidate.sessionId === item.sessionId) : undefined;
-      const runtimeSession = session ? ({
-        ...session,
-        nodeId: session.nodeId ?? '',
-        terminalId: session.terminalId ?? '',
-        missionId: session.missionId ?? '',
-        cli: session.cli ?? '',
-        executionMode: '',
-        roleId: session.roleId ?? '',
-        title: session.title ?? '',
-        status: session.status ?? 'idle',
-        attempt: 0,
-        artifacts: [],
-        startedAt: session.startedAt ?? Date.now(),
-        lastActivityAt: session.lastActivityAt ?? Date.now(),
-      } as any) : undefined;
+      const runtimeSession = session ? toRuntimeActionSession(session) : undefined;
       if (actionId === 'approve_permission' && item.kind === 'permission') {
         await runtimeActions.resolvePermission(item.sessionId!, item.permissionId, 'approve');
       } else if (actionId === 'deny_permission' && item.kind === 'permission') {
@@ -189,12 +195,14 @@ export function ActionCenterPane({ compactHeader = false }: { compactHeader?: bo
             <button
               className="flex items-center gap-1 text-[10px] uppercase tracking-wide text-text-muted hover:text-text-primary"
               onClick={() => setExpandedRaw(prev => ({ ...prev, [item.id]: !rawExpanded }))}
+              aria-expanded={rawExpanded}
+              aria-controls={`action-raw-prompt-${item.id}`}
             >
               {rawExpanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
               Raw prompt
             </button>
             {rawExpanded && (
-              <pre className="mt-2 max-h-36 overflow-auto whitespace-pre-wrap break-words rounded border border-border-panel background-bg-app p-2 text-[10px] text-text-secondary">
+              <pre id={`action-raw-prompt-${item.id}`} className="mt-2 max-h-36 overflow-auto whitespace-pre-wrap break-words rounded border border-border-panel background-bg-app p-2 text-[10px] text-text-secondary">
                 {item.rawPrompt}
               </pre>
             )}
@@ -241,6 +249,7 @@ export function ActionCenterPane({ compactHeader = false }: { compactHeader?: bo
               onClick={refreshInbox}
               className="w-7 h-7 flex items-center justify-center rounded border border-border-panel text-text-muted hover:text-text-primary hover:background-bg-surface"
               title="Refresh delegations"
+              aria-label="Refresh delegations"
             >
               <RefreshCw size={13} />
             </button>
@@ -248,6 +257,7 @@ export function ActionCenterPane({ compactHeader = false }: { compactHeader?: bo
               onClick={clearAllRecent}
               className="w-7 h-7 flex items-center justify-center rounded border border-border-panel text-text-muted hover:text-text-primary hover:background-bg-surface"
               title="Clear recent"
+              aria-label="Clear recent"
             >
               <Trash2 size={13} />
             </button>

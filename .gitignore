@@ -20,7 +20,7 @@ dist-ssr
 # Tauri / Rust build output
 src-tauri/target*/
 src-tauri/gen/schemas
-src-tauri/.terminal-docks/
+src-tauri/.comet-ai/
 src-tauri/example*.md
 
 # Editor directories and files

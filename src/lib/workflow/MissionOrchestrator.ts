@@ -12,7 +12,10 @@
 
 import { workflowOrchestrator } from './WorkflowOrchestrator.js';
 import type { WorkflowDefinition } from './WorkflowDefinition.js';
-import { compiledMissionToDefinition } from './WorkflowDefinition.js';
+import { compiledMissionToDefinition, workflowGraphToDefinition } from './WorkflowDefinition.js';
+import type { OrchestratorEvent } from './WorkflowEvents.js';
+import type { WorkflowRun } from './WorkflowRun.js';
+import type { Artifact } from './WorkflowTypes.js';
 import { missionRepository } from '../missionRepository.js';
 import { useWorkspaceStore } from '../../store/workspace.js';
 import type { CompiledMission } from '../../store/workspace.js';
@@ -29,7 +32,8 @@ export class MissionOrchestrator {
     // Automatically tick when nodes complete or fail
     workflowOrchestrator.subscribe(async (event) => {
       const run = workflowOrchestrator.getRun(event.runId);
-      const nodeState = (event as any).nodeId ? run?.nodeStates[(event as any).nodeId] : undefined;
+      const nodeId = nodeIdForEvent(event);
+      const nodeState = nodeId ? run?.nodeStates[nodeId] : undefined;
 
       if (event.type === 'node_completed' || event.type === 'node_failed') {
         await missionRepository.appendWorkflowEvent({
@@ -42,9 +46,9 @@ export class MissionOrchestrator {
             ? `Node ${event.nodeId} completed successfully.` 
             : `Node ${event.nodeId} failed: ${event.error || 'Unknown error'}`,
           payloadJson: JSON.stringify({ 
-            outcome: (event as any).outcome, 
-            attempt: (event as any).attempt,
-            error: (event as any).error 
+            outcome: event.type === 'node_completed' ? event.outcome : 'failure',
+            attempt: event.attempt,
+            error: event.type === 'node_failed' ? event.error : undefined,
           }),
         }).catch(console.error);
 
@@ -367,7 +371,7 @@ async rejectDelegation(_missionId: string, itemId: number, reason: string): Prom
    */
   async tick(missionId: string): Promise<void> {
     const run = workflowOrchestrator.getRun(missionId);
-    if (!run || (run.status as any) !== 'running') return;
+    if (!run || run.status !== 'running') return;
 
     // 1. Check for normal node eligibility and activation
     const eligibleNodes = this.findEligibleNodes(run);
@@ -386,12 +390,13 @@ async rejectDelegation(_missionId: string, itemId: number, reason: string): Prom
     workflowOrchestrator.checkRunCompletion(run);
 
     // 2. Phase 11: Quality Gate Check
-    if (run.status === 'completed') {
-      await this.evaluateQualityGate(missionId, run);
+    const updatedRun = workflowOrchestrator.getRun(missionId);
+    if (updatedRun?.status === 'completed') {
+      await this.evaluateQualityGate(missionId, updatedRun);
     }
   }
 
-  private async evaluateQualityGate(missionId: string, run: any): Promise<void> {
+  private async evaluateQualityGate(missionId: string, run: WorkflowRun): Promise<void> {
     const qgResult = qualityGateService.evaluate(run);
     
     if (qgResult.status === 'approved') {
@@ -409,8 +414,8 @@ async rejectDelegation(_missionId: string, itemId: number, reason: string): Prom
       });
 
       // Produce final IDE result summary
-      const allArtifacts = Object.values(run.nodeStates).flatMap((ns: any) => ns.artifacts);
-      const summary = allArtifacts.find((a: any) => a.kind === 'summary' || a.kind === 'review_verdict')?.content || 'No summary available.';
+      const allArtifacts = artifactsForRun(run);
+      const summary = allArtifacts.find((a) => a.kind === 'summary' || a.kind === 'review_verdict')?.content || 'No summary available.';
       
       await missionRepository.updateMissionStatus({
           missionId,
@@ -431,7 +436,7 @@ async rejectDelegation(_missionId: string, itemId: number, reason: string): Prom
     }
   }
 
-  private findEligibleNodes(run: any): string[] {
+  private findEligibleNodes(run: WorkflowRun): string[] {
     const eligible: string[] = [];
     let runningCount = 0;
     
@@ -452,8 +457,8 @@ async rejectDelegation(_missionId: string, itemId: number, reason: string): Prom
       if (state && state.state !== 'idle') continue;
 
       // Check fan-in
-      const incomingEdges = run.definition.edges.filter((e: any) => e.toNodeId === node.id);
-      const allParentsMet = incomingEdges.length === 0 || incomingEdges.every((edge: any) => {
+      const incomingEdges = run.definition.edges.filter((e) => e.toNodeId === node.id);
+      const allParentsMet = incomingEdges.length === 0 || incomingEdges.every((edge) => {
         const parentState = run.nodeStates[edge.fromNodeId];
         if (!parentState) return false;
         if (parentState.state === 'completed') return true;
@@ -472,26 +477,18 @@ async rejectDelegation(_missionId: string, itemId: number, reason: string): Prom
 
   private getGlobalDefinition(): WorkflowDefinition {
     const graph = useWorkspaceStore.getState().globalGraph;
-    const now = new Date().toISOString();
-
-    return {
-      id: graph.id,
-      name: graph.id,
-      createdAt: now,
-      updatedAt: now,
-      nodes: graph.nodes.map(n => ({
-        id: n.id,
-        kind: (n.roleId === 'task' ? 'task' : 'agent') as any,
-        roleId: n.roleId,
-        config: n.config ?? {},
-      })),
-      edges: graph.edges.map(e => ({
-        fromNodeId: e.fromNodeId,
-        toNodeId: e.toNodeId,
-        condition: (e.condition ?? 'always') as any,
-      })),
-    };
+    return workflowGraphToDefinition(graph, graph.id);
   }
 }
 
 export const missionOrchestrator = new MissionOrchestrator();
+
+function nodeIdForEvent(event: OrchestratorEvent): string | undefined {
+  return 'nodeId' in event ? event.nodeId : undefined;
+}
+
+function artifactsForRun(run: WorkflowRun): Artifact[] {
+  return Object.values(run.nodeStates).flatMap((nodeState) =>
+    nodeState.attempts.flatMap((attempt) => attempt.artifacts),
+  );
+}

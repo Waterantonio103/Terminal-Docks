@@ -91,7 +91,7 @@ function readSnapshotSummary(pathValue) {
 
 async function captureWindowsAppWindow(outputPath, { targetWindowTitle, processName, allowTitleFallback }) {
   const escapedOutput = outputPath.replace(/'/g, "''");
-  const escapedTitle = String(targetWindowTitle || 'CometAI').replace(/'/g, "''");
+  const escapedTitle = String(targetWindowTitle || 'Comet-AI').replace(/'/g, "''");
   const escapedProcess = String(processName || '').replace(/'/g, "''");
   const fallbackLiteral = allowTitleFallback ? '$true' : '$false';
   const script = [
@@ -161,7 +161,7 @@ export function registerDebugScreenwatchTools(server, getSessionId) {
     label = 'capture',
     outputDir,
     mode = 'window',
-    targetWindowTitle = 'CometAI',
+    targetWindowTitle = 'Comet-AI',
     processName = 'comet-ai',
     allowTitleFallback = false,
   }) => {

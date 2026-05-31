@@ -1,13 +1,16 @@
 pub mod agent_run;
 pub mod db;
+pub mod fs_watcher;
 pub mod mcp;
 pub mod model_detection;
 pub mod pty;
-pub mod swarm;
+pub mod sdk_http;
 pub mod workflow;
 pub mod workflow_engine;
 pub mod workflow_log;
 pub mod workspace;
+
+use tauri::Emitter;
 
 #[tauri::command]
 fn greet(name: &str) -> String {
@@ -36,7 +39,7 @@ pub fn run() {
         .manage(pty::PtyState::new())
         .manage(agent_run::AgentRunState::new())
         .manage(mcp::McpState::new())
-        .manage(swarm::WatcherState::new())
+        .manage(fs_watcher::WatcherState::new())
         .manage(workflow_engine::WorkflowState::new())
         .invoke_handler(tauri::generate_handler![
             greet,
@@ -71,6 +74,8 @@ pub fn run() {
             db::list_artifacts,
             db::append_workflow_event,
             db::get_workflow_events,
+            db::upsert_follow_up_message,
+            db::list_follow_up_messages,
             db::list_workflow_run_history,
             db::get_workflow_run_history,
             db::create_task_inbox_item,
@@ -86,8 +91,8 @@ pub fn run() {
             mcp::get_mcp_base_url,
             mcp::mcp_register_runtime_session,
             mcp::mcp_notify_agent,
-            swarm::get_swarm_status,
-            swarm::watch_directory,
+            fs_watcher::get_fs_watcher_status,
+            fs_watcher::watch_directory,
             workflow_log::export_workflow_log,
             workflow_engine::start_mission_graph,
             workflow_engine::seed_mission_to_db,
@@ -100,6 +105,7 @@ pub fn run() {
             workspace::workspace_read_dir,
             workspace::workspace_create_file,
             workspace::workspace_create_dir,
+            workspace::workspace_create_dir_all,
             workspace::workspace_rename,
             workspace::workspace_delete,
             workspace::workspace_read_text_file,
@@ -108,15 +114,21 @@ pub fn run() {
             workspace::workspace_copy,
             workspace::workspace_move,
             workspace::workspace_search,
+            sdk_http::sdk_http_request,
+            sdk_http::sdk_http_stream,
             model_detection::detect_models,
             model_detection::discover_models,
             model_detection::discover_cli_models,
+            model_detection::discover_cli_capabilities,
             get_command_output,
         ])
         .setup(|app| {
             db::init_db(app.handle()).expect("Failed to init db");
-            mcp::init_mcp_server(app.handle()).expect("Failed to init MCP server");
-            swarm::init_swarm_watcher(app.handle()).ok();
+            if let Err(error) = mcp::init_mcp_server(app.handle()) {
+                eprintln!("Failed to init Starlink server: {}", error);
+                let _ = app.emit("mcp-startup-error", error);
+            }
+            fs_watcher::init_fs_watcher(app.handle()).ok();
             Ok(())
         })
         .build(tauri::generate_context!())
@@ -134,16 +146,25 @@ fn reveal_in_explorer(path: String) {
     #[cfg(target_os = "windows")]
     {
         use std::process::Command;
+        let path_ref = std::path::Path::new(&path);
         let p = path.replace("/", "\\");
-        Command::new("explorer")
-            .arg(format!("/select,{}", p))
-            .spawn()
-            .ok();
+        let mut command = Command::new("explorer");
+        if path_ref.is_dir() {
+            command.arg(p);
+        } else {
+            command.arg(format!("/select,{}", p));
+        }
+        command.spawn().ok();
     }
     #[cfg(target_os = "macos")]
     {
         use std::process::Command;
-        Command::new("open").arg("-R").arg(path).spawn().ok();
+        let path_ref = std::path::Path::new(&path);
+        if path_ref.is_dir() {
+            Command::new("open").arg(path).spawn().ok();
+        } else {
+            Command::new("open").arg("-R").arg(path).spawn().ok();
+        }
     }
     #[cfg(target_os = "linux")]
     {

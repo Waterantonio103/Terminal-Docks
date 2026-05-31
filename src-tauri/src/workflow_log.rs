@@ -50,15 +50,13 @@ fn build_markdown(
     let mut md = String::with_capacity(8192);
 
     // ── Header ────────────────────────────────────────────────────────────────
-    md.push_str("# Terminal Docks — Workflow Analysis Report\n\n");
+    md.push_str("# Comet-AI Workflow Analysis Report\n\n");
     md.push_str(&format!("*Generated: {}*\n\n", generated_at));
     md.push_str("---\n\n");
 
     // ── How to use ────────────────────────────────────────────────────────────
     md.push_str("## HOW TO USE THIS FILE\n\n");
-    md.push_str(
-        "This is a self-contained workflow log from a Terminal Docks multi-agent session.\n",
-    );
+    md.push_str("This is a self-contained workflow log from a Comet-AI multi-agent session.\n");
     md.push_str(
         "Attach this file + your codebase to any AI (Claude Code, Claude.ai, ChatGPT, Gemini…).\n",
     );
@@ -225,7 +223,7 @@ fn build_markdown(
 
     // ── Analysis request ──────────────────────────────────────────────────────
     md.push_str("## ANALYSIS REQUEST\n\n");
-    md.push_str("You are an AI assistant reading this Terminal Docks workflow log.\n");
+    md.push_str("You are an AI assistant reading this Comet-AI workflow log.\n");
     md.push_str("The codebase produced by this workflow is at the path provided by the user.\n\n");
     md.push_str("Please deliver a structured report covering all of the following:\n\n");
 

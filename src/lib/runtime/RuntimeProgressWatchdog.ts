@@ -39,7 +39,7 @@ const ANSI_RE =
   /\x1b\][^\x07]*(?:\x07|\x1b\\)|\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])/g;
 const LOW_SIGNAL_RE = /^[^a-z0-9]+$/i;
 const WATCHDOG_NUDGE_RE =
-  /Terminal Docks still has missionId=|Terminal Docks is still waiting for MCP complete_task|post-ACK watchdog/i;
+  /Comet-AI still has missionId=|Comet-AI is still waiting for MCP complete_task|post-ACK watchdog/i;
 const CLI_CHROME_RE =
   /\b(?:context\s+\d+%|insert|bypass permissions|shift\+tab|ready for next turn|type your|ask anything|input|prompt)\b/i;
 const USEFUL_PROGRESS_RE =
@@ -107,7 +107,7 @@ export function evaluatePostAckWatchdog(args: {
   }
 
   const reason = classifyPostAckWatchdogReason(args.snapshot);
-  if (!args.snapshot.warnedAt) {
+  if (args.snapshot.warnedAt == null) {
     return { action: 'nudge', reason, idleMs };
   }
 

@@ -1,15 +1,15 @@
-# MCP Toolbox Follow-Up Checklist
+# Starlink Toolbox Follow-Up Checklist
 
-## Add MCP Sources
+## Add Starlink Sources
 
-- [ ] Add authenticated remote MCP sources.
+- [ ] Add authenticated remote Starlink sources.
 - [ ] Decide credential storage for bearer tokens, OAuth, and custom headers.
-- [ ] Add an explicit trust review screen before enabling public internet MCP URLs.
-- [ ] Support stdio MCP sources with supervised process lifecycle.
+- [ ] Add an explicit trust review screen before enabling public internet Starlink-compatible endpoints.
+- [ ] Support stdio Starlink sources with supervised process lifecycle.
 - [ ] Add managed local sources after a concrete integration is selected.
 - [ ] Build a curated source catalog or marketplace for known integrations.
 - [ ] Import existing MCP client configs with a read-only preview first.
-- [ ] Support restore for archived MCP sources.
+- [ ] Support restore for archived Starlink sources.
 - [ ] Add hard purge only if source ID reuse is intentionally supported.
 
 ## Tool Configuration
@@ -40,9 +40,8 @@
 
 ## Testing
 
-- [ ] Add end-to-end UI smoke coverage for Add MCP Source.
+- [ ] Add end-to-end UI smoke coverage for Add Starlink Source.
 - [ ] Add tests for authenticated sources once auth lands.
 - [ ] Add tests for stdio process supervision once stdio lands.
 - [ ] Add tests for confirmation approval/rejection behavior.
 - [ ] Add migration tests for legacy toolbox localStorage config.
-

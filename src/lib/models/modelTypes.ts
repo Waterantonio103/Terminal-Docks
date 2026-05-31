@@ -1,4 +1,10 @@
-export type CliId = 'claude' | 'gemini' | 'codex' | 'opencode';
+import type { CliId } from '../cliIdentity.js';
+import { normalizeCliId } from '../cliIdentity.js';
+
+export type { CliId };
+
+const MODEL_DISCOVERY_CLI_IDS: readonly CliId[] = ['claude', 'gemini', 'codex', 'opencode'];
+const MODEL_DISCOVERY_CLI_ID_SET = new Set<CliId>(MODEL_DISCOVERY_CLI_IDS);
 
 export type ModelSource =
   | 'cli-command'
@@ -45,5 +51,6 @@ export interface ModelDiscoveryResult {
 }
 
 export function isModelCliId(value: unknown): value is CliId {
-  return value === 'claude' || value === 'gemini' || value === 'codex' || value === 'opencode';
+  const cli = normalizeCliId(value);
+  return Boolean(cli && MODEL_DISCOVERY_CLI_ID_SET.has(cli));
 }

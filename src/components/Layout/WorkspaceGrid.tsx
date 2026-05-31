@@ -1,10 +1,17 @@
-import { TerminalSquare, FileCode2, KanbanSquare, Activity, Rocket, Monitor, X, Network, Bell } from 'lucide-react';
+import { TerminalSquare, FileCode2, KanbanSquare, Activity, Rocket, Monitor, X, Network, Bell, Columns2, PanelRightClose, Globe2, Plus, ClipboardPenLine } from 'lucide-react';
 import { useWorkspaceStore, PaneType, Pane, selectActivePanes, GridPos, resolveCollisions } from '../../store/workspace';
-import React, { Suspense, lazy, useState, useRef, useEffect, useCallback, useMemo } from 'react';
+import React, { Suspense, lazy, useState, useRef, useEffect, useCallback, useMemo, useId } from 'react';
 import { FileTypeIcon } from '../../lib/fileIcons';
+import { normalizePreviewUrl } from '../../lib/previewUrl';
+import { terminalOutputBus } from '../../lib/runtime/TerminalOutputBus';
+import { discoverWorkspaceServers, formatWorkspaceServerLabel, shortWorkspaceServerUrl, type DetectedWorkspaceServer } from '../../lib/workspaceServerDiscovery';
+import { activePaneIdForPanes, currentDirectoryForPane, nextTerminalTitle, nextUntitledEditorTitle } from '../../lib/workspaceTabs';
+import { normalizeTerminalId } from '../../lib/terminalIds';
 
 const TerminalPane = lazy(() => import('../Terminal/TerminalPane').then(module => ({ default: module.TerminalPane })));
 const EditorPane = lazy(() => import('../Editor/EditorPane').then(module => ({ default: module.EditorPane })));
+const ChangeReviewPane = lazy(() => import('../ChangeReview/ChangeReviewPane').then(module => ({ default: module.ChangeReviewPane })));
+const PreviewPane = lazy(() => import('../Preview/PreviewPane').then(module => ({ default: module.PreviewPane })));
 const TaskBoardPane = lazy(() => import('../TaskBoard/TaskBoardPane').then(module => ({ default: module.TaskBoardPane })));
 const ActivityFeedPane = lazy(() => import('../ActivityFeed/ActivityFeedPane').then(module => ({ default: module.ActivityFeedPane })));
 const LauncherPane = lazy(() => import('../Launcher/LauncherPane').then(module => ({ default: module.LauncherPane })));
@@ -14,6 +21,8 @@ const ActionCenterPane = lazy(() => import('../ActionCenter/ActionCenterPane').t
 const PANE_ICONS: Record<PaneType, React.ReactNode> = {
   terminal:       <TerminalSquare size={13} />,
   editor:         <FileCode2 size={13} />,
+  changereview:   <FileCode2 size={13} />,
+  preview:        <Globe2 size={13} />,
   taskboard:      <KanbanSquare size={13} />,
   activityfeed:   <Activity size={13} />,
   launcher:       <Rocket size={13} />,
@@ -38,6 +47,8 @@ function PaneBody({ pane, dragEndSeq }: { pane: Pane; dragEndSeq: number }) {
     <Suspense fallback={<PaneLoadingFallback />}>
       {pane.type === 'terminal'       && <TerminalPane pane={pane} dragEndSeq={dragEndSeq} />}
       {pane.type === 'editor'         && <EditorPane pane={pane} />}
+      {pane.type === 'changereview'   && <ChangeReviewPane pane={pane} />}
+      {pane.type === 'preview'        && <PreviewPane pane={pane} />}
       {pane.type === 'taskboard'      && <TaskBoardPane />}
       {pane.type === 'activityfeed'   && <ActivityFeedPane />}
       {pane.type === 'launcher'       && <LauncherPane />}
@@ -47,8 +58,28 @@ function PaneBody({ pane, dragEndSeq }: { pane: Pane; dragEndSeq: number }) {
   );
 }
 
+function isHiddenDockAgentPane(pane: Pane): boolean {
+  if (pane.type !== 'missioncontrol') return false;
+  if (pane.data?.dockOnly === true) return true;
+  if (pane.data?.dockOnly === false) return false;
+  const missionId = pane.data?.missionId;
+  return pane.title === 'Workspace Agent' && typeof missionId === 'string' && missionId.startsWith('adhoc-workspace-');
+}
+
 const CELL_HEIGHT = 4;
 const GRID_COLUMNS = 100;
+const WORKSPACE_PANE_DROP_TYPES = new Set<PaneType>([
+  'terminal',
+  'editor',
+  'changereview',
+  'preview',
+  'taskboard',
+  'activityfeed',
+  'launcher',
+  'missioncontrol',
+  'nodetree',
+  'inbox',
+]);
 
 interface DashboardPanelProps {
   pane: Pane;
@@ -58,6 +89,23 @@ interface DashboardPanelProps {
   isResizing: boolean;
   anyActive: boolean;
   dragEndSeq: number;
+}
+
+interface WorkspacePaneDropDetail {
+  type: PaneType;
+  title?: string;
+  data?: Record<string, unknown>;
+  clientX: number;
+  clientY: number;
+}
+
+function isWorkspacePaneDropDetail(value: unknown): value is WorkspacePaneDropDetail {
+  if (!value || typeof value !== 'object') return false;
+  const detail = value as Partial<WorkspacePaneDropDetail>;
+  return typeof detail.type === 'string'
+    && WORKSPACE_PANE_DROP_TYPES.has(detail.type as PaneType)
+    && typeof detail.clientX === 'number'
+    && typeof detail.clientY === 'number';
 }
 
 const DashboardPanel = React.memo(function DashboardPanel({ pane, onDragStart, onResizeStart, isDragging, isResizing, anyActive, dragEndSeq }: DashboardPanelProps) {
@@ -138,8 +186,10 @@ const DashboardPanel = React.memo(function DashboardPanel({ pane, onDragStart, o
           )}
           <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
             <button
+              type="button"
               onMouseDown={(e) => e.stopPropagation()}
               onClick={() => removePane(pane.id)}
+              aria-label={`Close ${pane.title}`}
               className="w-5 h-5 flex items-center justify-center rounded text-text-muted hover:text-red-400 hover:bg-bg-surface"
             >
               <X size={12} />
@@ -168,49 +218,373 @@ function TabsView({ panes }: { panes: Pane[] }) {
   const activePaneId = useWorkspaceStore(s => s.activePaneId);
   const setActivePaneId = useWorkspaceStore(s => s.setActivePaneId);
   const removePane = useWorkspaceStore(s => s.removePane);
+  const addPane = useWorkspaceStore(s => s.addPane);
+  const workspaceDir = useWorkspaceStore(s => s.tabs.find(tab => tab.id === s.activeTabId)?.workspaceDir ?? s.workspaceDir);
+  const [secondaryPaneId, setSecondaryPaneId] = useState<string | null>(null);
+  const [addMenuOpen, setAddMenuOpen] = useState(false);
+  const [serverScanSeq, setServerScanSeq] = useState(0);
+  const addMenuRef = useRef<HTMLDivElement>(null);
+  const addButtonRef = useRef<HTMLButtonElement>(null);
+  const firstAddMenuItemRef = useRef<HTMLButtonElement>(null);
+  const tabButtonRefs = useRef(new Map<string, HTMLDivElement>());
+  const addMenuId = useId();
+  const paneTabIdPrefix = useId();
   
   const activePane = panes.find(p => p.id === activePaneId) || panes[0];
+  const activePaneTabId = activePane ? `${paneTabIdPrefix}-tab-${activePane.id}` : undefined;
+  const activePanePanelId = activePane ? `${paneTabIdPrefix}-panel-${activePane.id}` : undefined;
+  const secondaryPane = secondaryPaneId && secondaryPaneId !== activePane?.id
+    ? panes.find(p => p.id === secondaryPaneId) ?? null
+    : null;
+  const terminalIds = useMemo(
+    () => Array.from(new Set(panes
+      .map(pane => pane.type === 'terminal' ? normalizeTerminalId(pane.data?.terminalId) : null)
+      .filter((terminalId): terminalId is string => Boolean(terminalId)))),
+    [panes],
+  );
+  const detectedServers = useMemo(
+    () => discoverWorkspaceServers(panes, (terminalId, maxBytes) => terminalOutputBus.getTail(terminalId, maxBytes)),
+    [panes, serverScanSeq],
+  );
+  const currentDirectory = currentDirectoryForPane(activePane, workspaceDir);
+
+  const activatePane = useCallback((id: string) => {
+    setActivePaneId(id);
+    if (id === secondaryPaneId) setSecondaryPaneId(null);
+  }, [secondaryPaneId, setActivePaneId]);
+
+  const setPaneTabRef = useCallback((id: string, node: HTMLDivElement | null) => {
+    if (node) {
+      tabButtonRefs.current.set(id, node);
+    } else {
+      tabButtonRefs.current.delete(id);
+    }
+  }, []);
+
+  const toggleSplitPane = useCallback((id: string) => {
+    if (id === activePane?.id) return;
+    setSecondaryPaneId(current => current === id ? null : id);
+  }, [activePane?.id]);
+
+  const openAddMenu = useCallback(() => {
+    setAddMenuOpen(current => {
+      if (!current) {
+        void terminalOutputBus.start();
+        setServerScanSeq(seq => seq + 1);
+      }
+      return true;
+    });
+  }, []);
+
+  const toggleAddMenu = useCallback(() => {
+    if (!addMenuOpen) {
+      void terminalOutputBus.start();
+      setServerScanSeq(seq => seq + 1);
+    }
+    setAddMenuOpen(open => !open);
+  }, [addMenuOpen]);
+
+  const handleAddButtonKeyDown = useCallback((event: React.KeyboardEvent<HTMLButtonElement>) => {
+    if (event.key !== 'ArrowDown') return;
+    event.preventDefault();
+    openAddMenu();
+  }, [openAddMenu]);
 
   useEffect(() => {
-    if (!activePaneId && panes.length > 0) {
-      setActivePaneId(panes[0].id);
+    const nextActivePaneId = activePaneIdForPanes(panes, activePaneId);
+    if (nextActivePaneId !== activePaneId) {
+      setActivePaneId(nextActivePaneId);
     }
-  }, [panes, activePaneId]);
+  }, [panes, activePaneId, setActivePaneId]);
+
+  useEffect(() => {
+    if (secondaryPaneId && !panes.some(pane => pane.id === secondaryPaneId)) {
+      setSecondaryPaneId(null);
+    }
+  }, [panes, secondaryPaneId]);
+
+  useEffect(() => {
+    if (!addMenuOpen) return;
+    const handlePointerDown = (event: PointerEvent) => {
+      if (addMenuRef.current?.contains(event.target as Node)) return;
+      setAddMenuOpen(false);
+    };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setAddMenuOpen(false);
+        addButtonRef.current?.focus();
+      }
+    };
+    document.addEventListener('pointerdown', handlePointerDown);
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('pointerdown', handlePointerDown);
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [addMenuOpen]);
+
+  useEffect(() => {
+    if (!addMenuOpen) return;
+    const focusTimer = window.setTimeout(() => firstAddMenuItemRef.current?.focus(), 0);
+    return () => window.clearTimeout(focusTimer);
+  }, [addMenuOpen]);
+
+  const handleAddMenuKeyDown = useCallback((event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
+    const menuItems = Array.from(
+      addMenuRef.current?.querySelectorAll<HTMLButtonElement>('[role="menuitem"]:not(:disabled)') ?? [],
+    );
+    if (!menuItems.length) return;
+
+    event.preventDefault();
+    const activeIndex = menuItems.indexOf(document.activeElement as HTMLButtonElement);
+    if (event.key === 'Home') {
+      menuItems[0].focus();
+      return;
+    }
+    if (event.key === 'End') {
+      menuItems[menuItems.length - 1].focus();
+      return;
+    }
+
+    const delta = event.key === 'ArrowDown' ? 1 : -1;
+    const nextIndex = activeIndex < 0
+      ? 0
+      : (activeIndex + delta + menuItems.length) % menuItems.length;
+    menuItems[nextIndex].focus();
+  }, []);
+
+  const handlePaneTabKeyDown = useCallback((event: React.KeyboardEvent<HTMLDivElement>, paneId: string, index: number) => {
+    if (event.target !== event.currentTarget) return;
+    if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault();
+      activatePane(paneId);
+      return;
+    }
+    if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+
+    event.preventDefault();
+    const nextIndex = event.key === 'Home'
+      ? 0
+      : event.key === 'End'
+        ? panes.length - 1
+        : (index + (event.key === 'ArrowRight' ? 1 : -1) + panes.length) % panes.length;
+    const nextPane = panes[nextIndex];
+    if (!nextPane) return;
+    activatePane(nextPane.id);
+    tabButtonRefs.current.get(nextPane.id)?.focus();
+  }, [activatePane, panes]);
+
+  useEffect(() => {
+    if (!addMenuOpen || terminalIds.length === 0) return;
+    let refreshTimer: ReturnType<typeof setTimeout> | null = null;
+    const scheduleRefresh = () => {
+      if (refreshTimer) return;
+      refreshTimer = setTimeout(() => {
+        refreshTimer = null;
+        setServerScanSeq(seq => seq + 1);
+      }, 250);
+    };
+    const unsubscribers = terminalIds.map(terminalId => terminalOutputBus.subscribe(terminalId, scheduleRefresh));
+    return () => {
+      if (refreshTimer) clearTimeout(refreshTimer);
+      unsubscribers.forEach(unsubscribe => unsubscribe());
+    };
+  }, [addMenuOpen, terminalIds]);
+
+  const openEditorPane = useCallback(() => {
+    addPane('editor', nextUntitledEditorTitle(panes), { untitled: true, untitledContent: '' });
+    setAddMenuOpen(false);
+  }, [addPane, panes]);
+
+  const openTerminalPane = useCallback(() => {
+    addPane('terminal', nextTerminalTitle(panes), { cwd: currentDirectory ?? undefined });
+    setAddMenuOpen(false);
+  }, [addPane, currentDirectory, panes]);
+
+  const openServerPane = useCallback((server: DetectedWorkspaceServer) => {
+    const normalizedUrl = normalizePreviewUrl(server.url);
+    if (!normalizedUrl) {
+      setAddMenuOpen(false);
+      return;
+    }
+    const existingServerPane = panes.find(pane => (
+      pane.type === 'preview'
+      && typeof pane.data?.url === 'string'
+      && normalizePreviewUrl(pane.data.url) === normalizedUrl
+    ));
+    if (existingServerPane) {
+      activatePane(existingServerPane.id);
+      setAddMenuOpen(false);
+      return;
+    }
+    addPane('preview', `Server: ${shortWorkspaceServerUrl(server.url)}`, {
+      url: normalizedUrl,
+      previewTitle: formatWorkspaceServerLabel(server),
+    });
+    setAddMenuOpen(false);
+  }, [activatePane, addPane, panes]);
 
   return (
     <div className="flex-1 flex flex-col bg-bg-app overflow-hidden">
       {/* File Tab Bar */}
-      <div className="flex items-center h-9 bg-bg-titlebar border-b border-border-panel overflow-x-auto shrink-0 no-scrollbar">
-        {panes.map(pane => (
-          <div
-            key={pane.id}
-            onClick={() => setActivePaneId(pane.id)}
-            className={`
-              group flex items-center h-full px-3 gap-2 border-r border-border-panel cursor-pointer select-none transition-colors min-w-[120px] max-w-[200px]
-              ${activePaneId === pane.id ? 'bg-bg-app border-b-2 border-b-accent-primary' : 'bg-transparent text-text-muted hover:bg-bg-surface/50 hover:text-text-secondary'}
-            `}
-          >
-            <span className={activePaneId === pane.id ? 'text-accent-primary' : 'text-text-muted opacity-60'}>
-              {getPaneIcon(pane)}
-            </span>
-            <span className={`text-[11px] font-medium truncate flex-1 ${activePaneId === pane.id ? 'text-text-primary' : ''}`}>
-              {pane.title}
-            </span>
-            <button
-              onClick={(e) => { e.stopPropagation(); removePane(pane.id); }}
-              className="opacity-0 group-hover:opacity-100 p-0.5 rounded hover:bg-bg-surface text-text-muted hover:text-red-400 transition-all"
-            >
-              <X size={12} />
-            </button>
+      <div className="flex items-center h-9 bg-bg-titlebar border-b border-border-panel shrink-0">
+        <div className="flex min-w-0 items-center h-full overflow-x-auto no-scrollbar">
+          <div className="flex h-full items-center" role="tablist" aria-label="Workspace panes">
+            {panes.map((pane, index) => (
+              <div
+                key={pane.id}
+                ref={node => setPaneTabRef(pane.id, node)}
+                id={`${paneTabIdPrefix}-tab-${pane.id}`}
+                role="tab"
+                tabIndex={activePane?.id === pane.id ? 0 : -1}
+                aria-selected={activePane?.id === pane.id}
+                aria-controls={`${paneTabIdPrefix}-panel-${pane.id}`}
+                aria-label={`${pane.title} tab`}
+                onClick={() => activatePane(pane.id)}
+                onKeyDown={(event) => handlePaneTabKeyDown(event, pane.id, index)}
+                className={`
+                  group flex items-center h-full px-3 gap-2 border-r border-border-panel cursor-pointer select-none transition-colors min-w-[120px] max-w-[200px]
+                  ${activePane?.id === pane.id ? 'bg-bg-app border-b-2 border-b-accent-primary' : secondaryPaneId === pane.id ? 'bg-bg-surface/70 border-b-2 border-b-accent-primary/50' : 'bg-transparent text-text-muted hover:bg-bg-surface/50 hover:text-text-secondary'}
+                `}
+              >
+                <span className={activePane?.id === pane.id ? 'text-accent-primary' : 'text-text-muted opacity-60'}>
+                  {getPaneIcon(pane)}
+                </span>
+                <span className={`text-[11px] font-medium truncate flex-1 ${activePane?.id === pane.id ? 'text-text-primary' : ''}`}>
+                  {pane.title}
+                </span>
+                {pane.id !== activePane?.id && (
+                  <button
+                    type="button"
+                    onClick={(e) => { e.stopPropagation(); toggleSplitPane(pane.id); }}
+                    onKeyDown={(e) => e.stopPropagation()}
+                    className="opacity-0 group-hover:opacity-100 focus-visible:opacity-100 p-0.5 rounded hover:bg-bg-surface text-text-muted hover:text-accent-primary transition-all"
+                    title={secondaryPaneId === pane.id ? 'Close split view' : 'Open to side'}
+                    aria-label={`${secondaryPaneId === pane.id ? 'Close split view for' : 'Open to side'} ${pane.title}`}
+                  >
+                    {secondaryPaneId === pane.id ? <PanelRightClose size={12} /> : <Columns2 size={12} />}
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    if (secondaryPaneId === pane.id) setSecondaryPaneId(null);
+                    removePane(pane.id);
+                  }}
+                  onKeyDown={(e) => e.stopPropagation()}
+                  className="opacity-0 group-hover:opacity-100 focus-visible:opacity-100 p-0.5 rounded hover:bg-bg-surface text-text-muted hover:text-red-400 transition-all"
+                  title="Close tab"
+                  aria-label={`Close ${pane.title}`}
+                >
+                  <X size={12} />
+                </button>
+              </div>
+            ))}
           </div>
-        ))}
+        </div>
+        <div ref={addMenuRef} className="td-workspace-tab-add">
+          <button
+            ref={addButtonRef}
+            type="button"
+            onClick={toggleAddMenu}
+            onKeyDown={handleAddButtonKeyDown}
+            className={`td-agent-add-button ${addMenuOpen ? 'is-open' : ''}`}
+            title="Open new pane tab"
+            aria-label="Open new pane tab"
+            aria-haspopup="menu"
+            aria-expanded={addMenuOpen}
+            aria-controls={addMenuOpen ? addMenuId : undefined}
+          >
+            <Plus size={16} />
+          </button>
+          {addMenuOpen && (
+            <div id={addMenuId} className="td-agent-add-menu td-workspace-tab-add-menu" role="menu" aria-label="New workspace pane" onKeyDown={handleAddMenuKeyDown}>
+              <button ref={firstAddMenuItemRef} type="button" className="td-agent-add-option" role="menuitem" onClick={openEditorPane} aria-label="Create editor pane">
+                <ClipboardPenLine size={14} />
+                <span>Editor</span>
+              </button>
+              <button type="button" className="td-agent-add-option" role="menuitem" onClick={openTerminalPane} aria-label="Create terminal pane">
+                <TerminalSquare size={14} />
+                <span>Terminal</span>
+              </button>
+              {detectedServers.length === 0 ? (
+                <button type="button" className="td-agent-add-option" role="menuitem" disabled aria-disabled="true">
+                  <Globe2 size={14} />
+                  <span className="td-workspace-tab-add-copy">
+                    <span>Server</span>
+                    <small>No running servers found</small>
+                  </span>
+                </button>
+              ) : detectedServers.length === 1 ? (
+                <button
+                  type="button"
+                  className="td-agent-add-option"
+                  role="menuitem"
+                  onClick={() => openServerPane(detectedServers[0])}
+                  title={shortWorkspaceServerUrl(detectedServers[0].url)}
+                  aria-label={`Open server ${formatWorkspaceServerLabel(detectedServers[0])}`}
+                >
+                  <Globe2 size={14} />
+                  <span className="td-workspace-tab-add-copy">
+                    <span>Server</span>
+                    <small>{formatWorkspaceServerLabel(detectedServers[0])}</small>
+                  </span>
+                </button>
+              ) : (
+                <div className="td-workspace-tab-add-section">
+                  <div className="td-workspace-tab-add-heading" role="presentation" aria-hidden="true">
+                    <Globe2 size={14} />
+                    <span className="td-workspace-tab-add-copy">
+                      <span>Server</span>
+                      <small>{detectedServers.length} running servers found</small>
+                    </span>
+                  </div>
+                  <div className="td-workspace-tab-add-server-list" role="group" aria-label={`${detectedServers.length} running servers found`}>
+                    {detectedServers.map(server => (
+                      <button
+                        key={server.url}
+                        type="button"
+                        className="td-agent-add-option td-workspace-tab-add-server-option"
+                        role="menuitem"
+                        onClick={() => openServerPane(server)}
+                        title={shortWorkspaceServerUrl(server.url)}
+                        aria-label={`Open server ${formatWorkspaceServerLabel(server)}`}
+                      >
+                        <Globe2 size={14} />
+                        <span className="td-workspace-tab-add-copy">
+                          <span>{shortWorkspaceServerUrl(server.url)}</span>
+                          <small>{formatWorkspaceServerLabel(server)}</small>
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+        <div className="min-w-0 flex-1" aria-hidden="true" />
       </div>
 
       {/* Active Pane Content */}
       <div className="flex-1 overflow-hidden relative">
         {activePane ? (
-          <div className="w-full h-full flex flex-col">
-            <PaneBody pane={activePane} dragEndSeq={0} />
+          <div
+            id={activePanePanelId}
+            role="tabpanel"
+            aria-labelledby={activePaneTabId}
+            className="w-full h-full flex min-w-0"
+          >
+            <div className="h-full min-w-0 flex flex-col" style={{ width: secondaryPane ? '50%' : '100%' }}>
+              <PaneBody pane={activePane} dragEndSeq={0} />
+            </div>
+            {secondaryPane && (
+              <div className="h-full min-w-0 flex flex-col border-l border-border-panel" style={{ width: '50%' }}>
+                <PaneBody pane={secondaryPane} dragEndSeq={0} />
+              </div>
+            )}
           </div>
         ) : (
           <div className="w-full h-full flex flex-col items-center justify-center text-text-muted">
@@ -227,6 +601,7 @@ export function WorkspaceGrid({ visibleTypes }: { visibleTypes?: PaneType[] } = 
   const panes = useWorkspaceStore(selectActivePanes);
   const updatePaneLayout = useWorkspaceStore(s => s.updatePaneLayout);
   const updatePaneData = useWorkspaceStore(s => s.updatePaneData);
+  const renamePane = useWorkspaceStore(s => s.renamePane);
   const addPaneAt = useWorkspaceStore(s => s.addPaneAt);
   const layoutMode = useWorkspaceStore(s => s.layoutMode);
   
@@ -242,7 +617,7 @@ export function WorkspaceGrid({ visibleTypes }: { visibleTypes?: PaneType[] } = 
 
   // Compute live preview of collisions
   const visiblePanes = useMemo(
-    () => visibleTypes ? panes.filter(pane => visibleTypes.includes(pane.type)) : panes,
+    () => panes.filter(pane => !isHiddenDockAgentPane(pane) && (!visibleTypes || visibleTypes.includes(pane.type))),
     [panes, visibleTypes]
   );
 
@@ -311,8 +686,9 @@ export function WorkspaceGrid({ visibleTypes }: { visibleTypes?: PaneType[] } = 
     const grid = containerRef.current;
     if (!grid) return;
 
-    const handleDrop = (e: any) => {
-      const { type, title, data, clientX, clientY } = e.detail;
+    const handleDrop = (event: Event) => {
+      if (containerWidth <= 0 || !(event instanceof CustomEvent) || !isWorkspacePaneDropDetail(event.detail)) return;
+      const { type, title, data, clientX, clientY } = event.detail;
       const rect = grid.getBoundingClientRect();
       const cellW = containerWidth / GRID_COLUMNS;
       
@@ -334,18 +710,19 @@ export function WorkspaceGrid({ visibleTypes }: { visibleTypes?: PaneType[] } = 
         return gridMouseX >= px && gridMouseX <= px + pw && gridMouseY >= py && gridMouseY <= py + ph;
       });
 
-      if (type === 'editor' && data?.filePath && overPane?.type === 'editor') {
-        updatePaneData(overPane.id, { filePath: data.filePath });
+      const newTitle = title || (type.charAt(0).toUpperCase() + type.slice(1));
+      if (type === 'editor' && typeof data?.filePath === 'string' && overPane?.type === 'editor' && !overPane.data?.editorDirty) {
+        renamePane(overPane.id, newTitle);
+        updatePaneData(overPane.id, { filePath: data.filePath, editorDirty: false, editorReloadToken: `${Date.now()}` });
       } else {
         // Add new pane at dropped position
-        const newTitle = title || (type.charAt(0).toUpperCase() + type.slice(1));
         addPaneAt(type, newTitle, panes.length, { ...data, gridPos: { x, y, w: 25, h: 40 } });
       }
     };
 
     grid.addEventListener('pane-drop', handleDrop);
     return () => grid.removeEventListener('pane-drop', handleDrop);
-  }, [panes, containerWidth, updatePaneData, addPaneAt]);
+  }, [panes, containerWidth, updatePaneData, renamePane, addPaneAt]);
 
   useEffect(() => {
     if (!draggingId && !resizingId) return;

@@ -7,6 +7,12 @@ use std::thread;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager};
 
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
+
 #[derive(Clone, serde::Serialize)]
 pub struct CliRegistrationResult {
     pub cli: String,
@@ -77,7 +83,7 @@ fn merge_json_config(
 fn register_claude(mcp_url: &str) -> CliRegistrationResult {
     // First, try to remove existing to ensure URL/token is updated
     let _ = Command::new("claude")
-        .args(["mcp", "remove", "--scope", "user", "terminal-docks"])
+        .args(["mcp", "remove", "--scope", "user", "starlink"])
         .output();
 
     // Use --transport http (streamable-HTTP, Claude Code's current transport).
@@ -89,7 +95,7 @@ fn register_claude(mcp_url: &str) -> CliRegistrationResult {
         "http",
         "--scope",
         "user",
-        "terminal-docks",
+        "starlink",
         mcp_url,
     ];
     let output = Command::new("claude")
@@ -107,7 +113,7 @@ fn register_claude(mcp_url: &str) -> CliRegistrationResult {
                 CliRegistrationResult {
                     cli: "claude".into(),
                     success: true,
-                    message: "claude MCP server registered successfully".into(),
+                    message: "claude Starlink MCP server registered successfully".into(),
                 }
             } else {
                 CliRegistrationResult {
@@ -139,16 +145,19 @@ fn register_gemini(mcp_url: &str) -> CliRegistrationResult {
     let config_path = home.join(".gemini").join("settings.json");
     let entry = serde_json::json!({ "httpUrl": mcp_url });
 
-    match merge_json_config(&config_path, "mcpServers", "terminal-docks", entry) {
+    match merge_json_config(&config_path, "mcpServers", "starlink", entry) {
         Ok(true) => CliRegistrationResult {
             cli: "gemini".into(),
             success: true,
-            message: format!("gemini MCP server registered in {}", config_path.display()),
+            message: format!(
+                "gemini Starlink MCP server registered in {}",
+                config_path.display()
+            ),
         },
         Ok(false) => CliRegistrationResult {
             cli: "gemini".into(),
             success: true,
-            message: "gemini MCP server already registered".into(),
+            message: "gemini Starlink MCP server already registered".into(),
         },
         Err(e) => CliRegistrationResult {
             cli: "gemini".into(),
@@ -172,19 +181,19 @@ fn register_opencode(mcp_url: &str) -> CliRegistrationResult {
     let config_path = home.join(".config").join("opencode").join("opencode.json");
     let entry = serde_json::json!({ "type": "remote", "url": mcp_url, "enabled": true });
 
-    match merge_json_config(&config_path, "mcp", "terminal-docks", entry) {
+    match merge_json_config(&config_path, "mcp", "starlink", entry) {
         Ok(true) => CliRegistrationResult {
             cli: "opencode".into(),
             success: true,
             message: format!(
-                "opencode MCP server registered in {}",
+                "opencode Starlink MCP server registered in {}",
                 config_path.display()
             ),
         },
         Ok(false) => CliRegistrationResult {
             cli: "opencode".into(),
             success: true,
-            message: "opencode MCP server already registered".into(),
+            message: "opencode Starlink MCP server already registered".into(),
         },
         Err(e) => CliRegistrationResult {
             cli: "opencode".into(),
@@ -206,7 +215,10 @@ fn register_codex(mcp_url: &str) -> CliRegistrationResult {
     CliRegistrationResult {
         cli: "codex".into(),
         success: true,
-        message: format!("codex MCP server will be injected per workflow launch via {}", mcp_url),
+        message: format!(
+            "codex Starlink MCP server will be injected per workflow launch via {}",
+            mcp_url
+        ),
     }
 }
 
@@ -244,7 +256,7 @@ fn register_goose(mcp_url: &str) -> CliRegistrationResult {
         message: if config_path.exists() {
             format!("Detected! Add {} to your goose config.yaml", mcp_url)
         } else {
-            "Detected! Add the MCP URL to your goose config manually.".into()
+            "Detected! Add the Starlink URL to your goose config manually.".into()
         },
     }
 }
@@ -253,7 +265,7 @@ fn register_claude_desktop(_mcp_url: &str) -> CliRegistrationResult {
     CliRegistrationResult {
         cli: "claude-desktop".into(),
         success: true,
-        message: "Detected! Add the MCP URL to your Claude Desktop config for SSE support.".into(),
+        message: "Detected! Add the Starlink URL to your Claude Desktop config for SSE support.".into(),
     }
 }
 
@@ -452,6 +464,41 @@ fn load_or_generate_push_token(app: &AppHandle) -> String {
     token
 }
 
+fn find_mcp_server_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    let mut candidates: Vec<PathBuf> = Vec::new();
+
+    if let Ok(current) = std::env::current_dir() {
+        candidates.push(current.join("mcp-server"));
+        if let Some(parent) = current.parent() {
+            candidates.push(parent.join("mcp-server"));
+        }
+    }
+
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(exe_dir) = exe.parent() {
+            candidates.push(exe_dir.join("mcp-server"));
+            for ancestor in exe_dir.ancestors().take(6) {
+                candidates.push(ancestor.join("mcp-server"));
+            }
+        }
+    }
+
+    if let Ok(resource_dir) = app.path().resource_dir() {
+        candidates.push(resource_dir.join("mcp-server"));
+        if let Some(parent) = resource_dir.parent() {
+            candidates.push(parent.join("mcp-server"));
+        }
+    }
+
+    for candidate in candidates {
+        if candidate.join("server.mjs").exists() {
+            return Ok(candidate);
+        }
+    }
+
+    Err("Starlink server directory not found; checked current directory, executable ancestors, and app resources".to_string())
+}
+
 pub fn init_mcp_server(app: &AppHandle) -> Result<(), String> {
     {
         let state = app.state::<McpState>();
@@ -462,28 +509,7 @@ pub fn init_mcp_server(app: &AppHandle) -> Result<(), String> {
         }
     }
 
-    let mut server_dir = std::env::current_dir()
-        .map_err(|e| e.to_string())?
-        .join("mcp-server");
-
-    if !server_dir.exists() {
-        // Try parent directory (likely when running from src-tauri)
-        if let Ok(current) = std::env::current_dir() {
-            if let Some(parent) = current.parent() {
-                let parent_server_dir = parent.join("mcp-server");
-                if parent_server_dir.exists() {
-                    server_dir = parent_server_dir;
-                }
-            }
-        }
-    }
-
-    if !server_dir.exists() {
-        return Err(format!(
-            "MCP server directory not found at {:?}",
-            server_dir
-        ));
-    }
+    let server_dir = find_mcp_server_dir(app)?;
 
     let db_path = {
         let state = app.state::<crate::db::DbState>();
@@ -501,16 +527,25 @@ pub fn init_mcp_server(app: &AppHandle) -> Result<(), String> {
         *a_guard = auth_token.clone();
     }
 
-    let child = Command::new("node")
+    let mut command = Command::new("node");
+    command
         .arg("server.mjs")
         .current_dir(&server_dir)
         .env("MCP_DB_PATH", &db_path)
         .env("MCP_INTERNAL_PUSH_TOKEN", &push_token)
-        .env("MCP_AUTH_TOKEN", &auth_token)
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
+        .env("MCP_AUTH_TOKEN", &auth_token);
+
+    if cfg!(debug_assertions) {
+        command.stdout(Stdio::inherit()).stderr(Stdio::inherit());
+    } else {
+        command.stdout(Stdio::null()).stderr(Stdio::null());
+        #[cfg(windows)]
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+
+    let child = command
         .spawn()
-        .map_err(|e| format!("Failed to spawn MCP server: {}", e))?;
+        .map_err(|e| format!("Failed to spawn Starlink server: {}", e))?;
 
     {
         let state = app.state::<McpState>();
@@ -531,7 +566,7 @@ pub fn init_mcp_server(app: &AppHandle) -> Result<(), String> {
             }
         }
         if !ready {
-            eprintln!("MCP server did not become ready in time");
+            eprintln!("Starlink server did not become ready in time");
             return;
         }
 
@@ -817,7 +852,7 @@ pub fn mcp_register_runtime_session(
 
     let url = format!("http://localhost:{}/internal/push", PORT);
     match ureq::post(&url)
-        .set("x-td-push-token", &token)
+        .set("x-comet-push-token", &token)
         .send_json(body)
     {
         Ok(response) => {
@@ -895,7 +930,7 @@ pub fn mcp_notify_agent(
 
     let url = format!("http://localhost:{}/internal/push", PORT);
     match ureq::post(&url)
-        .set("x-td-push-token", &token)
+        .set("x-comet-push-token", &token)
         .send_json(body)
     {
         Ok(response) => {

@@ -12,12 +12,12 @@ impl WatcherState {
     }
 }
 
-pub fn init_swarm_watcher(_app: &AppHandle) -> Result<(), String> {
+pub fn init_fs_watcher(_app: &AppHandle) -> Result<(), String> {
     Ok(())
 }
 
 #[tauri::command]
-pub fn get_swarm_status() -> Result<String, String> {
+pub fn get_fs_watcher_status() -> Result<String, String> {
     Ok("Active".to_string())
 }
 

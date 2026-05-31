@@ -11,10 +11,10 @@ import { openUrl } from '@tauri-apps/plugin-opener';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import { readImage } from '@tauri-apps/plugin-clipboard-manager';
 import { emit, listen } from '@tauri-apps/api/event';
-import agentsConfig from '../../config/agents';
+import { WORKFLOW_AGENT_ROLES, formatWorkflowRoleLabel, getPublicRoleForWorkflowRole } from '../../config/agentRoles';
 import { compileMission, validateGraph } from '../../lib/graphCompiler';
 import { generateId } from '../../lib/graphUtils';
-import { buildPresetFlowGraph, getPresetReadmeDefault, getWorkflowPreset, listWorkflowPresetModes, type PresetDefinition, type WorkflowPresetMode } from '../../lib/workflowPresets';
+import { buildPresetFlowGraph, getPresetNodeTerminalTitle, getPresetReadmeDefault, getWorkflowPreset, listWorkflowPresetModes, type PresetDefinition, type WorkflowPresetMode } from '../../lib/workflowPresets';
 import { isAppSitePresetId, type FrontendDirectionSpec } from '../../lib/frontendDirection';
 import { isWorkflowStatusActive, workflowStatusLabel, workflowStatusTone } from '../../lib/workflowStatus';
 import {
@@ -33,12 +33,16 @@ import { runtimeExecutor } from '../../lib/runtime/RuntimeExecutor';
 import { missionOrchestrator } from '../../lib/workflow/MissionOrchestrator';
 import { terminalOutputBus } from '../../lib/runtime/TerminalOutputBus';
 import { supportsHeadless } from '../../lib/cliIdentity';
+import { scopedDebugLog } from '../../lib/debugLog';
 import { useWorkspaceStore, type FrontendWorkflowMode, type LaunchedWorkflow, type MissionAgent, type Pane, type ResultEntry, type WorkflowAgentCli, type WorkflowAuthoringMode, type WorkflowExecutionMode, type WorkflowGraph, type WorkflowGraphMode } from '../../store/workspace';
 import { discoverModelsForCli, supportsModelDiscovery } from '../../lib/models/modelDiscoveryService';
 import type { CliId, CliModel, ModelDiscoveryResult } from '../../lib/models/modelTypes';
 import { useMissionSnapshot } from '../../hooks/useMissionSnapshot';
 import { useWorkflowEvents } from '../../hooks/useWorkflowEvents';
 
+function nodeTreeDebugLog(...args: unknown[]): void {
+  scopedDebugLog('node-tree', 'VITE_NODE_TREE_DEBUG', ...args);
+}
 
 type ValidationTone = 'idle' | 'ok' | 'error';
 type ResizeEdge = 'n' | 's' | 'e' | 'w' | 'ne' | 'nw' | 'se' | 'sw';
@@ -239,6 +243,24 @@ function selectionRect(origin: Point2D, current: Point2D) {
 
 type NodeRect = ReturnType<typeof worldRect>;
 type AlignmentOrientation = 'vertical' | 'horizontal';
+
+function instanceRect(node: NodeInstance): NodeRect {
+  const height = node.size?.height ?? (
+    node.type === 'workflow.task'
+      ? TASK_NODE_ESTIMATED_HEIGHT
+      : node.type === 'workflow.agent'
+        ? AGENT_NODE_ESTIMATED_HEIGHT
+        : node.type === 'workflow.frame'
+          ? FRAME_MIN_HEIGHT
+          : 96
+  );
+  return {
+    x: node.location.x,
+    y: node.location.y,
+    width: node.size?.width ?? (node.type === 'workflow.task' ? TASK_NODE_ESTIMATED_WIDTH : AGENT_NODE_ESTIMATED_WIDTH),
+    height,
+  };
+}
 
 interface AlignmentGuide {
   orientation: AlignmentOrientation;
@@ -615,6 +637,14 @@ function workflowModeDisplay(mode: string | undefined) {
   return { label: GRAPH_MODE_LABELS[graphMode] ?? presetMode.label, graphMode };
 }
 
+function presetNodeForGraphNode(preset: PresetDefinition | null | undefined, workflowId: string, nodeId: string) {
+  if (!preset) return null;
+  return preset.nodes.find(node =>
+    node.id === nodeId ||
+    (workflowId && `${workflowId}-${node.id}` === nodeId)
+  ) ?? null;
+}
+
 function flowNodeKind(node: Record<string, unknown>) {
   const type = String(node.type ?? '');
   const roleId = String((node.data as Record<string, unknown> | undefined)?.roleId ?? '');
@@ -657,6 +687,38 @@ function fitDocumentStateToGraph(documentState: NodeDocumentState, canvasRect: D
       viewByTree: {
         ...documentState.editor.viewByTree,
         [documentState.document.rootTreeId]: { pan, zoom },
+      },
+    },
+  };
+}
+
+function fitDocumentStateToNodeIds(documentState: NodeDocumentState, nodeIds: Set<string>, canvasRect: DOMRect | undefined | null): NodeDocumentState {
+  const treeId = getActiveTreeId(documentState.editor);
+  const tree = documentState.document.trees[treeId];
+  const rects = [...nodeIds]
+    .map(nodeId => tree.nodes[nodeId])
+    .filter((node): node is NodeInstance => Boolean(node))
+    .map(instanceRect);
+  if (rects.length === 0) return documentState;
+
+  const bounds = rectBounds(rects);
+  const viewportWidth = Math.max(640, canvasRect?.width ?? 1280);
+  const viewportHeight = Math.max(420, canvasRect?.height ?? 760);
+  const paddedWidth = bounds.width + 220;
+  const paddedHeight = bounds.height + 220;
+  const zoom = Math.max(0.35, Math.min(1.05, viewportWidth / paddedWidth, viewportHeight / paddedHeight));
+  const pan = {
+    x: (viewportWidth - bounds.width * zoom) / 2 - bounds.x * zoom,
+    y: (viewportHeight - bounds.height * zoom) / 2 - bounds.y * zoom,
+  };
+
+  return {
+    ...documentState,
+    editor: {
+      ...documentState.editor,
+      viewByTree: {
+        ...documentState.editor.viewByTree,
+        [treeId]: { pan, zoom },
       },
     },
   };
@@ -722,6 +784,11 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
   const runMenuRef = useRef<HTMLDivElement>(null);
 
   const registry = useMemo(() => createWorkflowNodeRegistry(), []);
+  const graphTerminalPaneBindings = useMemo(() => graph.nodes.flatMap(node => {
+    const cli = node.config?.cli;
+    const terminalId = node.config?.terminalId;
+    return cli && terminalId ? [{ cli, nodeId: node.id, terminalId }] : [];
+  }), [graph.nodes]);
   const [state, setState] = useState<NodeDocumentState>(() => legacyGraphToNodeDocument(graph));
   const stateRef = useRef(state);
   const [interaction, setInteraction] = useState<CanvasInteraction>({ kind: 'idle' });
@@ -758,15 +825,11 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
   // (including TerminalPane's initPty) can fire. useLayoutEffect runs synchronously
   // after the DOM commit but before useEffects, so pane data is correct at spawn time.
   useLayoutEffect(() => {
-    for (const node of graph.nodes) {
-      const nodeCli = node.config?.cli;
-      const terminalId = node.config?.terminalId;
-      if (!nodeCli || !terminalId) continue;
+    for (const { cli, nodeId, terminalId } of graphTerminalPaneBindings) {
       // Also stamp nodeId so handleCliChange can locate old persisted panes by nodeId.
-      updatePaneDataByTerminalId(terminalId, { cli: nodeCli, nodeId: node.id });
+      updatePaneDataByTerminalId(terminalId, { cli, nodeId });
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [graphTerminalPaneBindings, updatePaneDataByTerminalId]);
 
   useEffect(() => {
     const incoming = JSON.stringify(graph);
@@ -849,6 +912,21 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
     if (!activeNodeId) return null;
     return workflowGroups.find(group => group.taskNode.id === activeNodeId || group.nodeIds.has(activeNodeId)) ?? null;
   }, [state.editor.activeNodeId, state.editor.selection.nodeIds, workflowGroups]);
+  const focusWorkflowGroup = useCallback((group: WorkflowGroup) => {
+    const nodeIds = [...group.nodeIds].filter(nodeId => Boolean(activeTree.nodes[nodeId]));
+    if (nodeIds.length === 0) return;
+
+    setState(previous => {
+      let next = applyNodeEditorOperator(previous.document, previous.editor, registry, {
+        type: 'set_selection',
+        nodeIds,
+        linkIds: [],
+        activeNodeId: group.taskNode.id,
+      });
+      next = fitDocumentStateToNodeIds(next, new Set(nodeIds), canvasRef.current?.getBoundingClientRect());
+      return next;
+    });
+  }, [activeTree.nodes, registry]);
   useEffect(() => {
     setSelectedRunWorkflowIds(current => {
       const available = new Set(allWorkflowGroups.map(group => group.id));
@@ -1174,7 +1252,7 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
     [registry]
   );
   const agentRoleOptions = useMemo(
-    () => agentsConfig.agents.filter(agent =>
+    () => WORKFLOW_AGENT_ROLES.filter(agent =>
       graphUsesUiBackground
         ? UI_AGENT_ROLE_IDS.has(agent.id)
         : STANDARD_AGENT_ROLE_IDS.has(agent.id)
@@ -1709,6 +1787,10 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
         for (const nodeId of group.nodeIds) selected.add(nodeId);
         selectedNodeIdsByMode.set(group.graphMode, selected);
       }
+      const workflowGroupByNodeId = new Map<string, WorkflowGroup>();
+      for (const group of groupsToRun) {
+        for (const nodeId of group.nodeIds) workflowGroupByNodeId.set(nodeId, group);
+      }
 
       // Phase 1 runtime adapter: every agent node owns a REAL terminal (PTY),
       // regardless of the node's selected executionMode. This keeps Run on a
@@ -1725,6 +1807,9 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
         const data = node.data as Record<string, unknown>;
         const selectedCli = asWorkflowAgentCli(data.cli);
         const role = String(data.roleId ?? 'agent');
+        const nodeGroup = workflowGroupByNodeId.get(nodeId);
+        const presetNode = presetNodeForGraphNode(nodeGroup?.preset, nodeGroup?.id ?? '', nodeId);
+        const runtimeTitle = presetNode ? getPresetNodeTerminalTitle(presetNode) : `Runtime ${role}`;
 
         // Force interactive PTY so each agent node owns a real terminal.
         if (mode === workflowGraphMode) {
@@ -1752,21 +1837,21 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
             }
             const existing = openTerminals.find(t => t.id === storedTerminalId);
             if (existing && mode === workflowGraphMode) {
-              applyOperator({ type: 'set_node_property', nodeId, key: 'terminalTitle', value: existing.title });
+              applyOperator({ type: 'set_node_property', nodeId, key: 'terminalTitle', value: runtimeTitle });
               applyOperator({ type: 'set_node_property', nodeId, key: 'paneId', value: existing.paneId });
             }
           }
           const existingTerminal = openResolvedTerminal!;
           freshBindings.set(nodeId, {
             id: resolvedTerminalId,
-            title: existingTerminal.title,
+            title: runtimeTitle,
             paneId: existingTerminal.paneId,
             cli: selectedCli,
           });
           continue;
         }
         if (openResolvedTerminal && openResolvedTerminal.cli !== selectedCli) {
-          console.log(
+          nodeTreeDebugLog(
             `[runWorkflow] rebinding node=${nodeId} terminal=${resolvedTerminalId} oldCli=${openResolvedTerminal.cli ?? '<unknown>'} newCli=${selectedCli}`,
           );
         }
@@ -1778,10 +1863,10 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
           if (existing && existing.cli === selectedCli) {
             if (mode === workflowGraphMode) {
               applyOperator({ type: 'set_node_property', nodeId, key: 'terminalId', value: persistedId });
-              applyOperator({ type: 'set_node_property', nodeId, key: 'terminalTitle', value: existing.title });
+              applyOperator({ type: 'set_node_property', nodeId, key: 'terminalTitle', value: runtimeTitle });
               applyOperator({ type: 'set_node_property', nodeId, key: 'paneId', value: existing.paneId });
             }
-            freshBindings.set(nodeId, { id: persistedId, title: existing.title, paneId: existing.paneId, cli: selectedCli });
+            freshBindings.set(nodeId, { id: persistedId, title: runtimeTitle, paneId: existing.paneId, cli: selectedCli });
             continue;
           }
         }
@@ -1800,7 +1885,7 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
         // Allocate a runtime terminal id without adding a Workspace pane.
         // RuntimeManager owns the PTY launch, and RuntimeView renders the live
         // terminal stream through a synthetic pane wrapper.
-        const paneTitle = `Runtime ${role}`;
+        const paneTitle = runtimeTitle;
         const paneId = `runtime-pane-${nodeId}`;
         const terminalId = generateId();
         useWorkspaceStore.getState().setNodeRuntimeBinding(nodeId, {
@@ -1845,22 +1930,22 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
         const flow = flowByMode.get(group.graphMode);
         if (!flow) throw new Error(`Workflow "${group.name}" is not available on its canvas.`);
         const groupSubgraph = subgraphForWorkflow(flow, group);
+        const taskPresetId = group.preset?.id ?? (String(group.taskNode.properties.presetId ?? '').trim() || null);
+        const taskPreset = group.preset ?? getWorkflowPreset(taskPresetId);
         const hydratedNodes = groupSubgraph.nodes.map(node => {
           const data: Record<string, unknown> = { ...((node.data ?? {}) as Record<string, unknown>) };
           if (flowNodeKind(node) === 'task') {
-            const taskPresetId = group.preset?.id ?? String(group.taskNode.properties.presetId ?? '').trim();
-            const preset = group.preset ?? getWorkflowPreset(taskPresetId);
-            data.frontendMode = preset?.frontendMode ?? data.frontendMode ?? frontendMode;
+            data.frontendMode = taskPreset?.frontendMode ?? data.frontendMode ?? frontendMode;
             data.frontendDirection = isAppSitePresetId(taskPresetId) ? frontendDirection : data.frontendDirection;
             data.workflowId = group.id;
             data.workflowName = group.name;
             data.workflowSubMode = group.subMode;
             data.workflowMode = group.mode ?? '';
-            if (preset) {
+            if (taskPreset) {
               data.authoringMode = 'preset';
-              data.presetId = preset.id;
-              data.specProfile = preset.specProfile ?? 'none';
-              data.finalReadmeEnabled = Boolean(data.finalReadmeEnabled ?? getPresetReadmeDefault(preset));
+              data.presetId = taskPreset.id;
+              data.specProfile = taskPreset.specProfile ?? 'none';
+              data.finalReadmeEnabled = Boolean(data.finalReadmeEnabled ?? getPresetReadmeDefault(taskPreset));
             }
             return { ...node, data };
           }
@@ -1873,6 +1958,11 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
             data.paneId = fresh.paneId;
             data.cli = fresh.cli;
           }
+          const presetNode = presetNodeForGraphNode(taskPreset, group.id, nodeId);
+          if (presetNode) {
+            data.roleId = presetNode.roleId;
+            data.terminalTitle = getPresetNodeTerminalTitle(presetNode);
+          }
           if (!data.terminalId) throw new Error(`Agent node ${nodeId}: failed to create or find terminal binding.`);
           if (!data.terminalTitle) data.terminalTitle = `Terminal ${data.roleId ?? nodeId}`;
           return { ...node, data };
@@ -1884,8 +1974,6 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
             ? group.taskNode.properties.authoringMode
             : 'graph'
         ) as WorkflowAuthoringMode;
-        const taskPresetId = group.preset?.id ?? (String(group.taskNode.properties.presetId ?? '').trim() || null);
-        const taskPreset = group.preset ?? getWorkflowPreset(taskPresetId);
         const mission = compileMission({
           missionId,
           graphId: `${(group.graphMode === workflowGraphMode ? graph.id : workflowGraphs[group.graphMode]?.id) || group.graphMode}:${group.id}`,
@@ -1940,9 +2028,33 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
         };
         addLaunchedWorkflow(descriptor);
         ensureWorkflowWorkspace(descriptor);
+        const agents: MissionAgent[] = mission.nodes.map(node => ({
+          terminalId: node.terminal.terminalId,
+          title: node.terminal.terminalTitle,
+          roleId: node.roleId,
+          paneId: node.terminal.paneId,
+          status: 'idle',
+          attempt: 0,
+          lastPayload: null,
+          attemptHistory: [],
+          nodeId: node.id,
+          runtimeCli: node.terminal.cli,
+          model: node.terminal.model ?? null,
+          executionMode: node.terminal.executionMode,
+          activeRunId: null,
+          runtimeSessionId: null,
+          runtimeBootstrapState: 'NOT_CONNECTED',
+          runtimeBootstrapReason: null,
+        }));
+        addPane('missioncontrol', 'Mission Progress', {
+          taskDescription: mission.task.prompt,
+          agents,
+          missionId,
+          mission,
+        });
         launched.push(descriptor);
       }
-      setAppMode('runtime');
+      setAppMode('workspace');
 
       const { workflowOrchestrator } = await import('../../lib/workflow/WorkflowOrchestrator');
       for (const launchedWorkflow of launched) {
@@ -1964,41 +2076,6 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
       setValidationMessage(error instanceof Error ? error.message : String(error));
     }
   }, [addLaunchedWorkflow, allWorkflowGroups, ensureWorkflowWorkspace, registry, state.document, workspaceDir, graph.id, openTerminals, setAppMode, applyOperator, setNodeTerminalBinding, frontendMode, selectedRunWorkflowIds, workflowGraphMode, workflowGraphs]);
-
-  const viewRuntimeMapping = useCallback(() => {
-    try {
-      const flow = nodeDocumentToFlowGraph(state.document, registry);
-      const hydratedNodes = flow.nodes.map(node => {
-        if (node.type !== 'workflow.agent' && node.type !== 'agent') return node;
-        const data: Record<string, unknown> = { ...((node.data ?? {}) as Record<string, unknown>) };
-        if (!data.terminalId) data.terminalId = `preview-term-${node.id}`;
-        if (!data.terminalTitle) data.terminalTitle = `Preview ${data.roleId ?? node.id}`;
-        return { ...node, data };
-      });
-
-      const mission = compileMission({
-        missionId: 'preview-mission',
-        graphId: 'preview-graph',
-        nodes: hydratedNodes as never[],
-        edges: flow.edges as never[],
-        workspaceDirFallback: workspaceDir,
-        terminalClis: {},
-        authoringMode: 'graph',
-        runVersion: 1,
-        frontendMode,
-      });
-
-      const layerText = mission.metadata.executionLayers
-        .map((layer, index) => `L${index + 1}: ${layer.join(', ')}`)
-        .join(' | ');
-
-      setValidationTone('ok');
-      setValidationMessage(`Runtime mapping: start=[${mission.metadata.startNodeIds.join(', ')}] ${layerText}`);
-    } catch (error) {
-      setValidationTone('error');
-      setValidationMessage(error instanceof Error ? error.message : String(error));
-    }
-  }, [registry, state.document, workspaceDir, frontendMode]);
 
   const importPresetGraph = useCallback((presets: PresetDefinition[], options: { finalReadmeEnabled: boolean }) => {
     if (presets.length === 0) return;
@@ -2995,9 +3072,6 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
             <ScanSearch size={12} className="inline mr-1" />
             Validate
           </button>
-          <button onClick={viewRuntimeMapping} className="px-2.5 py-1 rounded border border-border-panel text-text-muted hover:text-text-primary hover:background-bg-panel">
-            Runtime Map
-          </button>
           <button onClick={() => setPresetPickerOpen(true)} className="px-2.5 py-1 rounded border border-border-panel text-text-muted hover:text-text-primary hover:background-bg-panel">
             <Sparkles size={12} className="inline mr-1" />
             Workflow Presets
@@ -3041,7 +3115,7 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
                   <button
                     key={group.id}
                     type="button"
-                    onClick={() => applyOperator({ type: 'set_selection', nodeIds: [group.taskNode.id], activeNodeId: group.taskNode.id })}
+                    onClick={() => focusWorkflowGroup(group)}
                     className={`flex h-6 shrink-0 items-center gap-1 rounded border px-2 text-[10px] ${
                       active
                         ? 'border-accent-primary bg-accent-primary/15 text-text-primary'
@@ -3463,7 +3537,7 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
                         >
                           {agentRoleOptions.map(agent => (
                             <option key={agent.id} value={agent.id}>
-                              {agent.name}
+                              {formatWorkflowRoleLabel(agent.id)}
                             </option>
                           ))}
                         </select>
@@ -3478,6 +3552,17 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
                           ))}
                         </select>
                       </div>
+                      {(() => {
+                        const workflowRoleId = String(materializedNode.node.properties.roleId ?? defaultAgentRoleId);
+                        const publicRole = getPublicRoleForWorkflowRole(workflowRoleId);
+                        const workflowRole = agentRoleOptions.find(agent => agent.id === workflowRoleId);
+                        return (
+                          <div className="rounded-lg border border-border-panel background-bg-surface px-2 py-1.5 text-[10px] text-text-muted">
+                            <span className="font-semibold text-text-secondary">Base role:</span> {publicRole.name}
+                            {workflowRole ? <span> · <span className="font-semibold text-text-secondary">Workflow node:</span> {workflowRole.name}</span> : null}
+                          </div>
+                        );
+                      })()}
                       {(() => {
                         const activeCli = asWorkflowAgentCli(materializedNode.node.properties.cli, runtimeCli);
                         const isSupported = supportsModelDiscovery(activeCli);
@@ -3740,7 +3825,7 @@ export function NodeTreePane(props: { graph: WorkflowGraph; onGraphChange?: (gra
                             {agentResults.map(entry => (
                               <div key={entry.id} className="rounded border border-border-panel background-bg-surface px-2 py-1.5">
                                 <div className="flex items-center justify-between mb-0.5">
-                                  <span className="text-[10px] font-semibold text-accent-primary">{entry.roleId}</span>
+                                  <span className="text-[10px] font-semibold text-accent-primary">{formatWorkflowRoleLabel(entry.roleId)}</span>
                                   <span className={`text-[9px] ${entry.outcome === 'failure' ? 'text-red-300' : 'text-emerald-300'}`}>
                                     {entry.outcome || 'completed'}
                                   </span>

@@ -1,12 +1,12 @@
-# Terminal Docks Architecture
+# Comet-AI Architecture
 
 ## System Shape
 
-Terminal Docks is a Tauri desktop app with a React/TypeScript frontend, Rust native services, and a local Node.js MCP server named Starlink.
+Comet-AI is a Tauri desktop app with a React/TypeScript frontend, Rust native services, and a local Node.js MCP server named Starlink.
 
 The main architectural rule is separation of responsibilities:
 
-- React components render app modes, panes, workflow authoring, runtime visibility, and user controls.
+- React components render the workspace shell, editor/terminal panes, app modes, workflow authoring, runtime visibility, and user controls.
 - TypeScript workflow modules own graph compilation, workflow definitions, workflow runs, state transitions, and mission orchestration.
 - TypeScript runtime modules own CLI runtime sessions, readiness gates, task injection, adapter behavior, and terminal output routing.
 - Rust/Tauri owns PTY processes, SQLite commands, filesystem commands, MCP server process lifecycle, and native OS integration.
@@ -16,8 +16,12 @@ The main architectural rule is separation of responsibilities:
 
 - `src/App.tsx`: top-level app shell, mode rail, layout wiring, and global listeners.
 - `src/store/workspace.ts`: Zustand store for UI state, panes, workflow graph data, compiled mission data, and mission snapshots.
+- `src/components/AgentDock/AgentDock.tsx`: global workspace agent dock for continuing active missions outside Mission Control.
+- `src/components/ChangeReview/ChangeReviewPane.tsx`: review surface for agent patch artifacts, changed files, hunk accept/reject, and applying accepted unified-diff hunks.
+- `src/components/Editor/EditorPane.tsx`: CodeMirror-based file editor, image preview, file reload/save, language loading, and cursor status.
+- `src/components/Sidebar/FileTree.tsx`: workspace file browsing and file-open entry points.
 - `src/components/NodeTree/NodeTreePane.tsx`: workflow graph authoring and run controls.
-- `src/components/MissionControl/MissionControlPane.tsx`: mission lifecycle visibility, node state, runtime logs, artifacts, and manual controls.
+- `src/components/MissionControl/MissionControlPane.tsx`: mission progress, lifecycle visibility, node state, runtime logs, artifacts, and manual controls.
 - `src/components/Runtime/RuntimeView.tsx`: runtime/machine view for live sessions.
 - `src/components/Terminal/TerminalPane.tsx`: xterm pane integration with Tauri PTY events.
 - `src/lib/graphCompiler.ts`: converts UI graph nodes and edges into compiled missions.
@@ -29,7 +33,17 @@ The main architectural rule is separation of responsibilities:
 - `mcp-server/src/*`: modular Starlink MCP server, tools, resources, prompts, debug tools, state, and SQLite access.
 - `tests/*`: Node-based and TypeScript-compiled regression tests for graph, workflow, MCP, runtime adapters, readiness, launch hardening, and debug MCP.
 
-## Runtime Flow
+## Workspace Flow
+
+1. The app opens into Workspace mode by default.
+2. The sidebar exposes the workspace file tree.
+3. Editor panes use Tauri workspace commands to read, write, reload, and preview files.
+4. Terminal panes use Tauri PTY commands and keep output available to runtime logic through `TerminalOutputBus`.
+5. `AgentDock` exposes the active mission follow-up composer from the global workspace shell.
+6. `ChangeReviewPane` opens from mission evidence when agents report file changes or patch artifacts.
+7. Workflow, Runtime Monitor, Starlink Toolbox, and Action Center remain available as secondary modes.
+
+## Workflow Runtime Flow
 
 1. The user authors or selects a workflow graph.
 2. `graphCompiler.ts` normalizes graph data into a compiled mission.
@@ -60,9 +74,9 @@ Owned by `RuntimeManager` and `RuntimeSession`. It contains CLI identity, execut
 
 Owned through Rust/Tauri SQLite commands and MCP server database helpers. It stores tasks, mission records, workflow events, artifacts, runtime session records, debug state, locks, inbox items, and related audit data.
 
-## MCP Server Boundary
+## Starlink Server Boundary
 
-Starlink MCP is an agent gateway and coordination layer. It should expose deterministic tools, validate graph-mode routing, record events, and communicate with the app. It should not become an independent UI workflow brain that conflicts with `WorkflowOrchestrator`.
+Starlink is the agent gateway and coordination layer. It exposes deterministic MCP-compatible tools, validates graph-mode routing, records events, and communicates with the app. It should not become an independent UI workflow brain that conflicts with `WorkflowOrchestrator`.
 
 Important tool groups:
 
@@ -88,6 +102,10 @@ CLI adapters are responsible for CLI-specific behavior:
 - task prompt/follow-up signal formatting.
 
 RuntimeManager is responsible for lifecycle sequencing and should call adapters instead of embedding CLI-specific parsing in UI components.
+
+## Startup Boundary
+
+The workspace/editor/terminal path should become usable before advanced workflow surfaces are opened. Runtime, workflow, MCP, and model-discovery initialization may still warm up in the background, but they should avoid blocking the default workspace surface when possible.
 
 ## Rust/Tauri Boundary
 

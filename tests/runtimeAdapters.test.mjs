@@ -5,6 +5,7 @@ import { claudeAdapter } from '../.tmp-tests/lib/runtime/adapters/claude.js';
 import { codexAdapter } from '../.tmp-tests/lib/runtime/adapters/codex.js';
 import { geminiAdapter } from '../.tmp-tests/lib/runtime/adapters/gemini.js';
 import { opencodeAdapter } from '../.tmp-tests/lib/runtime/adapters/opencode.js';
+import { normalizeMcpBaseUrl, normalizeMcpEndpointUrl, requireTerminalRuntimeId } from '../.tmp-tests/lib/runtime/TerminalRuntime.js';
 
 const fixtureRoot = join(process.cwd(), 'tests', 'fixtures', 'runtime-adapters');
 const adapters = {
@@ -45,7 +46,7 @@ for (const [cliId, adapter] of Object.entries(adapters)) {
 
 run('permission prompt output maps to waiting_user_answer', () => {
   assert.equal(
-    codexAdapter.detectStatus('Allow the terminal-docks MCP server to run tool "write_file"?\n1. Allow\nenter to submit').status,
+    codexAdapter.detectStatus('Allow the Starlink MCP server to run tool "write_file"?\n1. Allow\nenter to submit').status,
     'waiting_user_answer',
   );
   assert.equal(codexAdapter.detectStatus('Proceed? (y)').status, 'waiting_user_answer');
@@ -69,14 +70,14 @@ run('codex startup permission prompts are categorized', () => {
     'shell_execution',
   );
   assert.equal(
-    codexAdapter.detectPermissionRequest('Allow the terminal-docks MCP server to run tool "read_file"?\n1. Allow\nenter to submit')?.request.category,
+    codexAdapter.detectPermissionRequest('Allow the Starlink MCP server to run tool "read_file"?\n1. Allow\nenter to submit')?.request.category,
     'file_read',
   );
 });
 
 run('codex numbered approval prompts submit selected allow option', () => {
   const request = codexAdapter.detectPermissionRequest(
-    'Allow the terminal-docks MCP server to run tool "read_file"?\n' +
+    'Allow the Starlink MCP server to run tool "read_file"?\n' +
       '  1. Allow\n' +
       '  2. Allow for this session\n' +
       'enter to submit | esc to cancel',
@@ -180,4 +181,35 @@ run('Gemini latest visible input prompt wins over stale auth spinner', () => {
   assert.equal(status.status, 'idle', status.detail);
   assert.equal(status.confidence, 'high');
   assert.equal(geminiAdapter.detectReady(fixture).ready, true);
+});
+
+run('Starlink base URL normalization keeps health checks on the server root', () => {
+  assert.equal(normalizeMcpBaseUrl(' http://localhost:3741/ '), 'http://localhost:3741');
+  assert.equal(normalizeMcpBaseUrl(' http://user:pass@localhost:3741/\u0000 '), 'http://localhost:3741');
+  assert.equal(normalizeMcpBaseUrl('http://localhost:3741/mcp'), 'http://localhost:3741');
+  assert.equal(normalizeMcpBaseUrl('http://localhost:3741/mcp/'), 'http://localhost:3741');
+  assert.equal(normalizeMcpBaseUrl('http://localhost:3741/internal/mcp'), 'http://localhost:3741/internal');
+  assert.equal(normalizeMcpBaseUrl('javascript:alert(1)'), 'http://localhost:3741');
+  assert.equal(normalizeMcpBaseUrl('file:///tmp/starlink'), 'http://localhost:3741');
+  assert.equal(normalizeMcpBaseUrl(''), 'http://localhost:3741');
+});
+
+run('Starlink endpoint URL normalization keeps runtime launch config on /mcp', () => {
+  assert.equal(normalizeMcpEndpointUrl(' http://localhost:3741/ '), 'http://localhost:3741/mcp');
+  assert.equal(normalizeMcpEndpointUrl(' http://user:pass@localhost:3741/\u0000 '), 'http://localhost:3741/mcp');
+  assert.equal(normalizeMcpEndpointUrl('http://localhost:3741/mcp'), 'http://localhost:3741/mcp');
+  assert.equal(normalizeMcpEndpointUrl('http://localhost:3741/internal'), 'http://localhost:3741/internal/mcp');
+  assert.equal(normalizeMcpEndpointUrl('http://localhost:3741/mcp?token=abc'), 'http://localhost:3741/mcp?token=abc');
+  assert.equal(normalizeMcpEndpointUrl('http://localhost:3741/mcp?token=abc#ignored'), 'http://localhost:3741/mcp?token=abc');
+  assert.equal(normalizeMcpEndpointUrl('javascript:alert(1)'), 'http://localhost:3741/mcp');
+  assert.equal(normalizeMcpEndpointUrl('file:///tmp/starlink'), 'http://localhost:3741/mcp');
+  assert.equal(normalizeMcpEndpointUrl(''), 'http://localhost:3741/mcp');
+});
+
+run('TerminalRuntime normalizes terminal ids before backend operations', () => {
+  assert.equal(requireTerminalRuntimeId(' term-1\u0000 ', 'test operation'), 'term-1');
+  assert.throws(
+    () => requireTerminalRuntimeId(' \u0000 ', 'test operation'),
+    /Cannot test operation: missing terminal id\./,
+  );
 });

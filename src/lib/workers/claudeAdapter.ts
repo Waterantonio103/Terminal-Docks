@@ -17,6 +17,7 @@ import type {
   WorkerEvent,
   WorkerSession,
 } from './types';
+import { buildCometRuntimeEnv } from '../runtimeEnv';
 
 /**
  * @deprecated This legacy adapter does direct PTY writes outside RuntimeManager.
@@ -52,12 +53,15 @@ export const claudeAdapter: WorkerAdapter = {
       command: 'claude',
       args: [],
       env: {
-        TD_SESSION_ID: sessionId,
-        TD_MCP_URL: mcpUrl,
-        TD_AGENT_ID: agentId,
+        ...buildCometRuntimeEnv({
+          sessionId,
+          mcpUrl,
+          agentId,
+          workspaceDir: workspaceDir ?? '',
+          kind: 'claude',
+        }),
+        COMET_PROFILE_ID: profileId,
         TD_PROFILE_ID: profileId,
-        TD_WORKSPACE: workspaceDir ?? '',
-        TD_KIND: 'claude',
       },
     });
 
@@ -95,7 +99,7 @@ export const claudeAdapter: WorkerAdapter = {
       profileId: session.profileId,
     };
     const primer = `### MISSION_CONTROL_BOOTSTRAP_REQUEST ###
-Please connect to the MCP server at: ${mcpUrl}
+Please connect to Starlink at: ${mcpUrl}
 Use sessionId: ${session.sessionId}
 
 --- ENVELOPE ---

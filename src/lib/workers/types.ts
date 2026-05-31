@@ -2,7 +2,7 @@ export type WorkerKind = 'claude' | 'gemini' | 'codex' | 'opencode' | 'generic' 
 
 export type ReadyState = 'spawning' | 'booting' | 'ready' | 'busy' | 'stale' | 'dead';
 
-// Adapter lifecycle — owned by Terminal Docks, not by the AI CLI.
+// Adapter lifecycle — owned by Comet-AI, not by the AI CLI.
 // The adapter progresses through these states independently of the CLI.
 export type AdapterLifecycle =
   | 'created'
@@ -32,7 +32,7 @@ export interface AdapterRegistration {
   cwd: string | null;
 }
 
-// The full adapter contract Terminal Docks exposes to implementations.
+// The full adapter contract Comet-AI exposes to implementations.
 // The CLI is a child the adapter drives — it is NOT the adapter.
 export interface RuntimeAdapterContract {
   startRuntime(args: {
@@ -137,6 +137,7 @@ export interface McpServerEvent {
     | 'agent:heartbeat'
     | 'agent:disconnected'
     | 'agent:artifact'
+    | 'agent:progress'
     | 'task:acked'
     | 'task:completed'
     | 'task:pushed'
@@ -165,4 +166,11 @@ export interface McpServerEvent {
   content?: string;
   path?: string;
   payload?: unknown;
+  phaseId?: string;
+  status?: 'started' | 'progress' | 'completed' | 'blocked' | 'failed';
+  title?: string;
+  detail?: string;
+  artifactIds?: string[];
+  filePaths?: string[];
+  percentHint?: number;
 }

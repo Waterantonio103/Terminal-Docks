@@ -1,6 +1,7 @@
 import { invoke } from '@tauri-apps/api/core';
-import type { Pane } from '../store/workspace';
-import { detectCliFromTerminalOutput, normalizeCli, type AgentCli } from './cliDetection';
+import type { Pane } from '../store/workspace.js';
+import { detectCliFromTerminalOutput, normalizeCli, type AgentCli } from './cliDetection.js';
+import { normalizeTerminalId } from './terminalIds.js';
 
 type PaneDataPatch = Partial<NonNullable<Pane['data']>>;
 type UpdatePaneData = (id: string, data: PaneDataPatch) => void;
@@ -27,11 +28,17 @@ export async function refreshCliDetectionForTerminals(
   panes: Pane[],
   updatePaneData: UpdatePaneData
 ): Promise<void> {
-  const terminals = panes.filter(p => p.type === 'terminal');
+  const terminals = panes
+    .filter(p => p.type === 'terminal')
+    .map(pane => ({ pane, terminalId: normalizeTerminalId(pane.data?.terminalId) }))
+    .filter((entry): entry is { pane: Pane; terminalId: string } => Boolean(entry.terminalId));
 
-  await Promise.all(terminals.map(async pane => {
-    const terminalId = pane.data?.terminalId;
-    if (!terminalId) return;
+  const activeTerminalIds = new Set(terminals.map(entry => entry.terminalId));
+  for (const terminalId of states.keys()) {
+    if (!activeTerminalIds.has(terminalId)) states.delete(terminalId);
+  }
+
+  await Promise.all(terminals.map(async ({ pane, terminalId }) => {
 
     let recentOutput = '';
     try {

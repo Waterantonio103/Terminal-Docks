@@ -352,7 +352,7 @@ export function buildMissionTemplate({ debugRun, templateName, cliId, model, yol
     graphId,
     task: {
       nodeId: taskNodeId,
-      prompt: `Debug template ${templateName}: verify Terminal Docks workflow lifecycle without touching user missions.`,
+      prompt: `Debug template ${templateName}: verify Comet-AI workflow lifecycle without touching user missions.`,
       mode: 'build',
       workspaceDir: process.cwd(),
     },
@@ -492,10 +492,10 @@ function isSubpath(parent, child) {
 
 function resolveOutputPath(outputPath) {
   const resolved = isAbsolute(outputPath) ? resolve(outputPath) : resolve(REPO_ROOT, outputPath);
-  const docksTestingRoot = resolve(REPO_ROOT, 'docks-testing');
-  if (!isSubpath(docksTestingRoot, resolved)) {
+  const cometTestingRoot = resolve(REPO_ROOT, 'comet-testing');
+  if (!isSubpath(cometTestingRoot, resolved)) {
     return {
-      error: `Concrete workflow output must live under docks-testing/. Received: ${outputPath}`,
+      error: `Concrete workflow output must live under comet-testing/. Received: ${outputPath}`,
       resolved,
     };
   }

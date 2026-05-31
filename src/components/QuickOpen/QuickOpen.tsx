@@ -1,56 +1,27 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { Search, X } from 'lucide-react';
 import { useWorkspaceStore } from '../../store/workspace';
 import { invoke } from '@tauri-apps/api/core';
 import { FileTypeIcon } from '../../lib/fileIcons';
-
-interface DirEntry {
-  name: string;
-  isDirectory: boolean;
-  isFile: boolean;
-}
-
-interface FileEntry {
-  path: string;
-  name: string;
-}
+import { cleanQuickOpenStatusText, collectQuickOpenFiles, filterQuickOpenFiles, type QuickOpenDirEntry, type QuickOpenFileEntry } from '../../lib/quickOpenFiles';
+import { relativeWorkspacePath } from '../../lib/workspacePaths';
 
 const MAX_FILES = 500;
-
-async function collectFiles(dir: string, depth = 0): Promise<FileEntry[]> {
-  if (depth > 4) return [];
-  try {
-    const entries = await invoke<DirEntry[]>('workspace_read_dir', { path: dir });
-    const results: FileEntry[] = [];
-    for (const entry of entries) {
-      if (!entry.name) continue;
-      if (entry.name.startsWith('.') || entry.name === 'node_modules' || entry.name === 'target') continue;
-      const fullPath = `${dir}/${entry.name}`;
-      if (entry.isDirectory) {
-        const sub = await collectFiles(fullPath, depth + 1);
-        results.push(...sub);
-      } else {
-        results.push({ path: fullPath, name: entry.name });
-      }
-      if (results.length >= MAX_FILES) break;
-    }
-    return results;
-  } catch {
-    return [];
-  }
-}
 
 interface QuickOpenProps {
   onClose: () => void;
 }
 
 export function QuickOpen({ onClose }: QuickOpenProps) {
-  const workspaceDir = useWorkspaceStore((s) => s.workspaceDir);
+  const workspaceDir = useWorkspaceStore((s) =>
+    s.tabs.find(tab => tab.id === s.activeTabId)?.workspaceDir || s.workspaceDir
+  );
   const addPane      = useWorkspaceStore((s) => s.addPane);
 
   const [query,   setQuery]   = useState('');
-  const [files,   setFiles]   = useState<FileEntry[]>([]);
+  const [files,   setFiles]   = useState<QuickOpenFileEntry[]>([]);
   const [loading, setLoading] = useState(false);
+  const [scanError, setScanError] = useState<string | null>(null);
   const [selected, setSelected] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -59,32 +30,54 @@ export function QuickOpen({ onClose }: QuickOpenProps) {
   }, []);
 
   useEffect(() => {
-    if (!workspaceDir) return;
-    setLoading(true);
-    collectFiles(workspaceDir).then(f => {
-      setFiles(f);
+    if (!workspaceDir) {
+      setFiles([]);
       setLoading(false);
-    });
+      setScanError(null);
+      return;
+    }
+    const controller = new AbortController();
+    setLoading(true);
+    setScanError(null);
+    collectQuickOpenFiles(
+      workspaceDir,
+      path => invoke<QuickOpenDirEntry[]>('workspace_read_dir', { path }),
+      { maxFiles: MAX_FILES, signal: controller.signal, throwOnRootReadError: true },
+    )
+      .then(f => {
+        if (controller.signal.aborted) return;
+        setFiles(f);
+      })
+      .catch(error => {
+        if (controller.signal.aborted) return;
+        console.error('Failed to scan workspace files', error);
+        setFiles([]);
+        setScanError(cleanQuickOpenStatusText(error instanceof Error ? error.message : error));
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setLoading(false);
+      });
+    return () => controller.abort();
   }, [workspaceDir]);
 
-  const filtered = query.trim()
-    ? files.filter(f => f.name.toLowerCase().includes(query.toLowerCase()) ||
-                        f.path.toLowerCase().includes(query.toLowerCase()))
-    : files.slice(0, 50);
+  const filtered = useMemo(() => filterQuickOpenFiles(files, query), [files, query]);
 
-  const openFile = useCallback((file: FileEntry) => {
+  const openFile = useCallback((file: QuickOpenFileEntry) => {
     addPane('editor', file.name, { filePath: file.path });
     onClose();
   }, [addPane, onClose]);
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Escape') { onClose(); return; }
-    if (e.key === 'ArrowDown') { e.preventDefault(); setSelected(s => Math.min(s + 1, filtered.length - 1)); }
+    if (e.key === 'ArrowDown') { e.preventDefault(); setSelected(s => filtered.length ? Math.min(s + 1, filtered.length - 1) : 0); }
     if (e.key === 'ArrowUp')   { e.preventDefault(); setSelected(s => Math.max(s - 1, 0)); }
     if (e.key === 'Enter' && filtered[selected]) { openFile(filtered[selected]); }
   };
 
   useEffect(() => { setSelected(0); }, [query]);
+  useEffect(() => {
+    setSelected(current => Math.min(Math.max(current, 0), Math.max(filtered.length - 1, 0)));
+  }, [filtered.length]);
 
   const listRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -98,7 +91,7 @@ export function QuickOpen({ onClose }: QuickOpenProps) {
       onClick={onClose}
     >
       <div
-        className="background-bg-panel border border-border-panel rounded-xl shadow-2xl w-[560px] max-h-[60vh] flex flex-col overflow-hidden animate-fade-in"
+        className="bg-bg-panel border border-border-panel rounded-xl shadow-2xl w-[560px] max-h-[60vh] flex flex-col overflow-hidden animate-fade-in"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Search input */}
@@ -114,7 +107,7 @@ export function QuickOpen({ onClose }: QuickOpenProps) {
             disabled={!workspaceDir}
             className="flex-1 bg-transparent border-none text-text-primary text-sm focus:outline-none placeholder:text-text-muted"
           />
-          <button onClick={onClose} className="text-text-muted hover:text-text-primary transition-colors">
+          <button onClick={onClose} className="text-text-muted hover:text-text-primary transition-colors" aria-label="Close Quick Open">
             <X size={14} />
           </button>
         </div>
@@ -129,20 +122,21 @@ export function QuickOpen({ onClose }: QuickOpenProps) {
               Open a folder in the Explorer sidebar to enable Quick Open.
             </div>
           )}
-          {!loading && workspaceDir && filtered.length === 0 && (
+          {!loading && workspaceDir && scanError && (
+            <div className="px-4 py-3 text-xs text-red-300">{scanError}</div>
+          )}
+          {!loading && workspaceDir && !scanError && filtered.length === 0 && (
             <div className="px-4 py-3 text-xs text-text-muted">No files matching "{query}"</div>
           )}
-          {!loading && filtered.map((file, i) => {
-            const displayPath = workspaceDir
-              ? file.path.replace(workspaceDir, '').replace(/^[/\\]/, '')
-              : file.path;
+          {!loading && !scanError && filtered.map((file, i) => {
+            const displayPath = workspaceDir ? relativeWorkspacePath(workspaceDir, file.path) ?? file.path : file.path;
             return (
               <button
                 key={file.path}
                 onClick={() => openFile(file)}
                 onMouseEnter={() => setSelected(i)}
                 className={`w-full flex items-center gap-3 px-4 py-2 text-left transition-colors ${
-                  i === selected ? 'bg-accent-primary/15 text-text-primary' : 'text-text-secondary hover:background-bg-surface'
+                  i === selected ? 'bg-accent-primary/15 text-text-primary' : 'text-text-secondary hover:bg-bg-surface'
                 }`}
               >
                 <FileTypeIcon fileName={file.name} size={13} className="shrink-0" />

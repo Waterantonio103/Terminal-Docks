@@ -11,6 +11,12 @@ use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager, State};
 
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
+
 pub struct AgentRunState {
     children: Arc<Mutex<HashMap<String, Arc<Mutex<Child>>>>>,
 }
@@ -119,7 +125,7 @@ struct AgentRunExitEvent {
     at: u64,
 }
 
-const LOCAL_HTTP_COMMAND: &str = "__terminal_docks_local_http__";
+const LOCAL_HTTP_COMMAND: &str = "__comet_ai_local_http__";
 
 fn unix_millis_now() -> u64 {
     SystemTime::now()
@@ -144,13 +150,7 @@ fn sanitize_path_segment(value: &str) -> String {
     }
 }
 
-fn run_root(app: &AppHandle, cwd: Option<&str>) -> Result<PathBuf, String> {
-    if let Some(cwd) = cwd {
-        let trimmed = cwd.trim();
-        if !trimmed.is_empty() {
-            return Ok(PathBuf::from(trimmed).join(".terminal-docks").join("runs"));
-        }
-    }
+fn run_root(app: &AppHandle, _cwd: Option<&str>) -> Result<PathBuf, String> {
     Ok(app
         .path()
         .app_local_data_dir()
@@ -188,8 +188,39 @@ fn home_dir() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
+fn user_codex_home() -> Option<String> {
+    home_dir().map(|home| home.join(".codex").to_string_lossy().to_string())
+}
+
+fn normalize_cli_id(value: &str) -> String {
+    let key = value
+        .trim()
+        .to_lowercase()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join("_")
+        .replace('-', "_");
+
+    match key.as_str() {
+        "" => "custom".to_string(),
+        "open_code" | "opencode" => "opencode".to_string(),
+        "lm_studio" | "lmstudio" => "lmstudio".to_string(),
+        "claude" | "gemini" | "codex" | "custom" | "ollama" => key,
+        _ => key,
+    }
+}
+
+fn force_user_codex_home_env(cli: &str, env: &mut HashMap<String, String>) {
+    if normalize_cli_id(cli) != "codex" {
+        return;
+    }
+    if let Some(path) = user_codex_home() {
+        env.insert("CODEX_HOME".to_string(), path);
+    }
+}
+
 fn seed_codex_auth_if_needed(cli: &str, env: &HashMap<String, String>) -> Result<(), String> {
-    if !cli.eq_ignore_ascii_case("codex") {
+    if normalize_cli_id(cli) != "codex" {
         return Ok(());
     }
 
@@ -229,7 +260,7 @@ fn seed_codex_auth_if_needed(cli: &str, env: &HashMap<String, String>) -> Result
 }
 
 fn normalize_codex_home_env(cli: &str, cwd: Option<&str>, env: &mut HashMap<String, String>) {
-    if !cli.eq_ignore_ascii_case("codex") {
+    if normalize_cli_id(cli) != "codex" {
         return;
     }
 
@@ -264,22 +295,34 @@ fn normalize_codex_home_env(cli: &str, cwd: Option<&str>, env: &mut HashMap<Stri
 
 fn with_runtime_env(request: &StartAgentRunRequest, prompt_path: &str) -> HashMap<String, String> {
     let mut env = request.env.clone();
+    env.insert("COMET_SESSION_ID".to_string(), request.session_id.clone());
     env.insert("TD_SESSION_ID".to_string(), request.session_id.clone());
+    env.insert("COMET_AGENT_ID".to_string(), request.agent_id.clone());
     env.insert("TD_AGENT_ID".to_string(), request.agent_id.clone());
+    env.insert("COMET_MISSION_ID".to_string(), request.mission_id.clone());
     env.insert("TD_MISSION_ID".to_string(), request.mission_id.clone());
+    env.insert("COMET_NODE_ID".to_string(), request.node_id.clone());
     env.insert("TD_NODE_ID".to_string(), request.node_id.clone());
+    env.insert("COMET_ATTEMPT".to_string(), request.attempt.to_string());
     env.insert("TD_ATTEMPT".to_string(), request.attempt.to_string());
+    env.insert("COMET_RUN_ID".to_string(), request.run_id.clone());
     env.insert("TD_RUN_ID".to_string(), request.run_id.clone());
+    env.insert(
+        "COMET_EXECUTION_MODE".to_string(),
+        request.execution_mode.clone(),
+    );
     env.insert(
         "TD_EXECUTION_MODE".to_string(),
         request.execution_mode.clone(),
     );
+    env.insert("COMET_PROMPT_PATH".to_string(), prompt_path.to_string());
     env.insert("TD_PROMPT_PATH".to_string(), prompt_path.to_string());
     if let Some(cwd) = request
         .cwd
         .as_ref()
         .filter(|value| !value.trim().is_empty())
     {
+        env.insert("COMET_WORKSPACE".to_string(), cwd.clone());
         env.insert("TD_WORKSPACE".to_string(), cwd.clone());
     }
     env
@@ -501,7 +544,7 @@ fn mcp_internal_push(
         return Err("MCP push token not initialized".to_string());
     }
     let response = ureq::post("http://localhost:3741/internal/push")
-        .set("x-td-push-token", &token)
+        .set("x-comet-push-token", &token)
         .send_json(body)
         .map_err(|error| format!("MCP internal push failed: {error}"))?;
     let status = response.status();
@@ -690,21 +733,27 @@ fn start_local_http_run(
 
         let url = payload
             .env
-            .get("TD_LOCAL_HTTP_URL")
+            .get("COMET_LOCAL_HTTP_URL")
+            .or_else(|| payload.env.get("TD_LOCAL_HTTP_URL"))
             .cloned()
             .unwrap_or_else(|| "http://localhost:11434/v1/chat/completions".to_string());
         let model = payload
             .env
-            .get("TD_LOCAL_HTTP_MODEL")
+            .get("COMET_LOCAL_HTTP_MODEL")
+            .or_else(|| payload.env.get("TD_LOCAL_HTTP_MODEL"))
             .cloned()
             .unwrap_or_else(|| "llama3.1".to_string());
-        let api_key = payload.env.get("TD_LOCAL_HTTP_API_KEY").cloned();
+        let api_key = payload
+            .env
+            .get("COMET_LOCAL_HTTP_API_KEY")
+            .or_else(|| payload.env.get("TD_LOCAL_HTTP_API_KEY"))
+            .cloned();
         let request_body = serde_json::json!({
             "model": model,
             "messages": [
                 {
                     "role": "system",
-                    "content": "You are a Terminal Docks local runtime. Complete the assigned graph node and summarize the result."
+                    "content": "You are a Comet-AI local runtime. Complete the assigned graph node and summarize the result."
                 },
                 { "role": "user", "content": payload.prompt }
             ],
@@ -930,7 +979,7 @@ fn stream_reader(
 pub fn start_agent_run(
     app: AppHandle,
     state: State<'_, AgentRunState>,
-    payload: StartAgentRunRequest,
+    mut payload: StartAgentRunRequest,
 ) -> Result<AgentRunRecord, String> {
     if payload.command.trim().is_empty() {
         let error = "Headless command is empty.".to_string();
@@ -971,6 +1020,7 @@ pub fn start_agent_run(
         );
         return Err(error);
     }
+    payload.cli = normalize_cli_id(&payload.cli);
 
     let (prompt_path, stdout_path, stderr_path, transcript_path) =
         run_paths(&app, &payload.run_id, payload.cwd.as_deref())?;
@@ -998,6 +1048,7 @@ pub fn start_agent_run(
         .into_iter()
         .map(|(key, value)| (key, replace_placeholders(&value, &replacements)))
         .collect::<HashMap<_, _>>();
+    force_user_codex_home_env(&payload.cli, &mut env);
     normalize_codex_home_env(&payload.cli, payload.cwd.as_deref(), &mut env);
 
     if let Err(error) = seed_codex_auth_if_needed(&payload.cli, &env) {
@@ -1109,6 +1160,10 @@ pub fn start_agent_run(
         }
         for (key, value) in &env {
             command_builder.env(key, value);
+        }
+        #[cfg(windows)]
+        {
+            command_builder.creation_flags(CREATE_NO_WINDOW);
         }
         command_builder
     };
@@ -1589,4 +1644,18 @@ pub fn list_agent_runs(
         records.push(row.map_err(|e| e.to_string())?);
     }
     Ok(records)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalizes_cli_ids_for_agent_runs() {
+        assert_eq!(normalize_cli_id("open-code"), "opencode");
+        assert_eq!(normalize_cli_id("Open Code"), "opencode");
+        assert_eq!(normalize_cli_id("LM Studio"), "lmstudio");
+        assert_eq!(normalize_cli_id("ollama"), "ollama");
+        assert_eq!(normalize_cli_id(" \t "), "custom");
+    }
 }

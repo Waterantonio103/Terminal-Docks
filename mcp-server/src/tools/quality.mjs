@@ -10,6 +10,13 @@ import {
   FRONTEND_CATEGORY_OVERLAYS,
   FRONTEND_SPEC_MODES,
 } from '../utils/frontend-spec-framework.mjs';
+import {
+  buildWorkflowPresetFramework,
+  evaluateWorkflowPresetOutput,
+  WORKFLOW_PRESET_FRAMEWORK_MODES,
+  WORKFLOW_PRESET_FRAMEWORK_PRESETS,
+  WORKFLOW_PRESET_FRAMEWORK_SUB_MODES,
+} from '../utils/workflow-preset-framework.mjs';
 
 export function registerQualityTools(server, getSessionId) {
   server.registerTool('submit_test_result', {
@@ -140,5 +147,32 @@ export function registerQualityTools(server, getSessionId) {
       },
     });
     return makeToolText(JSON.stringify(result, null, 2));
+  });
+
+  server.registerTool('get_workflow_preset_framework', {
+    title: 'Get Workflow Preset Framework',
+    description: 'Return role lanes, required outputs, rubrics, and completion contracts for workflow presets.',
+    inputSchema: {
+      presetId: z.enum(Object.keys(WORKFLOW_PRESET_FRAMEWORK_PRESETS)).optional(),
+      mode: z.enum(Object.keys(WORKFLOW_PRESET_FRAMEWORK_MODES)).optional(),
+      subMode: z.enum(Object.keys(WORKFLOW_PRESET_FRAMEWORK_SUB_MODES)).optional(),
+    }
+  }, async ({ presetId, mode, subMode }) => {
+    const framework = buildWorkflowPresetFramework({ presetId, mode, subMode });
+    if (!framework) return makeToolText('No workflow preset framework found for the requested preset/mode.', true);
+    return makeToolText(JSON.stringify(framework, null, 2));
+  });
+
+  server.registerTool('evaluate_workflow_preset_output', {
+    title: 'Evaluate Workflow Preset Output',
+    description: 'Check a workflow preset completion payload against its framework requirements.',
+    inputSchema: {
+      presetId: z.enum(Object.keys(WORKFLOW_PRESET_FRAMEWORK_PRESETS)).optional(),
+      mode: z.enum(Object.keys(WORKFLOW_PRESET_FRAMEWORK_MODES)).optional(),
+      subMode: z.enum(Object.keys(WORKFLOW_PRESET_FRAMEWORK_SUB_MODES)).optional(),
+      output: z.union([z.string(), z.record(z.any())]),
+    }
+  }, async ({ presetId, mode, subMode, output }) => {
+    return makeToolText(JSON.stringify(evaluateWorkflowPresetOutput({ presetId, mode, subMode, output }), null, 2));
   });
 }

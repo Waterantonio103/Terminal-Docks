@@ -8,7 +8,7 @@ const SOURCE_ID_RE = /^[a-z][a-z0-9_]{1,31}$/;
 const DISCOVERY_TIMEOUT_MS = 10_000;
 const CALL_TIMEOUT_MS = 30_000;
 const STALE_AFTER_MS = 60 * 60 * 1000;
-const APPROVAL_REQUIRED_MESSAGE = 'approval_required: this MCP tool call is waiting for approval in the MCP Toolbox.';
+const APPROVAL_REQUIRED_MESSAGE = 'approval_required: this MCP tool call is waiting for approval in the Starlink Toolbox.';
 const PROBE_PATHS = ['/mcp', '/sse', '/message', '/messages', '/'];
 
 function nowIso() {
@@ -122,13 +122,13 @@ export function validateRemoteSourceUrl(url, { allowPublic = false } = {}) {
   try {
     parsed = new URL(String(url || ''));
   } catch {
-    return { ok: false, error: 'Enter a valid HTTP MCP URL.' };
+    return { ok: false, error: 'Enter a valid Starlink-compatible HTTP URL.' };
   }
   if (!['http:', 'https:'].includes(parsed.protocol)) {
-    return { ok: false, error: 'Only HTTP/S MCP endpoints are supported for remote sources.' };
+    return { ok: false, error: 'Only HTTP/S Starlink-compatible endpoints are supported for remote sources.' };
   }
   if (!allowPublic && !isPrivateAddress(parsed.hostname)) {
-    return { ok: false, error: 'Only localhost and private-network MCP URLs are supported until the source trust review is accepted.' };
+    return { ok: false, error: 'Only localhost and private-network Starlink URLs are supported until the source trust review is accepted.' };
   }
   return { ok: true, url: parsed.toString(), publicInternet: !isPrivateAddress(parsed.hostname) };
 }
@@ -177,7 +177,7 @@ function normalizeDefaultArgs(defaultArgs) {
 function normalizeStdioConfig(input) {
   const config = isObject(input?.config) ? input.config : input;
   const command = String(config.command || '').trim();
-  if (!command) throw new Error('Stdio MCP sources require a command.');
+  if (!command) throw new Error('Stdio Starlink sources require a command.');
   return {
     command,
     args: Array.isArray(config.args) ? config.args.map(String) : [],
@@ -188,7 +188,7 @@ function normalizeStdioConfig(input) {
 
 function normalizeManagedConfig(input) {
   const integration = String(input.integration || input.managedIntegration || '').trim();
-  if (!integration) throw new Error('Managed MCP sources require an integration id.');
+  if (!integration) throw new Error('Managed Starlink sources require an integration id.');
   if (integration === 'node-stdio') return { integration, ...normalizeStdioConfig(input) };
   throw new Error(`Managed MCP integration "${integration}" is not available in this build.`);
 }
@@ -422,8 +422,27 @@ export function getMcpSource(sourceId) {
   return rowToSource(row, tools, resources);
 }
 
+const STARLINK_RESOURCE_SCHEME = 'starlink-mcp://';
+const LEGACY_RESOURCE_SCHEME = 'td-mcp://';
+
 function proxiedResourceUri(sourceId, originalUri) {
-  return `td-mcp://${sourceId}/${encodeURIComponent(originalUri)}`;
+  return `${STARLINK_RESOURCE_SCHEME}${sourceId}/${encodeURIComponent(originalUri)}`;
+}
+
+function legacyProxiedResourceUri(sourceId, originalUri) {
+  return `${LEGACY_RESOURCE_SCHEME}${sourceId}/${encodeURIComponent(originalUri)}`;
+}
+
+export function isProxyResourceUri(uri) {
+  return typeof uri === 'string' && (uri.startsWith(STARLINK_RESOURCE_SCHEME) || uri.startsWith(LEGACY_RESOURCE_SCHEME));
+}
+
+function proxyResourceUriCandidates(proxiedUri) {
+  if (!isProxyResourceUri(proxiedUri)) return [proxiedUri, proxiedUri];
+  const alternate = proxiedUri.startsWith(STARLINK_RESOURCE_SCHEME)
+    ? `${LEGACY_RESOURCE_SCHEME}${proxiedUri.slice(STARLINK_RESOURCE_SCHEME.length)}`
+    : `${STARLINK_RESOURCE_SCHEME}${proxiedUri.slice(LEGACY_RESOURCE_SCHEME.length)}`;
+  return [proxiedUri, alternate];
 }
 
 function upsertDiscoveredTools(sourceId, tools) {
@@ -592,10 +611,10 @@ async function initializeRemoteSession(url, timeoutMs, headers = {}) {
     params: {
       protocolVersion: MCP_PROTOCOL_VERSION,
       capabilities: {},
-      clientInfo: { name: 'terminal-docks-starlink-proxy', version: '0.1.0' },
+      clientInfo: { name: 'starlink-proxy', version: '0.1.0' },
     },
   }, undefined, timeoutMs, headers);
-  if (!initialized.sessionId) throw new Error('MCP initialize did not return a session id.');
+  if (!initialized.sessionId) throw new Error('Starlink handshake did not return a session id.');
   await postMcpRpc(url, {
     jsonrpc: '2.0',
     method: 'notifications/initialized',
@@ -676,7 +695,7 @@ async function probeMcpUrl(url, timeoutMs) {
     params: {
       protocolVersion: MCP_PROTOCOL_VERSION,
       capabilities: {},
-      clientInfo: { name: 'terminal-docks-mcp-prober', version: '0.1.0' },
+      clientInfo: { name: 'starlink-mcp-prober', version: '0.1.0' },
     },
   };
   try {
@@ -814,7 +833,7 @@ async function discoverStdioCapabilities(config, { timeoutMs = DISCOVERY_TIMEOUT
         params: {
           protocolVersion: MCP_PROTOCOL_VERSION,
           capabilities: {},
-          clientInfo: { name: 'terminal-docks-starlink-stdio-proxy', version: '0.1.0' },
+          clientInfo: { name: 'starlink-stdio-proxy', version: '0.1.0' },
         },
       },
     },
@@ -822,7 +841,7 @@ async function discoverStdioCapabilities(config, { timeoutMs = DISCOVERY_TIMEOUT
     { expectResponse: true, body: { jsonrpc: '2.0', method: 'tools/list', params: {} } },
     { expectResponse: true, body: { jsonrpc: '2.0', method: 'resources/list', params: {} } },
   ], timeoutMs);
-  if (initialized?.error) throw new Error(initialized.error.message ?? 'stdio MCP initialize failed');
+  if (initialized?.error) throw new Error(initialized.error.message ?? 'Starlink stdio handshake failed');
   return {
     tools: normalizeDiscoveredTools(listed),
     resources: resourcesResult?.error ? [] : normalizeDiscoveredResources(resourcesResult),
@@ -869,7 +888,7 @@ function ensureNewSourceId(input) {
   const id = String(input.id || '').trim();
   if (!validateSourceId(id)) throw new Error('Source ID must match lowercase snake format, e.g. excalidraw or github_tools.');
   const existing = db.prepare('SELECT id FROM mcp_sources WHERE id = ?').get(id);
-  if (existing) throw new Error(`MCP source id "${id}" is already reserved.`);
+  if (existing) throw new Error(`Starlink source id "${id}" is already reserved.`);
   return id;
 }
 
@@ -959,9 +978,9 @@ async function discoverCapabilitiesForSource(row) {
 export async function refreshMcpSource(sourceId) {
   const source = getMcpSource(sourceId);
   const row = getSourceRow(sourceId);
-  if (!source || !row) throw new Error(`MCP source "${sourceId}" not found.`);
+  if (!source || !row) throw new Error(`Starlink source "${sourceId}" not found.`);
   if (source.type === 'builtin') return source;
-  if (source.archived) throw new Error(`MCP source "${sourceId}" is archived.`);
+  if (source.archived) throw new Error(`Starlink source "${sourceId}" is archived.`);
   try {
     const { tools, resources } = await discoverCapabilitiesForSource(row);
     const discoveredAt = upsertDiscoveredTools(source.id, tools);
@@ -984,7 +1003,7 @@ export async function refreshMcpSource(sourceId) {
 
 export function updateMcpSource(sourceId, patch) {
   const source = getMcpSource(sourceId);
-  if (!source) throw new Error(`MCP source "${sourceId}" not found.`);
+  if (!source) throw new Error(`Starlink source "${sourceId}" not found.`);
   const updates = [];
   const params = [];
   const fields = {
@@ -1029,7 +1048,7 @@ export function updateMcpSource(sourceId, patch) {
 
 export function updateMcpSourceTool(sourceId, originalName, patch) {
   const source = getMcpSource(sourceId);
-  if (!source) throw new Error(`MCP source "${sourceId}" not found.`);
+  if (!source) throw new Error(`Starlink source "${sourceId}" not found.`);
   const tool = source.tools.find(candidate => candidate.originalName === originalName);
   if (!tool && sourceId === 'starlink') {
     const timestamp = nowIso();
@@ -1046,7 +1065,7 @@ export function updateMcpSourceTool(sourceId, originalName, patch) {
       timestamp,
     );
   } else if (!tool) {
-    throw new Error(`MCP tool "${originalName}" not found for source "${sourceId}".`);
+    throw new Error(`Starlink tool "${originalName}" not found for source "${sourceId}".`);
   }
   const updates = [];
   const params = [];
@@ -1097,7 +1116,7 @@ export function restoreMcpSource(sourceId) {
        SET archived = 0, enabled = 0, status = 'disabled', archived_at = NULL, updated_at = ?
      WHERE id = ? AND archived = 1
   `).run(timestamp, sourceId);
-  if (!result.changes) throw new Error(`Archived MCP source "${sourceId}" not found.`);
+  if (!result.changes) throw new Error(`Archived Starlink source "${sourceId}" not found.`);
   return getMcpSource(sourceId);
 }
 
@@ -1163,9 +1182,9 @@ export function previewMcpClientConfig(input) {
 
 export function getCuratedMcpSourceCatalog() {
   return [
-    { id: 'remote_http', type: 'remote', name: 'Remote HTTP/SSE MCP', description: 'Connect a local, private-network, or trusted authenticated HTTP MCP endpoint.' },
-    { id: 'stdio_command', type: 'stdio', name: 'Stdio command', description: 'Launch a supervised local MCP server over stdio.' },
-    { id: 'node_stdio', type: 'managed', integration: 'node-stdio', name: 'Managed Node stdio', description: 'Run a selected Node-based stdio MCP command with Terminal Docks supervision.' },
+    { id: 'remote_http', type: 'remote', name: 'Remote HTTP/SSE source', description: 'Connect a local, private-network, or trusted authenticated Starlink-compatible HTTP endpoint.' },
+    { id: 'stdio_command', type: 'stdio', name: 'Stdio command', description: 'Launch a supervised local Starlink-compatible server over stdio.' },
+    { id: 'node_stdio', type: 'managed', integration: 'node-stdio', name: 'Managed Node stdio', description: 'Run a selected Node-based stdio MCP command with Comet-AI supervision.' },
   ];
 }
 
@@ -1423,7 +1442,7 @@ async function callStdioTool(entry, args) {
         params: {
           protocolVersion: MCP_PROTOCOL_VERSION,
           capabilities: {},
-          clientInfo: { name: 'terminal-docks-starlink-stdio-proxy', version: '0.1.0' },
+          clientInfo: { name: 'starlink-stdio-proxy', version: '0.1.0' },
         },
       },
     },
@@ -1445,7 +1464,7 @@ export async function callProxyTool(proxiedName, args = {}, context = {}) {
   if (!resolved.ok) {
     const source = resolved.entry?.sourceId ?? 'unknown';
     recordProxyAudit({ entry: resolved.entry, proxiedName, args, ...context, status: 'blocked', message: resolved.reason });
-    throw new Error(`MCP source ${source} cannot run ${proxiedName}: ${resolved.reason}.`);
+    throw new Error(`Starlink source ${source} cannot run ${proxiedName}: ${resolved.reason}.`);
   }
   const { entry } = resolved;
   const mergedArgs = { ...entry.defaultArgs, ...(isObject(args) ? args : {}) };
@@ -1457,11 +1476,11 @@ export async function callProxyTool(proxiedName, args = {}, context = {}) {
   if (response?.error) {
     const message = response.error.message ?? 'upstream error';
     recordProxyAudit({ entry, proxiedName, args: mergedArgs, ...context, status: 'error', message });
-    throw new Error(`MCP source ${entry.sourceId} returned upstream error: ${message}`);
+    throw new Error(`Starlink source ${entry.sourceId} returned upstream error: ${message}`);
   }
   if (!Object.prototype.hasOwnProperty.call(response ?? {}, 'result')) {
     recordProxyAudit({ entry, proxiedName, args: mergedArgs, ...context, status: 'error', message: 'invalid result shape' });
-    throw new Error(`MCP source ${entry.sourceId} returned an invalid tool result shape.`);
+    throw new Error(`Starlink source ${entry.sourceId} returned an invalid tool result shape.`);
   }
   recordProxyAudit({ entry, proxiedName, args: mergedArgs, ...context, status: 'completed', result: response.result });
   return response.result;
@@ -1493,8 +1512,8 @@ export async function readProxyResource(proxiedUri, context = {}) {
     SELECT r.*, s.url, s.transport, s.config_json, s.auth_json, s.call_timeout_ms, s.enabled, s.archived, s.status AS source_status, s.allowed_roles_json
     FROM mcp_source_resources r
     JOIN mcp_sources s ON s.id = r.source_id
-    WHERE r.proxied_uri = ?
-  `).get(proxiedUri);
+    WHERE r.proxied_uri IN (?, ?)
+  `).get(...proxyResourceUriCandidates(proxiedUri));
   if (!row) return { ok: false, reason: 'not_found' };
   if (!row.enabled || row.archived || row.source_status !== 'connected' || row.status !== 'available') return { ok: false, reason: 'unavailable' };
   if (!roleAllowed({ allowedRoles: parseJson(row.allowed_roles_json, []) }, context.role)) return { ok: false, reason: 'role_denied' };
@@ -1507,7 +1526,7 @@ export async function readProxyResource(proxiedUri, context = {}) {
         body: {
           jsonrpc: '2.0',
           method: 'initialize',
-          params: { protocolVersion: MCP_PROTOCOL_VERSION, capabilities: {}, clientInfo: { name: 'terminal-docks-starlink-resource-proxy', version: '0.1.0' } },
+          params: { protocolVersion: MCP_PROTOCOL_VERSION, capabilities: {}, clientInfo: { name: 'starlink-resource-proxy', version: '0.1.0' } },
         },
       },
       { expectResponse: false, body: { jsonrpc: '2.0', method: 'notifications/initialized', params: {} } },

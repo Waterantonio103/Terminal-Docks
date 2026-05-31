@@ -3,8 +3,13 @@ import { registry } from './registry.js';
 import type { McpServerEvent } from './types.js';
 import { useWorkspaceStore, type MissionArtifact } from '../../store/workspace.js';
 import { generateId } from '../graphUtils.js';
+import { scopedDebugLog } from '../debugLog.js';
 
 type Handler = (ev: McpServerEvent) => void;
+
+function starlinkDebugLog(...args: unknown[]): void {
+  scopedDebugLog('starlink', 'VITE_STARLINK_DEBUG', ...args);
+}
 
 interface Connection {
   es: EventSource | null;
@@ -14,6 +19,10 @@ interface Connection {
 }
 
 let cachedBaseUrl: string | null = null;
+function hasEventSource(): boolean {
+  return typeof EventSource !== 'undefined';
+}
+
 async function getBaseUrl(): Promise<string> {
   if (cachedBaseUrl) return cachedBaseUrl;
   try {
@@ -26,8 +35,10 @@ async function getBaseUrl(): Promise<string> {
 
 class McpEventBus {
   private connections = new Map<string, Connection>();
+  private globalConnection: Connection | null = null;
 
   subscribe(sessionId: string, handler: Handler): () => void {
+    if (!hasEventSource()) return () => {};
     let conn = this.connections.get(sessionId);
     if (!conn) conn = this.openConnection(sessionId);
     conn.handlers.add(handler);
@@ -39,6 +50,24 @@ class McpEventBus {
       if (current.handlers.size === 0) {
         current.es?.close();
         this.connections.delete(sessionId);
+      }
+    };
+  }
+
+  subscribeAll(handler: Handler): () => void {
+    if (!hasEventSource()) return () => {};
+    if (!this.globalConnection) {
+      this.globalConnection = this.openGlobalConnection();
+    }
+    this.globalConnection.handlers.add(handler);
+
+    return () => {
+      const conn = this.globalConnection;
+      if (!conn) return;
+      conn.handlers.delete(handler);
+      if (conn.handlers.size === 0) {
+        conn.es?.close();
+        this.globalConnection = null;
       }
     };
   }
@@ -56,20 +85,32 @@ class McpEventBus {
     return conn;
   }
 
+  private openGlobalConnection(): Connection {
+    const handlers = new Set<Handler>();
+    const conn: Connection = { es: null, handlers, connected: false, fallbackOpened: true };
+
+    void getBaseUrl().then(base => {
+      if (this.globalConnection !== conn) return;
+      this.attachEventSource(conn, '*', `${base}/events`, true);
+    });
+
+    return conn;
+  }
+
   private attachEventSource(conn: Connection, sessionId: string, url: string, fallback: boolean): void {
-    console.log(`[mcpEventBus] opening ${fallback ? 'fallback ' : ''}session SSE sid=${sessionId} url=${url}`);
+    starlinkDebugLog(`[mcpEventBus] opening ${fallback ? 'fallback ' : ''}session SSE sid=${sessionId} url=${url}`);
     const es = new EventSource(url);
     conn.es = es;
     es.onopen = () => {
       conn.connected = true;
-      console.log(`[mcpEventBus] session SSE connected sid=${sessionId}${fallback ? ' fallback=true' : ''}`);
+      starlinkDebugLog(`[mcpEventBus] session SSE connected sid=${sessionId}${fallback ? ' fallback=true' : ''}`);
     };
     es.onmessage = e => {
       let ev: McpServerEvent | null = null;
       try { ev = JSON.parse(e.data) as McpServerEvent; } catch { return; }
       if (!ev || typeof ev.type !== 'string') return;
-      if (fallback && ev.sessionId !== sessionId) return;
-      console.log(`[mcpEventBus] received event type=${ev.type} sid=${ev.sessionId}`);
+      if (fallback && sessionId !== '*' && ev.sessionId !== sessionId) return;
+      starlinkDebugLog(`[mcpEventBus] received event type=${ev.type} sid=${ev.sessionId}`);
       // Mirror into the registry so any subscriber (adapter, UI) sees
       // state changes even if it hasn't subscribed yet.
       applyToRegistry(ev);

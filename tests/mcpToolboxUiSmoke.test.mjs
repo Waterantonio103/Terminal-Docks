@@ -12,9 +12,10 @@ function includesAll(source, values) {
 }
 
 includesAll(page, [
-  'Remote HTTP/SSE MCP',
-  'Stdio MCP command',
-  'Managed local MCP',
+  'export function StarlinkToolboxPage',
+  'Remote HTTP/SSE source',
+  'Stdio command',
+  'Managed local source',
   'Trust public URL',
   'Bearer token',
   'Headers JSON',
@@ -24,10 +25,22 @@ includesAll(page, [
   'Default arguments',
   '/internal/mcp-tool-approvals',
   '/restore',
-  'Filter MCP events by source',
+  'Live Starlink Events',
+  'Filter Starlink events by source',
   'Resources',
   'listStarlinkResources',
+  'formatProbeStatus',
+  'Valid Starlink endpoint',
+  'Possible Starlink SSE endpoint',
 ]);
+
+for (const value of [
+  'MCP initialize did not return a session id.',
+  'MCP request failed with HTTP',
+  "result.status.replace(/_/g, ' ')",
+]) {
+  assert.ok(!page.includes(value), `stale product-facing MCP copy: ${value}`);
+}
 
 includesAll(css, [
   '.td-mcp-call-feed-header select',
@@ -37,4 +50,4 @@ includesAll(css, [
   '.td-mcp-call button',
 ]);
 
-console.log('PASS MCP Toolbox UI smoke exposes source, auth, approval, restore, and event-filter controls');
+console.log('PASS Starlink Toolbox UI smoke exposes source, auth, approval, restore, and event-filter controls');

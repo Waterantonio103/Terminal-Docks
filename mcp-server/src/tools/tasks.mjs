@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { db } from '../db/index.mjs';
-import { makeToolText, logSession } from '../utils/index.mjs';
+import { makeToolText, logSession, appendWorkflowEvent } from '../utils/index.mjs';
 import { broadcast, sessions, emitAgentEvent, messageQueues, projects } from '../state.mjs';
 import { buildTaskDetails, ackAndEmitTaskFetch } from './task-details.mjs';
 import { summarizeSession, normalizeCapabilityId, evaluateWorkerForRequirements } from '../utils/sessions.mjs';
@@ -87,7 +87,28 @@ function compactFrontendFramework(framework) {
   };
 }
 
-function compactTaskForCurrentTask(task, frontendFramework) {
+function compactPresetFramework(framework) {
+  if (!framework) return framework;
+  return {
+    version: framework.version,
+    presetId: framework.presetId,
+    mode: framework.mode,
+    modeConfig: framework.modeConfig,
+    subMode: framework.subMode,
+    framework: framework.framework
+      ? {
+          focus: framework.framework.focus,
+          laneGuidance: framework.framework.laneGuidance,
+          requiredOutputs: framework.framework.requiredOutputs,
+          qualityRubric: framework.framework.qualityRubric,
+        }
+      : null,
+    sharedWorkflow: framework.sharedWorkflow,
+    completionContract: framework.completionContract,
+  };
+}
+
+function compactTaskForCurrentTask(task, frontendFramework, presetFramework) {
   if (!task || typeof task !== 'object') return task;
   return {
     prompt: task.prompt,
@@ -102,6 +123,7 @@ function compactTaskForCurrentTask(task, frontendFramework) {
     frontendDirection: task.frontendDirection ?? null,
     frontendDirectionReview: task.frontendDirectionReview ?? null,
     frontendFramework,
+    presetFramework,
     outputContract: task.outputContract,
   };
 }
@@ -150,8 +172,9 @@ function compactArtifacts(artifacts) {
 }
 
 function compactTaskDetails(details) {
-  if (!details?.frontendFramework) return details;
+  if (!details?.frontendFramework && !details?.presetFramework) return details;
   const frontendFramework = compactFrontendFramework(details.frontendFramework);
+  const presetFramework = compactPresetFramework(details.presetFramework);
   return {
     missionId: details.missionId,
     nodeId: details.nodeId,
@@ -168,12 +191,13 @@ function compactTaskDetails(details) {
     frontendDirection: details.frontendDirection,
     frontendDirectionReview: details.frontendDirectionReview,
     frontendFramework,
+    presetFramework,
     goal: details.goal,
     objective: details.objective,
     acceptanceCriteria: details.acceptanceCriteria ?? [],
     outputContract: details.outputContract ?? '',
     relevantArtifacts: compactArtifacts(details.relevantArtifacts),
-    task: compactTaskForCurrentTask(details.task, frontendFramework),
+    task: compactTaskForCurrentTask(details.task, frontendFramework, presetFramework),
     node: details.node,
     runtimeSession: details.runtimeSession,
     legalNextTargets: details.legalNextTargets ?? [],
@@ -182,6 +206,8 @@ function compactTaskDetails(details) {
     upstreamContext: details.upstreamContext ?? {},
     workspaceContext: details.workspaceContext ?? {},
     frontendToolHints: details.frontendToolHints,
+    presetToolHints: details.presetToolHints,
+    progressReportingContract: details.progressReportingContract,
     completionContract: details.completionContract,
     workspaceDir: details.workspaceDir,
     assignment: details.assignment
@@ -205,6 +231,9 @@ function compactTaskDetails(details) {
           frontendDirectionReview: details.assignment.frontendDirectionReview,
           frontendFramework,
           frontendToolHints: details.assignment.frontendToolHints,
+          presetFramework,
+          presetToolHints: details.assignment.presetToolHints,
+          progressReportingContract: details.assignment.progressReportingContract,
           workspaceContext: details.assignment.workspaceContext ?? {},
         }
       : details.assignment,
@@ -240,6 +269,63 @@ export function executeGetTaskDetails(args = {}, callerSessionId = 'unknown') {
   ackAndEmitTaskFetch(details, callerSessionId);
   const responseDetails = includeFullFramework ? details : compactTaskDetails(details);
   return { content: [{ type: 'text', text: JSON.stringify(responseDetails, null, 2) }] };
+}
+
+export function executeRecordProgress(args = {}, callerSessionId = 'unknown') {
+  const mission = db.prepare('SELECT mission_json FROM compiled_missions WHERE mission_id = ?').get(args.missionId);
+  if (!mission) return makeToolText(`Mission ${args.missionId} not found.`, true);
+
+  let nodeExists = false;
+  try {
+    const parsed = JSON.parse(mission.mission_json);
+    nodeExists = Array.isArray(parsed.nodes) && parsed.nodes.some(node => node?.id === args.nodeId);
+  } catch {
+    nodeExists = false;
+  }
+  if (!nodeExists) {
+    return makeToolText(`Node ${args.nodeId} is not part of mission ${args.missionId}. Use the exact graph node ID.`, true);
+  }
+
+  const timestamp = Date.now();
+  const payload = {
+    missionId: args.missionId,
+    runId: args.runId ?? null,
+    nodeId: args.nodeId,
+    phaseId: args.phaseId ?? null,
+    status: args.status,
+    title: args.title,
+    detail: args.detail ?? null,
+    artifactIds: Array.isArray(args.artifactIds) ? args.artifactIds.slice(0, 20) : [],
+    filePaths: Array.isArray(args.filePaths) ? args.filePaths.slice(0, 20) : [],
+    percentHint: typeof args.percentHint === 'number' ? Math.max(0, Math.min(100, args.percentHint)) : null,
+    timestamp,
+  };
+
+  appendWorkflowEvent({
+    missionId: args.missionId,
+    nodeId: args.nodeId,
+    sessionId: callerSessionId,
+    type: 'agent_progress',
+    severity: args.status === 'failed' ? 'error' : args.status === 'blocked' ? 'warning' : 'info',
+    message: args.title,
+    payload,
+  });
+  logSession(callerSessionId, 'agent_progress', JSON.stringify(payload), args.missionId, args.nodeId);
+  emitAgentEvent({
+    type: 'agent:progress',
+    sessionId: callerSessionId,
+    missionId: args.missionId,
+    nodeId: args.nodeId,
+    phaseId: args.phaseId ?? undefined,
+    status: args.status,
+    title: args.title,
+    detail: args.detail ?? undefined,
+    artifactIds: payload.artifactIds,
+    filePaths: payload.filePaths,
+    percentHint: payload.percentHint ?? undefined,
+    at: timestamp,
+  });
+  return { content: [{ type: 'text', text: `Progress recorded for ${args.nodeId}: ${args.title}` }] };
 }
 
 export function registerTaskTools(server, getSessionId) {
@@ -398,7 +484,7 @@ export function registerTaskTools(server, getSessionId) {
 
   server.registerTool('get_task_details', {
     title: 'Get Task Details',
-    description: 'Return compact graph task details by default. Set includeFullFramework=true only when debugging Terminal Docks framework/template internals.',
+    description: 'Return compact graph task details by default. Set includeFullFramework=true only when debugging Comet-AI framework/template internals.',
     inputSchema: { missionId: z.string(), nodeId: z.string(), includeFullFramework: z.boolean().optional() }
   }, async (args) => executeGetTaskDetails(args, getSessionId() ?? 'unknown'));
 
@@ -407,4 +493,21 @@ export function registerTaskTools(server, getSessionId) {
     description: 'Compatibility alias for runtime-launched agents. Resolves the current mission/node from the bound runtime session, then returns compact task details and acknowledges the task activation.',
     inputSchema: { sessionId: z.string().optional() }
   }, async (args = {}) => executeGetCurrentTask(args, getSessionId() ?? 'unknown'));
+
+  server.registerTool('record_progress', {
+    title: 'Record Workflow Progress',
+    description: 'Record a concise structured progress update for the current mission/node. Use exact graph node IDs in graph-mode runs.',
+    inputSchema: {
+      missionId: z.string().min(1),
+      runId: z.string().optional(),
+      nodeId: z.string().min(1),
+      phaseId: z.string().optional(),
+      status: z.enum(['started', 'progress', 'completed', 'blocked', 'failed']),
+      title: z.string().min(1).max(120),
+      detail: z.string().max(500).optional(),
+      artifactIds: z.array(z.string()).optional(),
+      filePaths: z.array(z.string()).optional(),
+      percentHint: z.number().min(0).max(100).optional(),
+    }
+  }, async (args) => executeRecordProgress(args, getSessionId() ?? 'unknown'));
 }

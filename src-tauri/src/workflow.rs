@@ -1,6 +1,6 @@
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[derive(Serialize, Debug, Clone, PartialEq, Eq)]
 pub enum WorkflowAgentCli {
     #[serde(rename = "claude")]
     Claude,
@@ -16,6 +16,46 @@ pub enum WorkflowAgentCli {
     Ollama,
     #[serde(rename = "lmstudio")]
     Lmstudio,
+}
+
+fn normalize_workflow_cli_id(value: &str) -> String {
+    value
+        .trim()
+        .to_lowercase()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join("_")
+        .replace('-', "_")
+}
+
+impl<'de> Deserialize<'de> for WorkflowAgentCli {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        match normalize_workflow_cli_id(&value).as_str() {
+            "claude" => Ok(Self::Claude),
+            "gemini" => Ok(Self::Gemini),
+            "open_code" | "opencode" => Ok(Self::OpenCode),
+            "codex" => Ok(Self::Codex),
+            "custom" => Ok(Self::Custom),
+            "ollama" => Ok(Self::Ollama),
+            "lm_studio" | "lmstudio" => Ok(Self::Lmstudio),
+            _ => Err(serde::de::Error::unknown_variant(
+                value.as_str(),
+                &[
+                    "claude",
+                    "gemini",
+                    "opencode",
+                    "codex",
+                    "custom",
+                    "ollama",
+                    "lmstudio",
+                ],
+            )),
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -155,4 +195,41 @@ pub struct CompiledMission {
     pub metadata: CompiledMissionMetadata,
     pub nodes: Vec<CompiledMissionNode>,
     pub edges: Vec<CompiledMissionEdge>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn workflow_cli_deserialization_accepts_common_aliases() {
+        assert_eq!(
+            serde_json::from_str::<WorkflowAgentCli>(r#""open-code""#).unwrap(),
+            WorkflowAgentCli::OpenCode
+        );
+        assert_eq!(
+            serde_json::from_str::<WorkflowAgentCli>(r#""Open Code""#).unwrap(),
+            WorkflowAgentCli::OpenCode
+        );
+        assert_eq!(
+            serde_json::from_str::<WorkflowAgentCli>(r#""LM Studio""#).unwrap(),
+            WorkflowAgentCli::Lmstudio
+        );
+        assert_eq!(
+            serde_json::from_str::<WorkflowAgentCli>(r#""ollama""#).unwrap(),
+            WorkflowAgentCli::Ollama
+        );
+    }
+
+    #[test]
+    fn workflow_cli_serialization_stays_canonical() {
+        assert_eq!(
+            serde_json::to_string(&WorkflowAgentCli::OpenCode).unwrap(),
+            r#""opencode""#
+        );
+        assert_eq!(
+            serde_json::to_string(&WorkflowAgentCli::Lmstudio).unwrap(),
+            r#""lmstudio""#
+        );
+    }
 }

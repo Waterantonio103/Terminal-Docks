@@ -8,4 +8,4 @@ export type {
   ActionCenterSection,
   DeriveActionCenterItemsInput,
 } from './ActionCenterTypes.js';
-export { countNeedsYou, deriveActionCenterItems } from './deriveActionCenterItems.js';
+export { countNeedsYou, deriveActionCenterItems, normalizeActionCenterInboxItems } from './deriveActionCenterItems.js';

@@ -17,6 +17,7 @@ import type {
   CompletionOutcome,
   EdgeCondition,
   FailureCategory,
+  LegalTarget,
   NodeLifecycleState,
   PermissionDecision,
   PermissionRequest,
@@ -166,6 +167,8 @@ export class WorkflowOrchestrator {
 
   private unlistenRuntimeManager?: () => void;
   private mcpUnsubscribers = new Map<string, () => void>();
+  private globalMcpUnsubscriber?: () => void;
+  private handledMcpCompletionKeys = new Set<string>();
   private pendingRuntimeSessions = new Map<string, { runId: string; nodeId: string }>();
 
   setRuntimeManager(manager: RuntimeManagerPort): void {
@@ -176,6 +179,14 @@ export class WorkflowOrchestrator {
     this.unlistenRuntimeManager = manager.subscribe(event => {
       this.handleRuntimeManagerEvent(event);
     });
+    if (!this.globalMcpUnsubscriber) {
+      this.globalMcpUnsubscriber = mcpBus.subscribeAll(event => {
+        if (event.type !== 'task:completed' || !event.missionId || !event.nodeId) return;
+        const run = this.runs.get(event.missionId);
+        if (!run) return;
+        this.handleMcpTaskCompleted(event.missionId, event);
+      });
+    }
   }
 
   private handleRuntimeManagerEvent(event: import('../runtime/RuntimeTypes.js').RuntimeManagerEvent): void {
@@ -268,20 +279,35 @@ export class WorkflowOrchestrator {
 
     const unsub = mcpBus.subscribe(sessionId, event => {
       if (event.type === 'task:completed') {
-        this.handleNodeCompletion(runId, {
-          nodeId: event.nodeId!,
-          attempt: event.attempt || 1,
-          outcome: event.outcome as import('./WorkflowTypes.js').CompletionOutcome,
-          summary: event.summary,
-          filesChanged: event.filesChanged,
-          artifactReferences: event.artifactReferences,
-          downstreamPayload: event.payload,
-          targetNodeId: event.targetNodeId || undefined,
-        });
+        this.handleMcpTaskCompleted(runId, event);
       }
     });
 
     this.mcpUnsubscribers.set(sessionId, unsub);
+  }
+
+  private handleMcpTaskCompleted(runId: string, event: import('../workers/types.js').McpServerEvent): void {
+    if (!event.nodeId) return;
+    const attempt = event.attempt || 1;
+    const outcome = event.outcome === 'failure' ? 'failure' : 'success';
+    const key = `${runId}:${event.nodeId}:${attempt}:${event.sessionId}:${outcome}`;
+    if (this.handledMcpCompletionKeys.has(key)) return;
+    this.handledMcpCompletionKeys.add(key);
+    if (this.handledMcpCompletionKeys.size > 1_000) {
+      const [oldest] = this.handledMcpCompletionKeys;
+      if (oldest) this.handledMcpCompletionKeys.delete(oldest);
+    }
+
+    this.handleNodeCompletion(runId, {
+      nodeId: event.nodeId,
+      attempt,
+      outcome,
+      summary: event.summary,
+      filesChanged: event.filesChanged,
+      artifactReferences: event.artifactReferences,
+      downstreamPayload: event.payload,
+      targetNodeId: event.targetNodeId || undefined,
+    });
   }
 
   private handleNodeCompletion(runId: string, report: NodeCompletionReport & { targetNodeId?: string }): void {
@@ -314,12 +340,12 @@ export class WorkflowOrchestrator {
         explicitHandoff = {
           fromNodeId: nodeId,
           targetNodeId,
-          fromAttempt: report.attempt,
-          outcome,
-          payload: report.downstreamPayload,
-          condition: (legalTarget.condition || 'always') as import('./WorkflowTypes.js').EdgeCondition,
-          timestamp: Date.now(),
-        };
+      fromAttempt: report.attempt,
+      outcome,
+      payload: report.downstreamPayload,
+      condition: legalTarget.condition || 'always',
+      timestamp: Date.now(),
+    };
         recordHandoff(run, explicitHandoff);
       }
     }
@@ -520,7 +546,7 @@ export class WorkflowOrchestrator {
         specProfile: taskConfig?.specProfile,
         finalReadmeEnabled: Boolean(taskConfig?.finalReadmeEnabled),
         finalReadmeOwnerNodeId: taskConfig?.finalReadmeOwnerNodeId ?? null,
-        legalTargets: getLegalTargetsForNode(run, nodeId) as any,
+        legalTargets: getRuntimeLegalTargetsForNode(run, nodeId),
         upstreamPayloads: getIncomingHandoffs(run, nodeId),
       });
 
@@ -1319,4 +1345,27 @@ export const workflowOrchestrator = new WorkflowOrchestrator();
 function generateRunId(): string {
   const rand = Math.random().toString(36).slice(2, 10);
   return `run:${Date.now().toString(36)}:${rand}`;
+}
+
+function allowedOutcomesForCondition(condition: EdgeCondition): CompletionOutcome[] {
+  switch (condition) {
+    case 'on_success':
+      return ['success'];
+    case 'on_failure':
+      return ['failure'];
+    case 'always':
+      return ['success', 'failure'];
+  }
+}
+
+function getRuntimeLegalTargetsForNode(run: WorkflowRun, nodeId: string): LegalTarget[] {
+  return getLegalTargetsForNode(run, nodeId).map(edge => {
+    const targetNode = run.definition.nodes.find(node => node.id === edge.toNodeId);
+    return {
+      targetNodeId: edge.toNodeId,
+      targetRoleId: targetNode?.roleId ?? edge.toNodeId,
+      condition: edge.condition,
+      allowedOutcomes: allowedOutcomesForCondition(edge.condition),
+    };
+  });
 }

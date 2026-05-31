@@ -4,6 +4,7 @@ import type {
   MissionSnapshot,
   WorkflowEventRecord,
 } from '../hooks/useMissionSnapshot.js';
+import { readMcpJsonResponse } from './mcpResponse.js';
 
 export interface WorkflowRunHistorySummary {
   missionId: string;
@@ -99,6 +100,42 @@ export interface AppendWorkflowEventInput {
   payloadJson?: string | null;
 }
 
+export interface FollowUpMessageRecord {
+  id: string;
+  missionId: string;
+  threadId: string;
+  runId?: string | null;
+  role: string;
+  cli?: string | null;
+  model?: string | null;
+  runtimeSessionId?: string | null;
+  content: string;
+  attachmentsJson?: string | null;
+  artifactIdsJson?: string | null;
+  filePathsJson?: string | null;
+  status?: string | null;
+  createdAt: number;
+  completedAt?: number | null;
+}
+
+export interface UpsertFollowUpMessageInput {
+  id: string;
+  missionId: string;
+  threadId: string;
+  runId?: string | null;
+  role: string;
+  cli?: string | null;
+  model?: string | null;
+  runtimeSessionId?: string | null;
+  content: string;
+  attachmentsJson?: string | null;
+  artifactIdsJson?: string | null;
+  filePathsJson?: string | null;
+  status?: string | null;
+  createdAt: number;
+  completedAt?: number | null;
+}
+
 export interface TaskInboxInput {
   id: string;
   missionId: string;
@@ -124,44 +161,26 @@ function nextMcpRequestId(): string {
   return `ui-${Date.now()}-${mcpRequestSeq}`;
 }
 
-async function readMcpResponse(response: Response): Promise<any> {
-  const contentType = response.headers.get('content-type') ?? '';
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null;
+}
 
-  if (contentType.includes('text/event-stream')) {
-    const reader = response.body?.getReader();
-    if (!reader) return {};
-    const decoder = new TextDecoder();
-    let buffer = '';
-    try {
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const events = buffer.split('\n\n');
-        buffer = events.pop() ?? '';
-        for (const event of events) {
-          const dataLines = event
-            .split(/\r?\n/)
-            .filter(line => line.startsWith('data:'))
-            .map(line => line.slice(5).trim());
-          if (!dataLines.length) continue;
-          return JSON.parse(dataLines.join('\n'));
-        }
-      }
-    } finally {
-      reader.cancel().catch(() => {});
-    }
-    return {};
-  }
+function getMcpErrorMessage(body: Record<string, unknown>): string | null {
+  const error = asRecord(body.error);
+  const message = error?.message;
+  return typeof message === 'string' && message.trim() ? message : null;
+}
 
-  const rawBody = await response.text();
-  if (!rawBody) return {};
-  try {
-    return JSON.parse(rawBody);
-  } catch {
-    if (!response.ok) throw new Error(rawBody || `MCP request failed: HTTP ${response.status}`);
-    throw new Error(rawBody || 'MCP returned a non-JSON response');
-  }
+function getMcpResult(body: Record<string, unknown>): Record<string, unknown> | null {
+  return asRecord(body.result);
+}
+
+function getMcpToolText(result: Record<string, unknown> | null): string | null {
+  const content = result?.content;
+  if (!Array.isArray(content)) return null;
+  const first = asRecord(content[0]);
+  const text = first?.text;
+  return typeof text === 'string' ? text : null;
 }
 
 async function resolveMcpBaseUrl(): Promise<string> {
@@ -186,17 +205,18 @@ async function initializeMcpSession(baseUrl: string): Promise<string> {
       params: {
         protocolVersion: '2024-11-05',
         capabilities: {},
-        clientInfo: { name: 'Terminal Docks UI', version: '1.0.0' },
+        clientInfo: { name: 'Comet-AI UI', version: '1.0.0' },
       },
     }),
   });
 
   const sessionId = response.headers.get('mcp-session-id');
-  const body = await readMcpResponse(response);
-  if (!response.ok || body.error) {
-    throw new Error(body.error?.message || `MCP initialize failed: HTTP ${response.status}`);
+  const body = await readMcpJsonResponse(response);
+  const errorMessage = getMcpErrorMessage(body);
+  if (!response.ok || errorMessage) {
+    throw new Error(errorMessage || `Starlink handshake failed: HTTP ${response.status}`);
   }
-  if (!sessionId) throw new Error('MCP initialize did not return a session id');
+  if (!sessionId) throw new Error('Starlink handshake did not return a session id');
 
   const initialized = await fetch(`${baseUrl}/mcp`, {
     method: 'POST',
@@ -211,8 +231,8 @@ async function initializeMcpSession(baseUrl: string): Promise<string> {
     }),
   });
   if (!initialized.ok) {
-    const body = await readMcpResponse(initialized);
-    throw new Error(body.error?.message || `MCP initialized notification failed: HTTP ${initialized.status}`);
+    const body = await readMcpJsonResponse(initialized);
+    throw new Error(getMcpErrorMessage(body) || `Starlink initialized notification failed: HTTP ${initialized.status}`);
   }
 
   return sessionId;
@@ -255,6 +275,14 @@ export const missionRepository = {
 
   getWorkflowEvents(missionId: string, limit = 100): Promise<WorkflowEventRecord[]> {
     return invoke<WorkflowEventRecord[]>('get_workflow_events', { missionId, limit });
+  },
+
+  upsertFollowUpMessage(input: UpsertFollowUpMessageInput): Promise<void> {
+    return invoke('upsert_follow_up_message', { ...input });
+  },
+
+  listFollowUpMessages(missionId: string, threadId?: string | null, limit = 200): Promise<FollowUpMessageRecord[]> {
+    return invoke<FollowUpMessageRecord[]>('list_follow_up_messages', { missionId, threadId, limit });
   },
 
   listWorkflowRunHistory(limit = 25): Promise<WorkflowRunHistorySummary[]> {
@@ -300,21 +328,23 @@ export const missionRepository = {
     });
 
     let response = await callTool();
-    let body = await readMcpResponse(response);
-    const message = body.error?.message;
+    let body = await readMcpJsonResponse(response);
+    const message = getMcpErrorMessage(body);
     if (!response.ok && typeof message === 'string' && /not initialized|invalid session/i.test(message)) {
       mcpSessionPromise = null;
       sessionId = await getMcpSession(baseUrl);
       response = await callTool();
-      body = await readMcpResponse(response);
+      body = await readMcpJsonResponse(response);
     }
-    if (!response.ok) throw new Error(body.error?.message || `MCP request failed: HTTP ${response.status}`);
-    if (body.error) throw new Error(body.error.message || JSON.stringify(body.error));
+    const errorMessage = getMcpErrorMessage(body);
+    if (!response.ok) throw new Error(errorMessage || `Starlink request failed: HTTP ${response.status}`);
+    if (errorMessage) throw new Error(errorMessage);
     
     // Extract the text content from MCP result
-    const text = body.result?.content?.[0]?.text;
-    if (body.result?.isError) throw new Error(text || 'MCP Tool Error');
+    const result = getMcpResult(body);
+    const text = getMcpToolText(result);
+    if (result?.isError) throw new Error(text || 'Starlink tool error');
     
-    return text || JSON.stringify(body.result);
+    return text || (result ? JSON.stringify(result) : '{}');
   },
 };
