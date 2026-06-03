@@ -16,6 +16,7 @@ import type {
 } from './RuntimeTypes.js';
 import { isRuntimeSessionTerminal } from './RuntimeTypes.js';
 import type { CliId, ExecutionMode } from '../workflow/WorkflowTypes.js';
+import type { CliPermissionMode } from '../cliCommandBuilders.js';
 
 function generateSessionId(cliId: string): string {
   const rand = Math.random().toString(36).slice(2, 10);
@@ -48,7 +49,9 @@ export class RuntimeSession {
   readonly createdAt: number;
   readonly adapter: CliAdapter;
   readonly model: string;
-  readonly yolo: boolean;
+  readonly reasoningEffort: string;
+  yolo: boolean;
+  permissionMode: CliPermissionMode;
 
   private _state: RuntimeSessionState;
   private _lastHeartbeatAt?: number;
@@ -84,7 +87,9 @@ export class RuntimeSession {
       legalTargets?: import('../workflow/WorkflowTypes.js').LegalTarget[];
       upstreamPayloads?: import('../workflow/WorkflowRun.js').HandoffRecord[];
       model?: string | null;
+      reasoningEffort?: string | null;
       yolo?: boolean;
+      permissionMode?: CliPermissionMode | null;
     },
   ) {
     this.sessionId = generateSessionId(adapter.id);
@@ -111,7 +116,9 @@ export class RuntimeSession {
     this.legalTargets = args.legalTargets;
     this.upstreamPayloads = args.upstreamPayloads;
     this.model = args.model ?? '';
+    this.reasoningEffort = args.reasoningEffort ?? '';
     this.yolo = args.yolo ?? false;
+    this.permissionMode = args.permissionMode ?? (this.yolo ? 'full' : 'default');
     this.createdAt = Date.now();
     this._state = 'creating';
   }
@@ -175,6 +182,8 @@ export class RuntimeSession {
       specProfile: this.specProfile,
       finalReadmeEnabled: this.finalReadmeEnabled,
       finalReadmeOwnerNodeId: this.finalReadmeOwnerNodeId,
+      reasoningEffort: this.reasoningEffort || null,
+      permissionMode: this.permissionMode,
       legalTargets: this.legalTargets,
       upstreamPayloads: this.upstreamPayloads,
     };
@@ -239,6 +248,11 @@ export class RuntimeSession {
     if (this._state === 'awaiting_permission') {
       this.transitionTo('running');
     }
+  }
+
+  setPermissionMode(mode: CliPermissionMode): void {
+    this.permissionMode = mode;
+    this.yolo = mode === 'full';
   }
 
   // ── Subscription ──────────────────────────────────────────────

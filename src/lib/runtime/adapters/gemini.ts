@@ -138,6 +138,7 @@ export const geminiAdapter: CliAdapter = {
     const { args } = buildPtyLaunchCommandParts('gemini', {
       model: context.model,
       yolo: context.yolo,
+      permissionMode: context.permissionMode,
       workspaceDir: context.workspaceDir,
     });
     return {

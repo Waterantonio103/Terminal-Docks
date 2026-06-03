@@ -13,6 +13,7 @@ function includesAll(source, values) {
 
 includesAll(grid, [
   'className="td-workspace-tab-add"',
+  'td-workspace-tab-bar flex items-center h-9',
   'ref={addButtonRef}',
   'ref={firstAddMenuItemRef}',
   'const addMenuId = useId();',
@@ -51,8 +52,9 @@ includesAll(grid, [
   '<span>Server</span>',
   'aria-label={`${secondaryPaneId === pane.id ? \'Close split view for\' : \'Open to side\'} ${pane.title}`}',
   'aria-label={`Close ${pane.title}`}',
-  'type="button"\n                  onClick={(e) => { e.stopPropagation(); toggleSplitPane(pane.id); }}',
-  'type="button"\n                onClick={(e) => {',
+  'onClick={(e) => { e.stopPropagation(); toggleSplitPane(pane.id); }}',
+  'if (secondaryPaneId === pane.id) setSecondaryPaneId(null);',
+  'removePane(pane.id);',
   'type="button"\n              onMouseDown={(e) => e.stopPropagation()}',
   'No running servers found',
   'detectedServers.length === 1',
@@ -132,12 +134,14 @@ includesAll(readFileSync(resolve(root, 'src/store/workspace.ts'), 'utf8'), [
 
 includesAll(css, [
   '.td-workspace-tab-add',
+  '.td-workspace-tab-bar',
   '.td-workspace-tab-add-menu',
   '.td-workspace-tab-add-server-list',
   '.td-workspace-tab-add-server-list .td-agent-add-option',
   '.td-workspace-tab-add-heading',
   '.td-workspace-tab-add-heading > svg',
   'width: min(260px, calc(100vw - 24px));',
+  'z-index: 9600;',
   'flex: 1 1 auto;',
   '.td-agent-add-option > svg',
   'flex: 0 0 auto;',

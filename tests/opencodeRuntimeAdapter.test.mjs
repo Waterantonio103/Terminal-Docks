@@ -99,7 +99,7 @@ run('opencode activation prompt is reduced to direct MCP task acknowledgement', 
   assert.equal(input.submit, '\r');
 });
 
-run('opencode TUI launch does not emit unsupported yolo flag', () => {
+run('opencode TUI launch does not emit unsupported yolo flag by default', () => {
   const launch = opencodeAdapter.buildLaunchCommand({
     sessionId: 'session-1',
     missionId: 'mission-1',
@@ -111,7 +111,6 @@ run('opencode TUI launch does not emit unsupported yolo flag', () => {
     mcpUrl: 'http://127.0.0.1:3741/mcp',
     executionMode: 'interactive',
     model: 'anthropic/claude-sonnet-4',
-    yolo: true,
   });
 
   assert.equal(launch.command, 'opencode');
@@ -119,6 +118,34 @@ run('opencode TUI launch does not emit unsupported yolo flag', () => {
   assert.deepEqual(launch.args, ['C:/workspace', '--model', 'anthropic/claude-sonnet-4']);
   assert.equal(launch.args.includes('--yolo'), false);
   assert.equal(launch.args.includes('--dangerously-skip-permissions'), false);
+});
+
+run('opencode full access interactive launch uses documented run mode flag', () => {
+  const launch = opencodeAdapter.buildLaunchCommand({
+    sessionId: 'session-1',
+    missionId: 'mission-1',
+    nodeId: 'node-1',
+    role: 'builder',
+    agentId: 'agent-1',
+    profileId: 'profile-1',
+    workspaceDir: 'C:/workspace',
+    mcpUrl: 'http://127.0.0.1:3741/mcp',
+    executionMode: 'interactive',
+    model: 'anthropic/claude-sonnet-4',
+    permissionMode: 'full',
+  });
+
+  assert.equal(launch.command, 'opencode');
+  assert.equal(launch.promptDelivery, 'interactive_pty');
+  assert.deepEqual(launch.args, [
+    'run',
+    '--interactive',
+    '--dir',
+    'C:/workspace',
+    '--model',
+    'anthropic/claude-sonnet-4',
+    '--dangerously-skip-permissions',
+  ]);
 });
 
 run('opencode headless launch uses run subcommand and supported non-interactive flags', () => {

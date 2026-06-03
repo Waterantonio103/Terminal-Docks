@@ -1,10 +1,19 @@
 use notify::{Config, Event, RecommendedWatcher, RecursiveMode, Watcher};
+use serde::Serialize;
 use std::path::Path;
 use std::sync::Mutex;
 use tauri::AppHandle;
 use tauri::Emitter;
 
 pub struct WatcherState(pub Mutex<Option<RecommendedWatcher>>);
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FsChangePayload {
+    changed_dir: String,
+    paths: Vec<String>,
+    kind: String,
+}
 
 impl WatcherState {
     pub fn new() -> Self {
@@ -48,7 +57,16 @@ pub fn watch_directory(
                                 }
                             })
                             .unwrap_or_default();
-                        let _ = app_clone.emit("fs-change", changed_dir);
+                        let payload = FsChangePayload {
+                            changed_dir,
+                            paths: event
+                                .paths
+                                .iter()
+                                .map(|p| p.to_string_lossy().to_string())
+                                .collect(),
+                            kind: format!("{:?}", event.kind),
+                        };
+                        let _ = app_clone.emit("fs-change", payload);
                     }
                     _ => {}
                 }

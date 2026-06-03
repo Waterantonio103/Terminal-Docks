@@ -62,6 +62,15 @@ run('parses common agent progress lines into status blocks', () => {
     tone: 'info',
     icon: 'file',
   });
+  assert.deepEqual(parseAgentStatusLine('reading C:\\VSCODE\\comet-repo'), {
+    kind: 'status',
+    label: 'Reading path',
+    detail: 'C:\\VSCODE\\comet-repo',
+    tone: 'info',
+    icon: 'file',
+  });
+  assert.equal(parseAgentStatusLine('read the codebase and tell me what it is about'), null);
+  assert.equal(parseAgentStatusLine('read this folder and summarize it'), null);
   assert.deepEqual(parseAgentStatusLine('PASS parses todo output'), {
     kind: 'status',
     label: 'Check passed',
@@ -550,7 +559,7 @@ run('classifies runtime system messages as UI status cards', () => {
     content: 'Waiting for permission: edit src/App.tsx',
   }), {
     kind: 'approval_needed',
-    label: 'Approval needed',
+    label: 'Permission needed',
     detail: 'edit src/App.tsx',
     tone: 'warn',
   });

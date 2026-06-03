@@ -1423,6 +1423,261 @@ mod tests {
         Ok(text)
     }
 
+    #[cfg(target_os = "windows")]
+    fn run_codex_direct_launch_until_prompt() -> Result<String, String> {
+        run_codex_direct_launch_until_prompt_then(None)
+    }
+
+    #[cfg(target_os = "windows")]
+    fn run_codex_direct_launch_until_prompt_then(
+        after_prompt: Option<(&str, &str, Duration)>,
+    ) -> Result<String, String> {
+        let workspace = std::env::var("COMET_LIVE_CODEX_WORKSPACE")
+            .unwrap_or_else(|_| "C:\\VSCODE\\file-type-zoo".to_string());
+        let model = std::env::var("COMET_LIVE_CODEX_MODEL")
+            .unwrap_or_else(|_| "gpt-5.3-codex-spark".to_string());
+        let reasoning = std::env::var("COMET_LIVE_CODEX_REASONING")
+            .unwrap_or_else(|_| "low".to_string());
+
+        let pty_system = NativePtySystem::default();
+        let pair = pty_system
+            .openpty(PtySize {
+                rows: 32,
+                cols: 140,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .map_err(|error| format!("openpty failed: {error}"))?;
+
+        let mut launch_env = HashMap::new();
+        force_user_codex_home_env("codex", &mut launch_env);
+        normalize_codex_home_env("codex", Some(&workspace), &mut launch_env);
+        seed_codex_auth_if_needed("codex", &launch_env)?;
+
+        let args = [
+            "-c",
+            "mcp_servers.pencil.enabled=false",
+            "-c",
+            "mcp_servers.excalidraw.enabled=false",
+            "-c",
+            "mcp_servers.terminal-docks.enabled=false",
+            "-c",
+            "mcp_servers.node_repl.enabled=false",
+            "--disable",
+            "apps",
+            "--sandbox",
+            "read-only",
+            "--ask-for-approval",
+            "untrusted",
+            "-c",
+            &format!("model_reasoning_effort={reasoning}"),
+            "--model",
+            &model,
+            "--cd",
+            &workspace,
+            "--no-alt-screen",
+        ];
+
+        let candidates = windows_command_candidates("codex");
+        let mut last_error: Option<String> = None;
+        let mut child = None;
+        for candidate in candidates {
+            let mut builder = CommandBuilder::new(&candidate);
+            builder.env("TERM", "xterm-256color");
+            builder.env("COMET_SESSION_ID", "live-codex-direct-launch-test");
+            builder.env("TD_SESSION_ID", "live-codex-direct-launch-test");
+            for (key, value) in &launch_env {
+                builder.env(key, value);
+            }
+            for arg in &args {
+                builder.arg(arg);
+            }
+            builder.cwd(&workspace);
+
+            match pair.slave.spawn_command(builder) {
+                Ok(spawned) => {
+                    child = Some(spawned);
+                    break;
+                }
+                Err(error) => last_error = Some(format!("{}: {}", candidate, error)),
+            }
+        }
+        let mut child = child.ok_or_else(|| {
+            format!(
+                "failed to spawn codex: {}",
+                last_error.unwrap_or_else(|| "no launch candidates were tried".to_string())
+            )
+        })?;
+
+        let mut writer = pair
+            .master
+            .take_writer()
+            .map_err(|error| format!("take writer failed: {error}"))?;
+        let mut reader = pair
+            .master
+            .try_clone_reader()
+            .map_err(|error| format!("clone reader failed: {error}"))?;
+
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let output_clone = Arc::clone(&output);
+        let reader_thread = thread::spawn(move || {
+            let mut buf = [0; 4096];
+            loop {
+                match reader.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => output_clone.lock().unwrap().extend_from_slice(&buf[..n]),
+                    Err(_) => break,
+                }
+            }
+        });
+
+        let deadline = Instant::now() + Duration::from_secs(45);
+        let mut matched = false;
+        let mut saw_cursor_query = false;
+        while Instant::now() < deadline {
+            let raw = String::from_utf8_lossy(&output.lock().unwrap()).to_string();
+            if !saw_cursor_query && raw.contains("\x1b[6n") {
+                saw_cursor_query = true;
+                writer
+                    .write_all(b"\x1b[1;1R")
+                    .and_then(|_| writer.flush())
+                    .map_err(|error| format!("cursor position response failed: {error}"))?;
+            }
+
+            let normalized = normalize_prompt_text(&raw);
+            let lower = normalized.to_lowercase();
+            let has_codex_banner = lower.contains("openai codex") || lower.contains("codex");
+            let has_prompt = normalized.contains('›') || normalized.contains("Prompt:");
+            let has_context = lower.contains("context") || lower.contains("directory:");
+            let has_loaded_model = lower.contains("model: gpt") || lower.contains("model: o");
+            if has_codex_banner && has_prompt && has_context && has_loaded_model {
+                matched = true;
+                break;
+            }
+
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    return Err(format!(
+                        "codex exited before prompt with status {status:?}; output was {:?}",
+                        normalized
+                    ));
+                }
+                Ok(None) => thread::sleep(Duration::from_millis(100)),
+                Err(error) => return Err(format!("try_wait failed for codex: {error}")),
+            }
+        }
+
+        if matched {
+            if let Ok(value) = std::env::var("COMET_LIVE_CODEX_SETTLE_MS") {
+                if let Ok(ms) = value.parse::<u64>() {
+                    thread::sleep(Duration::from_millis(ms));
+                }
+            }
+        }
+        if let Some((input, expected, timeout)) = after_prompt {
+            thread::sleep(Duration::from_millis(1_500));
+            writer
+                .write_all(input.as_bytes())
+                .and_then(|_| writer.flush())
+                .map_err(|error| format!("post-prompt write failed: {error}"))?;
+            thread::sleep(Duration::from_millis(500));
+            writer
+                .write_all(b"\r")
+                .and_then(|_| writer.flush())
+                .map_err(|error| format!("post-prompt submit failed: {error}"))?;
+            let input_deadline = Instant::now() + timeout;
+            let mut saw_expected = false;
+            let mut answered_cursor_queries =
+                String::from_utf8_lossy(&output.lock().unwrap()).matches("\x1b[6n").count();
+            while Instant::now() < input_deadline {
+                let raw = String::from_utf8_lossy(&output.lock().unwrap()).to_string();
+                let cursor_queries = raw.matches("\x1b[6n").count();
+                if cursor_queries > answered_cursor_queries {
+                    answered_cursor_queries = cursor_queries;
+                    writer
+                        .write_all(b"\x1b[1;1R")
+                        .and_then(|_| writer.flush())
+                        .map_err(|error| format!("cursor position response failed after input: {error}"))?;
+                    thread::sleep(Duration::from_millis(100));
+                    continue;
+                }
+                let normalized = normalize_prompt_text(&raw);
+                if normalized.contains(expected) {
+                    saw_expected = true;
+                    break;
+                }
+                match child.try_wait() {
+                    Ok(Some(status)) => {
+                        return Err(format!(
+                            "codex exited after post-prompt input with status {status:?}; output was {:?}",
+                            normalized
+                        ));
+                    }
+                    Ok(None) => thread::sleep(Duration::from_millis(100)),
+                    Err(error) => return Err(format!("try_wait failed for codex: {error}")),
+                }
+            }
+            if !saw_expected {
+                let raw = String::from_utf8_lossy(&output.lock().unwrap()).to_string();
+                return Err(format!(
+                    "codex prompt accepted no visible response containing {expected:?}; output was {:?}",
+                    normalize_prompt_text(&raw)
+                ));
+            }
+        }
+
+        let settled_text = String::from_utf8_lossy(&output.lock().unwrap()).to_string();
+        let _ = writer.write_all(b"\x03").and_then(|_| writer.flush());
+        thread::sleep(Duration::from_millis(250));
+        let _ = child.kill();
+        drop(writer);
+        drop(child);
+        drop(pair);
+        let _ = reader_thread.join();
+
+        if !matched {
+            return Err(format!(
+                "codex direct launch did not reach an interactive prompt within 45s; output was {:?}",
+                normalize_prompt_text(&settled_text)
+            ));
+        }
+        Ok(settled_text)
+    }
+
+    #[test]
+    #[ignore = "local Windows Codex PTY launch QA; depends on installed/authenticated Codex"]
+    #[cfg(target_os = "windows")]
+    fn live_windows_codex_direct_launch_reaches_prompt() {
+        if !command_exists("codex") {
+            panic!("codex command not found");
+        }
+        let output = run_codex_direct_launch_until_prompt()
+            .unwrap_or_else(|error| panic!("Codex direct PTY launch failed: {error}"));
+        if let Ok(path) = std::env::var("COMET_LIVE_CODEX_OUTPUT_PATH") {
+            if !path.trim().is_empty() {
+                fs::write(&path, &output)
+                    .unwrap_or_else(|error| panic!("failed to write Codex PTY output to {path}: {error}"));
+            }
+        }
+        eprintln!("PASS codex direct launch: {}", normalize_prompt_text(&output));
+    }
+
+    #[test]
+    #[ignore = "local Windows Codex PTY launch QA; depends on installed/authenticated Codex"]
+    #[cfg(target_os = "windows")]
+    fn live_windows_codex_direct_launch_accepts_prompt_input() {
+        if !command_exists("codex") {
+            panic!("codex command not found");
+        }
+        let output = run_codex_direct_launch_until_prompt_then(Some((
+            "\x15/help",
+            "Unrecognized command",
+            Duration::from_secs(15),
+        )))
+        .unwrap_or_else(|error| panic!("Codex direct PTY input failed: {error}"));
+        eprintln!("PASS codex direct prompt input: {}", normalize_prompt_text(&output));
+    }
+
     #[test]
     #[ignore = "local Windows PTY QA; depends on installed common CLIs"]
     #[cfg(target_os = "windows")]

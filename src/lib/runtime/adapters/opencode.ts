@@ -106,12 +106,14 @@ export const opencodeAdapter: CliAdapter = {
         mcpUrl: context.mcpUrl,
         model: context.model,
         workspaceDir: context.workspaceDir,
+        permissionMode: context.permissionMode ?? (context.yolo ? 'full' : null),
       });
     }
 
     const { args } = buildPtyLaunchCommandParts('opencode', {
       model: context.model,
       yolo: context.yolo,
+      permissionMode: context.permissionMode,
       workspaceDir: context.workspaceDir,
     });
     return {

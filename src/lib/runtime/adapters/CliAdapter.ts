@@ -40,6 +40,7 @@ export type CliOutputStatus =
   | 'error';
 
 import type { ExecutionMode } from '../../workflow/WorkflowTypes.js';
+import type { CliPermissionMode } from '../../cliCommandBuilders.js';
 
 // ---------------------------------------------------------------------------
 // Context types passed into adapter methods by the Runtime Manager
@@ -56,7 +57,9 @@ export interface LaunchContext {
   mcpUrl: string;
   executionMode: ExecutionMode;
   model?: string | null;
+  reasoningEffort?: string | null;
   yolo?: boolean;
+  permissionMode?: CliPermissionMode | null;
   envOverrides?: Record<string, string>;
 }
 

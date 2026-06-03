@@ -9,12 +9,16 @@ const workspaceGrid = readFileSync(resolve(root, 'src/components/Layout/Workspac
 const workspaceStore = readFileSync(resolve(root, 'src/store/workspace.ts'), 'utf8');
 
 assert.ok(
-  editor.includes("if (isDirty && !window.confirm('Open another file and discard unsaved changes in this editor?')) return;"),
+  editor.includes("if (isDirty && !confirmDiscardEditorChange('Open another file and discard unsaved changes in this editor?')) return;"),
   'opening another file from a dirty editor should require discard confirmation',
 );
 assert.ok(
-  editor.includes("if (isDirty && !window.confirm('Reload this file and discard unsaved changes?')) return;"),
+  editor.includes("if (isDirty && !confirmDiscardEditorChange('Reload this file and discard unsaved changes?')) return;"),
   'reloading a dirty file should keep its discard confirmation',
+);
+assert.ok(
+  editor.includes("window.location?.hostname !== 'tauri.localhost'"),
+  'editor discard confirmations should avoid blocked Tauri dialog confirm calls',
 );
 assert.ok(
   workspaceStore.includes("if (existingFile.data?.editorDirty) {\r\n            return { activePaneId: existingFile.id };\r\n          }")

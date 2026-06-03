@@ -45,13 +45,7 @@ impl<'de> Deserialize<'de> for WorkflowAgentCli {
             _ => Err(serde::de::Error::unknown_variant(
                 value.as_str(),
                 &[
-                    "claude",
-                    "gemini",
-                    "opencode",
-                    "codex",
-                    "custom",
-                    "ollama",
-                    "lmstudio",
+                    "claude", "gemini", "opencode", "codex", "custom", "ollama", "lmstudio",
                 ],
             )),
         }

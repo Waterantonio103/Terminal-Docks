@@ -14,7 +14,7 @@ This directory contains the React/TypeScript app shell and browser-side orchestr
 - `components/MissionControl/`: mission progress and evidence for workflow runs.
 - `lib/workflow/`: canonical workflow definition/run/orchestrator/state-machine logic.
 - `lib/runtime/`: runtime session lifecycle, readiness gates, terminal runtime bridge, output bus, and CLI adapters.
-- `lib/editorLanguage.ts`, `lib/editorLanguageExtensions.ts`, and `lib/editorSessionCache.ts`: editor language detection, CodeMirror language loading, and session-local dirty buffer/view-state helpers.
+- `lib/editorLanguage.ts`, `lib/editorLanguageExtensions.ts`, `lib/editorDiagnostics.ts`, `lib/languageService.ts`, and `lib/editorSessionCache.ts`: editor language detection, CodeMirror language loading, parser diagnostics, LSP client wiring, and session-local dirty buffer/view-state helpers.
 - `lib/debug/workspaceQaHarness.ts`: dev-only live app harness used by `npm run test:workspace-qa`.
 - `lib/node-system/`: node-system conversion and editor primitives.
 - `lib/models/`: CLI model discovery and provider-specific model helpers.

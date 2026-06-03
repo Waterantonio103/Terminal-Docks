@@ -1,3 +1,4 @@
+use crate::process_utils::configure_hidden_command;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeSet, HashSet};
@@ -12,6 +13,7 @@ const MAX_PREVIEW_CHARS: usize = 700;
 const MAX_FILE_BYTES: u64 = 2_000_000;
 const MAX_RECURSIVE_FILES: usize = 60;
 const MAX_RECURSIVE_DEPTH: usize = 5;
+const MODEL_DISCOVERY_CACHE_SCHEMA_VERSION: u32 = 4;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -22,6 +24,31 @@ pub struct CliModel {
     provider: Option<String>,
     source: String,
     raw: Option<String>,
+    context_window: Option<u64>,
+    max_context_window: Option<u64>,
+}
+
+#[derive(Debug, Clone)]
+struct ParsedModel {
+    id: String,
+    label: Option<String>,
+    provider: Option<String>,
+    raw: Option<String>,
+    context_window: Option<u64>,
+    max_context_window: Option<u64>,
+}
+
+impl ParsedModel {
+    fn from_id(id: String) -> Self {
+        Self {
+            id,
+            label: None,
+            provider: None,
+            raw: None,
+            context_window: None,
+            max_context_window: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -64,11 +91,21 @@ pub struct CliSkill {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct CliCommand {
+    id: String,
+    name: String,
+    source: String,
+    path: Option<String>,
+    description: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CliCapabilityDiscovery {
     cli: String,
     models: Vec<CliModel>,
     skills: Vec<CliSkill>,
-    commands: Vec<Value>,
+    commands: Vec<CliCommand>,
     agents: Vec<Value>,
     warnings: Vec<String>,
 }
@@ -175,14 +212,16 @@ pub async fn discover_cli_capabilities(
     refresh: Option<bool>,
 ) -> Result<CliCapabilityDiscovery, String> {
     let normalized = normalize_cli_id(&cli);
-    let model_result = discover_cli_models(normalized.clone(), project_path, refresh).await?;
+    let model_result =
+        discover_cli_models(normalized.clone(), project_path.clone(), refresh).await?;
     let mut warnings = model_result.warnings.clone();
     let skills = discover_cli_skills(&normalized, &mut warnings);
+    let commands = discover_cli_commands(&normalized, project_path.as_deref(), &mut warnings);
     Ok(CliCapabilityDiscovery {
         cli: normalized,
         models: model_result.models,
         skills,
-        commands: Vec::new(),
+        commands,
         agents: Vec::new(),
         warnings,
     })
@@ -261,6 +300,241 @@ fn discover_cli_skills(cli: &str, warnings: &mut Vec<String>) -> Vec<CliSkill> {
     }
     skills.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
     skills
+}
+
+fn known_cli_commands(cli: &str) -> Vec<CliCommand> {
+    let entries: &[(&str, &str)] = match cli {
+        "codex" => &[
+            ("help", "Show Codex commands and shortcuts."),
+            (
+                "usage",
+                "Show Codex usage, quota, or limit details when supported.",
+            ),
+            ("model", "View or switch the active model."),
+            ("reasoning", "Adjust reasoning effort where supported."),
+            ("plan", "Ask Codex to plan before implementation."),
+            ("goal", "Create or inspect the current goal."),
+            ("clear", "Start a fresh conversation."),
+            ("compact", "Compact conversation context."),
+            ("review", "Run a review-oriented workflow."),
+        ],
+        "claude" => &[
+            ("help", "Show Claude Code commands and shortcuts."),
+            (
+                "usage",
+                "Show Claude usage, quota, or limit details when supported.",
+            ),
+            (
+                "cost",
+                "Show Claude session cost or usage details when supported.",
+            ),
+            ("model", "View or switch the active model."),
+            ("effort", "Adjust reasoning effort."),
+            ("plan", "Enter plan mode before a change."),
+            ("agents", "Manage agents and subagents."),
+            ("permissions", "View or change permission behavior."),
+            ("clear", "Start a new conversation."),
+            ("compact", "Compact conversation context."),
+        ],
+        "gemini" => &[
+            ("help", "Show Gemini CLI commands."),
+            ("quota", "Show Gemini quota and usage limits."),
+            ("usage", "Show Gemini usage details when supported."),
+            ("model", "View or switch the active model."),
+            ("agents", "Manage Gemini subagents."),
+            ("chat", "Manage or resume chat checkpoints."),
+            ("commands", "List or reload custom commands."),
+            ("compress", "Compress conversation context."),
+            ("clear", "Clear the visible terminal session."),
+        ],
+        "opencode" => &[
+            ("help", "Show OpenCode commands."),
+            (
+                "usage",
+                "Show OpenCode usage, quota, or limit details when supported.",
+            ),
+            ("compact", "Compact the current session."),
+            ("details", "Toggle tool execution details."),
+            ("editor", "Open an external editor for message composition."),
+            ("init", "Initialize project context."),
+            ("share", "Share or export the current session."),
+            ("undo", "Undo the previous agent change."),
+            ("redo", "Redo a previously undone change."),
+        ],
+        _ => &[],
+    };
+
+    entries
+        .iter()
+        .map(|(name, description)| CliCommand {
+            id: (*name).to_string(),
+            name: (*name).to_string(),
+            source: "builtin".to_string(),
+            path: None,
+            description: Some((*description).to_string()),
+        })
+        .collect()
+}
+
+fn discover_cli_commands(
+    cli: &str,
+    project_path: Option<&str>,
+    warnings: &mut Vec<String>,
+) -> Vec<CliCommand> {
+    let mut commands = known_cli_commands(cli);
+    let mut seen: HashSet<String> = commands.iter().map(|command| command.id.clone()).collect();
+    let Some(home) = home_dir() else {
+        warnings.push("Could not resolve home directory for command discovery.".to_string());
+        return commands;
+    };
+
+    let mut roots: Vec<(PathBuf, &str)> = Vec::new();
+    match cli {
+        "claude" => {
+            roots.push((home.join(".claude").join("commands"), "claude-command"));
+            if let Some(project) = project_path {
+                roots.push((
+                    PathBuf::from(project).join(".claude").join("commands"),
+                    "claude-project-command",
+                ));
+            }
+        }
+        "gemini" => {
+            roots.push((home.join(".gemini").join("commands"), "gemini-command"));
+            if let Some(project) = project_path {
+                roots.push((
+                    PathBuf::from(project).join(".gemini").join("commands"),
+                    "gemini-project-command",
+                ));
+            }
+        }
+        "opencode" => {
+            roots.push((
+                home.join(".config").join("opencode").join("commands"),
+                "opencode-command",
+            ));
+            roots.push((
+                home.join(".config").join("opencode").join("command"),
+                "opencode-command",
+            ));
+            if let Some(project) = project_path {
+                let project = PathBuf::from(project);
+                roots.push((
+                    project.join(".opencode").join("commands"),
+                    "opencode-project-command",
+                ));
+                roots.push((
+                    project.join(".opencode").join("command"),
+                    "opencode-project-command",
+                ));
+            }
+        }
+        "codex" => {
+            roots.push((home.join(".codex").join("commands"), "codex-command"));
+            if let Some(project) = project_path {
+                roots.push((
+                    PathBuf::from(project).join(".codex").join("commands"),
+                    "codex-project-command",
+                ));
+            }
+        }
+        _ => {}
+    }
+
+    for (root, source) in roots {
+        collect_command_files(&root, source, 0, &mut seen, &mut commands);
+        if commands.len() >= 200 {
+            warnings.push("Command discovery stopped after 200 entries.".to_string());
+            break;
+        }
+    }
+    commands.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    commands
+}
+
+fn collect_command_files(
+    dir: &Path,
+    source: &str,
+    depth: usize,
+    seen: &mut HashSet<String>,
+    out: &mut Vec<CliCommand>,
+) {
+    if depth > MAX_RECURSIVE_DEPTH || out.len() >= 200 || !dir.is_dir() {
+        return;
+    }
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if out.len() >= 200 {
+            return;
+        }
+        let path = entry.path();
+        if path.is_dir() {
+            collect_command_files(&path, source, depth + 1, seen, out);
+            continue;
+        }
+        let Some(stem) = path.file_stem().and_then(|value| value.to_str()) else {
+            continue;
+        };
+        let Some(ext) = path
+            .extension()
+            .and_then(|value| value.to_str())
+            .map(|value| value.to_lowercase())
+        else {
+            continue;
+        };
+        if !matches!(ext.as_str(), "md" | "toml" | "json" | "jsonc") {
+            continue;
+        }
+        let id = stem.trim().to_lowercase();
+        if id.is_empty() || !seen.insert(id.clone()) {
+            continue;
+        }
+        let description = read_short_description(&path);
+        out.push(CliCommand {
+            id,
+            name: stem.to_string(),
+            source: source.to_string(),
+            path: Some(path.to_string_lossy().to_string()),
+            description,
+        });
+    }
+}
+
+fn read_short_description(path: &Path) -> Option<String> {
+    let metadata = fs::metadata(path).ok()?;
+    if metadata.len() > MAX_FILE_BYTES {
+        return None;
+    }
+    let content = fs::read_to_string(path).ok()?;
+    for line in content.lines().take(24) {
+        let trimmed = line.trim().trim_matches('"').trim_matches('\'');
+        if trimmed.is_empty() || trimmed == "---" {
+            continue;
+        }
+        if let Some(value) = trimmed.strip_prefix("description:") {
+            let description = value
+                .trim()
+                .trim_matches('"')
+                .trim_matches('\'')
+                .to_string();
+            if !description.is_empty() {
+                return Some(description);
+            }
+        }
+        if let Some(value) = trimmed.strip_prefix("description =") {
+            let description = value
+                .trim()
+                .trim_matches('"')
+                .trim_matches('\'')
+                .to_string();
+            if !description.is_empty() {
+                return Some(description);
+            }
+        }
+    }
+    None
 }
 
 fn collect_skill_markdown(
@@ -394,7 +668,7 @@ fn cache_path(_project_path: Option<&str>) -> PathBuf {
 fn read_cache_entry(path: &Path, cli: &str) -> Option<ModelDiscoveryResult> {
     let text = fs::read_to_string(path).ok()?;
     let cache = serde_json::from_str::<ModelDiscoveryCache>(&text).ok()?;
-    if cache.schema_version != 3 {
+    if cache.schema_version != MODEL_DISCOVERY_CACHE_SCHEMA_VERSION {
         return None;
     }
     let entry = cache.entries.into_iter().find(|entry| entry.cli == cli)?;
@@ -429,7 +703,7 @@ fn write_cache_entry(path: &Path, result: &ModelDiscoveryResult) {
         let _ = fs::create_dir_all(parent);
     }
     if let Ok(text) = serde_json::to_string_pretty(&ModelDiscoveryCache {
-        schema_version: 3,
+        schema_version: MODEL_DISCOVERY_CACHE_SCHEMA_VERSION,
         entries,
     }) {
         let _ = fs::write(path, text);
@@ -456,6 +730,19 @@ fn push_model(
     source: &str,
     raw: Option<String>,
 ) {
+    push_model_with_context(result, id, label, provider, source, raw, None, None);
+}
+
+fn push_model_with_context(
+    result: &mut ModelDiscoveryResult,
+    id: String,
+    label: Option<String>,
+    provider: Option<String>,
+    source: &str,
+    raw: Option<String>,
+    context_window: Option<u64>,
+    max_context_window: Option<u64>,
+) {
     let id = id.trim().trim_matches('"').trim_matches('\'').to_string();
     if id.is_empty() || looks_secret(&id) {
         return;
@@ -468,6 +755,8 @@ fn push_model(
         provider,
         source: source.to_string(),
         raw,
+        context_window,
+        max_context_window,
     });
 }
 
@@ -479,8 +768,29 @@ fn default_model_label(cli: &str, id: &str) -> String {
 }
 
 fn dedupe_models(models: &mut Vec<CliModel>) {
-    let mut seen = HashSet::new();
-    models.retain(|model| seen.insert(model.id.to_lowercase()));
+    let mut merged: Vec<CliModel> = Vec::new();
+    for model in models.drain(..) {
+        if let Some(existing) = merged
+            .iter_mut()
+            .find(|existing| existing.id.eq_ignore_ascii_case(&model.id))
+        {
+            if existing.context_window.is_none() {
+                existing.context_window = model.context_window;
+            }
+            if existing.max_context_window.is_none() {
+                existing.max_context_window = model.max_context_window;
+            }
+            if existing.provider.is_none() {
+                existing.provider = model.provider;
+            }
+            if existing.raw.is_none() {
+                existing.raw = model.raw;
+            }
+            continue;
+        }
+        merged.push(model);
+    }
+    *models = merged;
 }
 
 fn strip_ansi(input: &str) -> String {
@@ -579,12 +889,13 @@ fn run_command_with_timeout(
     args: &[&str],
     timeout_ms: u64,
 ) -> (Option<i32>, String, String, Option<String>) {
-    let mut child = match Command::new(command)
+    let mut child_command = Command::new(command);
+    child_command
         .args(args)
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-    {
+        .stderr(Stdio::piped());
+    configure_hidden_command(&mut child_command);
+    let mut child = match child_command.spawn() {
         Ok(child) => child,
         Err(error) => return (None, String::new(), String::new(), Some(error.to_string())),
     };
@@ -700,10 +1011,28 @@ fn file_attempt<F>(
 where
     F: Fn(&str) -> Vec<String>,
 {
+    file_attempt_models(result, method, path, source, |text| {
+        parser(text)
+            .into_iter()
+            .map(ParsedModel::from_id)
+            .collect::<Vec<_>>()
+    })
+}
+
+fn file_attempt_models<F>(
+    result: &mut ModelDiscoveryResult,
+    method: &str,
+    path: &Path,
+    source: &str,
+    parser: F,
+) -> usize
+where
+    F: Fn(&str) -> Vec<ParsedModel>,
+{
     let path_string = path.to_string_lossy().to_string();
     let mut error = None;
     let mut parser_reason = None;
-    let ids = match fs::metadata(path) {
+    let models = match fs::metadata(path) {
         Ok(metadata) if metadata.len() > MAX_FILE_BYTES => {
             parser_reason = Some(format!("File is larger than {} bytes.", MAX_FILE_BYTES));
             Vec::new()
@@ -720,18 +1049,21 @@ where
             Vec::new()
         }
     };
-    let parsed = ids.len();
+    let parsed = models.len();
     if parsed == 0 && parser_reason.is_none() && error.is_none() {
         parser_reason = Some("No model IDs matched parser.".to_string());
     }
-    for id in ids {
-        push_model(
+    for model in models {
+        let provider = model.provider.or_else(|| provider_from_id(&model.id));
+        push_model_with_context(
             result,
-            id.clone(),
-            None,
-            provider_from_id(&id),
+            model.id,
+            model.label,
+            provider,
             source,
-            Some(path_string.clone()),
+            model.raw.or_else(|| Some(path_string.clone())),
+            model.context_window,
+            model.max_context_window,
         );
     }
     add_attempt(
@@ -849,12 +1181,12 @@ fn discover_codex_models(result: &mut ModelDiscoveryResult, project_path: Option
             "config-file",
             parse_toml_model_fields,
         );
-        file_attempt(
+        file_attempt_models(
             result,
             "file",
             &user_codex.join("models_cache.json"),
             "cache-file",
-            |text| parse_json_model_strings(text, "codex"),
+            parse_codex_models_cache_models,
         );
         for path in find_matching_files(
             &user_codex,
@@ -1289,6 +1621,105 @@ fn parse_json_model_strings(text: &str, cli: &str) -> Vec<String> {
             dedupe_strings(out)
         }
     }
+}
+
+fn parse_codex_models_cache_models(text: &str) -> Vec<ParsedModel> {
+    let Ok(value) = serde_json::from_str::<Value>(text) else {
+        return parse_json_model_strings(text, "codex")
+            .into_iter()
+            .map(ParsedModel::from_id)
+            .collect();
+    };
+
+    let mut out = Vec::new();
+    if let Some(models) = value.get("models").and_then(Value::as_array) {
+        for model in models {
+            if !model.is_object() {
+                continue;
+            }
+            let id = string_field(model, &["slug", "id", "model", "model_id"]);
+            let Some(id) = id.filter(|id| is_plausible_model_id(id, "codex")) else {
+                continue;
+            };
+            out.push(ParsedModel {
+                id,
+                label: string_field(model, &["display_name", "name", "label"]),
+                provider: string_field(model, &["provider"]),
+                raw: None,
+                context_window: u64_field(model, &["context_window", "contextWindow"]),
+                max_context_window: u64_field(model, &["max_context_window", "maxContextWindow"]),
+            });
+        }
+    }
+
+    if out.is_empty() {
+        return parse_json_model_strings(text, "codex")
+            .into_iter()
+            .map(ParsedModel::from_id)
+            .collect();
+    }
+
+    dedupe_parsed_models(out)
+}
+
+fn string_field(value: &Value, keys: &[&str]) -> Option<String> {
+    let map = value.as_object()?;
+    for key in keys {
+        if let Some(raw) = map.get(*key).and_then(Value::as_str) {
+            let trimmed = raw.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn u64_field(value: &Value, keys: &[&str]) -> Option<u64> {
+    let map = value.as_object()?;
+    for key in keys {
+        let Some(raw) = map.get(*key) else {
+            continue;
+        };
+        if let Some(value) = raw.as_u64() {
+            return Some(value);
+        }
+        if let Some(value) = raw.as_f64() {
+            if value.is_finite() && value > 0.0 {
+                return Some(value.round() as u64);
+            }
+        }
+        if let Some(value) = raw.as_str().and_then(|value| value.trim().parse().ok()) {
+            return Some(value);
+        }
+    }
+    None
+}
+
+fn dedupe_parsed_models(models: Vec<ParsedModel>) -> Vec<ParsedModel> {
+    let mut out: Vec<ParsedModel> = Vec::new();
+    for model in models {
+        if let Some(existing) = out
+            .iter_mut()
+            .find(|existing| existing.id.eq_ignore_ascii_case(&model.id))
+        {
+            if existing.context_window.is_none() {
+                existing.context_window = model.context_window;
+            }
+            if existing.max_context_window.is_none() {
+                existing.max_context_window = model.max_context_window;
+            }
+            if existing.provider.is_none() {
+                existing.provider = model.provider;
+            }
+            if existing.label.is_none() {
+                existing.label = model.label;
+            }
+            continue;
+        }
+        out.push(model);
+    }
+    out
 }
 
 fn parse_claude_settings_models(text: &str) -> Vec<String> {
@@ -1837,6 +2268,20 @@ model = "o4-mini"
             parse_json_model_strings(json, "codex"),
             vec!["gpt-5.1", "openai/o4-mini"]
         );
+    }
+
+    #[test]
+    fn parses_codex_models_cache_context_windows() {
+        let json = r#"{"models":[{"slug":"gpt-5.5","display_name":"GPT-5.5","context_window":272000,"max_context_window":272000},{"slug":"gpt-5.4","display_name":"GPT-5.4","context_window":272000,"max_context_window":1000000}]}"#;
+        let models = parse_codex_models_cache_models(json);
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[0].id, "gpt-5.5");
+        assert_eq!(models[0].label.as_deref(), Some("GPT-5.5"));
+        assert_eq!(models[0].context_window, Some(272000));
+        assert_eq!(models[0].max_context_window, Some(272000));
+        assert_eq!(models[1].id, "gpt-5.4");
+        assert_eq!(models[1].context_window, Some(272000));
+        assert_eq!(models[1].max_context_window, Some(1000000));
     }
 
     #[test]

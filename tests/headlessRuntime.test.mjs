@@ -301,7 +301,6 @@ run('opencode headless command uses official run mode with inline workflow confi
     'C:/workspace',
     '--model',
     'anthropic/claude-sonnet-4',
-    '--dangerously-skip-permissions',
     '{prompt}',
   ]);
   assert.equal(command.args.includes('--yolo'), false);
@@ -311,7 +310,29 @@ run('opencode headless command uses official run mode with inline workflow confi
   assert.equal(config.mcp['starlink'].type, 'remote');
   assert.equal(config.mcp['starlink'].url, 'http://127.0.0.1:3741/mcp');
   assert.equal(config.mcp['starlink'].enabled, true);
-  assert.equal(config.permission, 'allow');
+  assert.equal(config.permission, undefined);
+});
+
+run('opencode headless full access uses official dangerous skip flag', () => {
+  const command = buildCliRunCommand(payload({ cliType: 'opencode' }), {
+    mcpUrl: 'http://127.0.0.1:3741#local',
+    model: 'anthropic/claude-sonnet-4',
+    permissionMode: 'full',
+  });
+
+  assert.equal(command.command, 'opencode');
+  assert.deepEqual(command.args, [
+    'run',
+    '--format',
+    'json',
+    '--dir',
+    'C:/workspace',
+    '--model',
+    'anthropic/claude-sonnet-4',
+    '--dangerously-skip-permissions',
+    '{prompt}',
+  ]);
+  assert.equal(JSON.parse(command.env.OPENCODE_CONFIG_CONTENT).permission, 'allow');
 });
 
 run('opencode headless dispatcher materializes activation prompt as final message arg', () => {
@@ -359,9 +380,11 @@ run('codex interactive argv normalizes model and places yolo before final prompt
     '-c',
     'mcp_servers.excalidraw.enabled=false',
     '-c',
-    'approval_policy="never"',
+    'mcp_servers.terminal-docks.enabled=false',
     '-c',
-    'sandbox_mode="danger-full-access"',
+    'mcp_servers.node_repl.enabled=false',
+    '--disable',
+    'apps',
     '-c',
     'mcp_servers.starlink.url="http://127.0.0.1:3741/mcp?token=abc"',
     '-c',
@@ -391,10 +414,42 @@ run('codex interactive argv can omit global MCP disables for isolated CODEX_HOME
 
   assert.equal(args.includes('mcp_servers.pencil.enabled=false'), false);
   assert.equal(args.includes('mcp_servers.excalidraw.enabled=false'), false);
-  assert.equal(args.includes('approval_policy="never"'), true);
-  assert.equal(args.includes('sandbox_mode="danger-full-access"'), true);
+  assert.equal(args.includes('mcp_servers.terminal-docks.enabled=false'), false);
+  assert.equal(args.includes('mcp_servers.node_repl.enabled=false'), false);
+  assert.equal(args.includes('--disable'), false);
+  assert.equal(args.includes('approval_policy="never"'), false);
+  assert.equal(args.includes('sandbox_mode="danger-full-access"'), false);
+  assert.equal(args.includes('--sandbox'), true);
+  assert.equal(args.includes('workspace-write'), true);
+  assert.equal(args.includes('--ask-for-approval'), true);
   assert.equal(args.includes('mcp_servers.starlink.enabled=true'), true);
   assert.equal(args.at(-1), 'Connect only to Comet-AI.');
+});
+
+run('codex interactive argv maps restricted to official read-only approval flags', () => {
+  const args = buildCodexInteractiveLaunchArgs({
+    permissionMode: 'restricted',
+    bootstrapPrompt: 'Inspect only.',
+  });
+
+  assert.deepEqual(args, [
+    '-c',
+    'mcp_servers.pencil.enabled=false',
+    '-c',
+    'mcp_servers.excalidraw.enabled=false',
+    '-c',
+    'mcp_servers.terminal-docks.enabled=false',
+    '-c',
+    'mcp_servers.node_repl.enabled=false',
+    '--disable',
+    'apps',
+    '--sandbox',
+    'read-only',
+    '--ask-for-approval',
+    'untrusted',
+    '--no-alt-screen',
+    'Inspect only.',
+  ]);
 });
 
 run('codex interactive argv can trust an isolated workflow project', () => {
@@ -423,9 +478,15 @@ run('codex interactive argv preserves complex prompt as final argument', () => {
     '-c',
     'mcp_servers.excalidraw.enabled=false',
     '-c',
-    'approval_policy="never"',
+    'mcp_servers.terminal-docks.enabled=false',
     '-c',
-    'sandbox_mode="danger-full-access"',
+    'mcp_servers.node_repl.enabled=false',
+    '--disable',
+    'apps',
+    '--sandbox',
+    'workspace-write',
+    '--ask-for-approval',
+    'untrusted',
     '--no-alt-screen',
     prompt,
   ]);
@@ -435,16 +496,18 @@ run('codex interactive argv preserves complex prompt as final argument', () => {
 run('codex shell fallback flattens the bootstrap prompt before shell quoting', () => {
   const command = buildCodexInteractiveLaunchCommand({
     modelId: 'gpt-5.4-mini',
+    reasoningEffort: 'medium',
     yolo: false,
     bootstrapPrompt: 'You are a Comet-AI Codex runtime.\nA workflow task is ready for you.',
   });
 
   assert.equal(
     command.startsWith(
-      'set "CODEX_HOME=%USERPROFILE%\\.codex" && codex -c mcp_servers.pencil.enabled=false -c mcp_servers.excalidraw.enabled=false -c approval_policy="never" -c sandbox_mode="danger-full-access" --model gpt-5.4-mini --no-alt-screen ',
+      'set "CODEX_HOME=%USERPROFILE%\\.codex" && codex -c mcp_servers.pencil.enabled=false -c mcp_servers.excalidraw.enabled=false -c mcp_servers.terminal-docks.enabled=false -c mcp_servers.node_repl.enabled=false --disable apps --sandbox workspace-write --ask-for-approval untrusted -c model_reasoning_effort=medium --model gpt-5.4-mini --no-alt-screen ',
     ),
     true,
   );
+  assert.equal(command.includes('model_reasoning_effort=\\"medium\\"'), false);
   assert.equal(command.includes('\n'), false);
   assert.equal(command.includes('You are a Comet-AI Codex runtime. A workflow task is ready for you.'), true);
 });
@@ -474,11 +537,13 @@ run('codex activation prompt uses registered graph task tool', () => {
     ].join('\n'),
   );
 
+  assert.equal(input.preClear, '\x15');
   assert.match(input.paste, /get_task_details/);
   assert.doesNotMatch(input.paste, /get_current_task/);
   assert.match(input.paste, /missionId: "mission-1"/);
   assert.match(input.paste, /nodeId: "builder"/);
   assert.match(input.paste, /attempt: 2/);
+  assert.equal(input.submit, '\r');
 });
 
 run('codex permission detector ignores ordinary status output', () => {

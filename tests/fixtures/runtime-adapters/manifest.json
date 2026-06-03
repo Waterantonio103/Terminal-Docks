@@ -9,10 +9,10 @@
         "note": "Codex prompt/footer frame with input prompt visible."
       },
       "processing.ansi.txt": {
-        "expectedStatus": "processing",
+        "expectedStatus": "idle",
         "provenance": "real-redacted",
         "source": ".tmp-tests/live-codex-single-preserve-rust-running.json",
-        "note": "Codex startup frame while MCP boot is active."
+        "note": "Codex frame with stale MCP startup text before the latest visible prompt/footer."
       },
       "completed.ansi.txt": {
         "expectedStatus": "completed",

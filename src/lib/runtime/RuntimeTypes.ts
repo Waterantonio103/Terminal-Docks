@@ -9,6 +9,7 @@
 
 import type { CliId, ExecutionMode, PermissionCategory, PermissionDecision } from '../workflow/WorkflowTypes.js';
 import type { RuntimeActivationPayload } from '../missionRuntime.js';
+import type { CliPermissionMode } from '../cliCommandBuilders.js';
 import type { PostAckProgressSnapshot, PostAckWatchdogAction, PostAckWatchdogReason } from './RuntimeProgressWatchdog.js';
 import type { WorkflowNodeStatus } from '../../store/workspace.js';
 
@@ -122,13 +123,17 @@ export interface CreateRuntimeArgs {
   capabilities?: Array<{ id: string; level?: number; verifiedBy?: string }> | null;
   modelId?: string | null;
   model?: string | null;
+  reasoningEffort?: string | null;
   yolo?: boolean;
+  permissionMode?: CliPermissionMode | null;
 }
 
 export interface RuntimeReuseExpectation {
   cliId: CliId;
   model?: string | null;
+  reasoningEffort?: string | null;
   yolo?: boolean;
+  permissionMode?: CliPermissionMode | null;
   executionMode?: ExecutionMode;
   workspaceDir?: string | null;
 }
@@ -164,6 +169,8 @@ export interface RuntimeSessionDescriptor {
   specProfile?: import('../../store/workspace.js').PresetSpecProfile;
   finalReadmeEnabled?: boolean;
   finalReadmeOwnerNodeId?: string | null;
+  reasoningEffort?: string | null;
+  permissionMode?: CliPermissionMode | null;
   legalTargets?: import('../workflow/WorkflowTypes.js').LegalTarget[];
   upstreamPayloads?: import('../workflow/WorkflowRun.js').HandoffRecord[];
 }
@@ -252,6 +259,20 @@ export interface SendInputArgs {
   sessionId: string;
   input: string;
 }
+
+// ──────────────────────────────────────────────
+// Set Permission Mode Arguments
+// ──────────────────────────────────────────────
+
+export interface SetPermissionModeArgs {
+  sessionId: string;
+  permissionMode: CliPermissionMode;
+}
+
+export type SetPermissionModeResult =
+  | { status: 'changed'; details: string }
+  | { status: 'unchanged'; details: string }
+  | { status: 'unsupported'; details: string };
 
 // ──────────────────────────────────────────────
 // Stop Runtime Arguments

@@ -30,6 +30,8 @@ import type {
   SessionLivenessResult,
   StopRuntimeArgs,
   ResolvePermissionArgs,
+  SetPermissionModeArgs,
+  SetPermissionModeResult,
 } from './RuntimeTypes.js';
 import { isRuntimeSessionTerminal, runtimeSessionStateToWorkflowNodeStatus } from './RuntimeTypes.js';
 import { getCliAdapter } from './adapters/index.js';
@@ -65,7 +67,11 @@ import {
   buildCodexFollowupTaskSignal,
   buildGeminiInteractiveLaunchCommand,
   buildPtyLaunchCommand,
+  buildPtyLaunchCommandParts,
   formatLaunchArgsForLog,
+  type CliPermissionMode,
+  normalizeCliPermissionMode,
+  normalizeCliReasoningEffort,
   normalizeCodexModelId,
   redactSensitiveLaunchValue,
   resolveCodexYoloFlag,
@@ -103,6 +109,8 @@ const CLI_LAUNCH_DELAY_MS = 500;
 const SHELL_LAUNCH_SETTLE_MS = 700;
 const CLI_STARTUP_WAIT_MS = 2_000;
 const CLI_READY_WAIT_MS = 20_000;
+const CODEX_UPDATE_PROMPT_RE =
+  /Update available:[\s\S]{0,800}\b1\.\s*Update now\b[\s\S]{0,400}\b2\.\s*Skip\b[\s\S]{0,400}\bPress enter to continue\b/i;
 const CLAUDE_MANAGED_INJECTION_READY_WAIT_MS = readRuntimeEnvNumber(
   'VITE_RUNTIME_CLAUDE_MANAGED_INJECTION_READY_WAIT_MS',
   75_000,
@@ -111,6 +119,11 @@ const CLAUDE_MANAGED_INJECTION_READY_WAIT_MS = readRuntimeEnvNumber(
 const OPENCODE_MANAGED_INJECTION_READY_WAIT_MS = readRuntimeEnvNumber(
   'VITE_RUNTIME_OPENCODE_MANAGED_INJECTION_READY_WAIT_MS',
   75_000,
+  CLI_READY_WAIT_MS,
+);
+const CODEX_MANAGED_INJECTION_READY_WAIT_MS = readRuntimeEnvNumber(
+  'VITE_RUNTIME_CODEX_MANAGED_INJECTION_READY_WAIT_MS',
+  90_000,
   CLI_READY_WAIT_MS,
 );
 const PASTE_SUBMIT_GAP_MS = 150;
@@ -186,9 +199,63 @@ function pasteSubmitGapMsForCli(cliId: string): number {
 }
 
 function managedInjectionReadyWaitMsForCli(cliId: string): number {
+  if (cliId === 'codex') return CODEX_MANAGED_INJECTION_READY_WAIT_MS;
   if (cliId === 'claude') return CLAUDE_MANAGED_INJECTION_READY_WAIT_MS;
   if (cliId === 'opencode') return OPENCODE_MANAGED_INJECTION_READY_WAIT_MS;
   return CLI_READY_WAIT_MS;
+}
+
+function codexPermissionMenuIndex(mode: CliPermissionMode): number {
+  if (mode === 'restricted') return 1;
+  if (mode === 'full') return 4;
+  return 2;
+}
+
+function buildCodexPermissionModeInput(current: CliPermissionMode, target: CliPermissionMode): Array<{ input: string; delayMs: number }> {
+  const currentIndex = codexPermissionMenuIndex(current);
+  const targetIndex = codexPermissionMenuIndex(target);
+  const delta = targetIndex - currentIndex;
+  const arrows = delta > 0 ? '\x1b[B'.repeat(delta) : '\x1b[A'.repeat(Math.abs(delta));
+  return [
+    { input: '\x15/permissions\r', delayMs: 500 },
+    { input: `${arrows}\r`, delayMs: 700 },
+  ];
+}
+
+function buildClaudePermissionModeInput(current: CliPermissionMode, target: CliPermissionMode): Array<{ input: string; delayMs: number }> | null {
+  const cycle: Array<CliPermissionMode | 'acceptEdits'> = ['default', 'acceptEdits', 'restricted', 'full'];
+  const currentIndex = cycle.indexOf(current);
+  const targetIndex = cycle.indexOf(target);
+  if (currentIndex < 0 || targetIndex < 0) return null;
+  const steps = (targetIndex - currentIndex + cycle.length) % cycle.length;
+  if (steps === 0) return [];
+  return [{ input: '\x1b[Z'.repeat(steps), delayMs: 500 }];
+}
+
+function buildGeminiPermissionModeInput(current: CliPermissionMode, target: CliPermissionMode): Array<{ input: string; delayMs: number }> | null {
+  if (target === 'full' && current !== 'full') {
+    return [{ input: '\x19', delayMs: 500 }];
+  }
+  if (current === 'full') return null;
+  const cycle: Array<CliPermissionMode | 'auto_edit'> = ['default', 'auto_edit', 'restricted'];
+  const currentIndex = cycle.indexOf(current);
+  const targetIndex = cycle.indexOf(target);
+  if (currentIndex < 0 || targetIndex < 0) return null;
+  const steps = (targetIndex - currentIndex + cycle.length) % cycle.length;
+  if (steps === 0) return [];
+  return [{ input: '\x1b[Z'.repeat(steps), delayMs: 500 }];
+}
+
+function buildLivePermissionModeInput(
+  cliId: CliId,
+  current: CliPermissionMode,
+  target: CliPermissionMode,
+): Array<{ input: string; delayMs: number }> | null {
+  if (current === target) return [];
+  if (cliId === 'codex') return buildCodexPermissionModeInput(current, target);
+  if (cliId === 'claude') return buildClaudePermissionModeInput(current, target);
+  if (cliId === 'gemini') return buildGeminiPermissionModeInput(current, target);
+  return null;
 }
 
 async function checkMcpHealthForConcurrentLaunch(): Promise<Awaited<ReturnType<typeof checkMcpHealthDetailed>>> {
@@ -423,6 +490,7 @@ class RuntimeManager {
   }>();
   private postAckNoProgressWatchdogs = new Map<string, PostAckNoProgressWatchdogState>();
   private cliReadinessDiagnostics = new Map<string, string>();
+  private skippedCodexUpdatePromptSessions = new Set<string>();
   private recentPermissionSignatures = new Map<string, number>();
   private runtimeCompletionPollers = new Map<string, {
     timer: ReturnType<typeof setInterval>;
@@ -628,7 +696,7 @@ class RuntimeManager {
     }
 
     runtimeDebugLog(
-      `[runtime] create cli=${args.cliId} model=${normalizeModelForCli(args.cliId, args.modelId ?? args.model) ?? '<default>'} yolo=${Boolean(args.yolo)} executionMode=${args.executionMode} workspace=${args.workspaceDir ?? '<none>'}`,
+      `[runtime] create cli=${args.cliId} model=${normalizeModelForCli(args.cliId, args.modelId ?? args.model) ?? '<default>'} reasoning=${normalizeCliReasoningEffort(args.reasoningEffort) ?? '<default>'} permission=${normalizeCliPermissionMode(args.permissionMode, args.yolo)} yolo=${Boolean(args.yolo)} executionMode=${args.executionMode} workspace=${args.workspaceDir ?? '<none>'}`,
     );
 
     this.forgetRetainedSessionsForRuntime(args.missionId, args.nodeId, args.terminalId);
@@ -656,7 +724,9 @@ class RuntimeManager {
       legalTargets: args.legalTargets,
       upstreamPayloads: args.upstreamPayloads,
       model: normalizeModelForCli(args.cliId, args.modelId ?? args.model),
+      reasoningEffort: normalizeCliReasoningEffort(args.reasoningEffort),
       yolo: args.yolo,
+      permissionMode: normalizeCliPermissionMode(args.permissionMode, args.yolo),
     });
 
     this.sessions.set(session.sessionId, session);
@@ -778,7 +848,9 @@ class RuntimeManager {
           mcpUrl: await getMcpBaseUrl(),
           executionMode: session.executionMode,
           model: session.model || null,
+          reasoningEffort: session.reasoningEffort || null,
           yolo: session.yolo,
+          permissionMode: session.permissionMode,
         });
 
         if (launchCommand.promptDelivery === 'unsupported') {
@@ -804,14 +876,29 @@ class RuntimeManager {
         return;
       }
 
-      await this.waitForManagedInjectionReadyOrThrow(session, CLI_READY_WAIT_MS, 'sendTask');
+      await this.waitForManagedInjectionReadyOrThrow(
+        session,
+        managedInjectionReadyWaitMsForCli(session.cliId),
+        'sendTask',
+      );
 
       const { preClear, paste, submit } = adapter.buildActivationInput(signal);
+      if (session.cliId === 'codex') {
+        await this.waitForTerminalOutputIdle(
+          session.terminalId,
+          CODEX_IDLE_WAIT_MS,
+          CODEX_IDLE_TIMEOUT_MS,
+        );
+      }
       if (preClear) {
         await this.writeToTerminalOrFail(session, preClear);
         await sleep(PRE_CLEAR_SETTLE_MS);
       }
-      await this.writeToTerminalOrFail(session, paste);
+      if (session.cliId === 'codex') {
+        await this.writeTerminalLikeTyping(session.terminalId, paste);
+      } else {
+        await this.writeToTerminalOrFail(session, paste);
+      }
       await sleep(pasteSubmitGapMsForCli(session.cliId));
       await this.writeToTerminalOrFail(session, submit);
 
@@ -823,6 +910,15 @@ class RuntimeManager {
         promptBytes: new TextEncoder().encode(signal).length,
         promptPreview: previewText(signal, 320) ?? '',
       });
+      if (session.missionId.startsWith('adhoc-followup-')) {
+        session.transitionTo('running');
+        this.emit({
+          type: 'task_acked',
+          sessionId: session.sessionId,
+          nodeId: session.nodeId,
+          attempt: session.attempt,
+        });
+      }
       missionRepository.appendWorkflowEvent({
         missionId: session.missionId,
         nodeId: session.nodeId,
@@ -846,6 +942,135 @@ class RuntimeManager {
     }
 
     await this.writeToTerminalOrFail(session, args.input);
+  }
+
+  async setSessionPermissionMode(args: SetPermissionModeArgs): Promise<SetPermissionModeResult> {
+    const session = this.getSession(args.sessionId);
+    if (!session) throw new Error(`No runtime session: ${args.sessionId}`);
+
+    const currentMode = normalizeCliPermissionMode(session.permissionMode, session.yolo);
+    const targetMode = normalizeCliPermissionMode(args.permissionMode);
+    if (currentMode === targetMode) {
+      return { status: 'unchanged', details: `Session is already in ${targetMode} permission mode.` };
+    }
+    if (session.isHeadless) {
+      return { status: 'unsupported', details: `${session.cliId} headless sessions cannot change permissions in-place.` };
+    }
+    if (session.state === 'awaiting_permission') {
+      return { status: 'unsupported', details: 'Session is currently blocked on a permission prompt.' };
+    }
+    if (isRuntimeSessionTerminal(session.state)) {
+      return { status: 'unsupported', details: `Session is in terminal state "${session.state}".` };
+    }
+
+    const sequence = buildLivePermissionModeInput(session.cliId, currentMode, targetMode);
+    if (!sequence) {
+      return { status: 'unsupported', details: `${session.cliId} does not expose an exact live permission switch for ${targetMode}.` };
+    }
+
+    await this.withTerminalLock(session.terminalId, `permission:${session.sessionId.slice(0, 12)}`, async () => {
+      await this.waitForManagedInjectionReadyOrThrow(
+        session,
+        Math.min(managedInjectionReadyWaitMsForCli(session.cliId), 10_000),
+        'permission mode switch',
+      );
+      if (session.cliId === 'codex') {
+        await this.waitForTerminalOutputIdle(
+          session.terminalId,
+          CODEX_IDLE_WAIT_MS,
+          CODEX_IDLE_TIMEOUT_MS,
+        );
+      }
+      for (const step of sequence) {
+        if (!step.input) continue;
+        await this.writeToTerminalOrFail(session, step.input);
+        if (step.delayMs > 0) await sleep(step.delayMs);
+      }
+    });
+
+    session.setPermissionMode(targetMode);
+    runtimeDebugLog(`[runtime] permission mode changed session=${session.sessionId} cli=${session.cliId} ${currentMode}->${targetMode}`);
+    this.notifySnapshot();
+    return { status: 'changed', details: `Changed ${session.cliId} permission mode from ${currentMode} to ${targetMode}.` };
+  }
+
+  async captureCliSlashCommandOutput(args: {
+    cliId: CliId;
+    commandName: string;
+    model?: string | null;
+    reasoningEffort?: string | null;
+    yolo?: boolean;
+    permissionMode?: import('../cliCommandBuilders.js').CliPermissionMode | null;
+    workspaceDir?: string | null;
+    timeoutMs?: number;
+  }): Promise<{ terminalId: string; output: string; rawOutput: string }> {
+    const commandName = args.commandName.trim().replace(/^\/+/, '');
+    if (!commandName) throw new Error('Slash command name is required.');
+
+    const terminalId = `slash-probe-${args.cliId}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const launch = buildPtyLaunchCommandParts(args.cliId, {
+      model: args.model,
+      reasoningEffort: args.reasoningEffort,
+      yolo: args.yolo,
+      permissionMode: args.permissionMode,
+      workspaceDir: args.workspaceDir,
+    });
+    const timeoutMs = Math.max(2_500, args.timeoutMs ?? 10_000);
+    const deadline = Date.now() + timeoutMs;
+
+    try {
+      await spawnTerminal({
+        id: terminalId,
+        rows: 24,
+        cols: 120,
+        cwd: args.workspaceDir ?? null,
+        command: launch.command,
+        args: launch.args,
+      });
+
+      let skippedCodexUpdatePrompt = false;
+      let startupOutput = '';
+      while (Date.now() < deadline) {
+        startupOutput = await getRecentTerminalOutput(terminalId, 32_000);
+        if (
+          args.cliId === 'codex' &&
+          !skippedCodexUpdatePrompt &&
+          CODEX_UPDATE_PROMPT_RE.test(startupOutput)
+        ) {
+          skippedCodexUpdatePrompt = true;
+          await writeToTerminal(terminalId, '2\r');
+          await sleep(500);
+          continue;
+        }
+
+        if (startupOutput && Date.now() >= deadline - Math.max(1_500, timeoutMs - 2_500)) break;
+        await sleep(150);
+      }
+
+      const before = await getRecentTerminalOutput(terminalId, 32_000);
+      await writeToTerminal(terminalId, `/${commandName}\r`);
+
+      let rawOutput = '';
+      let lastChangedAt = Date.now();
+      while (Date.now() < deadline) {
+        const current = await getRecentTerminalOutput(terminalId, 48_000);
+        const next = current.startsWith(before) ? current.slice(before.length) : current;
+        if (next !== rawOutput) {
+          rawOutput = next;
+          lastChangedAt = Date.now();
+        }
+        if (rawOutput.trim() && Date.now() - lastChangedAt >= 900) break;
+        await sleep(150);
+      }
+
+      return {
+        terminalId,
+        rawOutput,
+        output: rawOutput || startupOutput,
+      };
+    } finally {
+      await destroyTerminal(terminalId);
+    }
   }
 
   async writeBootstrapToTerminal(terminalId: string, data: string, caller: string): Promise<void> {
@@ -975,10 +1200,21 @@ class RuntimeManager {
       };
     }
 
-    if (Boolean(session.yolo) !== Boolean(expected.yolo)) {
+    const currentReasoning = normalizeCliReasoningEffort(session.reasoningEffort);
+    const expectedReasoning = normalizeCliReasoningEffort(expected.reasoningEffort);
+    if (currentReasoning !== expectedReasoning) {
+      return {
+        status: 'model_mismatch',
+        details: `Session reasoning effort is "${currentReasoning ?? '<default>'}" but expected "${expectedReasoning ?? '<default>'}".`,
+      };
+    }
+
+    const currentPermissionMode = normalizeCliPermissionMode(session.permissionMode, session.yolo);
+    const expectedPermissionMode = normalizeCliPermissionMode(expected.permissionMode, expected.yolo);
+    if (currentPermissionMode !== expectedPermissionMode) {
       return {
         status: 'yolo_mismatch',
-        details: `Session yolo is "${Boolean(session.yolo)}" but expected "${Boolean(expected.yolo)}".`,
+        details: `Session permission mode is "${currentPermissionMode}" but expected "${expectedPermissionMode}".`,
       };
     }
 
@@ -1075,7 +1311,9 @@ class RuntimeManager {
     const expectedReuse: RuntimeReuseExpectation = {
       cliId: args.cliId,
       model: args.modelId ?? args.model ?? null,
+      reasoningEffort: args.reasoningEffort ?? null,
       yolo: args.yolo,
+      permissionMode: normalizeCliPermissionMode(args.permissionMode, args.yolo),
       executionMode: args.executionMode,
       workspaceDir: args.workspaceDir ?? null,
     };
@@ -1094,12 +1332,10 @@ class RuntimeManager {
         runtimeDebugLog(
           `[runtime] reusable runtime found; sending follow-up signal session=${existing.sessionId} terminal=${terminalId}`,
         );
-        this.retireSession(existing);
-        const reused = await this.createRuntimeForNode(args);
-        this.claimTerminalOwnership(terminalId, reused.sessionId);
-        this.wirePtyEvents(terminalId, reused.sessionId);
-        await this.launchCli(reused.sessionId, args.activationPayload);
-        return reused;
+        this.claimTerminalOwnership(terminalId, existing.sessionId);
+        this.wirePtyEvents(terminalId, existing.sessionId);
+        this.bindRuntimeToTerminalPane(existing);
+        return existing;
       }
 
       console.warn(
@@ -2412,48 +2648,73 @@ class RuntimeManager {
       session.transitionTo('launching_cli');
       if (session.isTerminal) {
         session.transitionTo('awaiting_cli_ready');
+        await registerTerminalMetadata({
+          terminalId: session.terminalId,
+          missionId: session.missionId,
+          nodeId: session.nodeId,
+          runtimeSessionId: session.sessionId,
+          attempt: session.attempt,
+          cli: session.cliId,
+        });
         this.bindRuntimeToTerminalPane(session);
         let terminalReady = await this.waitForTerminalReady(session.terminalId, 5_000);
+        let launchedDirectCli = false;
         if (!terminalReady) {
           const { rows, cols } = this.getTerminalDimensions(session.terminalId);
           const env = buildSessionLaunchEnv(session);
-          // Adhoc follow-up launches start a shell first and then type the CLI
-          // command into it. The native PTY Codex-home seeding path only runs
-          // for direct `command: codex` spawns, so keep shell-launched Codex on
-          // the user's normal Codex home instead of pointing at a missing
-          // workspace-local directory.
-
+          const launch = buildPtyLaunchCommandParts(session.cliId, {
+            model: session.model,
+            reasoningEffort: session.reasoningEffort,
+            yolo: session.yolo,
+            permissionMode: session.permissionMode,
+            workspaceDir: session.workspaceDir,
+          });
           await this.safeSpawnTerminal(session.terminalId, {
             rows,
             cols,
             cwd: session.workspaceDir ?? null,
+            command: launch.command,
+            args: launch.args,
             env,
+          });
+          launchedDirectCli = true;
+          updateRuntimeTerminalPaneData(session.terminalId, {
+            cliSource: 'connect_agent',
+            cli: session.cliId,
+            model: session.model,
           });
           terminalReady = await this.waitForTerminalReady(session.terminalId, 5_000);
           if (!terminalReady) {
             throw new Error(`Terminal ${session.terminalId} did not become active after hidden follow-up spawn (node: ${session.nodeId}).`);
           }
         }
-        if (terminalReady && await this.shouldLaunchCliInTerminal(session)) {
+        if (!launchedDirectCli && terminalReady && await this.shouldLaunchCliInTerminal(session)) {
           await sleep(CLI_LAUNCH_DELAY_MS);
-          try {
-            const launchCmd = buildPtyLaunchCommand(session.cliId, {
-              model: session.model,
-              yolo: session.yolo,
-              workspaceDir: session.workspaceDir,
-            });
-            await this.writeToTerminalOrFail(session, `${launchCmd}\r`);
-            updateRuntimeTerminalPaneData(session.terminalId, {
-              cliSource: 'connect_agent',
-              cli: session.cliId,
-              model: session.model,
-            });
-          } catch {
-            // PTY still not available — user can interact with the terminal manually
-          }
+          const launchCmd = buildPtyLaunchCommand(session.cliId, {
+            model: session.model,
+            reasoningEffort: session.reasoningEffort,
+            yolo: session.yolo,
+            permissionMode: session.permissionMode,
+            workspaceDir: session.workspaceDir,
+          });
+          await this.writeToTerminalOrFail(session, `${launchCmd}\r`);
+          await sleep(CLI_STARTUP_WAIT_MS);
+          updateRuntimeTerminalPaneData(session.terminalId, {
+            cliSource: 'connect_agent',
+            cli: session.cliId,
+            model: session.model,
+          });
+        }
+        const readyWaitMs = managedInjectionReadyWaitMsForCli(session.cliId);
+        const cliReady = await this.waitForCliReady(session, readyWaitMs);
+        if (!cliReady) {
+          throw new Error(this.readinessFailureReason(
+            session,
+            `CLI "${session.cliId}" did not report ready state within ${readyWaitMs}ms for ad-hoc follow-up.`,
+          ));
         }
       }
-      session.transitionTo('running');
+      session.transitionTo('ready');
       return;
     }
 
@@ -2568,7 +2829,9 @@ class RuntimeManager {
         } else {
           const launchCmd = buildPtyLaunchCommand(session.cliId, {
             model: session.model,
+            reasoningEffort: session.reasoningEffort,
             yolo: session.yolo,
+            permissionMode: session.permissionMode,
             workspaceDir: session.workspaceDir,
           });
           runtimeDebugLog(`[runtime] launch command=${redactSensitiveLaunchValue(launchCmd)}`);
@@ -2585,10 +2848,11 @@ class RuntimeManager {
       if (isWorkflowRun && launchedCli) {
         // launchInteractiveWorkflowCliViaShell already waited for adapter readiness.
       } else {
-        const cliReady = await this.waitForCliReady(session, CLI_READY_WAIT_MS);
+        const readyWaitMs = managedInjectionReadyWaitMsForCli(session.cliId);
+        const cliReady = await this.waitForCliReady(session, readyWaitMs);
         if (!cliReady) {
           const reason = launchedCli
-            ? `CLI "${session.cliId}" did not report ready state within ${CLI_READY_WAIT_MS}ms after launch.`
+            ? `CLI "${session.cliId}" did not report ready state within ${readyWaitMs}ms after launch.`
             : `CLI "${session.cliId}" is not ready and launch was skipped by gate logic.`;
           throw new Error(this.readinessFailureReason(session, reason));
         }
@@ -2596,6 +2860,20 @@ class RuntimeManager {
     }
 
     runtimeDebugLog(`[runtime] CLI ready cli=${session.cliId} terminal=${session.terminalId}`);
+
+    if (session.missionId.startsWith('adhoc-followup-')) {
+      session.transitionTo('ready');
+      missionRepository.appendWorkflowEvent({
+        missionId: session.missionId,
+        nodeId: session.nodeId,
+        sessionId: session.sessionId,
+        terminalId: session.terminalId,
+        eventType: 'cli_ready',
+        severity: 'info',
+        message: `CLI ${session.cliId} reported ready for ad-hoc follow-up in terminal ${session.terminalId}`,
+      }).catch(() => {});
+      return;
+    }
 
     // 4. Register session with MCP
     if (!contract || !bootstrapRequest) {
@@ -2872,7 +3150,9 @@ class RuntimeManager {
       ...terminalConfig,
       mcpUrl,
       model: session.model || null,
+      reasoningEffort: session.reasoningEffort || null,
       yolo: session.yolo,
+      permissionMode: session.permissionMode,
     });
 
     if (!request || error) {
@@ -2880,7 +3160,7 @@ class RuntimeManager {
     }
 
     runtimeDebugLog(
-      `[runtime] launch command=${redactSensitiveLaunchValue(request.command)} args=${formatLaunchArgsForLog(request.args)} cli=${session.cliId} model=${session.model || '<default>'} yolo=${session.yolo} promptDelivery=${request.promptDelivery} mode=${request.executionMode}`,
+      `[runtime] launch command=${redactSensitiveLaunchValue(request.command)} args=${formatLaunchArgsForLog(request.args)} cli=${session.cliId} model=${session.model || '<default>'} permission=${session.permissionMode} yolo=${session.yolo} promptDelivery=${request.promptDelivery} mode=${request.executionMode}`,
     );
     await startHeadlessRun(request as import('./TerminalRuntime.js').HeadlessRunRequest);
   }
@@ -3004,11 +3284,12 @@ class RuntimeManager {
     if (launch.promptDeliveredAtLaunch) {
       runtimeDebugLog(`[runtime] CLI launch prompt already delivered cli=${session.cliId} terminal=${session.terminalId}; skipping idle prompt wait`);
     } else {
-      const cliReady = await this.waitForCliReady(session, CLI_READY_WAIT_MS);
+      const readyWaitMs = managedInjectionReadyWaitMsForCli(session.cliId);
+      const cliReady = await this.waitForCliReady(session, readyWaitMs);
       if (!cliReady) {
         throw new Error(this.readinessFailureReason(
           session,
-          `CLI "${session.cliId}" did not report ready state within ${CLI_READY_WAIT_MS}ms after shell launch.`,
+          `CLI "${session.cliId}" did not report ready state within ${readyWaitMs}ms after shell launch.`,
         ));
       }
     }
@@ -3049,6 +3330,7 @@ class RuntimeManager {
         command: buildGeminiInteractiveLaunchCommand({
           modelId: session.model || null,
           yolo: session.yolo,
+          permissionMode: session.permissionMode,
           workspaceDir: session.workspaceDir,
           prompt: signal,
           shellKind: 'windows',
@@ -3061,7 +3343,9 @@ class RuntimeManager {
       return {
         command: buildPtyLaunchCommand(session.cliId, {
           model: session.model,
+          reasoningEffort: session.reasoningEffort,
           yolo: session.yolo,
+          permissionMode: session.permissionMode,
           workspaceDir: session.workspaceDir,
         }),
         promptDeliveredAtLaunch: false,
@@ -3073,18 +3357,21 @@ class RuntimeManager {
       activationPayload,
       await getMcpBaseUrl(),
     ).replace(/\r$/, '');
-    const resolvedYoloFlag = session.yolo ? await resolveCodexYoloFlag() : null;
+    const resolvedYoloFlag = normalizeCliPermissionMode(session.permissionMode, session.yolo) === 'full'
+      ? await resolveCodexYoloFlag()
+      : null;
     const trustedProjectDir = inferCodexTrustedProjectDir(session.workspaceDir);
     return {
       command: 'codex',
       args: buildCodexInteractiveLaunchArgs({
         modelId: session.model || null,
+        reasoningEffort: session.reasoningEffort || null,
         yolo: session.yolo,
+        permissionMode: session.permissionMode,
         workspaceDir: session.workspaceDir,
         mcpUrl: await getMcpUrl(),
         bootstrapPrompt,
         resolvedYoloFlag,
-        disableKnownGlobalMcps: false,
         trustedProjectDir,
       }),
       promptDeliveredAtLaunch: true,
@@ -3241,12 +3528,6 @@ class RuntimeManager {
         this.retainedSessions.delete(sessionId);
       }
     }
-  }
-
-  private retireSession(session: RuntimeSession): void {
-    session.markCompleted();
-    this.releaseTerminalOwnership(session.terminalId, session.sessionId);
-    this.cleanupSession(session);
   }
 
   private buildInteractiveBootstrapPrompt(
@@ -3611,8 +3892,31 @@ class RuntimeManager {
     };
     let lastStrictGateEnabled = isStrictCliStatusGateEnabled(session.cliId);
     while (Date.now() < deadline) {
+      if (isRuntimeSessionTerminal(session.state) || !this.isCurrentOwner(session)) {
+        return false;
+      }
+      const terminalActive = await isTerminalActive(session.terminalId).catch(() => false);
+      if (!terminalActive) {
+        lastStatus = {
+          status: 'error',
+          confidence: 'high',
+          detail: 'Terminal process exited before CLI became ready',
+        };
+        break;
+      }
       const output = await getRecentTerminalOutput(session.terminalId, 12_288);
       if (output) {
+        if (
+          session.cliId === 'codex' &&
+          !this.skippedCodexUpdatePromptSessions.has(session.sessionId) &&
+          CODEX_UPDATE_PROMPT_RE.test(output)
+        ) {
+          this.skippedCodexUpdatePromptSessions.add(session.sessionId);
+          runtimeDebugLog(`[runtime] skipping Codex update prompt session=${session.sessionId}`);
+          await this.writeToTerminalOrFail(session, '2\r');
+          await sleep(500);
+          continue;
+        }
         lastOutputLength = output.length;
         const readiness = this.evaluateSessionReadiness(session, output);
         lastStatus = readiness.status;
@@ -3741,8 +4045,8 @@ class RuntimeManager {
         CODEX_IDLE_WAIT_MS,
         CODEX_IDLE_TIMEOUT_MS,
       );
-      if (retry) {
-        await this.writeToTerminalOrFail(session, '\x15');
+      if (preClear || retry) {
+        await this.writeToTerminalOrFail(session, preClear ?? '\x15');
         await sleep(PRE_CLEAR_SETTLE_MS);
       }
       await this.writeTerminalLikeTyping(session.terminalId, paste);
@@ -3825,6 +4129,7 @@ class RuntimeManager {
     this.clearPostAckNoProgressWatchdog(session.sessionId);
     this.clearRuntimeCompletionPoller(session.sessionId);
     this.cliReadinessDiagnostics.delete(session.sessionId);
+    this.skippedCodexUpdatePromptSessions.delete(session.sessionId);
 
     const ptyCleanup = this.ptyCleanupFns.get(session.sessionId);
     if (ptyCleanup) {

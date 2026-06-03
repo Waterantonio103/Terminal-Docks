@@ -1,3 +1,4 @@
+use crate::process_utils::configure_hidden_command;
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
@@ -82,9 +83,10 @@ fn merge_json_config(
 
 fn register_claude(mcp_url: &str) -> CliRegistrationResult {
     // First, try to remove existing to ensure URL/token is updated
-    let _ = Command::new("claude")
-        .args(["mcp", "remove", "--scope", "user", "starlink"])
-        .output();
+    let mut remove_command = Command::new("claude");
+    remove_command.args(["mcp", "remove", "--scope", "user", "starlink"]);
+    configure_hidden_command(&mut remove_command);
+    let _ = remove_command.output();
 
     // Use --transport http (streamable-HTTP, Claude Code's current transport).
     // All options must come BEFORE the server name per claude mcp add syntax.
@@ -98,11 +100,13 @@ fn register_claude(mcp_url: &str) -> CliRegistrationResult {
         "starlink",
         mcp_url,
     ];
-    let output = Command::new("claude")
+    let mut add_command = Command::new("claude");
+    add_command
         .args(&args)
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output();
+        .stderr(Stdio::piped());
+    configure_hidden_command(&mut add_command);
+    let output = add_command.output();
 
     match output {
         Ok(o) => {
@@ -265,7 +269,8 @@ fn register_claude_desktop(_mcp_url: &str) -> CliRegistrationResult {
     CliRegistrationResult {
         cli: "claude-desktop".into(),
         success: true,
-        message: "Detected! Add the Starlink URL to your Claude Desktop config for SSE support.".into(),
+        message: "Detected! Add the Starlink URL to your Claude Desktop config for SSE support."
+            .into(),
     }
 }
 
@@ -278,11 +283,14 @@ fn register_interpreter(_mcp_url: &str) -> CliRegistrationResult {
 }
 
 fn is_cli_available(bin: &str) -> bool {
-    let check = if cfg!(target_os = "windows") {
-        Command::new("where").arg(bin).output()
+    let mut command = if cfg!(target_os = "windows") {
+        Command::new("where")
     } else {
-        Command::new("which").arg(bin).output()
+        Command::new("which")
     };
+    command.arg(bin);
+    configure_hidden_command(&mut command);
+    let check = command.output();
     check.map(|o| o.status.success()).unwrap_or(false)
 }
 
@@ -294,8 +302,10 @@ fn is_opencode_available() -> bool {
     if !is_cli_available("ollama") {
         return false;
     }
-    Command::new("ollama")
-        .arg("list")
+    let mut command = Command::new("ollama");
+    command.arg("list");
+    configure_hidden_command(&mut command);
+    command
         .output()
         .map(|o| {
             String::from_utf8_lossy(&o.stdout)

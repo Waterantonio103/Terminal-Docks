@@ -21,6 +21,8 @@ export interface CliModel {
   provider?: string;
   source: ModelSource;
   raw?: string;
+  contextWindow?: number;
+  maxContextWindow?: number;
   canLaunch?: boolean;
   reason?: string;
 }

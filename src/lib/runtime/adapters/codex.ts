@@ -12,18 +12,22 @@ import type {
   StatusDetectionResult,
   TaskContext,
 } from './CliAdapter.js';
-import { cliDebugLog, formatLaunchArgsForLog, normalizeCodexModelId } from '../../cliCommandBuilders.js';
+import { cliDebugLog, formatLaunchArgsForLog, normalizeCliPermissionMode, normalizeCliReasoningEffort, normalizeCodexModelId } from '../../cliCommandBuilders.js';
 import { buildCometRuntimeEnv } from '../../runtimeEnv.js';
 
 const ANSI_RE =
   /\x1b\][^\x07]*(?:\x07|\x1b\\)|\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])/g;
 const BANNER_RE = /\bcodex\b/i;
 const PROMPT_RE = /(?:^|\n)\s*(?:›|\uff1e|❯|Input:|Prompt:)\s*(?:\S.*)?$/m;
+const INLINE_PROMPT_RE = /(?:^|[\n\r]|[╯│]\s*)\s*(?:›|\uff1e|❯|Input:|Prompt:)\s*(?:\S.*)?(?:$|\bgpt-[\w.-]+\b[\s\S]{0,160}\bContext\b)/m;
 const SHELL_PROMPT_RE = /(?:^|\n)\s*(?:[A-Za-z]:\\[^>\r\n]*>|PS [^>\r\n]*>|[$#>])\s*$/m;
 const CODEX_FOOTER_RE = /(?:\bgpt-[\w.-]+(?:\s+\w+)?\b[\s\S]{0,120}\bContext\s+\d+%\s+(?:left|used)\b|\bContext\s+\d+%\s+left\b[\s\S]{0,80}\bContext\s+\d+%\s+used\b|\bFast\s+(?:on|off)\b)/i;
+const CODEX_COMPACT_FOOTER_RE = /\bgpt-[\w.-]+(?:\s+\w+)?\b\s*·\s*[^·\r\n]{2,160}\s*·\s*gpt-[\w.-]+(?:\s+\w+)?\b(?:\s*·\s*[^\r\n]{1,120})?/i;
 const CODEX_UI_RE = /(?:\bcodex\b|\bgpt-[\w.-]+\b|\bContext\s+\d+%\s+(?:left|used)\b|\bFast\s+(?:on|off)\b|›)/i;
+const MODEL_STATE_RE = /\bmodel:\s*([^│\n\r]*?)(?:\/model\s+to\s+change|│|$)/i;
 const ACTIVE_WORK_RE =
   /(?:\bWorking\b|\bBooting MCP server\b|\bStarting MCP servers\b|\bqueued message\b|\btab to queue message\b|\bPasted Content\b|\besc to interrupt\b|\bctrl-c to interrupt\b|\boperation in progress\b)/i;
+const MCP_STARTUP_ACTIVE_RE = /(?:\bBooting MCP server\b|\bStarting MCP servers\b)/i;
 const INTERRUPTED_IDLE_RE = /\bConversation interrupted\b|\btell the model what to do differently\b/i;
 const MCP_PERMISSION_PROMPT_RE =
   /Allow\s+the\s+.+?\s+MCP\s+server\s+to\s+run\s+tool\s+"[^"]+"\?\s*[\s\S]*(?:\b1\.\s*Allow\b|\bAlways\s+allow\b|\benter\s+to\s+submit\b)/i;
@@ -52,6 +56,31 @@ function lastNonEmptyLines(output: string, count: number): string {
     .filter(line => line.trim())
     .slice(-count)
     .join('\n');
+}
+
+function lastMatchingLineIndex(output: string, pattern: RegExp): number {
+  const flags = pattern.flags.replace(/g/g, '');
+  const matcher = new RegExp(pattern.source, flags);
+  return output
+    .split('\n')
+    .reduce((lastIndex, line, index) => matcher.test(line) ? index : lastIndex, -1);
+}
+
+function lastCodexModelState(output: string): { offset: number; loading: boolean } | null {
+  const matcher = new RegExp(MODEL_STATE_RE.source, 'ig');
+  let lastState: { offset: number; loading: boolean } | null = null;
+  let match: RegExpExecArray | null;
+  while ((match = matcher.exec(output)) !== null) {
+    const value = (match[1] ?? '').trim().toLowerCase();
+    if (value) {
+      lastState = {
+        offset: match.index,
+        loading: /^loading\b/.test(value),
+      };
+    }
+    if (match[0].length === 0) matcher.lastIndex += 1;
+  }
+  return lastState;
 }
 
 function escapeInstructionValue(value: string): string {
@@ -104,11 +133,18 @@ export const codexAdapter: CliAdapter = {
       };
     }
 
+    const permissionMode = normalizeCliPermissionMode(context.permissionMode, context.yolo);
     const args: string[] = [
       '-c',
       'mcp_servers.pencil.enabled=false',
       '-c',
       'mcp_servers.excalidraw.enabled=false',
+      '-c',
+      'mcp_servers.terminal-docks.enabled=false',
+      '-c',
+      'mcp_servers.node_repl.enabled=false',
+      '--disable',
+      'apps',
       ...(context.mcpUrl?.trim() ? [
         '-c',
         `mcp_servers.starlink.url="${context.mcpUrl.trim()}"`,
@@ -119,21 +155,31 @@ export const codexAdapter: CliAdapter = {
         '-c',
         'mcp_servers.starlink.tool_timeout_sec=120',
       ] : []),
-      '-c',
-      'approval_policy="never"',
-      '-c',
-      'sandbox_mode="danger-full-access"',
+      ...(permissionMode === 'restricted' ? [
+        '--sandbox',
+        'read-only',
+        '--ask-for-approval',
+        'untrusted',
+      ] : []),
+      ...(permissionMode === 'default' ? [
+        '--sandbox',
+        'workspace-write',
+        '--ask-for-approval',
+        'untrusted',
+      ] : []),
     ];
+    const reasoningEffort = normalizeCliReasoningEffort(context.reasoningEffort);
+    if (reasoningEffort) args.push('-c', `model_reasoning_effort=${reasoningEffort}`);
     const model = normalizeCodexModelId(context.model);
     if (model) args.push('--model', model);
     if (context.workspaceDir?.trim()) args.push('--cd', context.workspaceDir.trim());
     args.push('--no-alt-screen');
     const yoloFlag = '--dangerously-bypass-approvals-and-sandbox';
-    if (context.yolo) {
+    if (permissionMode === 'full') {
       args.push(yoloFlag);
       cliDebugLog(`[codex] resolved yolo flag=${yoloFlag}`);
     } else {
-      cliDebugLog('[codex] resolved yolo flag=<none> (yolo=false)');
+      cliDebugLog(`[codex] resolved yolo flag=<none> (permissionMode=${permissionMode})`);
     }
     cliDebugLog(`[codex] final codex args (no prompt)=${formatLaunchArgsForLog(args)}`);
     return {
@@ -171,12 +217,37 @@ export const codexAdapter: CliAdapter = {
       return { status: 'completed', confidence: 'high', detail: 'Codex completion marker detected' };
     }
 
-    const hasIdlePrompt = hasCodexUi && PROMPT_RE.test(recent || clean) && CODEX_FOOTER_RE.test(recent || clean);
+    const recentOrClean = recent || clean;
+    const hasPrompt = PROMPT_RE.test(recentOrClean) || INLINE_PROMPT_RE.test(recentOrClean);
+    const hasCodexFooter = CODEX_FOOTER_RE.test(recentOrClean) || CODEX_COMPACT_FOOTER_RE.test(recentOrClean);
+    const hasIdlePrompt = hasCodexUi && hasPrompt && hasCodexFooter;
+    const idlePromptLineIndex = hasIdlePrompt
+      ? Math.max(
+        lastMatchingLineIndex(clean, PROMPT_RE),
+        lastMatchingLineIndex(clean, CODEX_FOOTER_RE),
+        lastMatchingLineIndex(clean, CODEX_COMPACT_FOOTER_RE),
+      )
+      : -1;
+    const modelState = lastCodexModelState(clean);
+    const modelLoadingIsCurrent = modelState?.loading === true;
+    const activeWorkLineIndex = lastMatchingLineIndex(clean, ACTIVE_WORK_RE);
+    const mcpStartupLineIndex = lastMatchingLineIndex(clean, MCP_STARTUP_ACTIVE_RE);
+    const mcpStartupIsCurrent = mcpStartupLineIndex >= 0
+      && (!hasIdlePrompt || mcpStartupLineIndex > idlePromptLineIndex);
+    const activeWorkIsCurrent = activeWorkLineIndex >= 0
+      && (
+        !hasIdlePrompt
+        || activeWorkLineIndex > idlePromptLineIndex
+      );
     if (hasIdlePrompt && INTERRUPTED_IDLE_RE.test(recent || clean)) {
       return { status: 'idle', confidence: 'high', detail: 'Codex input prompt and footer detected' };
     }
 
-    if (ACTIVE_WORK_RE.test(recent || clean)) {
+    if (modelLoadingIsCurrent) {
+      return { status: 'processing', confidence: 'high', detail: 'Codex model is still loading' };
+    }
+
+    if (mcpStartupIsCurrent || activeWorkIsCurrent) {
       return { status: 'processing', confidence: 'high', detail: 'Codex active work indicator detected' };
     }
 
@@ -264,7 +335,7 @@ export const codexAdapter: CliAdapter = {
       events.push({ kind: 'banner', cli: 'codex', timestamp: ts, confidence: 'high' });
     }
 
-    if (CODEX_UI_RE.test(clean) && PROMPT_RE.test(clean) && CODEX_FOOTER_RE.test(clean)) {
+    if (status.status === 'idle' && status.confidence !== 'low') {
       events.push({ kind: 'ready', cli: 'codex', timestamp: ts, confidence: 'medium' });
     }
 
@@ -313,6 +384,7 @@ export const codexAdapter: CliAdapter = {
 
     const flat = target.replace(/\r?\n/g, ' ').replace(/\s{2,}/g, ' ').trim();
     return {
+      preClear: '\x15',
       paste: flat,
       submit: '\r',
     };

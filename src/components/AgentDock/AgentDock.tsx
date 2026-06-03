@@ -1,11 +1,11 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Bot, ChevronUp, X } from 'lucide-react';
 import { useWorkspaceStore, type CompiledMission, type MissionAgent, type Pane } from '../../store/workspace';
 import { useMissionSnapshot } from '../../hooks/useMissionSnapshot';
 import { useWorkflowEvents } from '../../hooks/useWorkflowEvents';
 import { deriveMissionProgressRows } from '../../lib/missionProgress';
 import { FollowUpComposer } from '../MissionControl/MissionControlPane';
 import { generateId } from '../../lib/graphUtils';
+import { getPublicRoleForWorkflowRole } from '../../config/agentRoles';
 
 function missionIdForPane(pane: Pane): string | null {
   const missionId = pane.data?.missionId ?? pane.data?.mission?.missionId;
@@ -23,6 +23,43 @@ function findDockMission(tabs: ReturnType<typeof useWorkspaceStore.getState>['ta
   }
 
   return null;
+}
+
+function CometAgentLogo({ className = '' }: { className?: string }) {
+  return <img className={`td-agent-footer-logo ${className}`} src="/comet-ai-logo.svg" alt="" aria-hidden="true" draggable={false} />;
+}
+
+function roleTitleForPane(pane: Pane | null): string {
+  const roleId = typeof pane?.data?.followUpAgentRoleId === 'string'
+    ? pane.data.followUpAgentRoleId
+    : typeof pane?.data?.agentRoleId === 'string'
+      ? pane.data.agentRoleId
+      : 'code';
+  return getPublicRoleForWorkflowRole(roleId).name;
+}
+
+function AgentFooterCompartment({
+  label,
+  title,
+  onOpen,
+}: {
+  label: string;
+  title: string;
+  onOpen: () => void;
+}) {
+  return (
+    <div className="td-agent-footer-compartment" role="group" aria-label="Agent dock">
+      <button
+        type="button"
+        className="td-agent-footer-main"
+        onClick={onOpen}
+        title={title}
+      >
+        <CometAgentLogo />
+        <span>{label}</span>
+      </button>
+    </div>
+  );
 }
 
 export function AgentDock() {
@@ -69,6 +106,7 @@ export function AgentDock() {
                 data: {
                   dockOnly: true,
                   missionId: id,
+                  workspaceDir,
                   taskDescription: workspaceDir ? `Workspace agent: ${workspaceDir}` : 'Workspace agent',
                   agents: [],
                   followUpThreadId: `thread:${id}`,
@@ -87,14 +125,20 @@ export function AgentDock() {
     useWorkspaceStore.setState(state => {
       const sourceTab = state.tabs.find(tab => tab.panes.some(candidate => candidate.id === pane.id));
       const sourcePane = sourceTab?.panes.find(candidate => candidate.id === pane.id) ?? pane;
+      const roleTitle = roleTitleForPane(sourcePane);
+      const sourcePaneWorkspaceDir = typeof sourcePane.data?.workspaceDir === 'string' && sourcePane.data.workspaceDir.trim()
+        ? sourcePane.data.workspaceDir
+        : null;
+      const sourceWorkspaceDir = sourceTab?.workspaceDir ?? state.workspaceDir ?? workspaceDir ?? sourcePaneWorkspaceDir;
       const visiblePane: Pane = {
         ...sourcePane,
-        title: 'Agent',
+        title: roleTitle,
         gridPos: { x: 0, y: 0, w: 100, h: 100 },
         data: {
           ...sourcePane.data,
           dockOnly: false,
           dockExpandedToTab: true,
+          workspaceDir: sourceWorkspaceDir,
         },
       };
       return {
@@ -122,92 +166,40 @@ export function AgentDock() {
   if (!pane || !missionId) {
     if (hidden) {
       return (
-        <button
-          type="button"
-          className="fixed bottom-4 right-4 z-[8500] flex h-10 items-center gap-2 rounded-full border border-border-panel bg-bg-panel px-3 text-xs text-text-secondary shadow-2xl hover:text-text-primary"
-          onClick={() => setHidden(false)}
+        <AgentFooterCompartment
+          label="Agent"
           title="Show agent dock"
-        >
-          <Bot size={15} />
-          Agent
-        </button>
+          onOpen={() => setHidden(false)}
+        />
       );
     }
 
     return (
-      <div className="fixed bottom-4 right-4 z-[8500] flex items-center gap-1 rounded-full border border-border-panel bg-bg-panel px-2 py-1.5 shadow-2xl">
-        <button
-          type="button"
-          className="flex items-center gap-2 rounded-full px-2 py-1 text-xs text-text-secondary hover:text-text-primary"
-          onClick={createWorkspaceAgent}
-          title="Start workspace agent"
-        >
-          <Bot size={15} className="text-accent-primary" />
-          <span className="max-w-[220px] truncate">Workspace agent</span>
-        </button>
-        <button
-          type="button"
-          className="flex h-6 w-6 items-center justify-center rounded-full text-text-muted hover:bg-bg-surface hover:text-text-primary"
-          onClick={createWorkspaceAgent}
-          title="Start workspace agent"
-        >
-          <ChevronUp size={14} />
-        </button>
-        <button
-          type="button"
-          className="flex h-6 w-6 items-center justify-center rounded-full text-text-muted hover:bg-bg-surface hover:text-text-primary"
-          onClick={() => setHidden(true)}
-          title="Hide agent dock"
-        >
-          <X size={13} />
-        </button>
-      </div>
+      <AgentFooterCompartment
+        label="Workspace agent"
+        title="Start workspace agent"
+        onOpen={createWorkspaceAgent}
+      />
     );
   }
 
   if (hidden) {
     return (
-      <button
-        type="button"
-        className="fixed bottom-4 right-4 z-[8500] flex h-10 items-center gap-2 rounded-full border border-border-panel bg-bg-panel px-3 text-xs text-text-secondary shadow-2xl hover:text-text-primary"
-        onClick={() => setHidden(false)}
+      <AgentFooterCompartment
+        label="Agent"
         title="Show agent dock"
-      >
-        <Bot size={15} />
-        Agent
-      </button>
+        onOpen={() => setHidden(false)}
+      />
     );
   }
 
   if (collapsed) {
     return (
-      <div className="fixed bottom-4 right-4 z-[8500] flex items-center gap-1 rounded-full border border-border-panel bg-bg-panel px-2 py-1.5 shadow-2xl">
-        <button
-          type="button"
-          className="flex items-center gap-2 rounded-full px-2 py-1 text-xs text-text-secondary hover:text-text-primary"
-          onClick={() => setCollapsed(false)}
-          title="Expand agent dock"
-        >
-          <Bot size={15} />
-          <span className="max-w-[220px] truncate">{taskDescription}</span>
-        </button>
-        <button
-          type="button"
-          className="flex h-6 w-6 items-center justify-center rounded-full text-text-muted hover:bg-bg-surface hover:text-text-primary"
-          onClick={() => setCollapsed(false)}
-          title="Expand agent dock"
-        >
-          <ChevronUp size={14} />
-        </button>
-        <button
-          type="button"
-          className="flex h-6 w-6 items-center justify-center rounded-full text-text-muted hover:bg-bg-surface hover:text-text-primary"
-          onClick={() => setHidden(true)}
-          title="Hide agent dock"
-        >
-          <X size={13} />
-        </button>
-      </div>
+      <AgentFooterCompartment
+        label={taskDescription}
+        title="Expand agent dock"
+        onOpen={() => setCollapsed(false)}
+      />
     );
   }
 

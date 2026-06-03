@@ -87,6 +87,9 @@ export const claudeAdapter: CliAdapter = {
     if (context.executionMode === 'headless' || context.executionMode === 'streaming_headless') {
       const args = ['--print', '{prompt}'];
       if (context.model?.trim()) args.unshift('--model', context.model.trim());
+      if (context.permissionMode === 'full' || context.yolo) args.unshift('--permission-mode', 'bypassPermissions');
+      else if (context.permissionMode === 'restricted') args.unshift('--permission-mode', 'plan');
+      else args.unshift('--permission-mode', 'default');
       return {
         command: 'claude',
         args,
@@ -97,7 +100,9 @@ export const claudeAdapter: CliAdapter = {
 
     const { args } = buildPtyLaunchCommandParts('claude', {
       model: context.model,
+      reasoningEffort: context.reasoningEffort,
       yolo: context.yolo,
+      permissionMode: context.permissionMode,
       workspaceDir: context.workspaceDir,
     });
     return {

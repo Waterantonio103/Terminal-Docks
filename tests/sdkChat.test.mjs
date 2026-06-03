@@ -134,6 +134,37 @@ run('builds Codex CLI JSON transport requests for no-key chat', () => {
   assert.equal(request.executionMode, 'streaming_headless');
 });
 
+run('maps Codex CLI JSON permission modes to official flags', () => {
+  const base = {
+    prompt: 'hello',
+    workspaceDir: 'C:/repo',
+    model: 'gpt-5.2',
+    missionId: 'mission-1',
+    nodeId: 'followup:builder:mission-1',
+    agentId: 'followup:builder:mission-1',
+    sessionId: 'codex-cli:thread-1',
+    runId: 'codex-cli-run-1',
+  };
+
+  assert.deepEqual(buildCodexCliJsonRunRequest({ ...base, permissionMode: 'restricted' }).args, [
+    'exec',
+    '--json',
+    '--color',
+    'never',
+    '--skip-git-repo-check',
+    '--sandbox',
+    'read-only',
+    '--model',
+    'gpt-5.2',
+    '--cd',
+    'C:/repo',
+  ]);
+  assert.equal(
+    buildCodexCliJsonRunRequest({ ...base, permissionMode: 'full' }).args.includes('--dangerously-bypass-approvals-and-sandbox'),
+    true,
+  );
+});
+
 run('parses Codex CLI JSON events into professional chat events', () => {
   assert.deepEqual(parseCodexJsonEventLine(JSON.stringify({
     type: 'turn.started',
@@ -156,14 +187,32 @@ run('parses Codex CLI JSON events into professional chat events', () => {
   assert.deepEqual(parseCodexJsonEventLine(JSON.stringify({
     type: 'tool.completed',
     item: { type: 'tool_call', name: 'shell', command: 'npm test', status: 'completed' },
-  })), { kind: 'tool', label: 'shell', detail: 'npm test', status: 'completed' });
+  })), { kind: 'tool', toolName: 'shell', label: 'shell', detail: 'npm test', status: 'completed' });
   assert.deepEqual(parseCodexJsonEventLine(JSON.stringify({
     type: ' turn.started ',
   })), { kind: 'step', label: 'Thinking' });
   assert.deepEqual(parseCodexJsonEventLine(JSON.stringify({
     type: ' tool.completed ',
     item: { type: ' tool_call ', name: ' shell ', command: ' npm test ', status: ' success ' },
-  })), { kind: 'tool', label: 'shell', detail: 'npm test', status: 'completed' });
+  })), { kind: 'tool', toolName: 'shell', label: 'shell', detail: 'npm test', status: 'completed' });
+  assert.deepEqual(parseCodexJsonEventLine(JSON.stringify({
+    method: 'item/fileChange/patchUpdated',
+    params: {
+      itemId: 'edit-1',
+      changes: [
+        { path: 'src/app.ts', diff: 'diff --git a/src/app.ts b/src/app.ts\n@@ -1 +1 @@\n-old\n+new' },
+      ],
+    },
+  })), {
+    kind: 'tool',
+    id: 'edit-1',
+    toolName: 'apply_patch',
+    label: 'Edit',
+    detail: 'src/app.ts',
+    output: 'diff --git a/src/app.ts b/src/app.ts\n@@ -1 +1 @@\n-old\n+new',
+    changes: [{ path: 'src/app.ts', diff: 'diff --git a/src/app.ts b/src/app.ts\n@@ -1 +1 @@\n-old\n+new' }],
+    status: 'running',
+  });
   assert.deepEqual(parseCodexJsonEventLine('[agent-run] launch'), { kind: 'none' });
 });
 
@@ -1487,6 +1536,45 @@ await runAsync('streams SDK chat through a local AI SDK test model', async () =>
   assert.match(userPromptText, /^<env>\nworkspace_root: C:\/repo\nactive_terminal_cwd: C:\/repo\/src\nactive_file: C:\/repo\/src\/App\.tsx\nactive_terminal_id: terminal-123\n<\/env>\n\nsay hello$/);
   assert.equal(steps[0], 'Contacting OpenAI');
   assert.equal(steps.includes('Writing'), true);
+});
+
+await runAsync('omits SDK workspace tools when tool mode is none', async () => {
+  const model = new MockLanguageModelV3({
+    doStream: async () => ({
+      stream: simulateReadableStream({
+        chunks: [
+          { type: 'stream-start', warnings: [] },
+          { type: 'text-start', id: 'text-1' },
+          { type: 'text-delta', id: 'text-1', delta: 'I need permission before reading workspace files.' },
+          { type: 'text-end', id: 'text-1' },
+          {
+            type: 'finish',
+            finishReason: 'stop',
+            usage: {
+              inputTokens: { total: 8, noCache: 8, cacheRead: 0, cacheWrite: 0 },
+              outputTokens: { total: 9, text: 9, reasoning: 0 },
+            },
+          },
+        ],
+        initialDelayInMs: null,
+        chunkDelayInMs: null,
+      }),
+    }),
+  });
+
+  const text = await runSdkChat({
+    apiKey: 'test-key',
+    model: 'gpt-5-mini',
+    modelOverride: model,
+    workspaceDir: 'C:/repo',
+    systemContext: 'Permission mode: restricted. Workspace tools are disabled for this turn.',
+    messages: [{ role: 'user', content: 'read the codebase' }],
+    requestTimeoutMs: null,
+    toolMode: 'none',
+  });
+
+  assert.equal(text, 'I need permission before reading workspace files.');
+  assert.deepEqual(model.doStreamCalls[0].tools ?? [], []);
 });
 
 await runAsync('streams SDK chat through a local OpenAI-compatible Responses endpoint', async () => {

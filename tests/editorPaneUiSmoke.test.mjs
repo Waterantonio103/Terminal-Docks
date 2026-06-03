@@ -16,6 +16,26 @@ for (const value of [
 }
 
 assert.ok(
+  editorPane.includes('languageServiceStatus.label'),
+  'editor footer should surface language server status when a service is configured',
+);
+
+assert.ok(
+  editorPane.includes('isBinaryLikeFile') &&
+    editorPane.includes('This file type is recognized, but it does not have an inline text editor or preview yet.'),
+  'editor should recognize non-text file types without trying to load them as text',
+);
+
+assert.ok(
+  editorPane.includes('scrollEditorFromMinimap') &&
+    editorPane.includes('EditorView.scrollIntoView') &&
+    editorPane.includes('td-editor-minimap-viewport') &&
+    editorPane.includes('td-editor-minimap-canvas') &&
+    editorPane.includes('tokenizeMinimapLine'),
+  'editor minimap should be canvas-rendered, interactive, and show the visible viewport',
+);
+
+assert.ok(
   packageJson.includes('node ./tests/editorPaneUiSmoke.test.mjs'),
   'test:graph should run the editor pane UI smoke test',
 );

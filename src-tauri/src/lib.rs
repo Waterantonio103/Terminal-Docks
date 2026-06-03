@@ -1,8 +1,11 @@
 pub mod agent_run;
+pub mod codex_usage;
 pub mod db;
 pub mod fs_watcher;
+pub mod lsp;
 pub mod mcp;
 pub mod model_detection;
+pub mod process_utils;
 pub mod pty;
 pub mod sdk_http;
 pub mod workflow;
@@ -19,10 +22,10 @@ fn greet(name: &str) -> String {
 
 #[tauri::command]
 async fn get_command_output(command: String, args: Vec<String>) -> Result<String, String> {
-    let output = std::process::Command::new(&command)
-        .args(&args)
-        .output()
-        .map_err(|e| e.to_string())?;
+    let mut child_command = std::process::Command::new(&command);
+    child_command.args(&args);
+    crate::process_utils::configure_hidden_command(&mut child_command);
+    let output = child_command.output().map_err(|e| e.to_string())?;
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
     Ok(stdout + &stderr)
@@ -40,6 +43,7 @@ pub fn run() {
         .manage(agent_run::AgentRunState::new())
         .manage(mcp::McpState::new())
         .manage(fs_watcher::WatcherState::new())
+        .manage(lsp::LspState::new())
         .manage(workflow_engine::WorkflowState::new())
         .invoke_handler(tauri::generate_handler![
             greet,
@@ -114,8 +118,12 @@ pub fn run() {
             workspace::workspace_copy,
             workspace::workspace_move,
             workspace::workspace_search,
+            lsp::start_lsp_server,
+            lsp::write_lsp_message,
+            lsp::stop_lsp_server,
             sdk_http::sdk_http_request,
             sdk_http::sdk_http_stream,
+            codex_usage::read_codex_usage_limits,
             model_detection::detect_models,
             model_detection::discover_models,
             model_detection::discover_cli_models,
@@ -136,6 +144,7 @@ pub fn run() {
         .run(|app_handle, event| {
             if let tauri::RunEvent::Exit = event {
                 pty::kill_all_ptys(app_handle);
+                lsp::kill_all_lsp_servers(app_handle);
                 mcp::kill_mcp_server(app_handle);
             }
         });

@@ -42,7 +42,7 @@ export function Sidebar() {
           </>
         )}
       </div>
-      <div className="flex-1 overflow-hidden">
+      <div className="min-h-0 flex-1 overflow-hidden">
         <FileTree iconOnly={collapsed} />
       </div>
     </aside>

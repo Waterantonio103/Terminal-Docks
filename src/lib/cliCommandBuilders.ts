@@ -22,7 +22,20 @@ export interface CliCommandBuilderOptions {
   localHttpModel?: string | null;
   localHttpApiKey?: string | null;
   model?: string | null;
+  reasoningEffort?: string | null;
   yolo?: boolean;
+  permissionMode?: CliPermissionMode | null;
+}
+
+export type CliPermissionMode = 'default' | 'restricted' | 'full';
+
+export function normalizeCliPermissionMode(value: string | null | undefined, yolo?: boolean): CliPermissionMode {
+  if (yolo) return 'full';
+  const normalized = typeof value === 'string' ? value.trim().toLowerCase() : '';
+  if (normalized === 'full' || normalized === 'yolo' || normalized === 'bypass') return 'full';
+  if (normalized === 'restricted' || normalized === 'read-only' || normalized === 'readonly' || normalized === 'plan') return 'restricted';
+  if (normalized === 'ask' || normalized === 'ask-for-approval' || normalized === 'ask_for_approval' || normalized === 'approval') return 'default';
+  return 'default';
 }
 
 function baseEnv(payload: RuntimeActivationPayload, mcpUrl?: string | null): Record<string, string> {
@@ -65,8 +78,9 @@ function normalizeOpenCodeMcpUrl(value?: string | null): string | null {
   }
 }
 
-export function buildOpenCodeWorkflowConfigContent(mcpUrl?: string | null): string {
+export function buildOpenCodeWorkflowConfigContent(mcpUrl?: string | null, permissionMode?: CliPermissionMode | null): string {
   const normalizedMcpUrl = normalizeOpenCodeMcpUrl(mcpUrl);
+  const mode = normalizeCliPermissionMode(permissionMode);
   return JSON.stringify({
     $schema: 'https://opencode.ai/config.json',
     ...(normalizedMcpUrl
@@ -84,7 +98,7 @@ export function buildOpenCodeWorkflowConfigContent(mcpUrl?: string | null): stri
           },
         }
       : {}),
-    permission: 'allow',
+    ...(mode === 'full' ? { permission: 'allow' } : {}),
   });
 }
 
@@ -93,19 +107,23 @@ export function buildOpenCodeHeadlessRunCommand({
   mcpUrl,
   model,
   workspaceDir,
+  permissionMode,
 }: {
   env: Record<string, string>;
   mcpUrl?: string | null;
   model?: string | null;
   workspaceDir?: string | null;
+  permissionMode?: CliPermissionMode | null;
 }): CliRunCommand {
   const args = ['run', '--format', 'json'];
   const workspace = workspaceDir?.trim();
   const modelId = model?.trim();
+  const mode = normalizeCliPermissionMode(permissionMode);
 
   if (workspace) args.push('--dir', workspace);
   if (modelId) args.push('--model', modelId);
-  args.push('--dangerously-skip-permissions', '{prompt}');
+  if (mode === 'full') args.push('--dangerously-skip-permissions');
+  args.push('{prompt}');
 
   return {
     command: 'opencode',
@@ -113,7 +131,7 @@ export function buildOpenCodeHeadlessRunCommand({
     env: {
       ...env,
       OPENCODE_CONFIG_CONTENT:
-        env.OPENCODE_CONFIG_CONTENT?.trim() || buildOpenCodeWorkflowConfigContent(mcpUrl),
+        env.OPENCODE_CONFIG_CONTENT?.trim() || buildOpenCodeWorkflowConfigContent(mcpUrl, mode),
     },
     promptDelivery: 'arg_text',
   };
@@ -191,14 +209,19 @@ export function buildCliRunCommand(
       mcpUrl: options.mcpUrl,
       model: options.model ?? payload.modelId ?? null,
       workspaceDir: payload.workspaceDir,
+      permissionMode: options.permissionMode ?? (options.yolo ? 'full' : null),
     });
   }
 
   if (cli === 'claude') {
     const args = ['--print', '{prompt}'];
+    const reasoningEffort = normalizeCliReasoningEffort(options.reasoningEffort);
+    const permissionMode = normalizeCliPermissionMode(options.permissionMode, options.yolo);
     if (options.model?.trim()) {
       args.unshift('--model', options.model.trim());
     }
+    if (reasoningEffort) args.unshift('--effort', reasoningEffort);
+    args.unshift('--permission-mode', permissionMode === 'full' ? 'bypassPermissions' : permissionMode === 'restricted' ? 'plan' : 'default');
     return {
       command: 'claude',
       args,
@@ -320,6 +343,16 @@ export function isModelCompatibleWithCli(cliId: string, modelId: string | null |
   return true;
 }
 
+export function normalizeCliReasoningEffort(value: string | null | undefined): string | null {
+  const normalized = typeof value === 'string'
+    ? value.trim().toLowerCase().replace(/[_\s-]+/g, '-')
+    : '';
+  if (!normalized) return null;
+  if (normalized === 'max' || normalized === 'x-high' || normalized === 'extra-high') return 'xhigh';
+  if (['low', 'medium', 'high', 'xhigh'].includes(normalized)) return normalized;
+  return null;
+}
+
 /**
  * Detect the correct yolo flag for the installed Codex CLI.
  * Prefers --yolo (newer versions); falls back to --dangerously-bypass-approvals-and-sandbox.
@@ -354,7 +387,9 @@ export async function resolveCodexYoloFlag(): Promise<string | null> {
 
 function buildCodexInteractiveFlagArgs({
   modelId,
+  reasoningEffort,
   yolo,
+  permissionMode,
   workspaceDir,
   mcpUrl,
   resolvedYoloFlag,
@@ -362,15 +397,19 @@ function buildCodexInteractiveFlagArgs({
   trustedProjectDir,
 }: {
   modelId?: string | null;
+  reasoningEffort?: string | null;
   yolo?: boolean;
+  permissionMode?: CliPermissionMode | null;
   workspaceDir?: string | null;
   mcpUrl?: string | null;
   resolvedYoloFlag?: string | null;
   disableKnownGlobalMcps?: boolean;
   trustedProjectDir?: string | null;
 }): string[] {
-  const yoloFlag = yolo ? (resolvedYoloFlag ?? '--dangerously-bypass-approvals-and-sandbox') : null;
+  const mode = normalizeCliPermissionMode(permissionMode, yolo);
+  const yoloFlag = mode === 'full' ? (resolvedYoloFlag ?? '--dangerously-bypass-approvals-and-sandbox') : null;
   const normalizedModelId = normalizeCodexModelId(modelId);
+  const normalizedReasoningEffort = normalizeCliReasoningEffort(reasoningEffort);
   const trustedProject = trustedProjectDir?.trim();
   const trustedProjectKey = trustedProject ? trustedProject.replace(/"/g, '\\"') : null;
   cliDebugLog(`[codex] buildCodexInteractiveFlagArgs: resolved yolo flag=${yoloFlag ?? '<none>'}`);
@@ -383,15 +422,33 @@ function buildCodexInteractiveFlagArgs({
       'mcp_servers.pencil.enabled=false',
       '-c',
       'mcp_servers.excalidraw.enabled=false',
+      '-c',
+      'mcp_servers.terminal-docks.enabled=false',
+      '-c',
+      'mcp_servers.node_repl.enabled=false',
+      '--disable',
+      'apps',
     ] : []),
     ...(trustedProjectKey ? [
       '-c',
       `projects."${trustedProjectKey}".trust_level="trusted"`,
     ] : []),
-    '-c',
-    'approval_policy="never"',
-    '-c',
-    'sandbox_mode="danger-full-access"',
+    ...(mode === 'restricted' ? [
+      '--sandbox',
+      'read-only',
+      '--ask-for-approval',
+      'untrusted',
+    ] : []),
+    ...(mode === 'default' ? [
+      '--sandbox',
+      'workspace-write',
+      '--ask-for-approval',
+      'untrusted',
+    ] : []),
+    ...(normalizedReasoningEffort ? [
+      '-c',
+      `model_reasoning_effort=${normalizedReasoningEffort}`,
+    ] : []),
     ...(mcpUrl?.trim() ? [
       '-c',
       `mcp_servers.starlink.url="${mcpUrl.trim()}"`,
@@ -413,7 +470,9 @@ function buildCodexInteractiveFlagArgs({
 
 export function buildCodexInteractiveLaunchCommand({
   modelId,
+  reasoningEffort,
   yolo,
+  permissionMode,
   workspaceDir,
   mcpUrl,
   bootstrapPrompt,
@@ -423,7 +482,9 @@ export function buildCodexInteractiveLaunchCommand({
   trustedProjectDir,
 }: {
   modelId?: string | null;
+  reasoningEffort?: string | null;
   yolo?: boolean;
+  permissionMode?: CliPermissionMode | null;
   workspaceDir?: string | null;
   mcpUrl?: string | null;
   bootstrapPrompt: string;
@@ -433,14 +494,16 @@ export function buildCodexInteractiveLaunchCommand({
   trustedProjectDir?: string | null;
 }): string {
   const normalizedPrompt = bootstrapPrompt.replace(/\s+/g, ' ').trim();
-  const parts: string[] = ['codex', ...buildCodexInteractiveFlagArgs({ modelId, yolo, workspaceDir, mcpUrl, resolvedYoloFlag, disableKnownGlobalMcps, trustedProjectDir })];
+  const parts: string[] = ['codex', ...buildCodexInteractiveFlagArgs({ modelId, reasoningEffort, yolo, permissionMode, workspaceDir, mcpUrl, resolvedYoloFlag, disableKnownGlobalMcps, trustedProjectDir })];
   parts.push(quoteShellArgument(normalizedPrompt, shellKind));
   return withCodexHomeForShell(parts.join(' '), shellKind);
 }
 
 export function buildCodexInteractiveLaunchArgs({
   modelId,
+  reasoningEffort,
   yolo,
+  permissionMode,
   workspaceDir,
   mcpUrl,
   bootstrapPrompt,
@@ -449,7 +512,9 @@ export function buildCodexInteractiveLaunchArgs({
   trustedProjectDir,
 }: {
   modelId?: string | null;
+  reasoningEffort?: string | null;
   yolo?: boolean;
+  permissionMode?: CliPermissionMode | null;
   workspaceDir?: string | null;
   mcpUrl?: string | null;
   bootstrapPrompt: string;
@@ -458,7 +523,7 @@ export function buildCodexInteractiveLaunchArgs({
   trustedProjectDir?: string | null;
 }): string[] {
   return [
-    ...buildCodexInteractiveFlagArgs({ modelId, yolo, workspaceDir, mcpUrl, resolvedYoloFlag, disableKnownGlobalMcps, trustedProjectDir }),
+    ...buildCodexInteractiveFlagArgs({ modelId, reasoningEffort, yolo, permissionMode, workspaceDir, mcpUrl, resolvedYoloFlag, disableKnownGlobalMcps, trustedProjectDir }),
     bootstrapPrompt,
   ];
 }
@@ -466,12 +531,14 @@ export function buildCodexInteractiveLaunchArgs({
 export function buildGeminiInteractiveLaunchCommand({
   modelId,
   yolo,
+  permissionMode,
   workspaceDir,
   prompt,
   shellKind = 'windows',
 }: {
   modelId?: string | null;
   yolo?: boolean;
+  permissionMode?: CliPermissionMode | null;
   workspaceDir?: string | null;
   prompt: string;
   shellKind?: ShellKind;
@@ -479,6 +546,7 @@ export function buildGeminiInteractiveLaunchCommand({
   const { command, args } = buildPtyLaunchCommandParts('gemini', {
     model: modelId,
     yolo,
+    permissionMode,
     workspaceDir,
   });
   return [
@@ -519,7 +587,9 @@ export function buildCodexFollowupTaskSignal({
 
 export interface PtyLaunchOptions {
   model?: string | null;
+  reasoningEffort?: string | null;
   yolo?: boolean;
+  permissionMode?: CliPermissionMode | null;
   workspaceDir?: string | null;
   shellKind?: ShellKind;
 }
@@ -548,35 +618,52 @@ export function buildPtyLaunchCommandParts(
 
   if (cli === 'claude') {
     const args: string[] = [];
+    const reasoningEffort = normalizeCliReasoningEffort(options.reasoningEffort);
+    const permissionMode = normalizeCliPermissionMode(options.permissionMode, options.yolo);
     if (model) args.push('--model', model);
-    if (options.yolo) args.push('--dangerously-skip-permissions');
+    if (reasoningEffort) args.push('--effort', reasoningEffort);
+    args.push('--permission-mode', permissionMode === 'full' ? 'bypassPermissions' : permissionMode === 'restricted' ? 'plan' : 'default');
+    if (permissionMode !== 'full') args.push('--allow-dangerously-skip-permissions');
     return { command: 'claude', args };
   }
 
   if (cli === 'gemini') {
     const args: string[] = [];
+    const permissionMode = normalizeCliPermissionMode(options.permissionMode, options.yolo);
     if (model) args.push('--model', model);
-    if (options.yolo) args.push('--approval-mode', 'yolo');
+    args.push('--approval-mode', permissionMode === 'full' ? 'yolo' : permissionMode === 'restricted' ? 'plan' : 'default');
     return { command: 'gemini', args };
   }
 
   if (cli === 'opencode') {
     const args: string[] = [];
-    // OpenCode has no confirmed alt-screen or mouse-disable flags. Its TUI
-    // accepts the project path as the deterministic workspace input.
+    const permissionMode = normalizeCliPermissionMode(options.permissionMode, options.yolo);
+    if (permissionMode === 'full') {
+      args.push('run', '--interactive');
+      if (workspaceDir) args.push('--dir', workspaceDir);
+      if (model) args.push('--model', model);
+      args.push('--dangerously-skip-permissions');
+      return { command: 'opencode', args };
+    }
+    // OpenCode's top-level TUI accepts the project path as the deterministic
+    // workspace input. The installed CLI exposes the dangerous skip flag on
+    // `opencode run`, handled above for Full access mode.
     if (workspaceDir) args.push(workspaceDir);
     if (model) args.push('--model', model);
     return { command: 'opencode', args };
   }
 
   if (cli === 'codex') {
-    const args: string[] = [];
-    const codexModel = normalizeCodexModelId(model);
-    if (codexModel) args.push('--model', codexModel);
-    if (workspaceDir) args.push('--cd', workspaceDir);
-    args.push('--no-alt-screen');
-    if (options.yolo) args.push('--dangerously-bypass-approvals-and-sandbox');
-    return { command: 'codex', args };
+    return {
+      command: 'codex',
+      args: buildCodexInteractiveFlagArgs({
+        modelId: model,
+        reasoningEffort: options.reasoningEffort,
+        yolo: options.yolo,
+        permissionMode: options.permissionMode,
+        workspaceDir,
+      }),
+    };
   }
 
   return { command: cliId, args: [] };

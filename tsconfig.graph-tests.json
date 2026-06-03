@@ -9,6 +9,7 @@
     "allowImportingTsExtensions": false
   },
   "include": [
+    "src/vite-env.d.ts",
     "src/lib/buildPrompt.ts",
     "src/lib/neuformEffects.ts",
     "src/lib/graphCompiler.ts",
@@ -20,6 +21,9 @@
     "src/lib/missionProgress.ts",
     "src/lib/workflowEvents.ts",
     "src/lib/agentChatFormatting.ts",
+    "src/lib/agentSlashCommands.ts",
+    "src/lib/agentUsageLimits.ts",
+    "src/lib/codexContextUsage.ts",
     "src/lib/codexCliJsonTransport.ts",
     "src/lib/sdkChat.ts",
     "src/lib/sdkChatUiLifecycle.ts",
@@ -30,6 +34,8 @@
     "src/lib/taskBoard.ts",
     "src/lib/editorLanguage.ts",
     "src/lib/editorLanguageExtensions.ts",
+    "src/lib/editorDiagnostics.ts",
+    "src/lib/languageService.ts",
     "src/lib/editorSavePath.ts",
     "src/lib/editorSessionCache.ts",
     "src/lib/localServerDetection.ts",

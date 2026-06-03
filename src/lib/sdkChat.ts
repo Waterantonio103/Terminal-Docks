@@ -24,7 +24,7 @@ const MAX_SDK_GLOB_RESULTS = 1_000;
 const MAX_SDK_GREP_LINE_CHARS = 180;
 const DEFAULT_SDK_READ_LINE_LIMIT = 2_000;
 const SDK_APPROVAL_CARD_TOOL_SET = new Set<string>(SDK_APPROVAL_CARD_TOOLS);
-export type SdkToolMode = 'full' | 'read_only';
+export type SdkToolMode = 'full' | 'read_only' | 'none';
 
 export interface SdkChatMessage {
   role: 'user' | 'assistant' | 'system' | 'tool';
@@ -66,10 +66,11 @@ export interface SdkChatArtifact {
 }
 
 export interface SdkChatToolEvent {
+  id?: string;
   toolName: 'list_directory' | 'read_file' | 'search_workspace' | 'grep' | 'glob' | 'get_terminal_output' | 'bash_list' | 'bash_logs' | 'bash_kill' | 'todo_write' | 'run_subagent' | 'suggest_command' | 'bash_run' | 'bash_background' | 'open_preview' | 'create_directory' | 'edit' | 'multi_edit' | 'write_file' | 'propose_patch';
   label: string;
   detail?: string;
-  status: 'completed' | 'failed';
+  status: 'running' | 'completed' | 'failed';
 }
 
 export interface SdkChatTodoItem {
@@ -469,7 +470,7 @@ export async function runSdkChat(options: SdkChatRunOptions): Promise<string> {
       sdkApprovalCardIsPending,
     ],
     abortSignal: abortScope.signal,
-    tools: buildWorkspaceTools(options, options.toolMode === 'read_only' ? 'read_only' : 'full'),
+    tools: buildWorkspaceTools(options, options.toolMode ?? 'full'),
     onStepFinish: step => {
       stepsSeen += 1;
       const lastTool = step.toolCalls?.[step.toolCalls.length - 1];
@@ -987,9 +988,28 @@ function buildWorkspaceTools(
   options: Pick<SdkChatRunOptions, 'apiKey' | 'model' | 'baseURL' | 'fetch' | 'workspaceDir' | 'activeTerminalId' | 'activeTerminalCwd' | 'terminals' | 'onStep' | 'onArtifact' | 'onToolEvent' | 'onTodos' | 'onCommand' | 'onUsage'>,
   mode: SdkToolMode = 'full',
 ): ToolSet {
+  if (mode === 'none') return {};
+
   const readCache = new Map<string, SdkReadCacheEntry>();
   const readPaths = new Set<string>();
   const resolveToolPath = (path: string): string => resolveSdkWorkspacePathFromBase(options.workspaceDir, path, options.activeTerminalCwd || options.workspaceDir);
+  let toolRunSeq = 0;
+
+  const startToolActivity = (
+    toolName: SdkChatToolEvent['toolName'],
+    label: string,
+    detail?: string,
+  ): string => {
+    const id = `sdk-tool-${toolName}-${Date.now()}-${++toolRunSeq}`;
+    options.onToolEvent?.({
+      id,
+      toolName,
+      label,
+      detail,
+      status: 'running',
+    });
+    return id;
+  };
 
   const publishPatch = async (
     toolName: SdkChatToolEvent['toolName'],
@@ -999,7 +1019,9 @@ function buildWorkspaceTools(
     newContent: string,
     rationale?: string,
     requireExisting = false,
+    existingToolRunId?: string,
   ) => {
+    const toolRunId = existingToolRunId || startToolActivity(toolName, label, path);
     let oldContent = '';
     let isNewFile = false;
     try {
@@ -1019,6 +1041,7 @@ function buildWorkspaceTools(
     };
     options.onArtifact?.(artifact);
     options.onToolEvent?.({
+      id: toolRunId,
       toolName,
       label,
       detail: path,
@@ -1039,9 +1062,11 @@ function buildWorkspaceTools(
       execute: async ({ path }) => {
         const fullPath = resolveToolPath(path);
         options.onStep?.(`Listing ${path}`);
+        const toolRunId = startToolActivity('list_directory', 'List directory', path);
         try {
           const entries = await invoke<Array<{ name: string; isDirectory: boolean; isFile: boolean }>>('workspace_read_dir', { path: fullPath });
           options.onToolEvent?.({
+            id: toolRunId,
             toolName: 'list_directory',
             label: 'Listed directory',
             detail: `${path} (${entries.length} entries)`,
@@ -1050,6 +1075,7 @@ function buildWorkspaceTools(
           return entries.map(entry => `${entry.isDirectory ? 'dir ' : 'file'} ${entry.name}`).join('\n');
         } catch (error) {
           options.onToolEvent?.({
+            id: toolRunId,
             toolName: 'list_directory',
             label: 'List directory failed',
             detail: `${path}: ${error instanceof Error ? error.message : String(error)}`,
@@ -1069,6 +1095,7 @@ function buildWorkspaceTools(
       execute: async ({ path, offset, limit }) => {
         const fullPath = resolveToolPath(path);
         options.onStep?.(`Reading ${path}`);
+        const toolRunId = startToolActivity('read_file', 'Read file', path);
         try {
           const read = await readSdkWorkspaceTextFile(fullPath, path => invoke<string>('workspace_read_text_file', { path }));
           const window = createSdkReadWindow(read.content, { offset, limit });
@@ -1084,6 +1111,7 @@ function buildWorkspaceTools(
           });
           readPaths.add(fullPath);
           options.onToolEvent?.({
+            id: toolRunId,
             toolName: 'read_file',
             label: 'Read file',
             detail: 'unchanged' in result
@@ -1094,6 +1122,7 @@ function buildWorkspaceTools(
           return result;
         } catch (error) {
           options.onToolEvent?.({
+            id: toolRunId,
             toolName: 'read_file',
             label: 'Read file failed',
             detail: `${path}: ${error instanceof Error ? error.message : String(error)}`,
@@ -1115,8 +1144,16 @@ function buildWorkspaceTools(
       execute: async ({ path, old_string, new_string, replace_all, rationale }) => {
         const fullPath = resolveToolPath(path);
         options.onStep?.(`Editing ${path}`);
+        const toolRunId = startToolActivity('edit', 'Edit file', path);
         try {
           if (!readPaths.has(fullPath)) {
+            options.onToolEvent?.({
+              id: toolRunId,
+              toolName: 'edit',
+              label: 'Edit blocked',
+              detail: `${path}: read_file required first`,
+              status: 'failed',
+            });
             return `Cannot edit ${path}: call read_file on this path first so the edit is grounded in current file content.`;
           }
           const read = await readSdkWorkspaceTextFile(fullPath, path => invoke<string>('workspace_read_text_file', { path }));
@@ -1124,6 +1161,7 @@ function buildWorkspaceTools(
           const editResult = applyExactEdits(oldContent, [{ oldString: old_string, newString: new_string, replaceAll: replace_all }]);
           if (!editResult.ok) {
             options.onToolEvent?.({
+              id: toolRunId,
               toolName: 'edit',
               label: 'Edit failed',
               detail: `${path}: ${editResult.error}`,
@@ -1131,9 +1169,10 @@ function buildWorkspaceTools(
             });
             return `Cannot edit ${path}: ${editResult.error}`;
           }
-          return publishPatch('edit', 'Proposed edit', path, fullPath, editResult.content, rationale, true);
+          return publishPatch('edit', 'Proposed edit', path, fullPath, editResult.content, rationale, true, toolRunId);
         } catch (error) {
           options.onToolEvent?.({
+            id: toolRunId,
             toolName: 'edit',
             label: 'Edit failed',
             detail: `${path}: ${error instanceof Error ? error.message : String(error)}`,
@@ -1157,8 +1196,16 @@ function buildWorkspaceTools(
       execute: async ({ path, edits, rationale }) => {
         const fullPath = resolveToolPath(path);
         options.onStep?.(`Editing ${path}`);
+        const toolRunId = startToolActivity('multi_edit', 'Multi edit file', path);
         try {
           if (!readPaths.has(fullPath)) {
+            options.onToolEvent?.({
+              id: toolRunId,
+              toolName: 'multi_edit',
+              label: 'Edit blocked',
+              detail: `${path}: read_file required first`,
+              status: 'failed',
+            });
             return `Cannot edit ${path}: call read_file on this path first so the edit is grounded in current file content.`;
           }
           const read = await readSdkWorkspaceTextFile(fullPath, path => invoke<string>('workspace_read_text_file', { path }));
@@ -1170,6 +1217,7 @@ function buildWorkspaceTools(
           })));
           if (!editResult.ok) {
             options.onToolEvent?.({
+              id: toolRunId,
               toolName: 'multi_edit',
               label: 'Edit failed',
               detail: `${path}: ${editResult.error}`,
@@ -1177,9 +1225,10 @@ function buildWorkspaceTools(
             });
             return `Cannot edit ${path}: ${editResult.error}`;
           }
-          return publishPatch('multi_edit', 'Proposed edits', path, fullPath, editResult.content, rationale, true);
+          return publishPatch('multi_edit', 'Proposed edits', path, fullPath, editResult.content, rationale, true, toolRunId);
         } catch (error) {
           options.onToolEvent?.({
+            id: toolRunId,
             toolName: 'multi_edit',
             label: 'Edit failed',
             detail: `${path}: ${error instanceof Error ? error.message : String(error)}`,
@@ -1199,10 +1248,12 @@ function buildWorkspaceTools(
       execute: async ({ path, content, rationale }) => {
         const fullPath = resolveToolPath(path);
         options.onStep?.(`Writing ${path}`);
+        const toolRunId = startToolActivity('write_file', 'Write file', path);
         try {
-          return publishPatch('write_file', 'Proposed file write', path, fullPath, content, rationale);
+          return publishPatch('write_file', 'Proposed file write', path, fullPath, content, rationale, false, toolRunId);
         } catch (error) {
           options.onToolEvent?.({
+            id: toolRunId,
             toolName: 'write_file',
             label: 'Write proposal failed',
             detail: `${path}: ${error instanceof Error ? error.message : String(error)}`,
@@ -1222,12 +1273,23 @@ function buildWorkspaceTools(
         })).min(1),
       }),
       execute: async ({ todos }) => {
+        const toolRunId = startToolActivity('todo_write', 'Update plan', `${todos.length} item${todos.length === 1 ? '' : 's'}`);
         const normalized = normalizeSdkTodoItems(todos);
         const validation = validateSdkTodoItems(normalized);
-        if (validation) return { error: validation };
+        if (validation) {
+          options.onToolEvent?.({
+            id: toolRunId,
+            toolName: 'todo_write',
+            label: 'Plan update failed',
+            detail: validation,
+            status: 'failed',
+          });
+          return { error: validation };
+        }
         options.onStep?.('Updating plan');
         options.onTodos?.({ todos: normalized });
         options.onToolEvent?.({
+          id: toolRunId,
           toolName: 'todo_write',
           label: 'Updated plan',
           detail: `${normalized.filter(todo => todo.status === 'completed').length}/${normalized.length} completed`,
@@ -1246,6 +1308,7 @@ function buildWorkspaceTools(
         const subagentType = type || 'research';
         const startedAt = Date.now();
         options.onStep?.(`Spawning ${subagentType} subagent`);
+        const toolRunId = startToolActivity('run_subagent', 'Run subagent', subagentType);
         try {
           const openai = createOpenAI({
             apiKey: options.apiKey,
@@ -1278,6 +1341,7 @@ function buildWorkspaceTools(
             },
           });
           options.onToolEvent?.({
+            id: toolRunId,
             toolName: 'run_subagent',
             label: 'Ran subagent',
             detail: `${subagentType} (${stepsSeen} steps)`,
@@ -1292,6 +1356,7 @@ function buildWorkspaceTools(
           };
         } catch (error) {
           options.onToolEvent?.({
+            id: toolRunId,
             toolName: 'run_subagent',
             label: 'Subagent failed',
             detail: error instanceof Error ? error.message : String(error),
@@ -1309,9 +1374,11 @@ function buildWorkspaceTools(
         cwd: z.string().optional().describe('Optional working directory for the command.'),
       }),
       execute: async ({ command, reason, cwd }) => {
+        const toolRunId = startToolActivity('suggest_command', 'Suggest command', command);
         const validation = validateSdkShellCommand(command);
         if (validation) {
           options.onToolEvent?.({
+            id: toolRunId,
             toolName: 'suggest_command',
             label: 'Command suggestion rejected',
             detail: validation,
@@ -1323,6 +1390,7 @@ function buildWorkspaceTools(
         options.onStep?.('Suggesting command');
         options.onCommand?.(normalized);
         options.onToolEvent?.({
+          id: toolRunId,
           toolName: 'suggest_command',
           label: 'Suggested command',
           detail: normalized.command,
@@ -1339,9 +1407,11 @@ function buildWorkspaceTools(
         cwd: z.string().optional().describe('Optional working directory for the command. Defaults to the workspace root.'),
       }),
       execute: async ({ command, reason, cwd }) => {
+        const toolRunId = startToolActivity('bash_run', 'Run command', command);
         const validation = validateSdkShellCommand(command);
         if (validation) {
           options.onToolEvent?.({
+            id: toolRunId,
             toolName: 'bash_run',
             label: 'Command proposal rejected',
             detail: validation,
@@ -1358,6 +1428,7 @@ function buildWorkspaceTools(
         options.onStep?.('Proposing command');
         options.onCommand?.(normalized);
         options.onToolEvent?.({
+          id: toolRunId,
           toolName: 'bash_run',
           label: 'Proposed command',
           detail: normalized.command,
@@ -1374,9 +1445,11 @@ function buildWorkspaceTools(
         cwd: z.string().optional().describe('Optional working directory for the command. Defaults to the workspace root.'),
       }),
       execute: async ({ command, reason, cwd }) => {
+        const toolRunId = startToolActivity('bash_background', 'Run background command', command);
         const validation = validateSdkShellCommand(command, { allowLongRunning: true });
         if (validation) {
           options.onToolEvent?.({
+            id: toolRunId,
             toolName: 'bash_background',
             label: 'Background command rejected',
             detail: validation,
@@ -1393,6 +1466,7 @@ function buildWorkspaceTools(
         options.onStep?.('Proposing background command');
         options.onCommand?.(normalized);
         options.onToolEvent?.({
+          id: toolRunId,
           toolName: 'bash_background',
           label: 'Proposed background command',
           detail: normalized.command,
@@ -1410,6 +1484,7 @@ function buildWorkspaceTools(
       execute: async ({ path, rationale }) => {
         const fullPath = resolveToolPath(path);
         options.onStep?.(`Creating directory ${path}`);
+        const toolRunId = startToolActivity('create_directory', 'Create directory', path);
         const artifact: SdkChatArtifact = {
           id: `sdk-directory-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
           kind: 'directory',
@@ -1419,6 +1494,7 @@ function buildWorkspaceTools(
         };
         options.onArtifact?.(artifact);
         options.onToolEvent?.({
+          id: toolRunId,
           toolName: 'create_directory',
           label: 'Proposed directory',
           detail: path,
@@ -1435,9 +1511,11 @@ function buildWorkspaceTools(
       }),
       execute: async ({ url, title }) => {
         const normalized = normalizeSdkPreviewUrl(url);
+        const toolRunId = startToolActivity('open_preview', 'Open preview', normalized);
         const validation = validateSdkPreviewUrl(normalized);
         if (validation) {
           options.onToolEvent?.({
+            id: toolRunId,
             toolName: 'open_preview',
             label: 'Preview rejected',
             detail: validation,
@@ -1455,6 +1533,7 @@ function buildWorkspaceTools(
         };
         options.onArtifact?.(artifact);
         options.onToolEvent?.({
+          id: toolRunId,
           toolName: 'open_preview',
           label: 'Proposed preview',
           detail: normalized,
@@ -1472,12 +1551,14 @@ function buildWorkspaceTools(
       execute: async ({ query, dir }) => {
         const fullDir = resolveToolPath(dir || options.activeTerminalCwd || options.workspaceDir || '.');
         options.onStep?.(`Searching ${query}`);
+        const toolRunId = startToolActivity('search_workspace', 'Search workspace', dir ? `${query} in ${dir}` : query);
         try {
           const result = await invoke<string>('workspace_search', { dirPath: fullDir, query });
           const matches = result === 'No matches found'
             ? 0
             : result.split('\n').filter(line => line.trim()).length;
           options.onToolEvent?.({
+            id: toolRunId,
             toolName: 'search_workspace',
             label: 'Searched workspace',
             detail: `${query}${dir ? ` in ${dir}` : ''} (${matches} matches)`,
@@ -1486,6 +1567,7 @@ function buildWorkspaceTools(
           return result;
         } catch (error) {
           options.onToolEvent?.({
+            id: toolRunId,
             toolName: 'search_workspace',
             label: 'Search failed',
             detail: `${query}: ${error instanceof Error ? error.message : String(error)}`,
@@ -1508,6 +1590,7 @@ function buildWorkspaceTools(
         const searchRoot = resolveToolPath(root || options.activeTerminalCwd || options.workspaceDir || '.');
         const cap = Math.min(max_results ?? 30, MAX_SDK_GREP_RESULTS);
         options.onStep?.(`Grepping ${pattern}`);
+        const toolRunId = startToolActivity('grep', 'Grep', pattern);
         try {
           const result = await grepSdkWorkspace({
             rootPath: searchRoot,
@@ -1517,6 +1600,7 @@ function buildWorkspaceTools(
             maxResults: cap,
           });
           options.onToolEvent?.({
+            id: toolRunId,
             toolName: 'grep',
             label: 'Searched contents',
             detail: `${pattern} (${result.hits.length}${result.truncated ? '+' : ''} hits)`,
@@ -1525,6 +1609,7 @@ function buildWorkspaceTools(
           return result;
         } catch (error) {
           options.onToolEvent?.({
+            id: toolRunId,
             toolName: 'grep',
             label: 'Content search failed',
             detail: `${pattern}: ${error instanceof Error ? error.message : String(error)}`,
@@ -1545,6 +1630,7 @@ function buildWorkspaceTools(
         const searchRoot = resolveToolPath(root || options.activeTerminalCwd || options.workspaceDir || '.');
         const cap = Math.min(max_results ?? 200, MAX_SDK_GLOB_RESULTS);
         options.onStep?.(`Globbing ${pattern}`);
+        const toolRunId = startToolActivity('glob', 'Glob', pattern);
         try {
           const result = await globSdkWorkspace({
             rootPath: searchRoot,
@@ -1552,6 +1638,7 @@ function buildWorkspaceTools(
             maxResults: cap,
           });
           options.onToolEvent?.({
+            id: toolRunId,
             toolName: 'glob',
             label: 'Found files',
             detail: `${pattern} (${result.hits.length}${result.truncated ? '+' : ''} matches)`,
@@ -1560,6 +1647,7 @@ function buildWorkspaceTools(
           return result;
         } catch (error) {
           options.onToolEvent?.({
+            id: toolRunId,
             toolName: 'glob',
             label: 'Glob failed',
             detail: `${pattern}: ${error instanceof Error ? error.message : String(error)}`,
@@ -1574,12 +1662,14 @@ function buildWorkspaceTools(
       inputSchema: z.object({}),
       execute: async () => {
         options.onStep?.('Listing terminals');
+        const toolRunId = startToolActivity('bash_list', 'List terminals');
         const terminals = normalizeSdkTerminalContexts(options.terminals, options.activeTerminalId, options.activeTerminalCwd);
         const enriched = await Promise.all(terminals.map(async terminal => ({
           ...terminal,
           active: await invoke<boolean>('is_pty_active', { id: terminal.terminalId }).catch(() => false),
         })));
         options.onToolEvent?.({
+          id: toolRunId,
           toolName: 'bash_list',
           label: 'Listed terminals',
           detail: `${enriched.length} terminal${enriched.length === 1 ? '' : 's'}`,
@@ -1607,9 +1697,11 @@ function buildWorkspaceTools(
         }
         const cap = Math.min(maxBytes ?? 12_000, 32_000);
         options.onStep?.(`Reading terminal logs ${id}`);
+        const toolRunId = startToolActivity('bash_logs', 'Read terminal logs', id);
         try {
           const result = await readSdkTerminalLogs(id, cap, since_offset);
           options.onToolEvent?.({
+            id: toolRunId,
             toolName: 'bash_logs',
             label: 'Read terminal logs',
             detail: `${id} (${result.output.length} chars${since_offset !== undefined ? ` since ${since_offset}` : ''})`,
@@ -1618,6 +1710,7 @@ function buildWorkspaceTools(
           return result;
         } catch (error) {
           options.onToolEvent?.({
+            id: toolRunId,
             toolName: 'bash_logs',
             label: 'Terminal logs failed',
             detail: `${id}: ${error instanceof Error ? error.message : String(error)}`,
@@ -1639,6 +1732,7 @@ function buildWorkspaceTools(
           return { error: 'No terminal id was provided for bash_kill.', terminalId: null };
         }
         options.onStep?.(`Proposing terminal stop ${id}`);
+        const toolRunId = startToolActivity('bash_kill', 'Stop terminal', id);
         const terminal = normalizeSdkTerminalContexts(options.terminals, options.activeTerminalId, options.activeTerminalCwd)
           .find(item => item.terminalId === id);
         const artifact: SdkChatArtifact = {
@@ -1650,6 +1744,7 @@ function buildWorkspaceTools(
         };
         options.onArtifact?.(artifact);
         options.onToolEvent?.({
+          id: toolRunId,
           toolName: 'bash_kill',
           label: 'Proposed terminal stop',
           detail: id,
@@ -1671,9 +1766,11 @@ function buildWorkspaceTools(
           return { error: 'No active terminal is available for this chat.', terminalId: null };
         }
         options.onStep?.('Reading terminal output');
+        const toolRunId = startToolActivity('get_terminal_output', 'Read terminal output', id);
         try {
           const output = await invoke<string>('get_pty_recent_output', { id, maxBytes: cap });
           options.onToolEvent?.({
+            id: toolRunId,
             toolName: 'get_terminal_output',
             label: 'Read terminal output',
             detail: `${id} (${output.length} chars)`,
@@ -1686,6 +1783,7 @@ function buildWorkspaceTools(
           };
         } catch (error) {
           options.onToolEvent?.({
+            id: toolRunId,
             toolName: 'get_terminal_output',
             label: 'Terminal output failed',
             detail: `${id}: ${error instanceof Error ? error.message : String(error)}`,
@@ -1705,10 +1803,12 @@ function buildWorkspaceTools(
       execute: async ({ path, newContent, rationale }) => {
         const fullPath = resolveToolPath(path);
         options.onStep?.(`Proposing patch for ${path}`);
+        const toolRunId = startToolActivity('propose_patch', 'Propose patch', path);
         try {
-          return publishPatch('propose_patch', 'Proposed patch', path, fullPath, newContent, rationale);
+          return publishPatch('propose_patch', 'Proposed patch', path, fullPath, newContent, rationale, false, toolRunId);
         } catch (error) {
           options.onToolEvent?.({
+            id: toolRunId,
             toolName: 'propose_patch',
             label: 'Patch proposal failed',
             detail: `${path}: ${error instanceof Error ? error.message : String(error)}`,

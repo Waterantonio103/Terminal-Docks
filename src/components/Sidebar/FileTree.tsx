@@ -4,9 +4,9 @@ import { open } from '@tauri-apps/plugin-dialog';
 import { Folder, File as FileIcon, ChevronRight, ChevronDown, Lock, FilePlus, FolderPlus, Trash2, Edit2, Copy, Scissors, Clipboard, ExternalLink, Search, FileText, Terminal as TerminalIcon, RefreshCw, FolderOpen } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
 import { writeText } from '@tauri-apps/plugin-clipboard-manager';
-import { FileTypeIcon } from '../../lib/fileIcons';
+import { FileTypeIcon, FolderTypeIcon } from '../../lib/fileIcons';
 import { fileTreeLockMatchesPath, normalizeFileTreeEntries, type FileTreeEntry } from '../../lib/fileTreeEntries';
-import { joinWorkspacePath, normalizeWorkspacePath, rebaseWorkspacePath, relativeWorkspacePath, workspacePathContains } from '../../lib/workspacePaths';
+import { dirname, joinWorkspacePath, normalizeWorkspacePath, rebaseWorkspacePath, relativeWorkspacePath, workspacePathContains } from '../../lib/workspacePaths';
 
 type DirEntry = FileTreeEntry;
 
@@ -121,7 +121,7 @@ function TreeNode({
         {file.isDirectory ? (
           <>
             {!iconOnly && (isOpen ? <ChevronDown size={12} className="shrink-0 text-text-muted" /> : <ChevronRight size={12} className="shrink-0 text-text-muted" />)}
-            <Folder size={iconOnly ? 12 : 13} className="text-accent-primary shrink-0" />
+            <FolderTypeIcon folderName={file.name} expanded={isOpen} size={iconOnly ? 12 : 13} className="shrink-0" />
           </>
         ) : (
           <>
@@ -153,6 +153,7 @@ export function FileTree({ iconOnly = false }: { iconOnly?: boolean }) {
   const updatePaneData = useWorkspaceStore(s => s.updatePaneData);
   const renamePane = useWorkspaceStore(s => s.renamePane);
   const activePanes = useWorkspaceStore(selectActivePanes);
+  const activePaneId = useWorkspaceStore(s => s.activePaneId);
   const [files, setFiles] = useState<DirEntry[]>([]);
   const [locks, setLocks] = useState<FileLock[]>([]);
   const [refreshSignal, setRefreshSignal] = useState(1);
@@ -161,6 +162,7 @@ export function FileTree({ iconOnly = false }: { iconOnly?: boolean }) {
   const [promptValue, setPromptValue] = useState('');
   const [clipboard, setClipboard] = useState<{ path: string, isCut: boolean } | null>(null);
   const [selectedItem, setSelectedItem] = useState<SelectedTreeItem | null>(null);
+  const [deleteConfirmItem, setDeleteConfirmItem] = useState<SelectedTreeItem | null>(null);
   
   const promptInputRef = useRef<HTMLInputElement>(null);
   const treeRef = useRef<HTMLDivElement>(null);
@@ -209,6 +211,22 @@ export function FileTree({ iconOnly = false }: { iconOnly?: boolean }) {
     const first = files[0];
     setSelectedItem({ file: first, parentPath: workspaceDir, path: getFullPath(first, workspaceDir) });
   }, [files, selectedItem, workspaceDir]);
+
+  useEffect(() => {
+    if (!workspaceDir || !activePaneId) return;
+    const activePane = activePanes.find(pane => pane.id === activePaneId);
+    const activeFilePath = activePane?.type === 'editor' && typeof activePane.data?.filePath === 'string'
+      ? activePane.data.filePath
+      : null;
+    if (!activeFilePath || !workspacePathContains(workspaceDir, activeFilePath)) return;
+    const name = activeFilePath.split(/[\\/]/).filter(Boolean).pop();
+    if (!name) return;
+    setSelectedItem({
+      path: activeFilePath,
+      parentPath: dirname(activeFilePath),
+      file: { name, isDirectory: false, isFile: true },
+    });
+  }, [activePaneId, activePanes, workspaceDir]);
 
   useEffect(() => {
     if (promptState) {
@@ -321,16 +339,22 @@ export function FileTree({ iconOnly = false }: { iconOnly?: boolean }) {
     closeContextMenu();
   };
 
-  const deleteItem = async (item: SelectedTreeItem) => {
-    if (confirm(`Are you sure you want to delete ${item.file.name}?`)) {
-      try {
-        await invoke('workspace_delete', { targetPath: item.path });
-        closeDeletedEditorPanes(item.path);
-        setSelectedItem(null);
-        refreshWorkspace();
-      } catch (err) {
-        alert(`Failed to delete: ${err}`);
-      }
+  const requestDeleteItem = (item: SelectedTreeItem) => {
+    setDeleteConfirmItem(item);
+    closeContextMenu();
+  };
+
+  const confirmDeleteItem = async () => {
+    if (!deleteConfirmItem) return;
+    const item = deleteConfirmItem;
+    setDeleteConfirmItem(null);
+    try {
+      await invoke('workspace_delete', { targetPath: item.path });
+      closeDeletedEditorPanes(item.path);
+      setSelectedItem(null);
+      refreshWorkspace();
+    } catch (err) {
+      alert(`Failed to delete: ${err}`);
     }
   };
 
@@ -380,7 +404,7 @@ export function FileTree({ iconOnly = false }: { iconOnly?: boolean }) {
       startRenameItem(selectedItem);
     } else if (event.key === 'Delete' && selectedItem) {
       event.preventDefault();
-      void deleteItem(selectedItem);
+      requestDeleteItem(selectedItem);
     } else if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'n') {
       event.preventDefault();
       const parentPath = event.shiftKey
@@ -395,6 +419,35 @@ export function FileTree({ iconOnly = false }: { iconOnly?: boolean }) {
     } else if (event.key === 'F5') {
       event.preventDefault();
       handleRefresh();
+    }
+  };
+
+  const handleTreeWheel = (event: React.WheelEvent<HTMLDivElement>) => {
+    const target = treeRef.current;
+    if (!target) return;
+
+    const maxTop = target.scrollHeight - target.clientHeight;
+    const maxLeft = target.scrollWidth - target.clientWidth;
+    if (maxTop <= 0 && maxLeft <= 0) return;
+
+    const preferVertical = Math.abs(event.deltaY) >= Math.abs(event.deltaX);
+    if (preferVertical && maxTop > 0) {
+      const before = target.scrollTop;
+      target.scrollTop = Math.max(0, Math.min(maxTop, target.scrollTop + event.deltaY));
+      if (target.scrollTop !== before) {
+        event.preventDefault();
+        event.stopPropagation();
+      }
+      return;
+    }
+
+    if (maxLeft > 0) {
+      const before = target.scrollLeft;
+      target.scrollLeft = Math.max(0, Math.min(maxLeft, target.scrollLeft + event.deltaX));
+      if (target.scrollLeft !== before) {
+        event.preventDefault();
+        event.stopPropagation();
+      }
     }
   };
 
@@ -472,8 +525,7 @@ export function FileTree({ iconOnly = false }: { iconOnly?: boolean }) {
       file: contextMenu.file,
       parentPath: contextMenu.parentPath,
     };
-    closeContextMenu();
-    await deleteItem(item);
+    requestDeleteItem(item);
   };
 
   const handleReveal = async () => {
@@ -561,10 +613,22 @@ export function FileTree({ iconOnly = false }: { iconOnly?: boolean }) {
 
     try {
       if (promptState.type === 'file') {
+        const nextPath = joinWorkspacePath(promptState.parentPath, nextName);
         await invoke('workspace_create_file', { parentPath: promptState.parentPath, name: nextName });
-        addPane('editor', nextName, { filePath: joinWorkspacePath(promptState.parentPath, nextName) });
+        setSelectedItem({
+          path: nextPath,
+          parentPath: promptState.parentPath,
+          file: { name: nextName, isDirectory: false, isFile: true },
+        });
+        addPane('editor', nextName, { filePath: nextPath });
       } else if (promptState.type === 'folder') {
+        const nextPath = joinWorkspacePath(promptState.parentPath, nextName);
         await invoke('workspace_create_dir', { parentPath: promptState.parentPath, name: nextName });
+        setSelectedItem({
+          path: nextPath,
+          parentPath: promptState.parentPath,
+          file: { name: nextName, isDirectory: true, isFile: false },
+        });
       } else if (promptState.type === 'rename') {
         const oldPath = joinWorkspacePath(promptState.parentPath, promptState.fileName ?? '');
         const newPath = joinWorkspacePath(promptState.parentPath, nextName);
@@ -600,7 +664,7 @@ export function FileTree({ iconOnly = false }: { iconOnly?: boolean }) {
 
   return (
     <div
-      className="flex-1 flex flex-col min-h-0 relative outline-none"
+      className="flex h-full min-h-0 flex-col relative outline-none"
       tabIndex={0}
       role="tree"
       aria-label="Workspace files"
@@ -621,7 +685,7 @@ export function FileTree({ iconOnly = false }: { iconOnly?: boolean }) {
         {!iconOnly && <span className="truncate font-bold text-text-secondary opacity-70 uppercase tracking-wider text-[10px]">
           {workspaceDir.split(/[\\/]/).pop()}
         </span>}
-        <Folder size={iconOnly ? 12 : 13} className="text-text-muted opacity-40 group-hover:text-accent-primary transition-colors shrink-0" />
+        <FolderTypeIcon folderName={workspaceDir.split(/[\\/]/).pop() || workspaceDir} expanded size={iconOnly ? 12 : 13} className="opacity-80 transition-colors shrink-0" />
       </div>
 
       {!iconOnly && <div
@@ -638,7 +702,7 @@ export function FileTree({ iconOnly = false }: { iconOnly?: boolean }) {
         <ExplorerToolButton title="Change Folder" onClick={handleOpenFolder} icon={<FolderOpen size={13} />} className="ml-auto" />
       </div>}
       
-      <div ref={treeRef} className={`flex-1 overflow-y-auto ${iconOnly ? 'p-1' : 'p-2'} no-scrollbar`}>
+      <div ref={treeRef} onWheel={handleTreeWheel} className={`min-h-0 flex-1 overflow-auto overscroll-contain ${iconOnly ? 'p-1' : 'p-2'} custom-scrollbar`}>
         <div className="pb-4">
           {files.map(file => (
             <TreeNode
@@ -702,6 +766,29 @@ export function FileTree({ iconOnly = false }: { iconOnly?: boolean }) {
           
           <div className="h-px bg-border-panel my-1" />
           <ContextMenuItem icon={<ExternalLink size={12}/>} label="Reveal in Explorer" onClick={handleReveal} />
+        </div>
+      )}
+
+      {deleteConfirmItem && (
+        <div className="absolute inset-x-2 top-10 z-50 rounded border border-red-500/40 bg-bg-panel p-2 shadow-xl">
+          <div className="text-[11px] font-semibold text-text-primary">Delete {deleteConfirmItem.file.name}?</div>
+          <div className="mt-1 truncate text-[10px] text-text-muted" title={deleteConfirmItem.path}>{deleteConfirmItem.path}</div>
+          <div className="mt-2 flex justify-end gap-2">
+            <button
+              type="button"
+              className="rounded border border-border-panel px-2 py-1 text-[10px] text-text-secondary hover:bg-bg-surface"
+              onClick={() => setDeleteConfirmItem(null)}
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              className="rounded border border-red-500/40 bg-red-500/10 px-2 py-1 text-[10px] text-red-300 hover:bg-red-500/20"
+              onClick={() => void confirmDeleteItem()}
+            >
+              Delete
+            </button>
+          </div>
         </div>
       )}
 

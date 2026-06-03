@@ -21,7 +21,8 @@ function normalizePathSegments(path: string, absoluteRoot = false): string {
 
 export function dirname(path: string): string {
   const trimmed = cleanComparablePath(path);
-  if (/^[A-Za-z]:[\\/]?$/.test(trimmed)) return `${trimmed[0]}:\\`;
+  if (/^[A-Za-z]:$/.test(trimmed)) return trimmed;
+  if (/^[A-Za-z]:[\\/]$/.test(trimmed)) return `${trimmed[0]}:\\`;
   if (/^[\\/]+$/.test(trimmed)) return trimmed[0];
 
   const normalized = trimmed.replace(/[\\/]+$/, '');
@@ -39,15 +40,24 @@ export function joinWorkspacePath(parent: string, name: string): string {
   const cleanName = cleanComparablePath(name);
   if (!cleanName) return cleanParent;
   const separator = cleanParent.includes('\\') ? '\\' : '/';
-  if (!cleanParent) return separator === '\\' ? cleanName.replace(/\//g, '\\') : cleanName.replace(/\\/g, '/');
-  const relativeName = cleanName.replace(/^[\\/]+/, '');
-  const child = separator === '\\' ? relativeName.replace(/\//g, '\\') : relativeName.replace(/\\/g, '/');
+  const relativeName = normalizePathSegments(
+    cleanName
+      .replace(/\\/g, '/')
+      .replace(/^[A-Za-z]:(?:\/+)?/, '')
+      .replace(/^\/+/, ''),
+    true,
+  );
+  if (!relativeName) return cleanParent;
+  if (!cleanParent) return separator === '\\' ? relativeName.replace(/\//g, '\\') : relativeName;
+  const child = separator === '\\' ? relativeName.replace(/\//g, '\\') : relativeName;
   if (cleanParent.endsWith('/') || cleanParent.endsWith('\\')) return cleanParent + child;
   return `${cleanParent}${separator}${child}`;
 }
 
 export function normalizeWorkspacePath(path: string): string {
   const normalized = cleanComparablePath(path).replace(/\\/g, '/');
+  if (/^[A-Za-z]:$/.test(normalized)) return '';
+  if (/^[A-Za-z]:(?!\/)/.test(normalized)) return normalizePathSegments(normalized.slice(2));
   if (/^[A-Za-z]:\/?$/.test(normalized)) return `${normalized[0]}:/`;
   if (/^\/+$/.test(normalized)) return '/';
 

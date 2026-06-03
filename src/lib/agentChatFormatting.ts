@@ -80,6 +80,7 @@ const TODO_LINE_RE = /^\s*(?:[-*]|\d+[.)])\s+\[( |x|X|-|~|>)\]\s+(.+?)\s*$/;
 const STRUCTURED_TODO_HINT_RE = /(?:\btodo_write\b|["']todos["']\s*:)/i;
 const DEFAULT_CONTEXT_MAX_CHARS = 12000;
 const DEFAULT_COMPACT_KEEP_TAIL = 8;
+const AGENT_WORK_ITEM_PREFIX = '__COMET_AGENT_WORK_ITEM__';
 
 export function stripAgentAnsi(text: string): string {
   return text
@@ -227,8 +228,11 @@ export function parseAgentStatusLine(line: string): Extract<AgentContentBlock, {
     return { kind: 'status', label: 'Running command', detail: withoutSpinner, tone: 'info', icon: 'terminal' };
   }
 
-  const read = withoutSpinner.match(/^(?:reading|read|opened|opening)\s+(?:file\s+)?(.+)$/i);
-  if (read) return { kind: 'status', label: 'Reading file', detail: read[1].trim(), tone: 'info', icon: 'file' };
+  const explicitFileRead = withoutSpinner.match(/^(?:reading|read|opened|opening)\s+files?\s+(.+)$/i);
+  if (explicitFileRead) return { kind: 'status', label: 'Reading file', detail: explicitFileRead[1].trim(), tone: 'info', icon: 'file' };
+
+  const pathRead = withoutSpinner.match(/^(?:reading|read|opened|opening)\s+(.+)$/i);
+  if (pathRead && isLikelyPathLike(pathRead[1])) return { kind: 'status', label: 'Reading path', detail: pathRead[1].trim(), tone: 'info', icon: 'file' };
 
   const search = withoutSpinner.match(/^(?:searching|grep|rg|glob|finding)\b[:\s]*(.*)$/i);
   if (search) return { kind: 'status', label: 'Searching', detail: search[1]?.trim() || undefined, tone: 'info', icon: 'search' };
@@ -258,7 +262,7 @@ export function parseAgentStatusLine(line: string): Extract<AgentContentBlock, {
 function isLikelyPathLike(value: string): boolean {
   const candidate = value.trim().replace(/^file\s+/i, '');
   if (!candidate || /\b(plan|context|summary|todo|todos|status)\b/i.test(candidate)) return false;
-  return /[\\/]/.test(candidate) || /\.[a-z0-9]{1,8}\b/i.test(candidate);
+  return /[\\/]/.test(candidate) || /(?:^|\s|["'`])[\w@~$%{}()[\]-]+(?:\.[a-z0-9]{1,8})+\b/i.test(candidate);
 }
 
 export function splitAgentContent(content: string): AgentContentBlock[] {
@@ -444,6 +448,8 @@ function formatMessageForConversationContext(message: AgentHistoryMessage): stri
 }
 
 function contentForConversationContext(content: string): string {
+  const workItem = summarizeStructuredWorkItem(content);
+  if (workItem) return workItem;
   const blocks = splitAgentContent(content);
   if (blocks.length === 0) return stripAgentAnsi(content).trim();
   return blocks.map(block => {
@@ -481,6 +487,27 @@ function contentForConversationContext(content: string): string {
       ...block.items.map(item => `- [${todoStatusMarker(item.status)}] ${item.label}${item.description ? ` - ${item.description}` : ''}`),
     ].join('\n');
   }).join('\n').trim();
+}
+
+function summarizeStructuredWorkItem(content: string): string | null {
+  const clean = content.trim();
+  if (!clean.startsWith(AGENT_WORK_ITEM_PREFIX)) return null;
+  try {
+    const item = JSON.parse(clean.slice(AGENT_WORK_ITEM_PREFIX.length).trim()) as Record<string, unknown>;
+    const title = typeof item.title === 'string' ? item.title : 'Tool';
+    const status = typeof item.status === 'string' ? item.status : 'inProgress';
+    const detail = typeof item.detail === 'string' ? item.detail : '';
+    const changes = Array.isArray(item.changes) ? item.changes.length : 0;
+    const command = typeof item.command === 'string' ? item.command : '';
+    return [
+      `Work item: ${title} (${status})`,
+      detail,
+      command ? `Command: ${command}` : '',
+      changes > 0 ? `${changes} changed file${changes === 1 ? '' : 's'}` : '',
+    ].filter(Boolean).join('\n');
+  } catch {
+    return null;
+  }
 }
 
 function summarizeAgentConversation(messages: AgentHistoryMessage[], maxChars: number): string {
@@ -813,7 +840,7 @@ export function classifyAgentStatusMessage(message: {
   if (/waiting for permission/i.test(content)) {
     return {
       kind: 'approval_needed',
-      label: 'Approval needed',
+      label: 'Permission needed',
       detail: content.replace(/^Waiting for permission:\s*/i, ''),
       tone: 'warn',
     };

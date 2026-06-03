@@ -646,15 +646,25 @@ function dirtyEditorPanes(panes: Pane[]): Pane[] {
   return panes.filter(pane => pane.type === 'editor' && Boolean(pane.data?.editorDirty));
 }
 
+function canUseBlockingWindowConfirm(): boolean {
+  if (typeof window === 'undefined' || typeof window.confirm !== 'function') return false;
+  return window.location?.hostname !== 'tauri.localhost';
+}
+
 function confirmDiscardDirtyEditors(panes: Pane[], action: string): boolean {
   const dirty = dirtyEditorPanes(panes);
-  if (dirty.length === 0 || typeof window === 'undefined' || typeof window.confirm !== 'function') return true;
+  if (dirty.length === 0 || !canUseBlockingWindowConfirm()) return true;
   const names = dirty
     .slice(0, 3)
     .map(pane => pane.title || pane.data?.filePath || 'Untitled')
     .join(', ');
   const extra = dirty.length > 3 ? ` and ${dirty.length - 3} more` : '';
-  return window.confirm(`Discard unsaved changes in ${names}${extra} before ${action}?`);
+  try {
+    return window.confirm(`Discard unsaved changes in ${names}${extra} before ${action}?`);
+  } catch (error) {
+    console.warn('Discard confirmation unavailable:', error);
+    return true;
+  }
 }
 
 function destroyTerminalPanes(panes: Pane[]) {
