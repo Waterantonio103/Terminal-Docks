@@ -19,7 +19,7 @@ function run(name, fn) {
 
 const now = Date.parse('2026-05-09T12:00:00Z');
 
-run('runtime permission is a needs-you item and drives badge count', () => {
+run('runtime permission remains an active runtime item while dock handles approval', () => {
   const items = deriveActionCenterItems({
     now,
     sessions: [{
@@ -39,10 +39,41 @@ run('runtime permission is a needs-you item and drives badge count', () => {
     }],
   });
 
-  assert.equal(items[0].id, 'permission:permission-1');
-  assert.equal(items[0].section, 'needs_you');
-  assert.equal(items[0].kind, 'permission');
-  assert.equal(countNeedsYou(items), 1);
+  assert.equal(items[0].id, 'active-runtime:session-1');
+  assert.equal(items[0].section, 'active_now');
+  assert.equal(items[0].kind, 'active_runtime');
+  assert.equal(countNeedsYou(items), 0);
+});
+
+run('codex update permission does not duplicate docked permission actions', () => {
+  const items = deriveActionCenterItems({
+    now,
+    sessions: [{
+      sessionId: 'session-update',
+      nodeId: 'node-update',
+      terminalId: 'terminal-update',
+      status: 'awaiting_permission',
+      activePermission: {
+        permissionId: 'codex-update-1',
+        category: 'package_install',
+        rawPrompt: [
+          'Update available! 0.136.0 -> 0.137.0',
+          '› 1. Update now (runs npm install -g @openai/codex)',
+          '  2. Skip',
+          'Press enter to continue',
+        ].join('\n'),
+        detail: 'Codex CLI update available. Update now?',
+        detectedAt: now - 1000,
+        sessionId: 'session-update',
+        nodeId: 'node-update',
+      },
+    }],
+  });
+
+  assert.equal(items[0].kind, 'active_runtime');
+  assert.equal(items[0].section, 'active_now');
+  assert.equal(items[0].actions.some(action => action.id === 'approve_permission'), false);
+  assert.equal(items[0].actions.some(action => action.id === 'deny_permission'), false);
 });
 
 run('pending and approved inbox items are actionable delegations', () => {

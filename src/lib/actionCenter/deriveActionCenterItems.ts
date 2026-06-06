@@ -38,12 +38,6 @@ const RECENT_DEFAULT_LIMIT = 50;
 const RECENT_DEFAULT_WINDOW_MS = 30 * 60 * 1000;
 const INBOX_STATUSES = new Set(['pending', 'approved', 'rejected', 'claimed', 'completed']);
 
-const permissionActions: ActionCenterAction[] = [
-  { id: 'deny_permission', label: 'Deny', tone: 'danger' },
-  { id: 'approve_permission', label: 'Approve', tone: 'primary' },
-  { id: 'focus_terminal', label: 'Focus', tone: 'neutral' },
-];
-
 const runtimeRecoveryActions: ActionCenterAction[] = [
   { id: 'focus_terminal', label: 'Focus', tone: 'neutral' },
   { id: 'retry_runtime', label: 'Retry', tone: 'primary' },
@@ -169,29 +163,6 @@ function deriveRuntimeItems(sessions: ActionCenterRuntimeSessionInput[], now: nu
 
   for (const session of sessions) {
     if (!optionalString(session.sessionId)) continue;
-    if (session.activePermission) {
-      const permission = session.activePermission;
-      items.push({
-        id: `permission:${permission.permissionId}`,
-        kind: 'permission',
-        section: 'needs_you',
-        severity: 'critical',
-        source: 'runtime',
-        title: `Permission needed: ${permission.category}`,
-        detail: permission.detail || runtimeDetail(session),
-        createdAt: timestampOrFallback(permission.detectedAt, timestampOrFallback(session.lastActivityAt, now)),
-        nodeId: permission.nodeId ?? session.nodeId,
-        sessionId: permission.sessionId || session.sessionId,
-        terminalId: session.terminalId,
-        missionId: session.missionId,
-        permissionId: permission.permissionId,
-        category: permission.category,
-        rawPrompt: permission.rawPrompt,
-        actions: permissionActions,
-      });
-      continue;
-    }
-
     const blockerKind = runtimeBlockerKind(session);
     if (blockerKind) {
       const manualActions: ActionCenterAction[] = blockerKind === 'manual_takeover'

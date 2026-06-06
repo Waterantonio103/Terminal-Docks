@@ -81,14 +81,16 @@ import { deriveMissionProgressRows, type MissionProgressRow } from '../../lib/mi
 import { discoverModelsForCli, supportsModelDiscovery } from '../../lib/models/modelDiscoveryService';
 import type { CliId, CliModel } from '../../lib/models/modelTypes';
 import { runtimeManager } from '../../lib/runtime/RuntimeManager';
-import type { RuntimeManagerSnapshot, RuntimeSessionState } from '../../lib/runtime/RuntimeTypes';
+import type { RuntimeManagerSnapshot, RuntimePermissionRequest, RuntimeSessionState } from '../../lib/runtime/RuntimeTypes';
 import { generateId } from '../../lib/graphUtils';
 import { missionRepository } from '../../lib/missionRepository';
 import {
   buildAgentConversationContext,
   classifyAgentStatusMessage,
+  compactAgentCommandOutput,
   compactAgentConversation,
-  runtimeStepLabel,
+  compactAgentShellCommandForDisplay,
+  stripAgentConversationContextLabels,
   splitAgentContent,
   type AgentOutputStatusIcon,
   type AgentStatusKind,
@@ -181,6 +183,15 @@ type FollowUpSubmitOptions = {
   displayContent?: string;
 };
 type FollowUpContextKind = 'file' | 'folder';
+type DebugAgentPromptPayload = {
+  requestId?: string;
+  debugRunId?: string;
+  prompt: string;
+  targetPaneId?: string;
+  displayContent?: string;
+  skipSlashProcessing?: boolean;
+  label?: string;
+};
 
 interface FollowUpMessage {
   id: string;
@@ -209,7 +220,30 @@ type AgentTokenUsage = {
 
 const AGENT_TOKEN_USAGE_PREFIX = '__COMET_AGENT_TOKEN_USAGE__';
 const AGENT_SESSION_TITLE_PREFIX = 'Session title:';
-const AGENT_SESSION_TITLE_RE = /^\s*(?:[•●*]\s*)?(?:Session|Conversation|Chat)\s+title\s*:\s*([^\r\n]{1,90})(?:\r?\n|$)/i;
+const AGENT_SESSION_TITLE_RE = /^\s*(?:[-•●*]\s*)?(?:Session|Conversation|Chat)\s+title\s*(?::|-|—|=)\s*([^\r\n]{1,90})(?:\r?\n|$)/i;
+const DEBUG_AGENT_PROMPT_MESSAGE_TYPE = 'debug_agent_prompt';
+
+function parseDebugAgentPromptPayload(value: unknown): DebugAgentPromptPayload | null {
+  if (!value || typeof value !== 'object') return null;
+  const record = value as { type?: unknown; content?: unknown };
+  if (record.type !== DEBUG_AGENT_PROMPT_MESSAGE_TYPE || typeof record.content !== 'string') return null;
+  try {
+    const parsed = JSON.parse(record.content) as Partial<DebugAgentPromptPayload>;
+    const prompt = typeof parsed.prompt === 'string' ? parsed.prompt.trim() : '';
+    if (!prompt) return null;
+    return {
+      requestId: typeof parsed.requestId === 'string' ? parsed.requestId : undefined,
+      debugRunId: typeof parsed.debugRunId === 'string' ? parsed.debugRunId : undefined,
+      prompt,
+      targetPaneId: typeof parsed.targetPaneId === 'string' && parsed.targetPaneId.trim() ? parsed.targetPaneId.trim() : undefined,
+      displayContent: typeof parsed.displayContent === 'string' ? parsed.displayContent : undefined,
+      skipSlashProcessing: parsed.skipSlashProcessing === true,
+      label: typeof parsed.label === 'string' ? parsed.label : undefined,
+    };
+  } catch {
+    return null;
+  }
+}
 
 function normalizeAgentTokenUsage(value: Partial<AgentTokenUsage> | null | undefined): AgentTokenUsage | null {
   if (!value) return null;
@@ -285,6 +319,63 @@ function extractAgentSessionTitle(content: string): { title: string | null; cont
 
 function stripAgentSessionTitle(content: string): string {
   return extractAgentSessionTitle(content).content;
+}
+
+const AGENT_TRANSCRIPT_BUSY_LINE_RE =
+  /^\s*(?:[⠐⠂⠒⠲⠴⠦⠖⠆⠋⠙⠹⠸⠼⠧⠇⠏]\s*)?(?:[-•●◦*]\s*)?(?:Working|Thinking|Starting|Streaming|Processing|Analyzing|Planning)\b.*(?:esc|interrupt|ctrl-c|MCP).*\s*$/i;
+const AGENT_TRANSCRIPT_STATUS_ONLY_LINE_RE =
+  /^\s*(?:[⠐⠂⠒⠲⠴⠦⠖⠆⠋⠙⠹⠸⠼⠧⠇⠏]\s*)?(?:[-•●◦*]\s*)?(?:Working|Thinking|Starting|Streaming|Processing|Analyzing|Planning)\s*$/i;
+const AGENT_TRANSCRIPT_REDRAW_FRAGMENT_RE =
+  /^\s*(?:[-•●◦*]\s*)?(?:\d+|W|Wo|Wog\d*|Wng\d*|or|rk|ki|in|ng|g)\s*$/i;
+const AGENT_TRANSCRIPT_PERMISSION_LINE_RE =
+  /^\s*(?:[│|]\s*)?(?:Would you like to run the following command\??|Press enter to confirm or esc to cancel|[›>]\s*[123]\.\s+|[123]\.\s+(?:Yes|No)|Yes,\s|No,\s|✔\s*You approved\b)/i;
+
+function stripAgentRuntimeTranscriptNoise(content: string): string {
+  const withoutPermissionBlocks = content.replace(
+    /\n?\s*(?:[│|]\s*)?Would you like to run the following command\??[\s\S]*?Press enter to confirm or esc to cancel\s*/gi,
+    '\n',
+  );
+  return stripAgentConversationContextLabels(withoutPermissionBlocks)
+    .split(/\r?\n/)
+    .filter(line => {
+      const clean = line.trim();
+      if (!clean) return true;
+      return !AGENT_TRANSCRIPT_BUSY_LINE_RE.test(clean)
+        && !AGENT_TRANSCRIPT_STATUS_ONLY_LINE_RE.test(clean)
+        && !AGENT_TRANSCRIPT_REDRAW_FRAGMENT_RE.test(clean)
+        && !AGENT_TRANSCRIPT_PERMISSION_LINE_RE.test(clean);
+    })
+    .join('\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+function agentDisplayContentWithoutMetadata(content: string): string {
+  return stripAgentRuntimeTranscriptNoise(stripAgentSessionTitle(stripAgentTokenUsage(content)));
+}
+
+function isTransientRuntimeStatusOnly(content: string): boolean {
+  const clean = stripAgentSessionTitle(stripAgentTokenUsage(content))
+    .replace(TERMINAL_ANSI_RE, '')
+    .replace(/\r/g, '\n')
+    .trim();
+  if (!clean) return true;
+  const lines = clean.split('\n').map(line => line.trim()).filter(Boolean);
+  if (lines.length === 0) return true;
+  return lines.every(line =>
+    AGENT_TRANSCRIPT_BUSY_LINE_RE.test(line)
+      || AGENT_TRANSCRIPT_STATUS_ONLY_LINE_RE.test(line)
+      || AGENT_TRANSCRIPT_REDRAW_FRAGMENT_RE.test(line)
+    );
+}
+
+function sanitizeAgentTranscriptForStorage(content: string): string {
+  if (isTransientRuntimeStatusOnly(content)) return '';
+  return stripAgentConversationContextLabels(agentDisplayContentWithoutMetadata(content));
+}
+
+function shouldDropFollowUpMessage(message: FollowUpMessage): boolean {
+  return message.role === 'agent' && isTransientRuntimeStatusOnly(message.content);
 }
 
 function collectAgentTokenUsage(messages: FollowUpMessage[]): AgentTokenUsage | null {
@@ -564,11 +655,30 @@ function extractTerminalUsageCommandOutput(value: string, command: string): stri
 
 function isInternalAgentStatusMessage(message: FollowUpMessage): boolean {
   const content = message.content.trim();
+  const displayContent = message.role === 'agent'
+    ? agentDisplayContentWithoutMetadata(message.content).trim()
+    : content;
   if (message.role === 'agent' && /^\[Pasted Content \d+ chars\]$/i.test(content)) {
+    return true;
+  }
+  if (
+    message.role === 'agent'
+    && (
+      /^(?:Thinking|Working|Streaming|Starting)(?:\s*\n|\s*$)/i.test(content)
+      || AGENT_TRANSCRIPT_BUSY_LINE_RE.test(content)
+      || AGENT_TRANSCRIPT_STATUS_ONLY_LINE_RE.test(content)
+      || !displayContent
+      || AGENT_TRANSCRIPT_BUSY_LINE_RE.test(displayContent)
+      || AGENT_TRANSCRIPT_STATUS_ONLY_LINE_RE.test(displayContent)
+    )
+  ) {
     return true;
   }
   if (message.role !== 'system') return false;
   if (parseAgentUsageLimitMessage(message.content)) return false;
+  if (/^(?:Waiting for permission:|Permission\s+(?:approve|deny|approved|denied|cancelled)\b)/i.test(content)) {
+    return true;
+  }
   if (/^(?:Agent runtime starting|Agent accepted the task|Runtime session|Runtime acknowledged|Sent to runtime session|Failed to send:\s*(?:sendTask|managed prompt injection|Task injection|Runtime session))/i.test(content)) {
     return true;
   }
@@ -1306,33 +1416,162 @@ function isFollowUpSessionBusy(state?: RuntimeSessionState | string): boolean {
   return Boolean(state && FOLLOW_UP_BUSY_STATES.has(state as RuntimeSessionState));
 }
 
+function isFollowUpBusyIndicatorState(state?: RuntimeSessionState | string | null): boolean {
+  if (!state) return false;
+  if (isFollowUpSessionBusy(state)) return true;
+  return /^(?:starting|sending|streaming|stopping)$/i.test(state);
+}
+
+function isActiveFollowUpMessageStatus(status?: FollowUpMessage['status']): boolean {
+  return status === 'queued' || status === 'sending' || status === 'streaming';
+}
+
+function sessionFollowUpMessages(messages: FollowUpMessage[], sessionId?: string | null): FollowUpMessage[] {
+  if (!sessionId) return [];
+  return messages.filter(message => message.runtimeSessionId === sessionId);
+}
+
+function hasActiveFollowUpOutput(messages: FollowUpMessage[], sessionId?: string | null): boolean {
+  return sessionFollowUpMessages(messages, sessionId).some(message =>
+    (message.role === 'agent' || message.role === 'tool' || message.role === 'system')
+    && isActiveFollowUpMessageStatus(message.status)
+  );
+}
+
+function isVisibleFollowUpOutputMessage(message: FollowUpMessage): boolean {
+  const workItem = parseAgentWorkItemMessage(message);
+  if (isInternalAgentWorkItem(workItem) || (!workItem && isInternalAgentStatusMessage(message))) return false;
+  if (message.role === 'agent') return Boolean(agentDisplayContentWithoutMetadata(message.content).trim());
+  return Boolean(workItem);
+}
+
+function isSettledAgentOutputMessage(message: FollowUpMessage | undefined): boolean {
+  return Boolean(
+    message
+    && message.role === 'agent'
+    && (message.status === 'completed' || message.status === 'failed' || message.status === 'cancelled')
+  );
+}
+
+function visibleFollowUpMessages(messages: FollowUpMessage[]): FollowUpMessage[] {
+  return messages.filter(isVisibleFollowUpOutputMessage);
+}
+
+function hasActiveVisibleFollowUpOutput(messages: FollowUpMessage[]): boolean {
+  return visibleFollowUpMessages(messages).some(message =>
+    (message.role === 'agent' || message.role === 'tool' || message.role === 'system')
+    && isActiveFollowUpMessageStatus(message.status)
+  );
+}
+
+function hasSettledVisibleAgentAnswer(messages: FollowUpMessage[]): boolean {
+  if (messages.length > 0 && shouldCollapseRun(messages)) return true;
+  if (hasActiveVisibleFollowUpOutput(messages)) return false;
+  return isSettledAgentOutputMessage(
+    [...visibleFollowUpMessages(messages)]
+      .reverse()
+      .find(message => message.role === 'agent'),
+  );
+}
+
+function isFollowUpSessionVisiblySettled(messages: FollowUpMessage[], sessionId?: string | null): boolean {
+  const sessionMessages = sessionFollowUpMessages(messages, sessionId);
+  if (hasSettledVisibleAgentAnswer(sessionMessages)) return true;
+
+  // Persisted follow-up history can outlive a runtime session id. When that
+  // happens, prefer the visible transcript over stale runtime state.
+  if (sessionMessages.length > 0) return false;
+  return hasSettledVisibleAgentAnswer(messages);
+}
+
+function isCodexUpdatePermissionPrompt(permission?: RuntimePermissionRequest | null): boolean {
+  if (!permission) return false;
+  return /Update available(?:[!:]|\s)[\s\S]{0,800}\b1\.\s*Update now\b[\s\S]{0,400}\b2\.\s*Skip\b/i.test(
+    `${permission.rawPrompt}\n${permission.detail}`,
+  );
+}
+
 function finalizeStreamingMessages(
   messages: FollowUpMessage[],
   sessionId: string,
   status: Extract<FollowUpMessage['status'], 'completed' | 'failed' | 'cancelled'>,
 ): FollowUpMessage[] {
   const completedAt = Date.now();
-  return messages.map(message =>
-    message.runtimeSessionId === sessionId && (message.role === 'agent' || message.role === 'tool') && message.status === 'streaming'
-      ? { ...message, status, completedAt }
-      : message
-  );
+  let changed = false;
+  const nextMessages = messages.map(message => {
+    if (message.runtimeSessionId !== sessionId || (message.role !== 'agent' && message.role !== 'tool') || message.status !== 'streaming') {
+      return message;
+    }
+    changed = true;
+    const workItem = parseAgentWorkItemContent(message.content);
+    if (message.role === 'tool' && workItem) {
+      const nextStatus: AgentWorkItemStatus = status === 'completed' ? 'completed' : 'failed';
+      return {
+        ...message,
+        status,
+        completedAt,
+        content: formatAgentWorkItemContent({
+          ...workItem,
+          status: nextStatus,
+          completedAt,
+        }),
+      };
+    }
+    return { ...message, status, completedAt };
+  });
+  return changed ? nextMessages : messages;
+}
+
+function finalizeStreamingToolMessages(
+  messages: FollowUpMessage[],
+  sessionId: string,
+  status: Extract<FollowUpMessage['status'], 'completed' | 'failed' | 'cancelled'>,
+): FollowUpMessage[] {
+  const completedAt = Date.now();
+  let changed = false;
+  const nextMessages = messages.map(message => {
+    if (message.runtimeSessionId !== sessionId || message.role !== 'tool' || message.status !== 'streaming') {
+      return message;
+    }
+    changed = true;
+    const workItem = parseAgentWorkItemContent(message.content);
+    if (!workItem) return { ...message, status, completedAt };
+    return {
+      ...message,
+      status,
+      completedAt,
+      content: formatAgentWorkItemContent({
+        ...workItem,
+        status: status === 'completed' ? 'completed' : 'failed',
+        completedAt,
+      }),
+    };
+  });
+  return changed ? nextMessages : messages;
 }
 
 function appendFollowUpMessages(paneId: string, next: FollowUpMessage[]): void {
   const current = readFollowUpMessages(paneId);
   const seen = new Set(current.map(message => message.id));
+  const nextVisible = next.filter(message => !shouldDropFollowUpMessage(message));
+  if (nextVisible.length === 0) return;
   useWorkspaceStore.getState().updatePaneData(paneId, {
-    followUpMessages: [...current, ...next.filter(message => !seen.has(message.id))].slice(-200),
+    followUpMessages: [...current.filter(message => !shouldDropFollowUpMessage(message)), ...nextVisible.filter(message => !seen.has(message.id))].slice(-200),
   });
 }
 
 function upsertFollowUpMessage(paneId: string, next: FollowUpMessage): void {
   const current = readFollowUpMessages(paneId);
+  if (shouldDropFollowUpMessage(next)) {
+    useWorkspaceStore.getState().updatePaneData(paneId, {
+      followUpMessages: current.filter(message => message.id !== next.id && !shouldDropFollowUpMessage(message)).slice(-200),
+    });
+    return;
+  }
   const index = current.findIndex(message => message.id === next.id);
   const followUpMessages = index >= 0
-    ? current.map(message => message.id === next.id ? { ...message, ...next } : message)
-    : [...current, next];
+    ? current.map(message => message.id === next.id ? { ...message, ...next } : message).filter(message => !shouldDropFollowUpMessage(message))
+    : [...current.filter(message => !shouldDropFollowUpMessage(message)), next];
   useWorkspaceStore.getState().updatePaneData(paneId, {
     followUpMessages: followUpMessages.slice(-200),
   });
@@ -1347,6 +1586,7 @@ function mergePersistedFollowUpMessages(current: FollowUpMessage[], persisted: F
   }
   return [...byId.values()]
     .sort((left, right) => left.createdAt - right.createdAt)
+    .filter(message => !shouldDropFollowUpMessage(message))
     .slice(-200);
 }
 
@@ -1743,6 +1983,7 @@ const RUNTIME_OUTPUT_TOOL_LINE_RE =
   /(?:^|\n)\s*(?:[•●*>\-]\s*)?(Read|Edit|Write|Bash|Glob|Grep|Search|List|Run|Shell|Apply Patch|ApplyPatch|MultiEdit|Todo)\b(?:\s*\(([^)\r\n]{0,180})\)|\s*:\s*([^\r\n]{0,180}))?/i;
 const CODEX_HIDDEN_PROMPT_ECHO_PATTERNS: RegExp[] = [
   /^Improve documentation in @filename$/i,
+  /^Write tests for @filename$/i,
   /\bYou are the workspace agent for Comet-AI\b/i,
   /\bAnswer the user directly\b/i,
   /\blook for an assigned mission\b/i,
@@ -1764,6 +2005,7 @@ const CODEX_HIDDEN_PROMPT_ECHO_PATTERNS: RegExp[] = [
   /\bPermission mode:/i,
   /\bask-for-approval\b/i,
   /\bSession title protocol:/i,
+  /^[-•●*]?\s*(?:Session|Conversation|Chat)\s+title\s*:/i,
   /\bbefore any other response text\b/i,
   /^["'`]?Session title:\s*<short title>/i,
   /\bbased on the user's latest prompt\b/i,
@@ -1772,9 +2014,21 @@ const CODEX_HIDDEN_PROMPT_ECHO_PATTERNS: RegExp[] = [
   /\bevery new agent run\b/i,
   /\bWorkspace summary:/i,
   /\bWorkspace agent for\b/i,
+  /\bPrevious follow-up context for continuity only\b/i,
+  /\bcontinuity only\.\s+Do not quote\b/i,
+  /\bDo not quote,\s+restate,\s+or summarize this context\b/i,
   /\bUser follow-up:/i,
 ];
-const CODEX_TUI_REDRAW_FRAGMENT_RE = /^(?:[•●◦*]\s*)?(?:W|Wo|Wog|Wng|or|rk|ki|in|ng|g|1)$/i;
+const CODEX_TUI_REDRAW_FRAGMENT_RE = /^(?:[-•●◦*]\s*)?(?:\d+|W|Wo|Wog\d*|Wng\d*|or|rk|ki|in|ng|g)$/i;
+const CODEX_PROMPT_PLACEHOLDER_PREFIX_RE =
+  /^\s*(?:[›＞❯]\s*)?(?:Implement\s+\{feature\}|Improve documentation in @filename|Write tests for @filename)\s*/i;
+const CODEX_COMMAND_START_RE = /^\s*[•●◦*]\s*(Running|Ran)\s+(.+?)\s*$/i;
+const CODEX_COMMAND_CONTINUATION_RE = /^\s*[│|]\s*(.+)$/;
+const CODEX_COMMAND_OUTPUT_RE = /^\s*(?:└|L)\s*(.*)$/;
+const CODEX_COMMAND_REJECTED_RE = /^`?(.+?)`?\s+rejected:\s+(.+)$/i;
+const CODEX_TRANSCRIPT_TRUNCATION_RE = /^\s*…?\s*[+-]\d+\s+lines?\s*\(ctrl\s*\+\s*t\s+to\s+view\s+transcript\)\s*$/i;
+const CODEX_SESSION_TITLE_LINE_RE = /^\s*(?:[-•●*]\s*)?(?:Session|Conversation|Chat)\s+title\s*(?::|-|—|=)/i;
+const CODEX_BULLET_PROSE_RE = /^\s*[•●◦*]\s+(.+)$/;
 
 function stripRuntimeOutputControls(text: string): string {
   return text
@@ -1820,37 +2074,529 @@ function isCodexRuntimeDisplayNoiseLine(line: string): boolean {
     || /^[-_╭╮╰╯│┃─━┬┴┼| ]+$/.test(clean)
     || /^›\s*/.test(clean)
     || /^Tip:\s/i.test(clean)
-    || /^(?:[•●*]\s*)?Starting MCP servers\b/i.test(clean)
+    || /^\d{4}-\d{2}-\d{2}T[^\s]+\s+(?:WARN|ERROR)\s+codex_/i.test(clean)
+    || /^(?:[-•●*]\s*)?Starting MCP servers\b/i.test(clean)
     || /^(?:⚠\s*)?MCP (?:client|startup|server)\b/i.test(clean)
     || /^\s*gpt-[\w.-]+(?:\s+\w+)?\s*[·•]/i.test(clean)
     || /\bContext\s+\d+%\s+(?:left|used)\b/i.test(clean)
-    || /^\s*(?:Working|Thinking|Starting)\b.*(?:esc|interrupt|MCP)/i.test(clean)
+    || /^\s*(?:[⠐⠂⠒⠲⠴⠦⠖⠆⠋⠙⠹⠸⠼⠧⠇⠏]\s*)?(?:[-•●*]\s*)?(?:Working|Thinking|Starting|Streaming)\s*$/i.test(clean)
+    || /^\s*(?:[⠐⠂⠒⠲⠴⠦⠖⠆⠋⠙⠹⠸⠼⠧⠇⠏]\s*)?(?:[-•●*]\s*)?(?:Working|Thinking|Starting|Streaming)\b.*(?:esc|interrupt|MCP)/i.test(clean)
   );
+}
+
+function stripCodexPromptPlaceholderFromLine(line: string): string {
+  return line.replace(CODEX_PROMPT_PLACEHOLDER_PREFIX_RE, '');
+}
+
+type CodexRuntimeCommandRecord = {
+  id: string;
+  command: string;
+  outputLines: string[];
+  status: 'running' | 'completed' | 'failed';
+  createdAt: number;
+};
+
+type CodexRuntimeOutputState = {
+  nextCommandIndex: number;
+  activeCommandId?: string;
+  inFinalAnswer: boolean;
+  commandByKey: Map<string, string>;
+  commands: Map<string, CodexRuntimeCommandRecord>;
+  seenAgentLines: Set<string>;
+  seenStatusLines: Set<string>;
+  seenOutputByCommand: Map<string, Set<string>>;
+  skippingPermissionPrompt: boolean;
+  suppressingHiddenContextEcho: boolean;
+  suppressingUserPromptEcho: boolean;
+};
+
+type CodexRuntimeWorkEvent = {
+  id: string;
+  toolName: string;
+  label: string;
+  detail?: string;
+  command?: string;
+  output?: string;
+  changes?: Array<{ path: string; diff?: string; patch?: string }>;
+  status?: 'running' | 'completed' | 'failed';
+};
+
+type CodexRuntimeStreamEvent =
+  | { kind: 'agent'; text: string }
+  | { kind: 'final_agent'; text: string }
+  | { kind: 'session_title'; title: string }
+  | { kind: 'work'; workEvent: CodexRuntimeWorkEvent };
+
+type CodexRuntimeLineResult = {
+  agentLine?: string;
+  finalAgentLine?: string;
+  sessionTitle?: string;
+  workEvent?: CodexRuntimeWorkEvent;
+  workEvents?: CodexRuntimeWorkEvent[];
+};
+
+function codexJsonString(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() ? value : undefined;
+}
+
+function codexJsonObject(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function codexJsonStatus(value: unknown): CodexRuntimeWorkEvent['status'] {
+  const status = codexJsonString(value);
+  if (status === 'completed') return 'completed';
+  if (status === 'failed' || status === 'declined') return 'failed';
+  return 'running';
+}
+
+function processCodexJsonRuntimeLine(
+  state: CodexRuntimeOutputState,
+  clean: string,
+): CodexRuntimeLineResult | null {
+  if (!clean.startsWith('{')) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(clean);
+  } catch {
+    return null;
+  }
+  const event = codexJsonObject(parsed);
+  const item = codexJsonObject(event?.item);
+  if (!event || !item) return {};
+  const eventType = codexJsonString(event.type) ?? '';
+  const itemType = codexJsonString(item.type) ?? '';
+  const status = codexJsonStatus(item.status);
+  const id = codexJsonString(item.id);
+
+  if (itemType === 'agent_message') {
+    const text = codexJsonString(item.text);
+    if (!text) return {};
+    return eventType === 'item.completed'
+      ? codexAgentLineEvent(state, text, false)
+      : {};
+  }
+
+  if (itemType === 'command_execution') {
+    const command = codexJsonString(item.command) ?? 'command';
+    const output = codexJsonString(item.aggregated_output);
+    return {
+      workEvent: {
+        id: id ? `codex-json-${id}` : `codex-json-command-${state.nextCommandIndex++}`,
+        toolName: 'shell_command',
+        label: 'Run',
+        detail: command,
+        command,
+        output,
+        status,
+      },
+    };
+  }
+
+  if (itemType === 'file_change') {
+    const changes = Array.isArray(item.changes)
+      ? item.changes
+        .map(change => codexJsonObject(change))
+        .filter((change): change is Record<string, unknown> => Boolean(change))
+        .map(change => ({ path: codexJsonString(change.path) ?? 'Updated file' }))
+      : [];
+    return {
+      workEvent: {
+        id: id ? `codex-json-${id}` : `codex-json-file-${state.nextCommandIndex++}`,
+        toolName: 'edit',
+        label: 'Edit',
+        detail: changes.map(change => change.path).join(', ') || 'File change',
+        changes,
+        status,
+      },
+    };
+  }
+
+  if (itemType === 'mcp_tool_call') {
+    const server = codexJsonString(item.server);
+    const tool = codexJsonString(item.tool) ?? 'tool';
+    const detail = [server, tool].filter(Boolean).join('/');
+    const error = codexJsonString(item.error);
+    return {
+      workEvent: {
+        id: id ? `codex-json-${id}` : `codex-json-tool-${state.nextCommandIndex++}`,
+        toolName: tool,
+        label: formatAgentToolName(tool, tool),
+        detail: detail || undefined,
+        output: error,
+        status: error ? 'failed' : status,
+      },
+    };
+  }
+
+  return {};
+}
+
+function createCodexRuntimeOutputState(): CodexRuntimeOutputState {
+  return {
+    nextCommandIndex: 1,
+    inFinalAnswer: false,
+    commandByKey: new Map(),
+    commands: new Map(),
+    seenAgentLines: new Set(),
+    seenStatusLines: new Set(),
+    seenOutputByCommand: new Map(),
+    skippingPermissionPrompt: false,
+    suppressingHiddenContextEcho: false,
+    suppressingUserPromptEcho: false,
+  };
+}
+
+function compactCodexDisplayLine(line: string): string {
+  return stripCodexPromptPlaceholderFromLine(line)
+    .replace(/\s+$/g, '')
+    .replace(/^\s{2,}/, '');
+}
+
+function codexLineSignature(line: string): string {
+  return line.replace(/\s+/g, ' ').trim().toLowerCase();
+}
+
+function codexCommandKey(command: string): string {
+  return command.replace(/\s+/g, ' ').trim().toLowerCase();
+}
+
+function upsertCodexCommandRecord(
+  state: CodexRuntimeOutputState,
+  command: string,
+  status: 'running' | 'completed',
+): CodexRuntimeCommandRecord {
+  const normalizedCommand = command.replace(/\s+/g, ' ').trim();
+  const key = codexCommandKey(normalizedCommand);
+  let id = state.commandByKey.get(key);
+  if (!id) {
+    id = `codex-command-${state.nextCommandIndex++}`;
+    state.commandByKey.set(key, id);
+  }
+  const existing = state.commands.get(id);
+  const record: CodexRuntimeCommandRecord = existing
+    ? { ...existing, command: normalizedCommand || existing.command, status }
+    : { id, command: normalizedCommand, outputLines: [], status, createdAt: Date.now() };
+  state.commands.set(id, record);
+  state.activeCommandId = id;
+  state.inFinalAnswer = false;
+  return record;
+}
+
+function commandRecordToWorkEvent(record: CodexRuntimeCommandRecord): CodexRuntimeWorkEvent {
+  const output = record.outputLines.join('\n').trim();
+  return {
+    id: record.id,
+    toolName: 'shell_command',
+    label: 'Run',
+    detail: record.command,
+    command: record.command,
+    output: output || undefined,
+    status: record.status,
+  };
+}
+
+function updateCodexCommandRecordStatus(
+  state: CodexRuntimeOutputState,
+  id: string,
+  status: CodexRuntimeCommandRecord['status'],
+): CodexRuntimeWorkEvent | null {
+  const record = state.commands.get(id);
+  if (!record) return null;
+  const next = { ...record, status };
+  state.commands.set(id, next);
+  return commandRecordToWorkEvent(next);
+}
+
+function completeRunningCodexCommands(
+  state: CodexRuntimeOutputState,
+  exceptId?: string,
+): CodexRuntimeWorkEvent[] {
+  const events: CodexRuntimeWorkEvent[] = [];
+  for (const record of state.commands.values()) {
+    if (record.id === exceptId || record.status !== 'running') continue;
+    const completed = { ...record, status: 'completed' as const };
+    state.commands.set(record.id, completed);
+    events.push(commandRecordToWorkEvent(completed));
+  }
+  return events;
+}
+
+function appendCodexCommandOutput(
+  state: CodexRuntimeOutputState,
+  value: string,
+): CodexRuntimeWorkEvent | null {
+  const id = state.activeCommandId;
+  if (!id) return null;
+  const record = state.commands.get(id);
+  if (!record) return null;
+  const output = value.trimEnd();
+  if (!output.trim()) return null;
+  if (isCodexPermissionPromptLine(output.trim())) return null;
+  let seen = state.seenOutputByCommand.get(id);
+  if (!seen) {
+    seen = new Set();
+    state.seenOutputByCommand.set(id, seen);
+  }
+  const signature = codexLineSignature(output);
+  if (seen.has(signature)) return null;
+  seen.add(signature);
+  const outputLines = [...record.outputLines, output].slice(-80);
+  const next = { ...record, outputLines };
+  state.commands.set(id, next);
+  return commandRecordToWorkEvent(next);
+}
+
+function codexAgentLineEvent(state: CodexRuntimeOutputState, display: string, final = false): { agentLine?: string; finalAgentLine?: string } {
+  const clean = display.trim();
+  const signature = codexLineSignature(clean);
+  if (!signature || state.seenAgentLines.has(signature)) return {};
+  state.seenAgentLines.add(signature);
+  return final ? { finalAgentLine: display } : { agentLine: display };
+}
+
+function isCodexPermissionPromptStart(clean: string): boolean {
+  return /\bWould you like to run the following command\??/i.test(clean);
+}
+
+function isCodexPermissionPromptEnd(clean: string): boolean {
+  return /\bPress enter to confirm or esc to cancel\b/i.test(clean);
+}
+
+function isCodexPermissionPromptLine(clean: string): boolean {
+  return isCodexPermissionPromptStart(clean)
+    || isCodexPermissionPromptEnd(clean)
+    || /^\s*[›>]\s*[123]\.\s+/i.test(clean)
+    || /^\s*[123]\.\s+(?:Yes|No)\b/i.test(clean)
+    || /^\s*\$\s+/.test(clean)
+    || /^✔\s*You approved\b/i.test(clean);
+}
+
+function isCodexHiddenContextEchoStart(clean: string): boolean {
+  return /\bPrevious follow-up context for continuity only\b/i.test(clean)
+    || /\bcontinuity only\.\s+Do not quote\b/i.test(clean)
+    || /\bDo not quote,\s+restate,\s+or summarize this context\b/i.test(clean);
+}
+
+function isCodexHiddenContextEchoTerminalLine(clean: string): boolean {
+  return CODEX_SESSION_TITLE_LINE_RE.test(clean)
+    || CODEX_COMMAND_START_RE.test(clean)
+    || isCodexPermissionPromptStart(clean)
+    || isCodexPermissionPromptLine(clean);
+}
+
+function isCodexUserPromptEchoStart(clean: string): boolean {
+  return /^User follow-up:/i.test(clean)
+    || /\bRun this exact shell command\b/i.test(clean)
+    || /\busing the shell tool\b/i.test(clean)
+    || /\bwait if approval is requested\b/i.test(clean);
+}
+
+function isLikelyCodexAgentProseLine(clean: string): boolean {
+  if (!clean || clean.length < 8) return false;
+  if (/^[\w.-]+[\\/][\w./\\-]+$/.test(clean)) return false;
+  if (/^[\w.-]+:\s*\d+\s*$/i.test(clean)) return false;
+  if (/^[\w.-]+\.\w+$/i.test(clean)) return false;
+  if (/^[\w.-]+(?:\s+[\w.-]+){0,4}$/.test(clean) && !/[.!?;:,]/.test(clean)) return false;
+  return /\b(?:I|I've|I'll|The|This|Here|It|There|Next|Now|Summary|Findings|Workspace|Repository|Repo)\b/i.test(clean)
+    || /[.!?]\s*$/.test(clean);
+}
+
+function processCodexRuntimeLine(
+  state: CodexRuntimeOutputState,
+  line: string,
+): CodexRuntimeLineResult {
+  const display = compactCodexDisplayLine(line);
+  const clean = display.trim();
+  if (!clean) return {};
+  const jsonResult = processCodexJsonRuntimeLine(state, clean);
+  if (jsonResult) return jsonResult;
+  if (state.suppressingHiddenContextEcho) {
+    if (/^User follow-up:/i.test(clean)) {
+      state.suppressingHiddenContextEcho = false;
+      state.suppressingUserPromptEcho = true;
+      return {};
+    }
+    if (!isCodexHiddenContextEchoTerminalLine(clean)) return {};
+    state.suppressingHiddenContextEcho = false;
+    if (CODEX_HIDDEN_PROMPT_ECHO_PATTERNS.some(pattern => pattern.test(clean))) return {};
+  }
+  if (isCodexHiddenContextEchoStart(clean)) {
+    state.suppressingHiddenContextEcho = true;
+    return {};
+  }
+  if (state.suppressingUserPromptEcho) {
+    if (!isCodexHiddenContextEchoTerminalLine(clean)) return {};
+    state.suppressingUserPromptEcho = false;
+    if (CODEX_HIDDEN_PROMPT_ECHO_PATTERNS.some(pattern => pattern.test(clean))) return {};
+  }
+  if (isCodexUserPromptEchoStart(clean)) {
+    state.suppressingUserPromptEcho = true;
+    return {};
+  }
+  if (CODEX_SESSION_TITLE_LINE_RE.test(clean)) {
+    const title = extractAgentSessionTitle(clean).title;
+    const completedEvents = completeRunningCodexCommands(state);
+    state.activeCommandId = undefined;
+    state.inFinalAnswer = true;
+    return { sessionTitle: title ?? undefined, workEvents: completedEvents };
+  }
+  if (state.skippingPermissionPrompt) {
+    if (isCodexPermissionPromptEnd(clean)) state.skippingPermissionPrompt = false;
+    return {};
+  }
+  if (isCodexPermissionPromptStart(clean)) {
+    state.skippingPermissionPrompt = true;
+    return {};
+  }
+  if (isCodexPermissionPromptLine(clean)) return {};
+  if (isCodexRuntimeDisplayNoiseLine(display)) return {};
+
+  const commandMatch = clean.match(CODEX_COMMAND_START_RE);
+  if (commandMatch) {
+    const status = /^ran$/i.test(commandMatch[1]) ? 'completed' : 'running';
+    const record = upsertCodexCommandRecord(state, commandMatch[2], status);
+    const completedEvents = completeRunningCodexCommands(state, record.id);
+    return { workEvents: [...completedEvents, commandRecordToWorkEvent(record)] };
+  }
+
+  const continuation = clean.match(CODEX_COMMAND_CONTINUATION_RE);
+  if (continuation && state.activeCommandId && !state.inFinalAnswer) {
+    const record = state.commands.get(state.activeCommandId);
+    if (!record) return {};
+    const command = `${record.command} ${continuation[1]}`.replace(/\s+/g, ' ').trim();
+    const next = { ...record, command };
+    state.commands.set(record.id, next);
+    return { workEvent: commandRecordToWorkEvent(next) };
+  }
+
+  const outputMatch = clean.match(CODEX_COMMAND_OUTPUT_RE);
+  if (outputMatch && state.activeCommandId && !state.inFinalAnswer) {
+    const output = outputMatch[1] || '(no output)';
+    const outputEvent = appendCodexCommandOutput(state, output);
+    const rejected = output.trim().match(CODEX_COMMAND_REJECTED_RE);
+    if (rejected) {
+      const failedEvent = updateCodexCommandRecordStatus(state, state.activeCommandId, 'failed');
+      return { workEvents: [outputEvent, failedEvent].filter(Boolean) as CodexRuntimeWorkEvent[] };
+    }
+    return { workEvent: outputEvent ?? undefined };
+  }
+
+  if (CODEX_TRANSCRIPT_TRUNCATION_RE.test(clean) && state.activeCommandId && !state.inFinalAnswer) {
+    return { workEvent: appendCodexCommandOutput(state, clean) ?? undefined };
+  }
+
+  const bulletProse = clean.match(CODEX_BULLET_PROSE_RE);
+  if (bulletProse) {
+    const completedEvents = completeRunningCodexCommands(state);
+    state.activeCommandId = undefined;
+    return {
+      ...codexAgentLineEvent(state, bulletProse[1].trim()),
+      workEvents: completedEvents,
+    };
+  }
+
+  if (state.activeCommandId && !state.inFinalAnswer && isLikelyCodexAgentProseLine(clean)) {
+    const completedEvents = completeRunningCodexCommands(state);
+    state.activeCommandId = undefined;
+    state.inFinalAnswer = true;
+    return {
+      ...codexAgentLineEvent(state, display, true),
+      workEvents: completedEvents,
+    };
+  }
+
+  if (state.activeCommandId && !state.inFinalAnswer) {
+    const outputEvent = appendCodexCommandOutput(state, clean);
+    const rejected = clean.match(CODEX_COMMAND_REJECTED_RE);
+    if (rejected) {
+      const failedEvent = updateCodexCommandRecordStatus(state, state.activeCommandId, 'failed');
+      return { workEvents: [outputEvent, failedEvent].filter(Boolean) as CodexRuntimeWorkEvent[] };
+    }
+    return { workEvent: outputEvent ?? undefined };
+  }
+
+  if (!state.inFinalAnswer) {
+    state.activeCommandId = undefined;
+    return isLikelyCodexAgentProseLine(clean) ? codexAgentLineEvent(state, display) : {};
+  }
+
+  return codexAgentLineEvent(state, display, true);
 }
 
 function sanitizeRuntimeOutputChunkForFollowUp(
   cli: string,
   text: string,
   pendingLine = '',
-): { content: string | null; pendingLine: string } {
+  codexState?: CodexRuntimeOutputState,
+): { content: string | null; pendingLine: string; workEvents: CodexRuntimeWorkEvent[]; events: CodexRuntimeStreamEvent[] } {
   const clean = stripRuntimeOutputControls(text);
-  if (cli !== 'codex') return { content: clean.trim() ? clean : null, pendingLine: '' };
+  if (cli !== 'codex') {
+    return {
+      content: clean.trim() && !isTransientRuntimeStatusOnly(clean) ? clean : null,
+      pendingLine: '',
+      workEvents: [],
+      events: [],
+    };
+  }
 
   const combined = `${pendingLine}${clean}`;
   const hasTrailingLineBreak = /\n$/.test(combined);
   const parts = combined.split('\n');
   const completeLines = hasTrailingLineBreak ? parts.slice(0, -1) : parts.slice(0, -1);
   const nextPendingLine = hasTrailingLineBreak ? '' : (parts[parts.length - 1] ?? '');
-  const display = completeLines
-    .filter(line => !isCodexRuntimeDisplayNoiseLine(line))
-    .join('\n');
-  return { content: display.trim() ? display : null, pendingLine: nextPendingLine };
+  const state = codexState ?? createCodexRuntimeOutputState();
+  const agentLines: string[] = [];
+  const workEvents: CodexRuntimeWorkEvent[] = [];
+  const events: CodexRuntimeStreamEvent[] = [];
+  for (const line of completeLines) {
+    const result = processCodexRuntimeLine(state, line);
+    const resultWorkEvents = result.workEvents ?? (result.workEvent ? [result.workEvent] : []);
+    for (const workEvent of resultWorkEvents) {
+      workEvents.push(workEvent);
+      events.push({ kind: 'work', workEvent });
+    }
+    if (result.agentLine) {
+      agentLines.push(result.agentLine);
+      events.push({ kind: 'agent', text: result.agentLine });
+    }
+    if (result.finalAgentLine) {
+      agentLines.push(result.finalAgentLine);
+      events.push({ kind: 'final_agent', text: result.finalAgentLine });
+    }
+    if (result.sessionTitle) {
+      events.push({ kind: 'session_title', title: result.sessionTitle });
+    }
+  }
+  const display = agentLines.join('\n');
+  return { content: display.trim() ? display : null, pendingLine: nextPendingLine, workEvents, events };
 }
 
-function flushRuntimeOutputChunkForFollowUp(cli: string, pendingLine = ''): string | null {
-  if (!pendingLine.trim()) return null;
-  if (cli === 'codex' && isCodexRuntimeDisplayNoiseLine(pendingLine)) return null;
-  return pendingLine;
+function flushRuntimeOutputChunkForFollowUp(
+  cli: string,
+  pendingLine = '',
+  codexState?: CodexRuntimeOutputState,
+): { content: string | null; workEvents: CodexRuntimeWorkEvent[]; events: CodexRuntimeStreamEvent[] } {
+  const display = cli === 'codex' ? stripCodexPromptPlaceholderFromLine(pendingLine) : pendingLine;
+  if (!display.trim()) return { content: null, workEvents: [], events: [] };
+  if (cli === 'codex') {
+    const state = codexState ?? createCodexRuntimeOutputState();
+    const result = processCodexRuntimeLine(state, display);
+    const events: CodexRuntimeStreamEvent[] = [];
+    const resultWorkEvents = result.workEvents ?? (result.workEvent ? [result.workEvent] : []);
+    for (const workEvent of resultWorkEvents) events.push({ kind: 'work', workEvent });
+    if (result.agentLine) events.push({ kind: 'agent', text: result.agentLine });
+    if (result.finalAgentLine) events.push({ kind: 'final_agent', text: result.finalAgentLine });
+    if (result.sessionTitle) events.push({ kind: 'session_title', title: result.sessionTitle });
+    return {
+      content: result.finalAgentLine ?? result.agentLine ?? null,
+      workEvents: resultWorkEvents,
+      events,
+    };
+  }
+  return { content: display, workEvents: [], events: [] };
 }
 
 function diffStats(patch: string): { added: number; removed: number; hunks: number } {
@@ -1992,6 +2738,8 @@ function isInternalAgentWorkItem(item: AgentWorkItem | null | undefined): boolea
   const detail = item.detail?.trim() ?? '';
   return (
     /^task-(?:injected|running)-\d+$/i.test(item.id)
+    || toolName === 'permission'
+    || title === 'permission'
     || toolName === 'send_task'
     || (title === 'send' && /^Prompt sent:/i.test(detail))
     || (title === 'run' && /^Agent accepted the task/i.test(detail))
@@ -2029,7 +2777,8 @@ function buildAgentWorkItemFromToolEvent(
       : 'inProgress';
   const title = formatAgentToolName(event.toolName, event.label);
   const kind = agentToolKind(event.toolName, event.label);
-  const output = event.output?.trim() || undefined;
+  const command = compactAgentShellCommandForDisplay(event.command?.trim() || event.detail?.trim() || '');
+  const output = event.output ? compactAgentCommandOutput(event.output) || undefined : undefined;
   const explicitChanges = kind === 'fileChange'
     ? (event.changes ?? [])
         .map(change => {
@@ -2064,9 +2813,9 @@ function buildAgentWorkItemFromToolEvent(
     id: stableAgentToolEventId(sessionId, event),
     kind,
     title,
-    detail: event.detail?.trim() || undefined,
+    detail: kind === 'command' ? command || event.detail?.trim() || undefined : event.detail?.trim() || undefined,
     toolName: event.toolName,
-    command: kind === 'command' ? event.command?.trim() || event.detail?.trim() || undefined : event.command?.trim() || undefined,
+    command: kind === 'command' ? command || undefined : compactAgentShellCommandForDisplay(event.command?.trim() || '') || undefined,
     cwd: event.cwd?.trim() || undefined,
     output,
     exitCode: event.exitCode,
@@ -2091,6 +2840,20 @@ function workItemHasPatch(item: AgentWorkItem | null | undefined): boolean {
 
 function mergeAgentWorkItemUpdate(existingMessage: FollowUpMessage | undefined, next: AgentWorkItem): AgentWorkItem {
   const existing = existingMessage ? parseAgentWorkItemMessage(existingMessage) : null;
+  if (
+    existing
+    && existing.status === 'completed'
+    && next.status === 'inProgress'
+    && existing.kind === next.kind
+  ) {
+    return {
+      ...next,
+      status: 'completed',
+      completedAt: existing.completedAt ?? Date.now(),
+      output: next.output || existing.output,
+      changes: next.changes ?? existing.changes,
+    };
+  }
   if (!existing || existing.kind !== 'fileChange' || next.kind !== 'fileChange') return next;
   if (workItemHasPatch(next)) {
     const existingByPath = new Map((existing.changes ?? []).filter(changeHasPatch).map(change => [changeLookupKey(change.path), change]));
@@ -2705,12 +3468,33 @@ function buildFollowUpTimelineItems(messages: FollowUpMessage[]): FollowUpTimeli
 }
 
 function shouldCollapseRun(messages: FollowUpMessage[]): boolean {
-  const hasStreaming = messages.some(message => message.status === 'streaming' || message.status === 'sending' || message.status === 'queued');
+  const workItems = collectAgentWorkItems(messages);
+  const hasStreamingWork = messages.some(message => {
+    if (message.status !== 'streaming') return false;
+    return Boolean(parseAgentWorkItemMessage(message));
+  });
+  const hasPendingNonAgent = messages.some(message =>
+    message.role !== 'agent'
+    && (message.status === 'streaming' || message.status === 'sending' || message.status === 'queued')
+  );
   const hasCompletedAgent = messages.some(message =>
     message.role === 'agent' &&
     (message.status === 'completed' || message.status === 'failed' || message.status === 'cancelled')
   );
-  return messages.length > 0 && hasCompletedAgent && !hasStreaming;
+  const lastVisible = [...messages].reverse().find(message => {
+    const workItem = parseAgentWorkItemMessage(message);
+    if (isInternalAgentWorkItem(workItem) || (!workItem && isInternalAgentStatusMessage(message))) return false;
+    if (message.role === 'agent') return Boolean(agentDisplayContentWithoutMetadata(message.content).trim());
+    return Boolean(workItem);
+  });
+  const finalAnswerStreaming = Boolean(
+    workItems.length > 0
+    && lastVisible?.role === 'agent'
+    && lastVisible.status === 'streaming'
+    && !hasStreamingWork
+    && !hasPendingNonAgent
+  );
+  return messages.length > 0 && !hasStreamingWork && !hasPendingNonAgent && (hasCompletedAgent || finalAnswerStreaming);
 }
 
 function FollowUpMessageTimeline({
@@ -2825,25 +3609,24 @@ function AgentTurnLiveGroup({
   onSdkCommandTerminalId,
   cardResolutions,
 }: { messages: FollowUpMessage[] } & FollowUpTimelineMessageProps) {
-  const workItems = collectAgentWorkItems(messages);
-  const hasWorkItems = workItems.length > 0;
   return (
     <div className="td-agent-turn-live">
-      {hasWorkItems && (
-        <div className="td-agent-work-panel" aria-label="Agent work">
-          {workItems.map(item => <AgentWorkItemCard key={item.id} item={item} />)}
-        </div>
-      )}
-      {messages.filter(message => !parseAgentWorkItemMessage(message) && !isInternalAgentStatusMessage(message)).map(message => (
-        <FollowUpChatMessage
-          key={message.id}
-          message={message}
-          onCardAction={onCardAction}
-          sdkCommandTerminalId={sdkCommandTerminalId}
-          onSdkCommandTerminalId={onSdkCommandTerminalId}
-          cardResolutions={cardResolutions}
-        />
-      ))}
+      {messages.map(message => {
+        const workItem = parseAgentWorkItemMessage(message);
+        if (isInternalAgentWorkItem(workItem) || (!workItem && isInternalAgentStatusMessage(message))) return null;
+        if (workItem) return <AgentWorkItemCard key={message.id} item={workItem} />;
+        if (message.role === 'agent' && !agentDisplayContentWithoutMetadata(message.content).trim()) return null;
+        return (
+          <FollowUpChatMessage
+            key={message.id}
+            message={message}
+            onCardAction={onCardAction}
+            sdkCommandTerminalId={sdkCommandTerminalId}
+            onSdkCommandTerminalId={onSdkCommandTerminalId}
+            cardResolutions={cardResolutions}
+          />
+        );
+      })}
     </div>
   );
 }
@@ -2992,6 +3775,7 @@ function FollowUpChatMessage({
 }) {
   const workItem = parseAgentWorkItemMessage(message);
   if (workItem) return <AgentWorkItemCard item={workItem} />;
+  if (message.role === 'agent' && !agentDisplayContentWithoutMetadata(message.content).trim()) return null;
 
   const hasInteractiveSdkContent = (message.role === 'system' || message.role === 'tool')
     ? followUpToolMessageHasInteractiveSdkContent(message.content)
@@ -3041,7 +3825,7 @@ function AgentMessageContent({
   cardResolutions?: Map<string, SdkCardResolution>;
 }) {
   const content = message.role === 'agent'
-    ? stripAgentSessionTitle(stripAgentTokenUsage(message.content))
+    ? agentDisplayContentWithoutMetadata(message.content)
     : stripAgentTokenUsage(message.content);
   if (message.role === 'user') {
     return (
@@ -3052,7 +3836,9 @@ function AgentMessageContent({
       </div>
     );
   }
-  const blocks = splitAgentContent(content);
+  const blocks = splitAgentContent(content, {
+    parseStatus: message.role !== 'agent' || message.status === 'streaming',
+  });
   if (blocks.length === 0) return null;
   const resolutionForCard = (index: number, kind: string, fallbackTarget: string): SdkCardResolution | undefined =>
     resolveSdkCardResolution(cardResolutions, {
@@ -3717,8 +4503,6 @@ function iconForAgentOutputStatus(icon: AgentOutputStatusIcon): ReactNode {
       return <Hammer size={13} />;
     case 'test':
       return <CheckCircle2 size={13} />;
-    case 'thinking':
-      return <Loader2 size={13} className="td-agent-spin" />;
     case 'tool':
       return <Sparkles size={13} />;
   }
@@ -4008,11 +4792,162 @@ function iconForAgentStatus(kind: AgentStatusKind): ReactNode {
   }
 }
 
-function AgentThinkingRow({ state }: { state?: string | null }) {
+function runtimeLiveStatusLabel(state?: string | null): string {
+  const normalized = (state || '').toLowerCase();
+  if (normalized === 'awaiting_cli_ready') return 'Awaiting CLI ready';
+  if (normalized === 'launching_cli') return 'Launching CLI';
+  if (normalized === 'creating') return 'Starting';
+  if (normalized === 'waiting_auth') return 'Waiting for auth';
+  if (normalized === 'registering_mcp' || normalized === 'awaiting_mcp_ready') return 'Preparing tools';
+  if (normalized === 'bootstrap_injecting' || normalized === 'bootstrap_sent' || normalized === 'injecting_task' || normalized === 'awaiting_ack') {
+    return 'Sending prompt';
+  }
+  if (normalized === 'awaiting_permission') return 'Waiting for permission';
+  if (/stopping/i.test(normalized)) return 'Stopping';
+  return 'Thinking';
+}
+
+function AgentRuntimeStatusLine({ label, elapsedSeconds }: { label: string; elapsedSeconds: number }) {
   return (
-    <div className="td-agent-thinking-row">
+    <div className="td-agent-runtime-status-line">
       <Loader2 size={13} className="td-agent-spin" />
-      <strong>{runtimeStepLabel(state)}</strong>
+      <strong>{label}</strong>
+      <small>{elapsedSeconds}s</small>
+    </div>
+  );
+}
+
+function isPermissionCommandJunk(value: string): boolean {
+  const clean = value.trim();
+  return !clean
+    || /^[-_─━|│╭╮╰╯\s]+$/.test(clean)
+    || /^Would you like to run the following command\??$/i.test(clean)
+    || /^Press enter to confirm or esc to cancel$/i.test(clean);
+}
+
+function permissionCommandText(permission: RuntimePermissionRequest): string {
+  const raw = stripRuntimeOutputControls(`${permission.rawPrompt || ''}\n${permission.detail || ''}`).replace(/\r/g, '\n');
+  const shellPromptMatch = raw.match(/\$\s*([\s\S]*?)(?=\n\s*(?:[›>]\s*)?[123]\.\s+|\n\s*Press enter\b|$)/i);
+  const shellCommand = shellPromptMatch?.[1]?.replace(/\s+/g, ' ').trim();
+  if (shellCommand && !isPermissionCommandJunk(shellCommand)) return shellCommand;
+
+  const questionMatch = raw.match(/Would you like to run the following command\??\s*([\s\S]*?)(?=\n\s*(?:[›>]\s*)?[123]\.\s+|\n\s*Press enter\b|$)/i);
+  const questionCommand = questionMatch?.[1]?.replace(/^\s*\$\s*/, '').replace(/\s+/g, ' ').trim();
+  if (questionCommand && !isPermissionCommandJunk(questionCommand)) return questionCommand;
+
+  const commandish = raw
+    .split(/\r?\n/)
+    .map(line => line.trim().replace(/^\$\s*/, ''))
+    .filter(line =>
+      line
+      && !isPermissionCommandJunk(line)
+      && !/^[›>]\s*[123]\.\s+/i.test(line)
+      && !/^[123]\.\s+(?:Yes|No)\b/i.test(line)
+      && !/^Permission needed/i.test(line)
+      && !/^Codex .*permission/i.test(line)
+    )
+    .find(line => /(?:\brg\b|Get-ChildItem|Select-Object|Measure-Object|powershell|pwsh|npm|node|git|python|cargo|pip|curl|bash|\|\s*)/i.test(line));
+  return commandish && !isPermissionCommandJunk(commandish) ? commandish : '';
+}
+
+function permissionReviewText(permission: RuntimePermissionRequest): string {
+  const command = permissionCommandText(permission);
+  if (command) return command;
+  const raw = stripRuntimeOutputControls(`${permission.rawPrompt || permission.detail}`)
+    .split(/\r?\n/)
+    .map(line => line.trimEnd())
+    .filter(line => {
+      const clean = line.trim();
+      if (!clean) return false;
+      return !/^[›>]\s*[123]\.\s+/i.test(clean)
+        && !/^[123]\.\s+(?:Yes|No)\b/i.test(clean)
+        && !/^Press enter to confirm or esc to cancel/i.test(clean);
+    })
+    .join('\n')
+    .trim();
+  return raw || permission.detail;
+}
+
+function permissionPopupSummary(permission: RuntimePermissionRequest): string {
+  const text = (permissionCommandText(permission) || permissionReviewText(permission))
+    .replace(/\s+/g, ' ')
+    .replace(/\bWould you like to run the following command\??\s*/i, '')
+    .trim();
+  return text || permission.category.replace(/_/g, ' ');
+}
+
+function AgentPermissionPopup({
+  permission,
+  sessionId,
+  elapsedSeconds,
+}: {
+  permission: RuntimePermissionRequest;
+  sessionId: string;
+  elapsedSeconds: number;
+}) {
+  const updatePrompt = isCodexUpdatePermissionPrompt(permission);
+  const approveLabel = updatePrompt ? 'Update' : 'Approve';
+  const denyLabel = updatePrompt ? 'Skip' : 'Deny';
+  const reviewText = permissionReviewText(permission);
+  const command = permissionCommandText(permission);
+  const summary = permissionPopupSummary(permission);
+  return (
+    <div
+      className="td-agent-permission-popup"
+      role="dialog"
+      aria-label="Permission needed"
+    >
+      <div className="td-agent-permission-popup-header">
+        <span className="td-agent-permission-icon">
+          <Shield size={14} />
+        </span>
+        <span className="td-agent-permission-popup-title">
+          <strong>{updatePrompt ? 'Codex update' : 'Permission needed'}</strong>
+          <small>{permission.category.replace(/_/g, ' ')}</small>
+        </span>
+        <span className="td-agent-permission-popup-summary" title={summary}>{summary}</span>
+      </div>
+      <div className="td-agent-permission-live-status">
+        <Loader2 size={12} className="td-agent-spin" />
+        <strong>Waiting for permission</strong>
+        <small>{elapsedSeconds}s</small>
+      </div>
+      {command && (
+        <div className="td-agent-permission-command" title={command}>
+          <TerminalSquare size={13} />
+          <code>{command}</code>
+        </div>
+      )}
+      <pre className="td-agent-permission-details"><code>{reviewText}</code></pre>
+      <div className="td-agent-permission-popup-actions">
+        <button
+          type="button"
+          className="td-agent-permission-popup-option is-deny"
+          onMouseDown={event => event.preventDefault()}
+          onClick={() => void runtimeManager.resolvePermission({ sessionId, permissionId: permission.permissionId, decision: 'deny' })}
+        >
+          <span className="td-agent-slash-icon"><X size={14} /></span>
+          <span className="td-agent-slash-command">{denyLabel}</span>
+          <span className="td-agent-slash-copy">
+            <span>{updatePrompt ? 'Continue without update' : 'Reject request'}</span>
+            <small>{updatePrompt ? 'Skip this Codex update prompt.' : 'Return a denial to the CLI.'}</small>
+          </span>
+        </button>
+        <button
+          type="button"
+          className="td-agent-permission-popup-option is-approve is-selected"
+          onMouseDown={event => event.preventDefault()}
+          onClick={() => void runtimeManager.resolvePermission({ sessionId, permissionId: permission.permissionId, decision: 'approve' })}
+        >
+          <span className="td-agent-slash-icon"><CheckCircle2 size={14} /></span>
+          <span className="td-agent-slash-command">{approveLabel}</span>
+          <span className="td-agent-slash-copy">
+            <span>{updatePrompt ? 'Run the update' : 'Allow request'}</span>
+            <small>{updatePrompt ? 'Let Codex update before continuing.' : 'Send approval back to the CLI.'}</small>
+          </span>
+        </button>
+      </div>
+      <div className="td-agent-slash-hint">Choose an action to continue the run.</div>
     </div>
   );
 }
@@ -4155,11 +5090,12 @@ export function FollowUpComposer({
   const [loadingModels, setLoadingModels] = useState(false);
   const [runtimeSnapshot, setRuntimeSnapshot] = useState<RuntimeManagerSnapshot>(() => runtimeManager.snapshot());
   const [submitting, setSubmitting] = useState(false);
+  const [runtimeLiveStatusClock, setRuntimeLiveStatusClock] = useState(() => Date.now());
   const [activeMenu, setActiveMenu] = useState<string | null>(null);
   const [skillsOpen, setSkillsOpen] = useState(false);
   const [storedOpenAiApiKey, setStoredOpenAiApiKeyState] = useState(() => getStoredOpenAiApiKey());
   const [, bumpOpenAiConfigVersion] = useState(0);
-  const [sdkStep, setSdkStep] = useState<string | null>(null);
+  const [, setSdkStep] = useState<string | null>(null);
   const [sdkUsage, setSdkUsage] = useState<SdkChatUsageDelta | null>(null);
   const [sdkFinishMeta, setSdkFinishMeta] = useState<SdkChatFinishMeta | null>(null);
   const [cliContextPercent, setCliContextPercent] = useState<number | null>(null);
@@ -4180,6 +5116,10 @@ export function FollowUpComposer({
   const cliContextOutputTailRef = useRef('');
   const runtimeOutputDisplaySessionsRef = useRef<Set<string>>(new Set());
   const runtimeOutputPendingLinesRef = useRef<Map<string, string>>(new Map());
+  const runtimeOutputCodexStateRef = useRef<Map<string, CodexRuntimeOutputState>>(new Map());
+  const runtimeOutputLastEntryKindRef = useRef<Map<string, 'agent' | 'work'>>(new Map());
+  const followUpIdleClearTimerRef = useRef<number | null>(null);
+  const handledDebugAgentPromptIdsRef = useRef<Set<string>>(new Set());
   const agentOutputScrollRef = useRef<HTMLDivElement | null>(null);
   const agentOutputShouldStickRef = useRef(true);
   const promptInputRef = useRef<HTMLTextAreaElement | null>(null);
@@ -4219,6 +5159,10 @@ export function FollowUpComposer({
     if (!element) return;
     agentOutputShouldStickRef.current = isAgentOutputScrolledToBottom(element);
   }
+
+  useEffect(() => {
+    return () => clearFollowUpIdleCompletionTimer();
+  }, []);
 
   useEffect(() => {
     if (placement !== 'tab' || pane.data?.dockExpandedToTab !== true) return;
@@ -4261,6 +5205,33 @@ export function FollowUpComposer({
     const currentBusyState = currentPane?.data?.followUpBusyState as { sessionId?: string; active?: boolean } | undefined;
     if (sessionId && currentBusyState?.sessionId && currentBusyState.sessionId !== sessionId) return;
     updatePaneData(pane.id, { followUpBusyState: null });
+  }
+
+  function clearFollowUpIdleCompletionTimer() {
+    if (followUpIdleClearTimerRef.current === null) return;
+    window.clearTimeout(followUpIdleClearTimerRef.current);
+    followUpIdleClearTimerRef.current = null;
+  }
+
+  function scheduleFollowUpIdleCompletion(
+    sessionId: string,
+    finalizeStatus?: Extract<FollowUpMessage['status'], 'completed' | 'failed' | 'cancelled'>,
+  ) {
+    clearFollowUpIdleCompletionTimer();
+    followUpIdleClearTimerRef.current = window.setTimeout(() => {
+      followUpIdleClearTimerRef.current = null;
+      if (finalizeStatus) {
+        const current = readFollowUpMessages(pane.id);
+        const finalized = finalizeStreamingMessages(current, sessionId, finalizeStatus);
+        if (finalized !== current) {
+          updatePaneData(pane.id, { followUpMessages: finalized.slice(-200) });
+          finalized
+            .filter((message, index) => message !== current[index])
+            .forEach(message => void persistFollowUpMessage(threadId, message));
+        }
+      }
+      clearFollowUpBusyState(sessionId);
+    }, 2_500);
   }
 
   function rememberFollowUpSession(update: Partial<FollowUpSessionRecord> & { threadId?: string } = {}) {
@@ -4387,9 +5358,23 @@ export function FollowUpComposer({
     sessionId: string,
     cli: string,
     model: string | undefined,
-    event: { toolName: string; label: string; detail?: string; status?: 'running' | 'completed' | 'failed'; id?: string },
+    event: {
+      toolName: string;
+      label: string;
+      detail?: string;
+      status?: 'running' | 'completed' | 'failed';
+      id?: string;
+      command?: string;
+      cwd?: string;
+      output?: string;
+      exitCode?: number | null;
+    },
   ) {
     const status = event.status ?? 'running';
+    if (status === 'running') {
+      clearFollowUpIdleCompletionTimer();
+      setFollowUpBusyState(sessionId, event.label || 'streaming');
+    }
     const id = stableAgentToolEventId(sessionId, { ...event, id: event.id ?? `${event.toolName}:${event.label}:${event.detail ?? ''}` });
     const existing = readFollowUpMessages(pane.id).find(message => message.id === id);
     const createdAt = existing?.createdAt ?? Date.now();
@@ -4408,8 +5393,60 @@ export function FollowUpComposer({
       completedAt: status === 'running' ? undefined : (workItem.completedAt ?? Date.now()),
     };
     upsertFollowUpMessage(pane.id, toolMessage);
+    runtimeOutputLastEntryKindRef.current.set(sessionId, 'work');
     if (workItem.kind === 'fileChange') scheduleFollowUpLiveFileChangeRefresh(sessionId);
-    if (status !== 'running') void persistFollowUpMessage(threadId, toolMessage);
+    if (status !== 'running') {
+      scheduleFollowUpIdleCompletion(sessionId, status === 'failed' ? 'failed' : 'completed');
+      void persistFollowUpMessage(threadId, toolMessage);
+    }
+  }
+
+  function finalizeFollowUpToolWork(
+    sessionId: string,
+    status: Extract<FollowUpMessage['status'], 'completed' | 'failed' | 'cancelled'> = 'completed',
+  ) {
+    const current = readFollowUpMessages(pane.id);
+    const finalized = finalizeStreamingToolMessages(current, sessionId, status);
+    if (finalized === current) return;
+    updatePaneData(pane.id, { followUpMessages: finalized.slice(-200) });
+    finalized
+      .filter((message, index) => message !== current[index])
+      .forEach(message => void persistFollowUpMessage(threadId, message));
+  }
+
+  function publishRuntimeAgentTranscript(sessionId: string, cli: string, model: string | undefined, content: string, final = false) {
+    const display = sanitizeAgentTranscriptForStorage(content).trim();
+    if (!display) return;
+    if (final) finalizeFollowUpToolWork(sessionId, 'completed');
+    const current = readFollowUpMessages(pane.id);
+    const lastEntryKind = runtimeOutputLastEntryKindRef.current.get(sessionId);
+    const lastAgent = lastEntryKind === 'agent'
+      ? [...current].reverse().find(message => message.runtimeSessionId === sessionId && message.role === 'agent' && message.status === 'streaming')
+      : null;
+    const rawAgentContent = lastAgent
+      ? `${lastAgent.content}${lastAgent.content.trim() ? '\n' : ''}${display}`
+      : display;
+    rememberSessionTitleFromAgentContent(sessionId, rawAgentContent);
+    const nextAgentContent = sanitizeAgentTranscriptForStorage(rawAgentContent);
+    if (!nextAgentContent.trim()) return;
+    const nextMessages = lastAgent
+      ? current.map(message => message.id === lastAgent.id ? { ...message, content: nextAgentContent } : message)
+      : [...current, {
+          id: generateId(),
+          missionId,
+          role: 'agent' as const,
+          cli,
+          model,
+          runtimeSessionId: sessionId,
+          content: display,
+          status: 'streaming' as const,
+          createdAt: Date.now(),
+        }];
+    updatePaneData(pane.id, { followUpMessages: nextMessages.slice(-200) });
+    runtimeOutputLastEntryKindRef.current.set(sessionId, 'agent');
+    scheduleFollowUpIdleCompletion(sessionId);
+    const persisted = nextMessages.find(message => message.runtimeSessionId === sessionId && message.role === 'agent' && message.status === 'streaming' && message.content === (lastAgent ? nextAgentContent : display));
+    if (persisted) void persistFollowUpMessage(threadId, persisted);
   }
 
   useEffect(() => () => {
@@ -4575,52 +5612,55 @@ export function FollowUpComposer({
       if (activeSessionId !== event.sessionId) return;
       if (event.type !== 'output_captured') {
         if (event.type === 'session_state_changed') {
-          setFollowUpBusyState(event.sessionId, event.to);
+          if (isFollowUpBusyIndicatorState(event.to)) {
+            setFollowUpBusyState(event.sessionId, event.to);
+          } else {
+            scheduleFollowUpIdleCompletion(event.sessionId, 'completed');
+          }
         } else if (event.type === 'task_injected') {
+          clearFollowUpIdleCompletionTimer();
           runtimeOutputDisplaySessionsRef.current.add(event.sessionId);
           runtimeOutputPendingLinesRef.current.delete(event.sessionId);
+          runtimeOutputCodexStateRef.current.set(event.sessionId, createCodexRuntimeOutputState());
+          runtimeOutputLastEntryKindRef.current.delete(event.sessionId);
         } else if (event.type === 'task_acked') {
           setFollowUpBusyState(event.sessionId, 'streaming');
         } else if (event.type === 'permission_requested') {
-          publishRuntimeToolActivity(event.sessionId, selectedCli, activeSelectedModel || undefined, {
-            id: `permission-${event.request.permissionId}`,
-            toolName: 'permission',
-            label: 'Permission',
-            detail: event.request.detail,
-            status: 'running',
-          });
+          clearFollowUpIdleCompletionTimer();
+          setFollowUpBusyState(event.sessionId, 'awaiting_permission');
         } else if (event.type === 'permission_resolved') {
-          publishRuntimeToolActivity(event.sessionId, selectedCli, activeSelectedModel || undefined, {
-            id: `permission-${event.permissionId}`,
-            toolName: 'permission',
-            label: 'Permission',
-            detail: `Permission ${event.decision}`,
-            status: 'completed',
-          });
+          clearFollowUpIdleCompletionTimer();
+          setFollowUpBusyState(event.sessionId, 'streaming');
         } else if (event.type === 'session_completed' || event.type === 'session_failed' || event.type === 'session_disconnected') {
-          const pendingDisplay = flushRuntimeOutputChunkForFollowUp(selectedCli, runtimeOutputPendingLinesRef.current.get(event.sessionId) ?? '');
+          clearFollowUpIdleCompletionTimer();
+          const flushed = flushRuntimeOutputChunkForFollowUp(
+            selectedCli,
+            runtimeOutputPendingLinesRef.current.get(event.sessionId) ?? '',
+            runtimeOutputCodexStateRef.current.get(event.sessionId),
+          );
           runtimeOutputDisplaySessionsRef.current.delete(event.sessionId);
           runtimeOutputPendingLinesRef.current.delete(event.sessionId);
-          if (pendingDisplay) {
-            const current = readFollowUpMessages(pane.id);
-            const lastAgent = [...current].reverse().find(message => message.runtimeSessionId === event.sessionId && message.role === 'agent' && message.status === 'streaming');
-            const nextAgentContent = lastAgent ? `${lastAgent.content}${pendingDisplay}` : pendingDisplay;
-            updatePaneData(pane.id, {
-              followUpMessages: lastAgent
-                ? current.map(message => message.id === lastAgent.id ? { ...message, content: nextAgentContent } : message)
-                : [...current, {
-                    id: generateId(),
-                    missionId,
-                    role: 'agent' as const,
-                    cli: selectedCli,
-                    model: activeSelectedModel,
-                    runtimeSessionId: event.sessionId,
-                    content: nextAgentContent,
-                    status: 'streaming' as const,
-                    createdAt: Date.now(),
-                  }],
-            });
+          runtimeOutputCodexStateRef.current.delete(event.sessionId);
+          const flushedEvents = flushed.events.length > 0
+            ? flushed.events
+            : [
+                ...flushed.workEvents.map(workEvent => ({ kind: 'work' as const, workEvent })),
+                ...(flushed.content ? [{ kind: 'agent' as const, text: flushed.content }] : []),
+              ];
+          for (const streamEvent of flushedEvents) {
+            if (streamEvent.kind === 'work') {
+              publishRuntimeToolActivity(event.sessionId, selectedCli, activeSelectedModel || undefined, streamEvent.workEvent);
+            } else if (streamEvent.kind === 'session_title') {
+              rememberFollowUpSession({
+                runtimeSessionId: event.sessionId,
+                title: streamEvent.title,
+              });
+            } else {
+              publishRuntimeAgentTranscript(event.sessionId, selectedCli, activeSelectedModel || undefined, streamEvent.text, streamEvent.kind === 'final_agent');
+            }
           }
+          clearFollowUpIdleCompletionTimer();
+          runtimeOutputLastEntryKindRef.current.delete(event.sessionId);
           clearFollowUpBusyState(event.sessionId);
           void publishFollowUpFileChanges(event.sessionId, selectedCli, activeSelectedModel || undefined);
         }
@@ -4669,7 +5709,7 @@ export function FollowUpComposer({
         void persistFollowUpMessage(threadId, message);
         return;
       }
-      const runtimeTool = parseRuntimeToolActivity(event.text);
+      const runtimeTool = selectedCli === 'codex' ? null : parseRuntimeToolActivity(event.text);
       if (selectedCli === 'codex') {
         const contextOutput = `${cliContextOutputTailRef.current}${event.text}`;
         cliContextOutputTailRef.current = contextOutput.slice(-1000);
@@ -4699,29 +5739,33 @@ export function FollowUpComposer({
         selectedCli,
         event.text,
         runtimeOutputPendingLinesRef.current.get(event.sessionId) ?? '',
+        runtimeOutputCodexStateRef.current.get(event.sessionId),
       );
       runtimeOutputPendingLinesRef.current.set(event.sessionId, sanitized.pendingLine);
-      if (!sanitized.content) return;
-      const current = readFollowUpMessages(pane.id);
-      const lastAgent = [...current].reverse().find(message => message.runtimeSessionId === event.sessionId && message.role === 'agent' && message.status === 'streaming');
-      const nextAgentContent = lastAgent ? `${lastAgent.content}${sanitized.content}` : sanitized.content;
-      const nextMessages = lastAgent
-        ? current.map(message => message.id === lastAgent.id ? { ...message, content: nextAgentContent } : message)
-        : [...current, {
-            id: generateId(),
-            missionId,
-            role: 'agent' as const,
-            cli: selectedCli,
-            model: activeSelectedModel,
+      const streamEvents = sanitized.events.length > 0
+        ? sanitized.events
+        : [
+            ...sanitized.workEvents.map(workEvent => ({ kind: 'work' as const, workEvent })),
+            ...(sanitized.content ? [{ kind: 'agent' as const, text: sanitized.content }] : []),
+          ];
+      for (const streamEvent of streamEvents) {
+        if (streamEvent.kind === 'work') {
+          publishRuntimeToolActivity(event.sessionId, selectedCli, activeSelectedModel || undefined, streamEvent.workEvent);
+        } else if (streamEvent.kind === 'session_title') {
+          rememberFollowUpSession({
             runtimeSessionId: event.sessionId,
-            content: nextAgentContent,
-            status: 'streaming' as const,
-            createdAt: Date.now(),
-          }];
-      updatePaneData(pane.id, { followUpMessages: nextMessages });
-      rememberSessionTitleFromAgentContent(event.sessionId, nextAgentContent);
-      const persisted = nextMessages.find(message => message.runtimeSessionId === event.sessionId && message.role === 'agent' && message.status === 'streaming');
-      if (persisted) void persistFollowUpMessage(threadId, persisted);
+            title: streamEvent.title,
+          });
+        } else {
+          publishRuntimeAgentTranscript(event.sessionId, selectedCli, activeSelectedModel || undefined, streamEvent.text, streamEvent.kind === 'final_agent');
+        }
+      }
+      if (streamEvents.length > 0) {
+        const latestSessionState = runtimeManager.snapshot().sessions.find(session => session.sessionId === event.sessionId)?.state;
+        if (!isFollowUpBusyIndicatorState(latestSessionState)) {
+          scheduleFollowUpIdleCompletion(event.sessionId, 'completed');
+        }
+      }
     });
     return unsubscribe;
   }, [activeSelectedModel, missionId, pane.id, selectedCli, threadId, updatePaneData]);
@@ -4753,7 +5797,7 @@ export function FollowUpComposer({
       .map(message => ({
         ...message,
         content: message.role === 'agent'
-          ? stripAgentSessionTitle(stripAgentTokenUsage(message.content))
+          ? agentDisplayContentWithoutMetadata(message.content)
           : stripAgentTokenUsage(message.content),
       }));
     const conversationContext = buildAgentConversationContext(priorMessages, { maxChars: 12000 });
@@ -4784,7 +5828,7 @@ export function FollowUpComposer({
       usesMissionRuntimeContext && report ? `Current phase summary:\n${report}` : '',
       usesMissionRuntimeContext && artifactContext ? `Recent artifacts and changed files:\n${artifactContext}` : '',
       attachmentContext,
-      conversationContext ? `Previous follow-up context:\n${conversationContext}` : '',
+      conversationContext ? `Previous follow-up context for continuity only. Do not quote, restate, or summarize this context unless the user asks for it:\n${conversationContext}` : '',
     ].filter(Boolean).join('\n\n');
     const followUpPrompt = [
       followUpContext,
@@ -4954,14 +5998,17 @@ export function FollowUpComposer({
             setSdkFinishMeta(meta);
           },
           onDelta: delta => {
+            finalizeFollowUpToolWork(sessionId, 'completed');
             streamedContent += delta;
             rememberSessionTitleFromAgentContent(sessionId, streamedContent);
-            upsertFollowUpMessage(pane.id, { ...agentMessage, content: streamedContent });
+            upsertFollowUpMessage(pane.id, { ...agentMessage, content: sanitizeAgentTranscriptForStorage(streamedContent) });
           },
         });
+        finalizeFollowUpToolWork(sessionId, 'completed');
+        const completedText = sanitizeAgentTranscriptForStorage(finalText || streamedContent || '(No response text returned.)');
         const completed: FollowUpMessage = {
           ...agentMessage,
-          content: appendAgentTokenUsage(finalText || streamedContent || '(No response text returned.)', usageRef.current),
+          content: appendAgentTokenUsage(completedText, usageRef.current),
           status: 'completed',
           completedAt: Date.now(),
         };
@@ -4994,9 +6041,11 @@ export function FollowUpComposer({
         return;
       } catch (error) {
         const aborted = controller.signal.aborted;
+        finalizeFollowUpToolWork(sessionId, aborted ? 'cancelled' : 'failed');
+        const failedText = sanitizeAgentTranscriptForStorage(streamedContent || (aborted ? 'SDK chat stopped.' : `SDK chat failed: ${error instanceof Error ? error.message : String(error)}`));
         const failed: FollowUpMessage = {
           ...agentMessage,
-          content: appendAgentTokenUsage(streamedContent || (aborted ? 'SDK chat stopped.' : `SDK chat failed: ${error instanceof Error ? error.message : String(error)}`), usageRef.current),
+          content: appendAgentTokenUsage(failedText, usageRef.current),
           status: aborted ? 'cancelled' : 'failed',
           completedAt: Date.now(),
         };
@@ -5130,8 +6179,15 @@ export function FollowUpComposer({
     const trimmed = rawPrompt.trim();
     if (!trimmed) return;
     const createdAt = Date.now();
-    const activeSession = runtimeSnapshot.sessions.find(session => session.sessionId === selectedSessionId);
-    const busy = isFollowUpSessionBusy(activeSession?.state);
+    const currentMessages = readFollowUpMessages(pane.id);
+    const visiblySettled = isFollowUpSessionVisiblySettled(currentMessages, selectedSessionId);
+    const busyStateBlocksSending = Boolean(
+      busyStateMatchesSession
+      && isFollowUpBusyIndicatorState(followUpBusyState?.state)
+      && !visiblySettled
+    );
+    const visibleOutputActive = hasActiveFollowUpOutput(currentMessages, selectedSessionId);
+    const busy = !visiblySettled && (submitting || busyStateBlocksSending || visibleOutputActive);
     const queued = !options.internal && (submitting || busy) && (sessionPolicy !== 'new' || submitting);
     const messageAttachments = options.internal ? [] : attachments;
     const displayContent = options.displayContent?.trim() || trimmed;
@@ -5186,8 +6242,14 @@ export function FollowUpComposer({
 
   useEffect(() => {
     if (submitting || pendingQueue.length === 0) return;
-    const activeSession = runtimeSnapshot.sessions.find(session => session.sessionId === selectedSessionId);
-    if (isFollowUpSessionBusy(activeSession?.state)) return;
+    const currentMessages = readFollowUpMessages(pane.id);
+    const visiblySettled = isFollowUpSessionVisiblySettled(currentMessages, selectedSessionId);
+    const busyStateBlocksSending = Boolean(
+      busyStateMatchesSession
+      && isFollowUpBusyIndicatorState(followUpBusyState?.state)
+      && !visiblySettled
+    );
+    if (!visiblySettled && (busyStateBlocksSending || hasActiveFollowUpOutput(currentMessages, selectedSessionId))) return;
     const next = pendingQueue[0];
     const userMessage = readFollowUpMessages(pane.id).find(message => message.id === next.messageId);
     if (!userMessage) {
@@ -5782,10 +6844,35 @@ export function FollowUpComposer({
     followUpBusyState?.active
       && (!selectedSessionId || !followUpBusyState.sessionId || followUpBusyState.sessionId === selectedSessionId)
   );
-  const showThinkingRow = messages.length > 0 && (submitting || busyStateMatchesSession || isFollowUpSessionBusy(activeRuntimeSession?.state)) && !activePermission;
-  const thinkingState = usesSdkTransport
-    ? (sdkStep ?? (busyStateMatchesSession ? followUpBusyState?.state : null) ?? 'streaming')
-    : ((busyStateMatchesSession ? followUpBusyState?.state : null) ?? activeRuntimeSession?.state ?? runtimeStatus);
+  const selectedSessionVisiblySettled = isFollowUpSessionVisiblySettled(messages, selectedSessionId);
+  const activeVisibleOutput = hasActiveFollowUpOutput(messages, selectedSessionId);
+  const busyIndicatorActive = busyStateMatchesSession && isFollowUpBusyIndicatorState(followUpBusyState?.state);
+  const runtimeBusyWithVisibleTurn = Boolean(
+    isFollowUpSessionBusy(activeRuntimeSession?.state)
+    && !selectedSessionVisiblySettled
+    && (activeVisibleOutput || busyIndicatorActive)
+  );
+  const permissionLiveStatusActive = Boolean(activePermission);
+  const showRuntimeLiveStatus = messages.length > 0
+    && (permissionLiveStatusActive || !selectedSessionVisiblySettled)
+    && (permissionLiveStatusActive || submitting || busyIndicatorActive || activeVisibleOutput || runtimeBusyWithVisibleTurn);
+  const runtimeLiveStatusStartedAt = selectedSessionId
+    ? messages
+      .filter(message => message.runtimeSessionId === selectedSessionId)
+      .reduce((min, message) => Math.min(min, message.createdAt), Number.POSITIVE_INFINITY)
+    : Number.POSITIVE_INFINITY;
+  const runtimeLiveStatusBaseTime = Number.isFinite(runtimeLiveStatusStartedAt)
+    ? runtimeLiveStatusStartedAt
+    : followUpBusyState?.updatedAt ?? Date.now();
+  const runtimeLiveStatusElapsedSeconds = Math.max(0, Math.floor((runtimeLiveStatusClock - runtimeLiveStatusBaseTime) / 1000));
+  const runtimeLiveStatusText = runtimeLiveStatusLabel(followUpBusyState?.state ?? activeRuntimeSession?.state ?? null);
+
+  useEffect(() => {
+    if (!showRuntimeLiveStatus) return undefined;
+    setRuntimeLiveStatusClock(Date.now());
+    const timer = window.setInterval(() => setRuntimeLiveStatusClock(Date.now()), 1_000);
+    return () => window.clearInterval(timer);
+  }, [showRuntimeLiveStatus, runtimeLiveStatusBaseTime]);
 
   useEffect(() => {
     if (selectedCli !== 'codex' || !activeRuntimeTerminalId) return undefined;
@@ -5817,7 +6904,7 @@ export function FollowUpComposer({
     const element = agentOutputScrollRef.current;
     if (!element || !agentOutputShouldStickRef.current) return;
     element.scrollTop = element.scrollHeight;
-  }, [messages, showThinkingRow]);
+  }, [messages, showRuntimeLiveStatus]);
 
   const showSkills = selectedCli === 'codex' || selectedCli === 'claude';
   const cliOptions = FOLLOW_UP_CLIS.map(cli => ({
@@ -6088,6 +7175,39 @@ export function FollowUpComposer({
     void persistFollowUpMessage(threadId, message);
     if (options.autoContinue) scheduleSdkAutoContinue(options.continuePrompt ?? 'continue');
   };
+  useEffect(() => {
+    let unmounted = false;
+    let unlistenFn: (() => void) | undefined;
+    listen<unknown>('mcp-message', event => {
+      if (unmounted) return;
+      const payload = parseDebugAgentPromptPayload(event.payload);
+      if (!payload) return;
+      if (payload.targetPaneId) {
+        if (payload.targetPaneId !== pane.id) return;
+      } else {
+        const activePaneId = useWorkspaceStore.getState().activePaneId;
+        if (activePaneId && activePaneId !== pane.id) return;
+        if (!activePaneId && pane.data?.dockExpandedToTab !== true) return;
+      }
+      if (payload.requestId) {
+        if (handledDebugAgentPromptIdsRef.current.has(payload.requestId)) return;
+        handledDebugAgentPromptIdsRef.current.add(payload.requestId);
+      }
+      void submitFollowUp(payload.prompt, {
+        skipSlashProcessing: payload.skipSlashProcessing,
+        displayContent: payload.displayContent,
+      });
+    }).then(fn => {
+      if (unmounted) fn();
+      else unlistenFn = fn;
+    }).catch(error => {
+      console.debug('[FollowUpComposer] debug prompt listener unavailable in this runtime', error);
+    });
+    return () => {
+      unmounted = true;
+      if (unlistenFn) unlistenFn();
+    };
+  }, [pane.data?.dockExpandedToTab, pane.id, submitFollowUp]);
   useEffect(() => {
     let unmounted = false;
     let unlistenFn: (() => void) | undefined;
@@ -6712,6 +7832,14 @@ export function FollowUpComposer({
       </div>
     </div>
   ) : null;
+  const permissionPopup = activePermission && selectedSessionId ? (
+    <AgentPermissionPopup
+      key={activePermission.permissionId}
+      permission={activePermission}
+      sessionId={selectedSessionId}
+      elapsedSeconds={runtimeLiveStatusElapsedSeconds}
+    />
+  ) : null;
   const usageLimitPopover = usagePopoverPayload || usagePopoverStatus ? (
     <div className="td-agent-usage-popover" role="dialog" aria-label="Usage limits">
       {usagePopoverPayload ? (
@@ -6953,29 +8081,18 @@ export function FollowUpComposer({
                   onSdkCommandTerminalId={rememberSdkCommandTerminalId}
                   cardResolutions={cardResolutions}
                 />
-        {showThinkingRow && <AgentThinkingRow state={thinkingState} />}
+                {showRuntimeLiveStatus && (
+                  <AgentRuntimeStatusLine label={runtimeLiveStatusText} elapsedSeconds={runtimeLiveStatusElapsedSeconds} />
+                )}
               </div>
             )}
           </div>
-
-          {activePermission && selectedSessionId && (
-            <div className="td-agent-permission">
-              <div className="truncate">{activePermission.detail}</div>
-              <div className="flex items-center gap-2">
-                <button type="button" onClick={() => void runtimeManager.resolvePermission({ sessionId: selectedSessionId, permissionId: activePermission.permissionId, decision: 'approve' })}>
-                  Approve
-                </button>
-                <button type="button" onClick={() => void runtimeManager.resolvePermission({ sessionId: selectedSessionId, permissionId: activePermission.permissionId, decision: 'deny' })}>
-                  Deny
-                </button>
-              </div>
-            </div>
-          )}
 
           {liveCodeChangeCard}
           {queuedFollowUpPanel}
 
           <div className="td-agent-prompt-pill">
+            {permissionPopup}
             {attachmentToasts}
             {slashCommandMenu}
             {usageLimitPopover}
@@ -7099,12 +8216,15 @@ export function FollowUpComposer({
             onSdkCommandTerminalId={rememberSdkCommandTerminalId}
             cardResolutions={cardResolutions}
           />
-          {showThinkingRow && <AgentThinkingRow state={thinkingState} />}
+          {showRuntimeLiveStatus && (
+            <AgentRuntimeStatusLine label={runtimeLiveStatusText} elapsedSeconds={runtimeLiveStatusElapsedSeconds} />
+          )}
         </div>
       )}
       {liveCodeChangeCard}
       {queuedFollowUpPanel}
       <div className={shellClass}>
+        {permissionPopup}
         {skillsOverlay}
         {attachmentToasts}
         {slashCommandMenu}
@@ -7118,19 +8238,6 @@ export function FollowUpComposer({
           placeholder="Continue this mission..."
           className="min-h-[76px] w-full resize-none bg-transparent px-2 py-1 text-sm text-text-primary placeholder:text-text-muted outline-none"
         />
-        {activePermission && selectedSessionId && (
-          <div className="mb-2 rounded-lg border border-yellow-500/30 bg-yellow-500/10 px-2 py-2 text-[11px] text-yellow-100">
-            <div className="mb-2 truncate">{activePermission.detail}</div>
-            <div className="flex items-center gap-2">
-              <button type="button" onClick={() => void runtimeManager.resolvePermission({ sessionId: selectedSessionId, permissionId: activePermission.permissionId, decision: 'approve' })} className="rounded bg-green-600 px-2 py-1 text-white">
-                Approve
-              </button>
-              <button type="button" onClick={() => void runtimeManager.resolvePermission({ sessionId: selectedSessionId, permissionId: activePermission.permissionId, decision: 'deny' })} className="rounded bg-red-600 px-2 py-1 text-white">
-                Deny
-              </button>
-            </div>
-          </div>
-        )}
         <div className="flex items-center justify-between gap-2 border-t border-white/10 pt-2">
           <div className="flex items-center gap-1.5 min-w-0">
             <div className="td-agent-add-control">
@@ -7384,11 +8491,9 @@ function summarizeRuntimeEventForFollowUp(event: import('../../lib/runtime/Runti
     case 'session_completed':
     case 'session_failed':
     case 'session_disconnected':
-      return null;
     case 'permission_requested':
-      return `Waiting for permission: ${event.request.detail}`;
     case 'permission_resolved':
-      return `Permission ${event.decision}: ${event.permissionId}.`;
+      return null;
     case 'artifact_published':
       return `Artifact: ${event.artifact.label}${event.artifact.path ? ` (${event.artifact.path})` : ''}`;
     case 'completion_contract_missing':

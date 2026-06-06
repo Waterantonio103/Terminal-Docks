@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 const {
   buildAgentConversationContext,
   classifyAgentStatusMessage,
+  compactAgentCommandOutput,
+  compactAgentShellCommandForDisplay,
   compactAgentConversation,
   parseAgentActionResult,
   parseAgentCommandSuggestion,
@@ -16,6 +18,7 @@ const {
   runtimeStepLabel,
   splitAgentContent,
   stripAgentAnsi,
+  stripAgentConversationContextLabels,
 } = await import('../.tmp-tests/lib/agentChatFormatting.js');
 
 function run(name, fn) {
@@ -30,6 +33,34 @@ function run(name, fn) {
 
 run('strips terminal control sequences and normalizes carriage returns', () => {
   assert.equal(stripAgentAnsi('\u001b[32mDone\u001b[0m\rNext'), 'Done\nNext');
+});
+
+run('compacts shell-wrapped commands for agent work cards', () => {
+  assert.equal(
+    compactAgentShellCommandForDisplay('"C:\\Program Files\\PowerShell\\7\\pwsh.exe" -Command \'rg -n "AgentMessageContent" src\\components\\MissionControl\\MissionControlPane.tsx\''),
+    'rg -n "AgentMessageContent" src\\components\\MissionControl\\MissionControlPane.tsx',
+  );
+  assert.equal(
+    compactAgentShellCommandForDisplay('cmd.exe /d /c npm run test:graph'),
+    'npm run test:graph',
+  );
+});
+
+run('bounds large command output with an omission marker', () => {
+  const large = Array.from({ length: 400 }, (_, index) => `line ${index + 1}`).join('\n');
+  const compacted = compactAgentCommandOutput(large, 900);
+
+  assert.ok(compacted.length < large.length);
+  assert.match(compacted, /lines omitted|characters omitted/);
+  assert.match(compacted, /line 1/);
+  assert.match(compacted, /line 400/);
+});
+
+run('strips echoed conversation context role labels', () => {
+  assert.equal(
+    stripAgentConversationContextLabels('Agent (completed): inspected files Tool (streaming): rg output User (completed): thanks'),
+    'inspected files rg output User: thanks',
+  );
 });
 
 run('parses markdown checklists into todo statuses', () => {
@@ -78,6 +109,8 @@ run('parses common agent progress lines into status blocks', () => {
     tone: 'success',
     icon: 'test',
   });
+  assert.equal(parseAgentStatusLine('Thinking'), null);
+  assert.equal(parseAgentStatusLine('Working (2s • esc to interrupt)'), null);
 });
 
 run('parses Terax-style todo_write payloads into todo items', () => {
@@ -139,6 +172,18 @@ run('splits agent progress lines into inline status blocks', () => {
     { kind: 'status', label: 'Running command', detail: 'npm run build', tone: 'info', icon: 'terminal' },
     { kind: 'status', label: 'Check passed', detail: 'build completed', tone: 'success', icon: 'test' },
     { kind: 'markdown', text: 'Done.' },
+  ]);
+});
+
+run('can keep settled agent prose from becoming status cards', () => {
+  assert.deepEqual(splitAgentContent('Read the codebase. This workspace is a fixture corpus.', { parseStatus: false }), [
+    { kind: 'markdown', text: 'Read the codebase. This workspace is a fixture corpus.' },
+  ]);
+});
+
+run('drops transient thinking progress lines from chat output', () => {
+  assert.deepEqual(splitAgentContent('Before\nThinking\nWorking (2s • esc to interrupt)\nAfter'), [
+    { kind: 'markdown', text: 'Before\nAfter' },
   ]);
 });
 
@@ -588,6 +633,7 @@ run('classifies runtime system messages as UI status cards', () => {
 
 run('maps runtime states to compact thinking labels', () => {
   assert.equal(runtimeStepLabel('running'), 'Thinking');
+  assert.equal(runtimeStepLabel('streaming'), 'Thinking');
   assert.equal(runtimeStepLabel('awaiting_mcp_ready'), 'Connecting workspace tools');
   assert.equal(runtimeStepLabel('custom_phase'), 'Custom Phase');
   assert.equal(runtimeStepLabel(null), 'Thinking');

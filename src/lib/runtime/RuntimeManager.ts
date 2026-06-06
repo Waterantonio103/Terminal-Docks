@@ -110,7 +110,7 @@ const SHELL_LAUNCH_SETTLE_MS = 700;
 const CLI_STARTUP_WAIT_MS = 2_000;
 const CLI_READY_WAIT_MS = 20_000;
 const CODEX_UPDATE_PROMPT_RE =
-  /Update available:[\s\S]{0,800}\b1\.\s*Update now\b[\s\S]{0,400}\b2\.\s*Skip\b[\s\S]{0,400}\bPress enter to continue\b/i;
+  /Update available(?:[!:]|\s)[\s\S]{0,800}\b1\.\s*Update now\b[\s\S]{0,400}\b2\.\s*Skip\b[\s\S]{0,400}\bPress enter to continue\b/i;
 const CLAUDE_MANAGED_INJECTION_READY_WAIT_MS = readRuntimeEnvNumber(
   'VITE_RUNTIME_CLAUDE_MANAGED_INJECTION_READY_WAIT_MS',
   75_000,
@@ -490,7 +490,6 @@ class RuntimeManager {
   }>();
   private postAckNoProgressWatchdogs = new Map<string, PostAckNoProgressWatchdogState>();
   private cliReadinessDiagnostics = new Map<string, string>();
-  private skippedCodexUpdatePromptSessions = new Set<string>();
   private recentPermissionSignatures = new Map<string, number>();
   private runtimeCompletionPollers = new Map<string, {
     timer: ReturnType<typeof setInterval>;
@@ -1701,29 +1700,7 @@ class RuntimeManager {
       this.recordPostAckTerminalProgress(session, event.text);
 
       const perm = session.adapter.detectPermissionRequest(event.text);
-      if (perm && session.state !== 'awaiting_permission') {
-        const request = {
-          ...perm.request,
-          sessionId,
-          nodeId: session.nodeId,
-          detectedAt: Date.now(),
-        };
-        if (this.shouldSuppressPermissionDetection(session, request)) {
-          return;
-        }
-        if (session.yolo) {
-          void this.autoApproveYoloPermission(session, request);
-          return;
-        }
-        session.setPermission(request);
-        this.emit({
-          type: 'permission_requested',
-          sessionId,
-          nodeId: session.nodeId,
-          request,
-        });
-        this.recordPostAckProgress(session, 'permission_prompt');
-      }
+      if (perm) this.requestRuntimePermission(session, perm.request);
 
       const comp = session.adapter.detectCompletion(event.text);
       if (comp && session.state === 'running') {
@@ -3460,6 +3437,39 @@ class RuntimeManager {
     return false;
   }
 
+  private isCodexUpdatePermission(request: Pick<RuntimePermissionRequest, 'rawPrompt' | 'detail'>): boolean {
+    return CODEX_UPDATE_PROMPT_RE.test(`${request.rawPrompt}\n${request.detail}`);
+  }
+
+  private requestRuntimePermission(
+    session: RuntimeSession,
+    request: Omit<RuntimePermissionRequest, 'sessionId' | 'nodeId' | 'detectedAt'>,
+  ): RuntimePermissionRequest | null {
+    if (session.state === 'awaiting_permission') return null;
+    const runtimeRequest: RuntimePermissionRequest = {
+      ...request,
+      sessionId: session.sessionId,
+      nodeId: session.nodeId,
+      detectedAt: Date.now(),
+    };
+    if (this.shouldSuppressPermissionDetection(session, runtimeRequest)) {
+      return null;
+    }
+    if (session.yolo && !this.isCodexUpdatePermission(runtimeRequest)) {
+      void this.autoApproveYoloPermission(session, runtimeRequest);
+      return runtimeRequest;
+    }
+    session.setPermission(runtimeRequest);
+    this.emit({
+      type: 'permission_requested',
+      sessionId: session.sessionId,
+      nodeId: session.nodeId,
+      request: runtimeRequest,
+    });
+    this.recordPostAckProgress(session, 'permission_prompt');
+    return runtimeRequest;
+  }
+
   private async autoApproveYoloPermission(session: RuntimeSession, request: RuntimePermissionRequest): Promise<void> {
     this.rememberPermissionSignature(session, request);
     this.recordPostAckProgress(session, 'manual_input');
@@ -3906,16 +3916,19 @@ class RuntimeManager {
       }
       const output = await getRecentTerminalOutput(session.terminalId, 12_288);
       if (output) {
-        if (
-          session.cliId === 'codex' &&
-          !this.skippedCodexUpdatePromptSessions.has(session.sessionId) &&
-          CODEX_UPDATE_PROMPT_RE.test(output)
-        ) {
-          this.skippedCodexUpdatePromptSessions.add(session.sessionId);
-          runtimeDebugLog(`[runtime] skipping Codex update prompt session=${session.sessionId}`);
-          await this.writeToTerminalOrFail(session, '2\r');
-          await sleep(500);
-          continue;
+        const permission = session.adapter.detectPermissionRequest(output);
+        if (permission) {
+          const request = this.requestRuntimePermission(session, permission.request) ?? session.activePermission;
+          if (request) {
+            deadline = Math.max(deadline, Date.now() + timeoutMs);
+            lastStatus = {
+              status: 'waiting_user_answer',
+              confidence: 'high',
+              detail: request.detail || 'CLI is waiting for user input',
+            };
+            await sleep(200);
+            continue;
+          }
         }
         lastOutputLength = output.length;
         const readiness = this.evaluateSessionReadiness(session, output);
@@ -4129,7 +4142,6 @@ class RuntimeManager {
     this.clearPostAckNoProgressWatchdog(session.sessionId);
     this.clearRuntimeCompletionPoller(session.sessionId);
     this.cliReadinessDiagnostics.delete(session.sessionId);
-    this.skippedCodexUpdatePromptSessions.delete(session.sessionId);
 
     const ptyCleanup = this.ptyCleanupFns.get(session.sessionId);
     if (ptyCleanup) {

@@ -58,6 +58,7 @@ export class RuntimeSession {
   private _disconnectedAt?: number;
   private _lastError?: string;
   private _activePermission?: RuntimePermissionRequest;
+  private _permissionReturnState?: RuntimeSessionState;
   private _completedTaskCount = 0;
 
   private stateListeners = new Set<(from: RuntimeSessionState, to: RuntimeSessionState) => void>();
@@ -240,13 +241,16 @@ export class RuntimeSession {
 
   setPermission(request: RuntimePermissionRequest): void {
     this._activePermission = request;
+    this._permissionReturnState = this._state;
     this.transitionTo('awaiting_permission');
   }
 
   clearPermission(): void {
     this._activePermission = undefined;
+    const returnState = this._permissionReturnState;
+    this._permissionReturnState = undefined;
     if (this._state === 'awaiting_permission') {
-      this.transitionTo('running');
+      this.transitionTo(returnState && returnState !== 'awaiting_permission' ? returnState : 'running');
     }
   }
 

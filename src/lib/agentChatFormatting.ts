@@ -33,7 +33,7 @@ export type AgentContentBlock =
   | { kind: 'status'; label: string; detail?: string; tone: AgentStatusTone; icon: AgentOutputStatusIcon };
 
 export type AgentStatusTone = 'info' | 'success' | 'warn' | 'error';
-export type AgentOutputStatusIcon = 'terminal' | 'file' | 'search' | 'edit' | 'test' | 'thinking' | 'tool';
+export type AgentOutputStatusIcon = 'terminal' | 'file' | 'search' | 'edit' | 'test' | 'tool';
 
 export type AgentStatusKind =
   | 'context_compacted'
@@ -81,12 +81,60 @@ const STRUCTURED_TODO_HINT_RE = /(?:\btodo_write\b|["']todos["']\s*:)/i;
 const DEFAULT_CONTEXT_MAX_CHARS = 12000;
 const DEFAULT_COMPACT_KEEP_TAIL = 8;
 const AGENT_WORK_ITEM_PREFIX = '__COMET_AGENT_WORK_ITEM__';
+const DEFAULT_COMMAND_OUTPUT_MAX_CHARS = 12000;
+const AGENT_CONTEXT_ROLE_LABEL_RE = /\b(?:Agent|Tool|System)\s*\((?:completed|streaming|sending|failed|cancelled|queued)\):\s*/gi;
 
 export function stripAgentAnsi(text: string): string {
   return text
     .replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, '')
     .replace(/\u001b\][^\u0007]*(?:\u0007|\u001b\\)/g, '')
     .replace(/\r(?!\n)/g, '\n');
+}
+
+export function stripAgentConversationContextLabels(text: string): string {
+  return stripAgentAnsi(text)
+    .replace(AGENT_CONTEXT_ROLE_LABEL_RE, '')
+    .replace(/\bUser\s*\((?:completed|streaming|sending|failed|cancelled|queued)\):\s*/gi, 'User: ')
+    .replace(/[ \t]{2,}/g, ' ')
+    .trim();
+}
+
+export function compactAgentShellCommandForDisplay(command: string): string {
+  const clean = stripAgentAnsi(command).replace(/\s+/g, ' ').trim();
+  if (!clean) return '';
+
+  const shellCommand = clean.match(/^(?:"[^"]*(?:pwsh|powershell)(?:\.exe)?"|(?:pwsh|powershell)(?:\.exe)?)(?:\s+-[A-Za-z]+)*\s+-Command\s+(['"])([\s\S]*)\1\s*$/i);
+  if (shellCommand?.[2]) {
+    return shellCommand[2]
+      .replace(/\\"/g, '"')
+      .replace(/\\'/g, "'")
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  const cmdShim = clean.match(/^cmd(?:\.exe)?\s+\/d\s+\/c\s+(.+)$/i);
+  if (cmdShim?.[1]) return cmdShim[1].trim();
+
+  return clean;
+}
+
+export function compactAgentCommandOutput(output: string, maxChars = DEFAULT_COMMAND_OUTPUT_MAX_CHARS): string {
+  const clean = stripAgentAnsi(output).trim();
+  if (!clean || clean.length <= maxChars) return clean;
+
+  const headSize = Math.max(1000, Math.floor(maxChars * 0.45));
+  const tailSize = Math.max(1000, maxChars - headSize - 160);
+  const omitted = clean.slice(headSize, clean.length - tailSize);
+  const omittedLines = omitted.split(/\r?\n/).filter(Boolean).length;
+  const omittedLabel = omittedLines > 0
+    ? `... ${omittedLines} lines omitted ...`
+    : `... ${clean.length - headSize - tailSize} characters omitted ...`;
+
+  return [
+    clean.slice(0, headSize).trimEnd(),
+    omittedLabel,
+    clean.slice(-tailSize).trimStart(),
+  ].join('\n');
 }
 
 export function parseAgentTodoLine(line: string): AgentTodoItem | null {
@@ -249,14 +297,17 @@ export function parseAgentStatusLine(line: string): Extract<AgentContentBlock, {
   const fail = withoutSpinner.match(/^(?:FAIL|✗|✘)\s+(.+)$/i);
   if (fail) return { kind: 'status', label: 'Check failed', detail: fail[1].trim(), tone: 'error', icon: 'test' };
 
-  if (/^(?:thinking|working|processing|analyzing|planning)\b/i.test(withoutSpinner)) {
-    return { kind: 'status', label: 'Thinking', detail: withoutSpinner, tone: 'info', icon: 'thinking' };
-  }
-
   const tool = withoutSpinner.match(/^(?:calling|using|running)\s+tool[:\s]+(.+)$/i);
   if (tool) return { kind: 'status', label: 'Using tool', detail: tool[1].trim(), tone: 'info', icon: 'tool' };
 
   return null;
+}
+
+function isTransientAgentProgressLine(line: string): boolean {
+  const clean = stripAgentAnsi(line)
+    .replace(/^[|/\\\-⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏•·*]\s*/, '')
+    .trim();
+  return /^(?:thinking|working|processing|analyzing|planning)\b/i.test(clean);
 }
 
 function isLikelyPathLike(value: string): boolean {
@@ -265,7 +316,8 @@ function isLikelyPathLike(value: string): boolean {
   return /[\\/]/.test(candidate) || /(?:^|\s|["'`])[\w@~$%{}()[\]-]+(?:\.[a-z0-9]{1,8})+\b/i.test(candidate);
 }
 
-export function splitAgentContent(content: string): AgentContentBlock[] {
+export function splitAgentContent(content: string, options: { parseStatus?: boolean } = {}): AgentContentBlock[] {
+  const parseStatus = options.parseStatus ?? true;
   const clean = stripAgentAnsi(content);
   const lines = clean.split('\n');
   const blocks: AgentContentBlock[] = [];
@@ -366,7 +418,11 @@ export function splitAgentContent(content: string): AgentContentBlock[] {
       todos.push(todo);
       continue;
     }
-    const status = parseAgentStatusLine(line);
+    if (isTransientAgentProgressLine(line)) {
+      flushTodos();
+      continue;
+    }
+    const status = parseStatus ? parseAgentStatusLine(line) : null;
     if (status) {
       pushStatus(status);
       continue;
@@ -444,7 +500,7 @@ function formatMessageForConversationContext(message: AgentHistoryMessage): stri
   const artifacts = message.artifactIds?.filter(Boolean) ?? [];
   const artifactLine = artifacts.length > 0 ? `\nArtifacts: ${uniqueTail(artifacts, 8).join(', ')}` : '';
   const fileLine = files.length > 0 ? `\nFiles: ${uniqueTail(files, 8).join(', ')}` : '';
-  return `${role}${message.status ? ` (${message.status})` : ''}: ${content}${artifactLine}${fileLine}`.trim();
+  return `${role}: ${content}${artifactLine}${fileLine}`.trim();
 }
 
 function contentForConversationContext(content: string): string {
@@ -900,6 +956,7 @@ export function runtimeStepLabel(state?: string | null): string {
     case 'awaiting_ack':
       return 'Waiting for agent';
     case 'running':
+    case 'streaming':
       return 'Thinking';
     case 'awaiting_permission':
       return 'Waiting for approval';

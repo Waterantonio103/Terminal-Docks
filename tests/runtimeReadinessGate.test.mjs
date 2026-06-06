@@ -7,6 +7,7 @@ import {
   isStatusSafeForManagedInjection,
   isStrictCliStatusGateEnabled,
 } from '../.tmp-tests/lib/runtime/RuntimeReadinessGate.js';
+import { RuntimeSession } from '../.tmp-tests/lib/runtime/RuntimeSession.js';
 import { claudeAdapter } from '../.tmp-tests/lib/runtime/adapters/claude.js';
 import { codexAdapter } from '../.tmp-tests/lib/runtime/adapters/codex.js';
 import { geminiAdapter } from '../.tmp-tests/lib/runtime/adapters/gemini.js';
@@ -196,4 +197,45 @@ run('waiting_auth is blocked for managed injection with explicit diagnostics', (
   );
   assert.match(diagnostic, /status=waiting_auth/);
   assert.match(diagnostic, /Gemini authentication flow detected/);
+});
+
+run('runtime session permissions resume the state that requested them', () => {
+  const session = new RuntimeSession(codexAdapter, {
+    missionId: 'mission-1',
+    nodeId: 'node-1',
+    attempt: 1,
+    role: 'builder',
+    agentId: 'agent-1',
+    cliId: 'codex',
+    executionMode: 'interactive_pty',
+    terminalId: 'terminal-1',
+    workspaceDir: 'C:/repo',
+  });
+
+  session.transitionTo('awaiting_cli_ready');
+  session.setPermission({
+    permissionId: 'codex-update-1',
+    category: 'package_install',
+    rawPrompt: 'Update available! 0.136.0 -> 0.137.0\n1. Update now\n2. Skip\nPress enter to continue',
+    detail: 'Codex CLI update available. Update now?',
+    detectedAt: Date.now(),
+    sessionId: session.sessionId,
+    nodeId: session.nodeId,
+  });
+  assert.equal(session.state, 'awaiting_permission');
+  session.clearPermission();
+  assert.equal(session.state, 'awaiting_cli_ready');
+
+  session.transitionTo('running');
+  session.setPermission({
+    permissionId: 'perm-1',
+    category: 'file_edit',
+    rawPrompt: 'Allow edit?',
+    detail: 'Allow edit?',
+    detectedAt: Date.now(),
+    sessionId: session.sessionId,
+    nodeId: session.nodeId,
+  });
+  session.clearPermission();
+  assert.equal(session.state, 'running');
 });

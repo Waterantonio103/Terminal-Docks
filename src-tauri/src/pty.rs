@@ -1679,6 +1679,36 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "local Windows Codex PTY prompt QA; depends on installed/authenticated Codex"]
+    #[cfg(target_os = "windows")]
+    fn live_windows_codex_direct_launch_accepts_env_prompt_input() {
+        if !command_exists("codex") {
+            panic!("codex command not found");
+        }
+        let prompt = std::env::var("COMET_LIVE_CODEX_PROMPT")
+            .unwrap_or_else(|_| "Print exactly: COMET_TUI_ENV_PROMPT_OK".to_string());
+        let expected = std::env::var("COMET_LIVE_CODEX_EXPECTED")
+            .unwrap_or_else(|_| "COMET_TUI_ENV_PROMPT_OK".to_string());
+        let timeout = std::env::var("COMET_LIVE_CODEX_PROMPT_TIMEOUT_SECS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(90);
+        let output = run_codex_direct_launch_until_prompt_then(Some((
+            &format!("\x15{prompt}"),
+            &expected,
+            Duration::from_secs(timeout),
+        )))
+        .unwrap_or_else(|error| panic!("Codex direct PTY env prompt input failed: {error}"));
+        if let Ok(path) = std::env::var("COMET_LIVE_CODEX_OUTPUT_PATH") {
+            if !path.trim().is_empty() {
+                fs::write(&path, &output)
+                    .unwrap_or_else(|error| panic!("failed to write Codex PTY output to {path}: {error}"));
+            }
+        }
+        eprintln!("PASS codex direct env prompt input: {}", normalize_prompt_text(&output));
+    }
+
+    #[test]
     #[ignore = "local Windows PTY QA; depends on installed common CLIs"]
     #[cfg(target_os = "windows")]
     fn live_windows_pty_common_cli_qa() {

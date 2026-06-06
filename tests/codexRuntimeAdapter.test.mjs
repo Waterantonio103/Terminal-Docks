@@ -40,6 +40,23 @@ run('codex ordinary footer does not imply permission or completion', () => {
   assert.equal(codexAdapter.detectReady(footer).ready, false);
 });
 
+run('codex update prompt requires user choice and maps actions to menu entries', () => {
+  const prompt = [
+    'Update available! 0.136.0 -> 0.137.0',
+    '› 1. Update now (runs npm install -g @openai/codex)',
+    '  2. Skip',
+    '  3. Skip until next version',
+    'Press enter to continue',
+  ].join('\n');
+  const permission = codexAdapter.detectPermissionRequest(prompt)?.request;
+
+  assert.equal(codexAdapter.detectStatus(prompt).status, 'waiting_user_answer');
+  assert.equal(permission?.category, 'package_install');
+  assert.match(permission?.detail ?? '', /update available/i);
+  assert.equal(codexAdapter.buildPermissionResponse('approve', permission).input, '1\r');
+  assert.equal(codexAdapter.buildPermissionResponse('deny', permission).input, '2\r');
+});
+
 run('codex context parser prefers exact CLI used percentage', () => {
   assert.equal(
     parseCodexContextUsagePercent('gpt-5.5 high · ~ · gpt-5.5 · Context 94% left · Context 6% used · Fast off'),

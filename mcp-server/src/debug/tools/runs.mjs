@@ -1,7 +1,9 @@
 import { z } from 'zod';
 import { makeToolText } from '../../utils/index.mjs';
+import { broadcast } from '../../state.mjs';
 import { createDebugRun, getDebugRun, listDebugEvents } from '../state.mjs';
 import { writeDebugEvent } from '../audit.mjs';
+import { auditTool, jsonResponse, requireDebugRun } from './shared.mjs';
 
 export function registerDebugRunTools(server, getSessionId) {
   server.registerTool('debug_start_run', {
@@ -64,5 +66,58 @@ export function registerDebugRunTools(server, getSessionId) {
       debugRun,
       events: includeEvents ? listDebugEvents(debugRunId, eventLimit) : undefined,
     }, null, 2));
+  });
+
+  server.registerTool('debug_submit_agent_prompt', {
+    title: 'Debug Submit Agent Prompt',
+    inputSchema: {
+      debugRunId: z.string().min(1),
+      prompt: z.string().min(1),
+      targetPaneId: z.string().optional(),
+      displayContent: z.string().optional(),
+      skipSlashProcessing: z.boolean().optional(),
+      label: z.string().optional(),
+    },
+  }, async ({
+    debugRunId,
+    prompt,
+    targetPaneId,
+    displayContent,
+    skipSlashProcessing = false,
+    label = 'debug prompt',
+  }) => {
+    const checked = requireDebugRun(debugRunId);
+    if (!checked.ok) return checked.response;
+
+    const requestId = `debug-agent-prompt-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const payload = {
+      requestId,
+      debugRunId,
+      prompt,
+      targetPaneId: targetPaneId || undefined,
+      displayContent: displayContent || undefined,
+      skipSlashProcessing,
+      label,
+      createdAt: Date.now(),
+    };
+    broadcast('Starlink Debug', JSON.stringify(payload), 'debug_agent_prompt');
+    auditTool(debugRunId, 'debug_submit_agent_prompt', getSessionId?.(), {
+      requestId,
+      targetPaneId: targetPaneId ?? null,
+      promptLength: prompt.length,
+      label,
+    });
+    writeDebugEvent(debugRunId, 'debug_agent_prompt_submitted', {
+      requestId,
+      targetPaneId: targetPaneId ?? null,
+      label,
+    });
+    return jsonResponse({
+      ok: true,
+      requestId,
+      eventType: 'debug_agent_prompt',
+      targetPaneId: targetPaneId ?? null,
+      note: 'Prompt was broadcast to the running app; capture the agent window to verify it was accepted and rendered.',
+    });
   });
 }

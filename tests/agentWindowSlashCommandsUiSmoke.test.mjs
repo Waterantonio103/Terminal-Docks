@@ -55,7 +55,7 @@ for (const required of [
   'formatAgentTokenUsageTotal(tokenUsage)',
   '`${formatContextTokenCount(totalAgentTokenUsage(usage))} used`',
   'stripAgentTokenUsage(message.content)',
-  'appendAgentTokenUsage(finalText || streamedContent',
+  'appendAgentTokenUsage(completedText',
   'collectAgentTokenUsage(messages)',
   'filterAgentTurnSummaryItems',
   'mergeAgentWorkItemUpdate',
@@ -103,7 +103,7 @@ for (const required of [
   'followUpBusyState',
   'setFollowUpBusyState(sessionId, step)',
   'busyStateMatchesSession',
-  'upsertFollowUpMessage(pane.id, { ...agentMessage, content: streamedContent })',
+  'upsertFollowUpMessage(pane.id, { ...agentMessage, content: sanitizeAgentTranscriptForStorage(streamedContent) })',
   "selectedCli === 'codex' && selectedPermissionMode === 'full'",
   "selectedCli === 'codex' && configuredOpenAiApiKey",
   'runtimeWorkspaceDir',
@@ -205,6 +205,12 @@ for (const required of [
   '.td-agent-window-tab .td-agent-chat-area.has-messages',
   '-webkit-mask-image: linear-gradient(',
   '.td-agent-window-tab .td-agent-prompt-pill',
+  '.td-followup-glass',
+  'z-index: 50;',
+  '.td-agent-permission-popup',
+  '.td-agent-permission-live-status',
+  'bottom: calc(100% + 8px);',
+  '.td-agent-permission-popup-option',
   'width: min(1100px, calc(100% - 24px));',
   'border-radius: 18px;',
   '.td-agent-window-tab .td-agent-permission-mode-label',
@@ -235,12 +241,14 @@ for (const required of [
 
 for (const required of [
   'CODEX_UPDATE_PROMPT_RE',
-  'skippedCodexUpdatePromptSessions',
-  "await this.writeToTerminalOrFail(session, '2\\r')",
+  'Update available(?:[!:]|\\s)',
+  'requestRuntimePermission(session, permission.request)',
+  'session.adapter.detectPermissionRequest(output)',
+  "await writeToTerminal(terminalId, '2\\r')",
   'return existing;',
   'buildCodexInteractiveLaunchArgs({',
 ]) {
-  assert.ok(runtimeManager.includes(required), `RuntimeManager should skip Codex update prompts with ${required}`);
+  assert.ok(runtimeManager.includes(required), `RuntimeManager should route Codex update prompts with ${required}`);
 }
 
 assert.ok(
@@ -293,20 +301,66 @@ for (const required of [
   'publishRuntimeToolActivity',
   'parseRuntimeToolActivity',
   'sanitizeRuntimeOutputChunkForFollowUp',
+  'CodexRuntimeOutputState',
+  'processCodexRuntimeLine',
+  'processCodexJsonRuntimeLine',
+  "itemType === 'command_execution'",
+  "itemType === 'file_change'",
+  "itemType === 'mcp_tool_call'",
+  "kind: 'session_title'",
+  'rememberFollowUpSession({',
+  'CODEX_COMMAND_START_RE',
+  'CODEX_COMMAND_REJECTED_RE',
+  'updateCodexCommandRecordStatus',
+  '(?:WARN|ERROR)\\s+codex_',
+  'completeRunningCodexCommands',
+  'commandRecordToWorkEvent',
   'CODEX_HIDDEN_PROMPT_ECHO_PATTERNS',
   'CODEX_TUI_REDRAW_FRAGMENT_RE',
+  'stripCodexPromptPlaceholderFromLine',
+  'Implement\\s+\\{feature\\}',
   'Workspace agent for',
   'User follow-up:',
   'runtimeOutputDisplaySessionsRef',
   'runtimeOutputPendingLinesRef',
+  'runtimeOutputLastEntryKindRef',
   'runtimeOutputDisplaySessionsRef.current.add(event.sessionId)',
   'AgentChangeSummaryCard changes={appliedChanges}',
-  '!parseAgentWorkItemMessage(message) && !isInternalAgentStatusMessage(message)',
+  'messages.map(message => {',
+  'if (workItem) return <AgentWorkItemCard key={message.id} item={workItem} />;',
   'await beginFollowUpFileTracking(sessionId)',
   'void publishFollowUpFileChanges(event.sessionId',
 ]) {
   assert.ok(source.includes(required), `MissionControlPane should track live runtime activity and file changes with ${required}`);
 }
+
+assert.ok(
+  source.includes('AgentPermissionPopup') &&
+    source.includes('const permissionPopup = activePermission && selectedSessionId') &&
+    source.includes("setFollowUpBusyState(event.sessionId, 'awaiting_permission')") &&
+    source.includes('const permissionLiveStatusActive = Boolean(activePermission)') &&
+    source.includes('&& (permissionLiveStatusActive || !selectedSessionVisiblySettled)') &&
+    source.includes('elapsedSeconds={runtimeLiveStatusElapsedSeconds}') &&
+    source.includes('Waiting for permission') &&
+    !source.includes('AgentPermissionDock') &&
+    !css.includes('.td-agent-permission-dock'),
+  'MissionControlPane should render permission requests as a prompt-anchored popup while preserving the live status row',
+);
+
+assert.ok(
+  source.includes('suppressingHiddenContextEcho') &&
+    source.includes('suppressingUserPromptEcho') &&
+    source.includes('isCodexHiddenContextEchoStart') &&
+    source.includes('isCodexUserPromptEchoStart') &&
+    source.includes('Previous follow-up context for continuity only') &&
+    source.includes('Do not quote,\\s+restate,\\s+or summarize this context'),
+  'MissionControlPane should suppress echoed hidden continuity context and user prompt text during live Codex output',
+);
+
+assert.ok(
+  /if \(isCodexPermissionPromptStart\(clean\)\) \{\s*state\.skippingPermissionPrompt = true;\s*return \{\};\s*\}/.test(source),
+  'Codex permission prompts should not mark the pending command as completed before the user approves it',
+);
 
 assert.ok(
   !source.includes('Runtime session failed: ${event.error}') &&

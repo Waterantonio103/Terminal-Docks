@@ -37,6 +37,8 @@ const CONFIRMATION_PERMISSION_PROMPT_RE =
   /(?:\bproceed\??\s*(?:\(\s*y\s*\)|\[\s*y\s*\/\s*n\s*\]|\byes\b|\by\/n\b)|\b(?:yes|no)\b[\s\S]{0,80}\b(?:approve|deny|edit|edits|command|tool|proceed)\b|\bapprove\s+edits\s+manually\b)/i;
 const CODEX_STARTUP_PERMISSION_PROMPT_RE =
   /(?:\b(?:do\s+you\s+)?(?:want\s+to\s+)?trust\s+(?:the\s+)?(?:files\s+in\s+)?(?:this\s+)?folder\b[\s\S]{0,180}(?:\by\s*\/\s*n\b|\[\s*y\s*\/\s*n\s*\]|\(\s*y\s*\/\s*n\s*\)|\byes\b|\bno\b|\?)|\b(?:enable|allow|approve|grant|turn\s+on)\s+(?:the\s+)?(?:admin\s+)?sandbox\b[\s\S]{0,220}(?:\by\s*\/\s*n\b|\[\s*y\s*\/\s*n\s*\]|\(\s*y\s*\/\s*n\s*\)|\byes\b|\bno\b|\?)|\badmin\s+sandbox\b[\s\S]{0,220}(?:\by\s*\/\s*n\b|\[\s*y\s*\/\s*n\s*\]|\(\s*y\s*\/\s*n\s*\)|\byes\b|\bno\b|\?))/i;
+const CODEX_UPDATE_PROMPT_RE =
+  /Update available(?:[!:]|\s)[\s\S]{0,800}\b1\.\s*Update now\b[\s\S]{0,400}\b2\.\s*Skip\b[\s\S]{0,400}\bPress enter to continue\b/i;
 const COMPLETION_RE = /(?:\btask\s+(?:completed|complete)\b|turn\.completed|exit code\s+0|(?:^|\n)\s*[─-]+\s*worked for\b|\bworked for\s+\d+\s*(?:s|m|h))/i;
 const FAILURE_RE =
   /(?:\btask\s+failed\b|\bfatal error\b|\buncaught exception\b|\bMCP error\b|exit code\s+[1-9]|\bfailed process\b|\bcommand not found\b|\bnot recognized as\b|\bunknown option\b|\bunexpected argument\b|\binvalid flag\b|(?:^|\n)\s*(?:error|fatal):)/i;
@@ -276,6 +278,20 @@ export const codexAdapter: CliAdapter = {
 
   detectPermissionRequest(output: string): PermissionDetectionResult | null {
     const clean = stripTerminalControls(output);
+    if (CODEX_UPDATE_PROMPT_RE.test(clean)) {
+      const lines = clean.split('\n').filter(l => l.trim());
+      const promptLine = lines.slice(-16).join('\n');
+      return {
+        detected: true,
+        request: {
+          permissionId: `codex-update-${Date.now()}`,
+          category: 'package_install',
+          rawPrompt: promptLine,
+          detail: 'Codex CLI update available. Update now? Skipping continues this prompt without updating.',
+        },
+      };
+    }
+
     if (!MCP_PERMISSION_PROMPT_RE.test(clean) && !GENERIC_PERMISSION_PROMPT_RE.test(clean) && !CONFIRMATION_PERMISSION_PROMPT_RE.test(clean) && !CODEX_STARTUP_PERMISSION_PROMPT_RE.test(clean)) {
       return null;
     }
@@ -307,6 +323,9 @@ export const codexAdapter: CliAdapter = {
   },
 
   buildPermissionResponse(decision: PermissionDecision, _request: PermissionRequest): PermissionResponse {
+    if (CODEX_UPDATE_PROMPT_RE.test(_request.rawPrompt ?? _request.detail ?? '')) {
+      return { input: decision === 'approve' ? '1\r' : '2\r' };
+    }
     if (decision === 'approve' && /\b1\.\s*Allow\b|enter\s+to\s+submit/i.test(_request.rawPrompt ?? '')) {
       return { input: '\r' };
     }

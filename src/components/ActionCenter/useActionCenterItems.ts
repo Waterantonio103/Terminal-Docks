@@ -25,7 +25,7 @@ function titleForRuntimeEvent(
   const completedLabel = runtimeAgentProgressLabel(event, runtimeManager, workflowOrchestrator);
   switch (event.type) {
     case 'permission_resolved':
-      return `Permission ${event.decision === 'approve' ? 'approved' : 'denied'}`;
+      return null;
     case 'session_completed':
       return `${completedLabel} ${event.outcome === 'success' ? 'completed' : 'failed'}`;
     case 'session_failed':
